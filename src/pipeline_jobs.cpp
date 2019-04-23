@@ -438,9 +438,9 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 		int nnodes = CEIL(fnodes);
 		if (fmod(fnodes, 1) > 0)
 		{
-			std:: cout << std::endl;
+			std::cout << std::endl;
 			std::cout << " Warning! You're using " << nmpi << " MPI processes with " << nthr << " threads each (i.e. " << ncores << " cores), while asking for " << nnodes << " nodes with " << ndedi << " cores." << std::endl;
-			std::cout << " It is more efficient to make the number of cores (i.e. mpi*threads) a multiple of the minimum number of dedicated cores per node " << std::endl;
+			std::cout << " It is more efficient to make the number of cores (i.e. mpi*threads) a multiple of the minimum number of dedicated cores per node. " << std::endl;
 		}
 
 		fh.clear(); // reset eof if happened...
@@ -456,6 +456,10 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 		replacing["XXXerrfileXXX"] = outputname + "run.err";
 		replacing["XXXoutfileXXX"] = outputname + "run.out";
 		replacing["XXXqueueXXX"] = joboptions["queuename"].getString();
+		replacing["XXXwalltimeXXX"] = joboptions["walltime"].getString(); // add walltime option
+		replacing["XXXmemoryXXX"] = joboptions["memory"].getString(); // add memory per thread option
+		replacing["XXXgresXXX"] = joboptions["gres"].getString(); // add gres option
+		replacing["XXXsbatchargsXXX"] = joboptions["other_sbatch_args"].getString(); // add other SBATCH options
 		char * extra_count_text = getenv ("RELION_QSUB_EXTRA_COUNT");
 		const char extra_count_val = (extra_count_text ? atoi(extra_count_text) : 2);
 		for (int i=1; i<=extra_count_val; i++)
@@ -528,6 +532,173 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 
 }
 
+bool RelionJob::saveJobSubmissionScript2(std::string newfilename, std::string outputname, std::vector<std::string> commands, std::string &error_message)
+{
+	std::ofstream fo;
+	fo.open(newfilename.c_str(), std::ios::out | std::ios::app);
+
+	if (fo.fail())
+	{
+		error_message = "Error writing to job submission script in: " + newfilename;
+		return false;
+	}
+	else
+	{
+		int nmpi = (joboptions.find("nr_mpi") != joboptions.end()) ? joboptions["nr_mpi"].getNumber() : 1;
+		int nthr = (joboptions.find("nr_threads") != joboptions.end()) ? joboptions["nr_threads"].getNumber() : 1;
+		int nodes = (joboptions.find("nodes") != joboptions.end()) ? joboptions["nodes"].getNumber() : 1;
+
+		// Lines to be added to Slurm submission script
+		fo << "#!/bin/bash" << std::endl;
+		fo << "#SBATCH --job-name=" << outputname << std::endl;
+		fo << "#SBATCH --ntasks=" << floatToString(nmpi) << std::endl;
+		fo << "#SBATCH --cpus-per-task=" << floatToString(nthr) << std::endl;
+		fo << "#SBATCH --partition=" << joboptions["queuename"].getString() << std::endl;
+		fo << "#SBATCH --error=" << outputname + "run.err" << std::endl;
+		fo << "#SBATCH --output=" << outputname + "run.out" << std::endl;
+		fo << "#SBATCH --nodes=" << floatToString(nodes) << std::endl;
+		
+		if (joboptions["wt_day"].getString() == "")
+		{
+			fo << "#SBATCH --time=" << joboptions["wt_hour"].getString() + ":" + joboptions["wt_min"].getString() + ":" + joboptions["wt_sec"].getString() << std::endl;  // replacing["XXXwalltimeXXX"] = joboptions["walltime"].getString(); // add walltime option
+		}
+
+		else {
+			fo << "#SBATCH --time=" << joboptions["wt_day"].getString() + "-" + joboptions["wt_hour"].getString() + ":" + joboptions["wt_min"].getString() + ":" + joboptions["wt_sec"].getString() << std::endl;
+		}
+		
+		// To check if number of GPUs have been specified
+		if (joboptions["gres"].getNumber() > 0)
+		{
+			fo << "#SBATCH --gres=gpu:" << joboptions["gres"].getString() << std::endl;
+		}
+
+		// To check if there are additional SBATCH commands
+		if (joboptions["other_sbatch_args"].getString() != "")
+		{
+			fo << "#SBATCH " << joboptions["other_sbatch_args"].getString() << std::endl;
+		}
+
+		fo << std::endl;
+
+		const char *default_mpirun = getenv("RELION_MPIRUN");
+		if (default_mpirun == NULL)
+		{
+			default_mpirun = DEFAULTMPIRUN;
+		}
+		
+		fo << std::string(default_mpirun) + " -n " + floatToString(nmpi) + " ";
+
+		// Append the commands
+		std::string line;
+		std::string ori_line = line;
+		for (int icom = 0; icom < commands.size(); icom++)
+		{
+			// For multiple relion mpi commands: add multiple lines from the XXXcommandXXX template
+			if ((commands[icom]).find("relion_") != std::string::npos &&
+				((commands[icom]).find("_mpi`") != std::string::npos || nmpi == 1)) // if there are no MPI programs, then still use XXXcommandXXX once
+			{
+				std::string line = commands[icom];
+				fo << line << std::endl;
+				line = ori_line;
+			}
+			else
+			{
+				// Just add the sequential command
+				fo << commands[icom] << std::endl;
+			}
+
+		}
+
+		fo << std::endl;
+
+		fo.close();
+	}
+
+	return true;
+
+}
+
+bool RelionJob::saveJobSubmissionScript3(std::string newfilename, std::string outputname, std::vector<std::string> commands, std::string &error_message)
+{
+	std::ofstream fo;
+	fo.open(newfilename.c_str(), std::ios::out | std::ios::app);
+
+	if (fo.fail())
+	{
+		error_message = "Error writing to job submission script in: " + newfilename;
+		return false;
+	}
+	else
+	{
+		int nmpi = (joboptions.find("nr_mpi") != joboptions.end()) ? joboptions["nr_mpi"].getNumber() : 1;
+		int nthr = (joboptions.find("nr_threads") != joboptions.end()) ? joboptions["nr_threads"].getNumber() : 1;
+		int nodes = (joboptions.find("nodes") != joboptions.end()) ? joboptions["nodes"].getNumber() : 1;
+		int nppn = nmpi * nthr;
+
+		// Lines to be added to Slurm submission script
+		fo << "#!/bin/bash" << std::endl;
+		fo << "#PBS -V" << std::endl;
+		fo << "#PBS -N " << outputname << std::endl;
+		fo << "#PBS -e " << outputname + "run.err" << std::endl;
+		fo << "#PBS -o " << outputname + "run.out" << std::endl;
+		fo << "#PBS -q " << joboptions["queuename"].getString() << std::endl;
+		
+		// To check if number of GPUs have been specified
+		if (joboptions["gres"].getNumber() > 0)
+			fo << "#PBS -l " << "nodes=" + floatToString(nodes) + ":ppn=" + floatToString(nppn) + ":gpus=" + joboptions["gres"].getString() << std::endl;
+		else {
+			fo << "#PBS -l " << "nodes=" + floatToString(nodes) + ":ppn=" + floatToString(nppn) << std::endl;
+		}
+		
+		fo << "#PBS -l " << "walltime=" + joboptions["wt_hour"].getString() + ":" + joboptions["wt_min"].getString() + ":" + joboptions["wt_sec"].getString() << std::endl;
+		
+		// To check if there are additional QSUB commands
+		if (joboptions["other_sbatch_args"].getString() != "")
+		{
+			fo << "#PBS " << joboptions["other_sbatch_args"].getString() << std::endl;
+		}
+
+		fo << std::endl;
+
+		const char *default_mpirun = getenv("RELION_MPIRUN");
+		if (default_mpirun == NULL)
+		{
+			default_mpirun = DEFAULTMPIRUN;
+		}
+
+		fo << std::string(default_mpirun) + " -n " + floatToString(nmpi) + " ";
+
+		// Append the commands
+		std::string line;
+		std::string ori_line = line;
+		for (int icom = 0; icom < commands.size(); icom++)
+		{
+			// For multiple relion mpi commands: add multiple lines from the XXXcommandXXX template
+			if ((commands[icom]).find("relion_") != std::string::npos &&
+				((commands[icom]).find("_mpi`") != std::string::npos || nmpi == 1)) // if there are no MPI programs, then still use XXXcommandXXX once
+			{
+				std::string line = commands[icom];
+				fo << line << std::endl;
+				line = ori_line;
+			}
+			else
+			{
+				// Just add the sequential command
+				fo << commands[icom] << std::endl;
+			}
+
+		}
+
+		fo << std::endl;
+
+		fo.close();
+	}
+
+	return true;
+
+}
+
 void RelionJob::initialisePipeline(std::string &outputname, std::string defaultname, int job_counter)
 {
 
@@ -568,7 +739,7 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 	{
 		// Make the submission script and write it to disc
 		std::string output_script = outputname + "run_submit.script";
-		if (!saveJobSubmissionScript(output_script, outputname, commands, error_message))
+		if (!saveJobSubmissionScript2(output_script, outputname, commands, error_message))
 			return false;
 		final_command = joboptions["qsub"].getString() + " " + output_script + " &";
 	}
@@ -768,7 +939,6 @@ void RelionJob::initialise(int _job_type)
 When set to 1, no multi-threading will be used. The maximum can be set through the environment variable RELION_THREAD_MAX.");
 	}
 
-
 	const char * use_queue_input = getenv("RELION_QUEUE_USE");
 	bool use_queue = (use_queue_input == NULL) ? DEFAULTQUEUEUSE : textToBool(use_queue_input);
 	joboptions["do_queue"] = JobOption("Submit to queue?", use_queue, "If set to Yes, the job will be submit to a queue, otherwise \
@@ -782,7 +952,7 @@ the job will be executed locally. Note that only MPI jobs may be sent to a queue
 	}
 
 	// Need the std::string(), as otherwise it will be overloaded and passed as a boolean....
-	joboptions["queuename"] = JobOption("Queue name: ", std::string(default_queue), "Name of the queue to which to submit the job. The default name can be set through the environment variable RELION_QUEUE_NAME.");
+	joboptions["queuename"] = JobOption("Queue name:", std::string(default_queue), "Name of the queue to which to submit the job. The default name can be set through the environment variable RELION_QUEUE_NAME.");
 
 	// Check for environment variable RELION_QSUB_COMMAND
 	const char * default_command = getenv("RELION_QSUB_COMMAND");
@@ -791,12 +961,10 @@ the job will be executed locally. Note that only MPI jobs may be sent to a queue
 		default_command = DEFAULTQSUBCOMMAND;
 	}
 
-	joboptions["qsub"] = JobOption("Queue submit command:", std::string(default_command), "Name of the command used to submit scripts to the queue, e.g. qsub or bsub.\n\n\
-Note that the person who installed RELION should have made a custom script for your cluster/queue setup. Check this is the case \
-(or create your own script following the RELION Wiki) if you have trouble submitting jobs. The default command can be set through the environment variable RELION_QSUB_COMMAND.");
+	joboptions["qsub"] = JobOption("Queue submit command:", std::string(default_command), "Name of the command used to submit scripts to the queue, e.g. qsub, bsub, or sbatch. \
+The default command can be set through the environment variable RELION_QSUB_COMMAND.");
 
-
-	// additional options that may be set through environment variables RELION_QSUB_EXTRAi and RELION_QSUB_EXTRAi (for more flexibility)
+	// Additional options that may be set through environment variables RELION_QSUB_EXTRAi and RELION_QSUB_EXTRAi (for more flexibility)
 	char * extra_count_text = getenv ("RELION_QSUB_EXTRA_COUNT");
 	const char extra_count_val = (extra_count_text ? atoi(extra_count_text) : 2);
 	for (int i=1; i<=extra_count_val; i++)
@@ -836,8 +1004,8 @@ Note that the person who installed RELION should have made a custom script for y
 	{
 		default_location=mydefault;
 	}
-	joboptions["qsubscript"] = JobOption("Standard submission script:", std::string(default_location), "Script Files (*.{csh,sh,bash,script})", ".",
-"The template for your standard queue job submission script. \
+	// joboptions["qsubscript"] = JobOption("Standard submission script:", std::string(default_location), "Script Files (*.{csh,sh,bash,script})", ".",
+// "The template for your standard queue job submission script. \
 Its default location may be changed by setting the environment variable RELION_QSUB_TEMPLATE. \
 In the template script a number of variables will be replaced: \n \
 XXXcommandXXX = relion command + arguments; \n \
@@ -856,17 +1024,85 @@ Likewise, default values for the extra entries can be set through environment va
 But note that (unlike all other entries in the GUI) the extra values are not remembered from one run to the other.");
 
 	// Check for environment variable RELION_QSUB_TEMPLATE
-	char * my_minimum_dedicated = getenv ("RELION_MINIMUM_DEDICATED");
-	int minimum_nr_dedicated = (my_minimum_dedicated == NULL) ? DEFAULTMININIMUMDEDICATED : textToInteger(my_minimum_dedicated);
-	joboptions["min_dedicated"] = JobOption("Minimum dedicated cores per node:", minimum_nr_dedicated, 1, 64, 1, "Minimum number of dedicated cores that need to be requested on each node. This is useful to force the queue to fill up entire nodes of a given size. The default can be set through the environment variable RELION_MINIMUM_DEDICATED.");
+	// char * my_minimum_dedicated = getenv ("RELION_MINIMUM_DEDICATED");
+	// int minimum_nr_dedicated = (my_minimum_dedicated == NULL) ? DEFAULTMININIMUMDEDICATED : textToInteger(my_minimum_dedicated);
+	// joboptions["min_dedicated"] = JobOption("Minimum dedicated cores per node:", minimum_nr_dedicated, 1, 64, 1, "Minimum number of dedicated cores that need to be requested on each node. This is useful to force the queue to fill up entire nodes of a given size. \
+It is suggested to use an integer that can divide number-of-mpi X number-of-threads into an interger number. \
+For example, if MPI = 3 and threads = 2, you could set this value to 6, meaning 6 CPUs will be used on the same node. Setting this value to 3 would request 2 nodes.\n\n\
+Currently for Slurm testing in Hockmeyer Hall, the maximum number of CPUs that can be requested for GPU-related jobs is 6. You will need to satisfy nubmer-of-mpi X number-of-threads = 6 to avoid jobs being rejected in the Slurm queue. This is subject to change in the future. \
+For CPU-only jobs, there is no maximum of CPUs set. But keep in mind the number of nodes to which you have access and the number of CPUs per node. Jobs submitted to the Slurm queue will get rejected if you request more resources (i.e. nodes) than what is currently available in the queue.\n\n\
+The number of nodes is calculated by (number-of-mpi X number-of-threads) / number-of-dedicated-nodes. This is currently implemented and is subject to change in the future.\n\n\
+The default can be set through the environment variable RELION_MINIMUM_DEDICATED.");
+
+	char * my_minimum_nodes = getenv ("RELION_MINIMUM_NODES");
+	int minimum_nr_nodes = (my_minimum_nodes == NULL) ? DEFAULTMININIMUMNODES : textToInteger(my_minimum_nodes);
+	joboptions["nodes"] = JobOption("Number of nodes to request:", minimum_nr_nodes, 1, 32, 1, "Set the number of nodes you would like to request.");
+
+	// Check for environment variable RELION_QSUB_WALLTIME
+	char * default_walltime = getenv ("RELION_QSUB_WALLTIME");
+	char mydefaultwalltime[] = "";
+	if (default_walltime == NULL)
+	{
+		default_walltime = mydefaultwalltime;
+	}
 
 	// Need the std::string(), as otherwise it will be overloaded and passed as a boolean....
-	joboptions["other_args"] = JobOption("Additional arguments:", std::string(""), "In this box command-line arguments may be provided that are not generated by the GUI. \
+	// joboptions["walltime"] = JobOption("Walltime:", std::string(default_walltime), "Specify walltime for the job in the format of D-HH:MM:SS; D = days, H = hours, M = minutes, and S = seconds. Setting the number of Days is optional and you could use the HH:MM:SS format. \
+If > 99 hours is to be requested, you can set D-HHH:MM:SS or HHH:MM:SS for each format, respectively. \
+It's suggested to use the maximum time possible for a specific queue name. The default time can be set through the environment variable RELION_QSUB_WALLTIME.");
+	
+	joboptions["wt_day"] = JobOption("Walltime - Days:", std::string("1"), "Specify walltime for the job in the format of D-HH:MM:SS; D = days, H = hours, M = minutes, and S = seconds. Setting the number of Days is optional and you could use the HH:MM:SS format. \
+If > 99 hours is to be requested, you can set D-HHH:MM:SS or HHH:MM:SS for each format, respectively. \
+It's suggested to use the maximum time possible for a specific queue name.");
+	joboptions["wt_hour"] = JobOption("Walltime - Hours", std::string("00"), "Specify walltime for the job in the format of D-HH:MM:SS; D = days, H = hours, M = minutes, and S = seconds. Setting the number of Days is optional and you could use the HH:MM:SS format. \
+If > 99 hours is to be requested, you can set D-HHH:MM:SS or HHH:MM:SS for each format, respectively. \
+It's suggested to use the maximum time possible for a specific queue name.");
+	joboptions["wt_min"] = JobOption("Walltime - Minutes:", std::string("00"), "Specify walltime for the job in the format of D-HH:MM:SS; D = days, H = hours, M = minutes, and S = seconds. Setting the number of Days is optional and you could use the HH:MM:SS format. \
+If > 99 hours is to be requested, you can set D-HHH:MM:SS or HHH:MM:SS for each format, respectively. \
+It's suggested to use the maximum time possible for a specific queue name.");
+	joboptions["wt_sec"] = JobOption("Walltime - Seconds", std::string("00"), "Specify walltime for the job in the format of D-HH:MM:SS; D = days, H = hours, M = minutes, and S = seconds. Setting the number of Days is optional and you could use the HH:MM:SS format. \
+If > 99 hours is to be requested, you can set D-HHH:MM:SS or HHH:MM:SS for each format, respectively. \
+It's suggested to use the maximum time possible for a specific queue name.");
+
+	// Check for environment variable RELION_QSUB_MEMORY
+	// char * default_memory = getenv ("RELION_QSUB_MEMORY");
+	// char mydefaultmemory[] = "";
+	// if (default_memory == NULL)
+	// {
+	// 	default_memory = mydefaultmemory;
+	// }
+
+	// Need the std::string(), as otherwise it will be overloaded and passed as a boolean....
+	// joboptions["memory"] = JobOption("Memory Per Thread:", std::string(default_memory), "Specify memory per thread. The default time can be set through the environment variable RELION_QSUB_MEMORY.");
+	
+	// Need the std::string(), as otherwise it will be overloaded and passed as a boolean....
+	// joboptions["gres"] = JobOption("Gres:", std::string(""), "Specify Gres options here. This option is useful for requesting a certain number (and type) of GPUs. \
+For example, setting 'gpu:2' would request any 2 available GPUs. Setting 'gpu:tesla:2' would request only 2 Tesla GPUs. There is no need to include '--gres=' as RELION will add this automatically. \
+This entry can be left blank if there is no need for setting Gres options. \
+More documentation of Gres is found at https://slurm.schedmd.com/gres.html.");
+
+	char * my_minimum_gpus = getenv("RELION_MINIMUM_GPUS");
+	int minimum_nr_gpus = (my_minimum_gpus == NULL) ? DEFAULTMININIMUMGPUS : textToInteger(my_minimum_gpus);
+	joboptions["gres"] = JobOption("Number of GPUs to request:", minimum_nr_gpus, 0, 2, 1, "Indicate the number of GPUs to request.");
+
+	// Need the std::string(), as otherwise it will be overloaded and passed as a boolean....
+	joboptions["other_sbatch_args"] = JobOption("Additional SBATCH arguments (Optional):", std::string(""), "In this box command-line arguments may be provided that are not generated by the GUI. \
+This may be useful for testing developmental options and/or expert use of the program. \
+One example, setting '--exclude=<node-name-list>' can be set here if one would like to exclude certain nodes from the generated SLURM_JOB_NODELIST. \
+Another additional directive, '--nodelist=/path/to/nodelist' could be set if specific nodes are needed to run a job. \
+More documentation of additional sbatch directives can be found at https://slurm.schedmd.com/sbatch.html.");
+
+	// Need the std::string(), as otherwise it will be overloaded and passed as a boolean....
+	// joboptions["other_qsub_args"] = JobOption("Additional QSUB Directives:", std::string(""), "In this box command-line arguments may be provided that are not generated by the GUI. \
+This may be useful for testing developmental options and/or expert use of the program. \
+To print a list of possible options, run the corresponding program from the command line without any arguments.");
+
+	// Need the std::string(), as otherwise it will be overloaded and passed as a boolean....
+	joboptions["other_args"] = JobOption("Additional RELION arguments (Optional):", std::string(""), "In this box command-line arguments may be provided that are not generated by the GUI. \
 This may be useful for testing developmental options and/or expert use of the program. \
 To print a list of possible options, run the corresponding program from the command line without any arguments.");
 
 }
-
 
 bool RelionJob::getCommands(std::string &outputname, std::vector<std::string> &commands,
 		std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)
@@ -970,7 +1206,6 @@ bool RelionJob::getCommands(std::string &outputname, std::vector<std::string> &c
 	return result;
 
 }
-
 
 void RelionJob::initialiseImportJob()
 {
@@ -1130,8 +1365,6 @@ bool RelionJob::getCommandsImportJob(std::string &outputname, std::vector<std::s
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 
-
-
 }
 
 void RelionJob::initialiseMotioncorrJob()
@@ -1176,7 +1409,7 @@ Note that multiple MotionCor2 processes should not share a GPU; otherwise, it ca
 	joboptions["other_motioncor2_args"] = JobOption("Other MOTIONCOR2 arguments", std::string(""), "Additional arguments that need to be passed to MOTIONCOR2.");
 
 	// Dose-weight
-	joboptions["do_dose_weighting"] = JobOption("Do dose-weighting?", true ,"If set to Yes, the averaged micrographs will be dose-weighted.");
+	joboptions["do_dose_weighting"] = JobOption("Do dose-weighting?", false ,"If set to Yes, the averaged micrographs will be dose-weighted.");
 	joboptions["save_noDW"] = JobOption("Save non-dose weighted as well?", false, "Aligned but non-dose weighted images are sometimes useful in CTF estimation, although there is no difference in most cases. Whichever the choice, CTF refinement job is always done on dose-weighted particles.");
 	joboptions["voltage"] = JobOption("Voltage (kV):", 300, 80, 300, 20, "Acceleration voltage in kV.");
 	joboptions["dose_per_frame"] = JobOption("Dose per frame (e/A2):", 1, 0, 5, 0.2, "Dose per movie frame (in electrons per squared Angstrom).");
@@ -1816,7 +2049,6 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 	commands.push_back(command.c_str());
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
-
 
 }
 
@@ -2477,7 +2709,7 @@ void RelionJob::initialiseClass2DJob()
 
 	joboptions["fn_img"] = JobOption("Input images STAR file:", NODE_PART_DATA, "", "STAR files (*.star) \t Image stacks (not recommended, read help!) (*.{spi,mrcs})", "A STAR file with all images (and their metadata). \n \n Alternatively, you may give a Spider/MRC stack of 2D images, but in that case NO metadata can be included and thus NO CTF correction can be performed, \
 nor will it be possible to perform noise spectra estimation or intensity scale corrections in image groups. Therefore, running RELION with an input stack will in general provide sub-optimal results and is therefore not recommended!! Use the Preprocessing procedure to get the input STAR file in a semi-automated manner. Read the RELION wiki for more information.");
-	joboptions["fn_cont"] = JobOption("Continue from here: ", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR",  "Select the *_optimiser.star file for the iteration \
+	joboptions["fn_cont"] = JobOption("Continue from here:", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR",  "Select the *_optimiser.star file for the iteration \
 from which you want to continue a previous run. \
 Note that the Output rootname of the continued run and the rootname of the previous run cannot be the same. \
 If they are the same, the program will automatically add a '_ctX' to the output rootname, \
@@ -2731,7 +2963,7 @@ void RelionJob::initialiseInimodelJob()
 In SGD, it is very important that there are particles from enough different orientations. One only needs a few thousand to 10k particles. When selecting good 2D classes in the Subset Selection jobtype, use the option to select a maximum number of particles from each class to generate more even angular distributions for SGD.\
 \n \n Alternatively, you may give a Spider/MRC stack of 2D images, but in that case NO metadata can be included and thus NO CTF correction can be performed, \
 nor will it be possible to perform noise spectra estimation or intensity scale corrections in image groups. Therefore, running RELION with an input stack will in general provide sub-optimal results and is therefore not recommended!! Use the Preprocessing procedure to get the input STAR file in a semi-automated manner. Read the RELION wiki for more information.");
-	joboptions["fn_cont"] = JobOption("Continue from here: ", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR", "Select the *_optimiser.star file for the iteration \
+	joboptions["fn_cont"] = JobOption("Continue from here:", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR", "Select the *_optimiser.star file for the iteration \
 from which you want to continue a previous run. \
 Note that the Output rootname of the continued run and the rootname of the previous run cannot be the same. \
 If they are the same, the program will automatically add a '_ctX' to the output rootname, \
@@ -2958,7 +3190,7 @@ void RelionJob::initialiseClass3DJob()
 
 	joboptions["fn_img"] = JobOption("Input images STAR file:", NODE_PART_DATA, "", "STAR files (*.star) \t Image stacks (not recommended, read help!) (*.{spi,mrcs})", "A STAR file with all images (and their metadata). \n \n Alternatively, you may give a Spider/MRC stack of 2D images, but in that case NO metadata can be included and thus NO CTF correction can be performed, \
 nor will it be possible to perform noise spectra estimation or intensity scale corrections in image groups. Therefore, running RELION with an input stack will in general provide sub-optimal results and is therefore not recommended!! Use the Preprocessing procedure to get the input STAR file in a semi-automated manner. Read the RELION wiki for more information.");
-	joboptions["fn_cont"] = JobOption("Continue from here: ", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR", "Select the *_optimiser.star file for the iteration \
+	joboptions["fn_cont"] = JobOption("Continue from here:", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR", "Select the *_optimiser.star file for the iteration \
 from which you want to continue a previous run. \
 Note that the Output rootname of the continued run and the rootname of the previous run cannot be the same. \
 If they are the same, the program will automatically add a '_ctX' to the output rootname, \
@@ -3375,7 +3607,7 @@ void RelionJob::initialiseAutorefineJob()
 
 	joboptions["fn_img"] = JobOption("Input images STAR file:", NODE_PART_DATA, "", "STAR files (*.star) \t Image stacks (not recommended, read help!) (*.{spi,mrcs})", "A STAR file with all images (and their metadata). \n \n Alternatively, you may give a Spider/MRC stack of 2D images, but in that case NO metadata can be included and thus NO CTF correction can be performed, \
 nor will it be possible to perform noise spectra estimation or intensity scale corrections in image groups. Therefore, running RELION with an input stack will in general provide sub-optimal results and is therefore not recommended!! Use the Preprocessing procedure to get the input STAR file in a semi-automated manner. Read the RELION wiki for more information.");
-	joboptions["fn_cont"] = JobOption("Continue from here: ", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR", "Select the *_optimiser.star file for the iteration \
+	joboptions["fn_cont"] = JobOption("Continue from here:", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR", "Select the *_optimiser.star file for the iteration \
 from which you want to continue a previous run. \
 Note that the Output rootname of the continued run and the rootname of the previous run cannot be the same. \
 If they are the same, the program will automatically add a '_ctX' to the output rootname, \
@@ -3745,7 +3977,6 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 
-
 }
 
 void RelionJob::initialiseMultiBodyJob()
@@ -3757,7 +3988,7 @@ void RelionJob::initialiseMultiBodyJob()
 	joboptions["fn_in"] = JobOption("Consensus refinement optimiser.star: ", std::string(""), "STAR Files (*_optimiser.star)", "Refine3D/", "Select the *_optimiser.star file for the iteration of the consensus refinement \
 from which you want to start multi-body refinement.");
 
-	joboptions["fn_cont"] = JobOption("Continue from here: ", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR", "Select the *_optimiser.star file for the iteration \
+	joboptions["fn_cont"] = JobOption("Continue from here:", std::string(""), "STAR Files (*_optimiser.star)", "CURRENT_ODIR", "Select the *_optimiser.star file for the iteration \
 from which you want to continue this multi-body refinement. \
 Note that the Output rootname of the continued run and the rootname of the previous run cannot be the same. \
 If they are the same, the program will automatically add a '_ctX' to the output rootname, \
@@ -4025,7 +4256,6 @@ bool RelionJob::getCommandsMultiBodyJob(std::string &outputname, std::vector<std
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 
-
 }
 
 void RelionJob::initialiseMovierefineJob()
@@ -4073,7 +4303,6 @@ will be centered at the rotations determined for the corresponding particle wher
 If one wants to perform particle polishing, then rotational alignments of the movie frames is NOT necessary and will only take more computing time.");
 	joboptions["movie_sigma_angles"] = JobOption("Stddev on the rotations (deg):", 1., 0.5, 10, 0.5, "A Gaussian prior with the specified standard deviation \
 will be centered at the rotations determined for the corresponding particle where all movie-frames were averaged. For ribosomes, we used a value of 1 degree");
-
 
 }
 
@@ -4224,7 +4453,6 @@ bool RelionJob::getCommandsMovierefineJob(std::string &outputname, std::vector<s
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 
-
 }
 
 void RelionJob::initialisePolishJob()
@@ -4370,7 +4598,6 @@ bool RelionJob::getCommandsPolishJob(std::string &outputname, std::vector<std::s
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 
-
 }
 
 void RelionJob::initialiseMaskcreateJob()
@@ -4443,7 +4670,6 @@ bool RelionJob::getCommandsMaskcreateJob(std::string &outputname, std::vector<st
 	commands.push_back(command);
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
-
 
 }
 
