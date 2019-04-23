@@ -237,6 +237,10 @@ void JobWindow::setupRunTab()
 	queue_group->end();
 
 	place("do_queue", TOGGLE_LEAVE_ACTIVE, queue_group);
+	
+	// Always deactivate the queue option to enforce submission to the queue
+	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
+	myjob.joboptions["do_queue"].setString("Yes");
 
 	queue_group->begin();
 
@@ -257,21 +261,45 @@ void JobWindow::setupRunTab()
 		}
 	}
 
-	place("qsubscript");
+	// place("min_dedicated");
+	// if (do_allow_change_minimum_dedicated)
+	// 	guientries["min_dedicated"].deactivate(false);
+	// else
+	// 	guientries["min_dedicated"].deactivate(true);
 
-	place("min_dedicated");
+	place("nodes");
 	if (do_allow_change_minimum_dedicated)
-		guientries["min_dedicated"].deactivate(false);
+		guientries["nodes"].deactivate(false);
 	else
-		guientries["min_dedicated"].deactivate(true);
+		guientries["nodes"].deactivate(true);
 
+	place4("wt_day", "wt_hour", "wt_min", "wt_sec", "Walltime (D-HH:MM:SS):");
+	
+	// Always deactivate the "seconds" option and set to "00"
+	guientries["wt_sec"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
+	myjob.joboptions["wt_sec"].setString("00");
+
+	// place("memory");
+
+	place("gres");
+	if (do_allow_change_minimum_dedicated)
+		guientries["gres"].deactivate(false);
+	else
+		guientries["gres"].deactivate(true);
+	
+	place("other_sbatch_args");
+	
+	// place("other_qsub_args");
+
+	// place("qsubscript");
+	
 	queue_group->end();
 	guientries["do_queue"].cb_menu_i(); // This is to make the default effective
 
     // Add a little spacer
     current_y += STEPY/4;
 
-    place("other_args");
+	place("other_args");
 
     runtab->end();
 
@@ -324,6 +352,35 @@ void JobWindow::place3(std::string key1, std::string key2, std::string key3, std
 	guientries[key3].place(myjob.joboptions[key3], current_y, deactivate_option, NULL, false, do_oldstyle,
 			XCOL2 + 1 + 2 * (WCOL2 + COLUMN_SEPARATION) / 3, STEPY, (WCOL2 - COLUMN_SEPARATION * 2) / 3);
 
+}
+
+void JobWindow::place4(std::string key1, std::string key2, std::string key3, std::string key4, std::string label, int deactivate_option)
+{
+	if (myjob.joboptions.find(key1) == myjob.joboptions.end())
+		std::cerr << "WARNING: cannot find " << key1 << " in the defined joboptions of jobtype= " << myjob.type << std::endl;
+	if (myjob.joboptions.find(key2) == myjob.joboptions.end())
+		std::cerr << "WARNING: cannot find " << key2 << " in the defined joboptions of jobtype= " << myjob.type << std::endl;
+	if (myjob.joboptions.find(key3) == myjob.joboptions.end())
+		std::cerr << "WARNING: cannot find " << key3 << " in the defined joboptions of jobtype= " << myjob.type << std::endl;
+	if (myjob.joboptions.find(key4) == myjob.joboptions.end())
+		std::cerr << "WARNING: cannot find " << key4 << " in the defined joboptions of jobtype= " << myjob.type << std::endl;
+	
+	myjob.joboptions[key1].label_gui = label;
+	myjob.joboptions[key2].label_gui = "";
+	myjob.joboptions[key3].label_gui = "";
+	myjob.joboptions[key4].label_gui = "";
+	int old_y = current_y;
+	guientries[key1].place(myjob.joboptions[key1], current_y, deactivate_option, NULL, false, do_oldstyle,
+		XCOL2, STEPY, (WCOL2 - COLUMN_SEPARATION * 2) / 4);
+	current_y = old_y;
+	guientries[key2].place(myjob.joboptions[key2], current_y, deactivate_option, NULL, false, do_oldstyle,
+		XCOL2 + (WCOL2 + COLUMN_SEPARATION) / 4, STEPY, (WCOL2 - COLUMN_SEPARATION * 2) / 4);
+	current_y = old_y;
+	guientries[key3].place(myjob.joboptions[key3], current_y, deactivate_option, NULL, false, do_oldstyle,
+		XCOL2 + 2 * (WCOL2 + COLUMN_SEPARATION) / 4, STEPY, (WCOL2 - COLUMN_SEPARATION * 2) / 4);
+	current_y = old_y;
+	guientries[key4].place(myjob.joboptions[key4], current_y, deactivate_option, NULL, false, do_oldstyle,
+		XCOL2 + 3 * (WCOL2 + COLUMN_SEPARATION) / 4, STEPY, (WCOL2 - COLUMN_SEPARATION * 2) / 4);
 }
 
 void JobWindow::toggle_new_continue(bool _is_continue)
@@ -1708,7 +1765,7 @@ void JobWindow::initialiseAutorefineWindow()
 	place("do_local_search_helical_symmetry", TOGGLE_DEACTIVATE, group3);
 	group3->begin();
 	place3("helical_twist_min", "helical_twist_max", "helical_twist_inistep", "Twist search - Min, Max, Step (deg):", TOGGLE_DEACTIVATE);
-	place3("helical_rise_min", "helical_rise_max","helical_rise_inistep","Rise search - Min, Max, Step (A):", TOGGLE_DEACTIVATE);
+	place3("helical_rise_min", "helical_rise_max", "helical_rise_inistep", "Rise search - Min, Max, Step (A):", TOGGLE_DEACTIVATE);
 	group3->end();
 	guientries["do_local_search_helical_symmetry"].cb_menu_i(); // to make default effective
 
@@ -2052,12 +2109,16 @@ void JobWindow::initialiseMaskcreateWindow()
 
 	tab3->end();
 
+	// Always deactivate the queue option
+	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
+	myjob.joboptions["do_queue"].setString("No");
+
 }
 void JobWindow::initialiseJoinstarWindow()
 {
 	setupTabs(3);
 	tab1->begin();
-	tab1->label("particles");
+	tab1->label("Particles");
 	resetHeight();
 
 	group1 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
@@ -2074,7 +2135,7 @@ void JobWindow::initialiseJoinstarWindow()
 	tab1->end();
 
 	tab2->begin();
-	tab2->label("micrographs");
+	tab2->label("Micrographs");
 	resetHeight();
 
 	group2 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
@@ -2092,7 +2153,7 @@ void JobWindow::initialiseJoinstarWindow()
 
 
 	tab3->begin();
-	tab3->label("movies");
+	tab3->label("Movies");
 	resetHeight();
 
 	group3 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
@@ -2107,6 +2168,10 @@ void JobWindow::initialiseJoinstarWindow()
 	guientries["do_mov"].cb_menu_i(); // make default active
 
 	tab3->end();
+
+	// Always deactivate the queue option
+	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
+	myjob.joboptions["do_queue"].setString("No");
 
 }
 void JobWindow::initialiseSubtractWindow()
@@ -2152,6 +2217,10 @@ void JobWindow::initialiseSubtractWindow()
 	guientries["do_ctf_correction"].cb_menu_i(); // To make default effective
 
 	tab2->end();
+
+	// Always deactivate the queue option
+	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
+	myjob.joboptions["do_queue"].setString("No");
 
 }
 void JobWindow::initialisePostprocessWindow()
@@ -2211,6 +2280,10 @@ void JobWindow::initialisePostprocessWindow()
 	guientries["do_skip_fsc_weighting"].cb_menu_i();
 
 	tab3->end();
+
+	// Always deactivate the queue option
+	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
+	myjob.joboptions["do_queue"].setString("No");
 
 }
 void JobWindow::initialiseLocresWindow()
