@@ -427,6 +427,8 @@ void Preprocessing::joinAllStarFiles()
 				}
 			}
 
+			myOutObsModel->opticsMdt.setValue(EMDL_MICROGRAPH_PIXEL_SIZE, my_angpix);
+
 			if (do_rescale)
 				my_angpix *= (RFLOAT)extract_size / (RFLOAT)scale;
 			myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_PIXEL_SIZE, my_angpix);
