@@ -810,7 +810,7 @@ void RelionJob::initialise(int _job_type)
 	else if (type == PROC_AUTOPICK)
 	{
 		has_mpi = true;
-		has_thread = false;
+		has_thread = true;
 		initialiseAutopickJob();
 	}
 	else if (type == PROC_EXTRACT)
@@ -2036,18 +2036,21 @@ The samplings are approximate numbers and vary slightly over the sphere.\n\n For
 	joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string(""), "This argument is not necessary. If left empty, the job itself will try to allocate available GPU resources. You can override the default allocation by providing a list of which GPUs (0,1,2,3, etc) to use. MPI-processes are separated by ':'. For example: 0:1:0:1:0:1");
 
 	joboptions["do_pick_helical_segments"] = JobOption("Pick 2D helical segments?", false, "Set to Yes if you want to pick 2D helical segments. Note this will run the old algorithms for reference-based helical segment picking, as described by He & Scheres, J Struct Biol, 2017. Often, we now run filament picking from the Topaz tab instead....");
-	joboptions["do_amyloid"] = JobOption("Pick amyloid segments?", false, "Set to Yes if you want to use the algorithm that was developed specifically for picking amyloids.");
+	joboptions["do_amyloid"] = JobOption("Pick amyloid segments?", false, "Set to Yes if you want to use the find_amyloid program that was developed specifically for picking amyloids. Note this is the only option that will use threads!");
 
 	joboptions["helical_tube_outer_diameter"] = JobOption("Tube diameter (A): ", 200, 100, 1000, 10, "Outer diameter (in Angstroms) of helical tubes. \
 This value should be slightly larger than the actual width of the tubes.");
-	joboptions["helical_nr_asu"] = JobOption("Number of unique asymmetrical units:", 1, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box. This integer should not be less than 1. The inter-box distance (pixels) = helical rise (Angstroms) * number of asymmetrical units / pixel size (Angstroms). \
+	joboptions["helical_nr_asu"] = JobOption("Number of unique asymmetrical units:", 3, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box. This integer should not be less than 1. The inter-box distance (pixels) = helical rise (Angstroms) * number of asymmetrical units / pixel size (Angstroms). \
 The optimal inter-box distance might also depend on the box size, the helical rise and the flexibility of the structure. In general, an inter-box distance of ~10% * the box size seems appropriate.");
-	joboptions["helical_rise"] = JobOption("Helical rise (A):", -1, 0, 100, 0.01, "Helical rise in Angstroms. (Please click '?' next to the option above for details about how the inter-box distance is calculated.)");
-	joboptions["helical_tube_kappa_max"] = JobOption("Maximum curvature (kappa): ", 0.1, 0.05, 0.5, 0.01, "Maximum curvature allowed for picking helical tubes. \
+	joboptions["helical_rise"] = JobOption("Helical rise (A):", 4.75, 0, 100, 0.01, "Helical rise in Angstroms. (Please click '?' next to the option above for details about how the inter-box distance is calculated.)");
+	joboptions["helical_tube_kappa_max"] = JobOption("Maximum curvature (kappa): ", 0.07, 0.05, 0.5, 0.01, "Maximum curvature allowed for picking helical tubes. \
 Kappa = 0.3 means that the curvature of the picked helical tubes should not be larger than 30% the curvature of a circle (diameter = particle mask diameter). \
 Kappa ~ 0.05 is recommended for long and straight tubes (e.g. TMV, VipA/VipB and AChR tubes) while 0.20 ~ 0.40 seems suitable for flexible ones (e.g. ParM and MAVS-CARD filaments).");
-	joboptions["helical_tube_length_min"] = JobOption("Minimum length (A): ", -1, 100, 1000, 10, "Minimum length (in Angstroms) of helical tubes for auto-picking. \
+	joboptions["helical_tube_length_min"] = JobOption("Minimum length (A): ", 400, 100, 1000, 10, "Minimum length (in Angstroms) of helical tubes for auto-picking. \
 Helical tubes with shorter lengths will not be picked. Note that a long helical tube seen by human eye might be treated as short broken pieces due to low FOM values or high picking threshold.");
+    joboptions["amyloid_threshold"] = JobOption("Amyloid pick threshold (sigma): ", 2, 0.3, 5, 0.1, "How many sigma does the peaks need to be above the mean for the filament tracing to include a coordinate?");
+
+
 }
 
 bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std::string> &commands,
@@ -2146,7 +2149,8 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 	}
 	else
 	{
-		// Run autopicking
+
+        // Run autopicking
 		if (joboptions["nr_mpi"].getNumber(error_message) > 1)
 			command="`which relion_autopick_mpi`";
 		else
@@ -2157,11 +2161,12 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 		int icheck = 0;
 		if (joboptions["do_log"].getBoolean()) icheck++;
 		if (joboptions["do_topaz"].getBoolean()) icheck++;
-		if (joboptions["do_refs"].getBoolean()) icheck++;
+        if (joboptions["do_refs"].getBoolean()) icheck++;
+        if (joboptions["do_amyloid"].getBoolean()) icheck++;
 
 		if ( icheck != 1)
 		{
-			error_message = "ERROR: On the I/O tab specify (only) one of three methods: template-matching, LoG or topaz ...";
+			error_message = "ERROR: On the I/O tab specify (only) one of four methods: template-matching, LoG, topaz or amyloid ...";
 			return false;
 		}
 
@@ -2270,7 +2275,7 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 			}
 
 		}
-		else if (joboptions["do_log"].getBoolean())
+        else if (joboptions["do_log"].getBoolean())
 		{
 			if (joboptions["use_gpu"].getBoolean())
 			{
@@ -2292,6 +2297,43 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 			if (joboptions["log_invert"].getBoolean())
 				command += " --Log_invert ";
 		}
+        else if (joboptions["do_amyloid"].getBoolean())
+        {
+            label += ".amypick";
+
+            // Run find_amyloid instead of autopick!!
+            if (joboptions["nr_mpi"].getNumber(error_message) > 1)
+                command="`which relion_find_amyloid_mpi`";
+            else
+                command="`which relion_find_amyloid`";
+            if (error_message != "") return false;
+
+
+            command += " --odir " + outputname;
+            command += " --pickname autopick";
+
+            command += " --i " + joboptions["fn_input_autopick"].getString();
+            Node node(joboptions["fn_input_autopick"].getString(), joboptions["fn_input_autopick"].node_type);
+            inputNodes.push_back(node);
+
+            // Output new version: no longer save coords_suffix nodetype, but 2-column list of micrographs and coordinate files
+            Node node3(outputname + "amypick.star", LABEL_AUTOPICK_COORDS);
+            outputNodes.push_back(node3);
+
+            // PDF with histograms of the eigenvalues
+            Node node3b(outputname + "logfile.pdf", LABEL_AUTOPICK_LOG);
+            outputNodes.push_back(node3b);
+
+            command += " --min_filament_length " + joboptions["helical_tube_length_min"].getString();
+            command += " --filament_width " + joboptions["helical_tube_outer_diameter"].getString();
+            command += " --rungs_per_segment " + joboptions["helical_nr_asu"].getString();
+            command += " --kappa " + joboptions["helical_tube_kappa_max"].getString();
+            command += " --threshold " + joboptions["amyloid_threshold"].getString();
+
+            command += " --j " + joboptions["nr_threads"].getString();
+
+
+        }
 		else if (joboptions["do_refs"].getBoolean())
 		{
 			if (joboptions["do_ref3d"].getBoolean())
@@ -2408,7 +2450,7 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 			if (is_continue && !(joboptions["do_read_fom_maps"].getBoolean() || joboptions["do_write_fom_maps"].getBoolean()))
 				command += " --only_do_unfinished ";
 		}
-		else if (joboptions["do_topaz"].getBoolean())
+		else if (joboptions["do_topaz"].getBoolean() || joboptions["do_amyloid"].getBoolean() )
 		{
 			if (is_continue)
 				command += " --only_do_unfinished ";

@@ -767,6 +767,7 @@ void JobWindow::initialiseAutopickWindow()
 	place("do_refs", TOGGLE_DEACTIVATE);
 	place("do_log", TOGGLE_DEACTIVATE);
 	place("do_topaz", TOGGLE_DEACTIVATE);
+    place("do_amyloid", TOGGLE_DEACTIVATE);
 	place("continue_manual", TOGGLE_REACTIVATE);
 
 	tab1->end();
@@ -938,7 +939,7 @@ void JobWindow::initialiseAutopickWindow()
 
 	current_y += STEPY/2;
 
-	place("do_amyloid");
+    place("amyloid_threshold");
 
 	group4->end();
 
