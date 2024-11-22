@@ -2324,7 +2324,7 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
             Node node3b(outputname + "logfile.pdf", LABEL_AUTOPICK_LOG);
             outputNodes.push_back(node3b);
 
-            command += " --min_filament_length " + joboptions["helical_tube_length_min"].getString();
+            command += " --filament_length " + joboptions["helical_tube_length_min"].getString();
             command += " --filament_width " + joboptions["helical_tube_outer_diameter"].getString();
             command += " --rungs_per_segment " + joboptions["helical_nr_asu"].getString();
             command += " --kappa " + joboptions["helical_tube_kappa_max"].getString();

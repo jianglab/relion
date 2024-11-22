@@ -35,22 +35,22 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     int search_section = parser.addSection("Filament searching options ");
     psi_step = textToFloat(parser.getOption("--psi_step", "Angular sampling rate (in degrees)", "10."));
     shift_step = textToInteger(parser.getOption("--shift_step", "Step in shifts to search (in downscaled pixels)", "5"));
-    width = textToFloat(parser.getOption("--width", "Width of searching image (in A)", "100"));
-    length = textToFloat(parser.getOption("--length", "Length of searching image (in A)", "300"));
+    filament_width = textToFloat(parser.getOption("--filament_width", "Width of searching image (in A)", "200"));
+    filament_length = textToFloat(parser.getOption("--filament_length", "Length of searching image (in A)", "400"));
 
     int pick_section = parser.addSection("Filament tracing options ");
-    zscore_threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "2."));
-    minimum_filament_length = textToFloat(parser.getOption("--min_filament_length", "Minimum length of filaments to trace (in A)", "400."));
-    filament_width = textToFloat(parser.getOption("--filament_width", "Minimum distance between two traced filaments (in A)", "200."));
+    zscore_threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "1."));
     nr_rungs_per_segment = textToInteger(parser.getOption("--rungs_per_segment", "Number of new amyloid rungs per segment", "3"));
+    min_filament_length = textToFloat(parser.getOption("--min_filament_length", "Minimum length of traced filaments (in A)", "300"));
     RFLOAT kappa = textToFloat(parser.getOption("--kappa", "Curvature parameter kappa ", "0.07"));
-    if (kappa > 0.1)
+    if (kappa > 0.101)
         REPORT_ERROR("ERROR: for amyloids you cannot use kappa larger than 0.1!");
     psidiff_per_segment = RAD2DEG(kappa*2.);
 
     int expert_section = parser.addSection("Expert options (typically no need to change)");
     signal_minres = textToFloat(parser.getOption("--signal_minres", "Minimum resolution value for signal (in A)", "4.85"));
     signal_maxres = textToFloat(parser.getOption("--signal_maxres", "Maximum resolution value for signal (in A)", "4.65"));
+    inifactor_threshold = textToFloat(parser.getOption("--inifactor_threshold", "What fraction of the Z-score threshold for allowing to grow filaments?", "0.5"));
     down_angpix = textToFloat(parser.getOption("--down_angpix", "Pixel size for downscaled images (needs to include signal frequency!)", "2.25"));
     angpix = textToFloat(parser.getOption("--force_angpix", "Force this pixel size, regardless of what is in the image header", "-1"));
 
@@ -71,6 +71,10 @@ void AmyloidFinder::initialise(bool is_leader)
     // Make sure fn_odir ends with a slash
     if (fn_odir[fn_odir.length()-1] != '/')
         fn_odir += "/";
+
+    // Make sure inifactor is <0.1]
+    if (inifactor_threshold > 1 || inifactor_threshold <= 0.)
+        REPORT_ERROR("ERROR: --inifactor_threshold should be between <0,1]");
 
     fn_micrographs.clear();
     if (fn_in.isStarFile())
@@ -138,8 +142,8 @@ void AmyloidFinder::initialise(bool is_leader)
     if (angpix > down_angpix) REPORT_ERROR("ERROR: this program requires input images with a pixel size of at least down_angpix (" + floatToString(down_angpix) + ")!");
 
     // Width and length in the downscaled pixels
-    iwidthmax = ROUND(width / down_angpix );
-    ilengthmax = CEIL(length/ down_angpix );
+    iwidthmax = ROUND(filament_width / down_angpix );
+    ilengthmax = CEIL(filament_length/ down_angpix );
 
     down_xsize = FLOOR( (ori_xsize * angpix) / down_angpix );
     down_ysize = FLOOR( (ori_ysize * angpix) / down_angpix );
@@ -152,7 +156,9 @@ void AmyloidFinder::initialise(bool is_leader)
     imax_signal = CEIL(ilengthmax*down_angpix/signal_maxres);
 
     // Box size, orginal and cropped: set size of rectangular image to largest dimension
-    large_box = XMIPP_MAX(ori_xsize, ori_ysize);
+    large_box = 1.1*XMIPP_MAX(ori_xsize, ori_ysize);
+    large_box += ROUND(XMIPP_MAX(filament_width, filament_length)/angpix);
+    if (large_box%2 != 0) large_box++;
     // Also calculate size of cropped box:
     crop_box = large_box * angpix/down_angpix;
     if (crop_box%2 != 0) crop_box++;
@@ -178,17 +184,15 @@ void AmyloidFinder::initialise(bool is_leader)
     float myradb2 = (float)myradb * (float)myradb;
     for (int ii = -myradb; ii <= myradb; ii++)
     {
-    	for (int jj = -myradb; jj <= myradb; jj++)
+    	for (int jj = 0; jj <= myradb; jj++)
     	{
     		float r2 = (float)(ii*ii) + (float)(jj*jj);
     		if (r2 > myrad2 && r2 <= myradb2)
     		{
                 float myang = RAD2DEG(atan2((float)(ii),(float)(jj)));
-                if (myang > 90.)
-                    myang -= 180.;
-                if (myang < -90.)
-                    myang += 180.;
-                if (fabs(myang) < psidiff_per_segment)
+                if (myang > 90.) myang -= 180.;
+                if (myang < -90.) myang += 180.;
+                if (myang < 90. && fabs(myang) < psidiff_per_segment)
                 {
                 	AmyloidCoordinate circlecoord;
                 	circlecoord.x = (RFLOAT)jj;
@@ -218,8 +222,36 @@ RFLOAT AmyloidFinder::getPsiAngle(int ipsi)
     return 2.3 + ipsi * psi_step;
 }
 
+RFLOAT AmyloidFinder::getPsiDiff(RFLOAT psi1, RFLOAT psi2)
+{
+    RFLOAT psidiff = fabs(psi1 - psi2);
+    if (psidiff > 90.) psidiff -= 180.;
+    return fabs(psidiff);
+
+}
+
 void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mangle, bool myverb)
 {
+
+    MultidimArray<RFLOAT> Mbig(large_box, large_box);
+    Mbig.setXmippOrigin();
+    for (long int i=STARTINGY(Mbig); i<=FINISHINGY(Mbig); i++)
+    {
+        long int ip = i;
+        //if (i < STARTINGY(image)) ip += YSIZE(image);
+        //else if (i > FINISHINGY(image)) ip -= YSIZE(image);
+        if (i < STARTINGY(image)) ip = 2*STARTINGY(image) - i;
+        else if (i > FINISHINGY(image)) ip = 2*FINISHINGY(image) - i;
+
+        for (long int j=STARTINGX(Mbig); j<=FINISHINGX(Mbig); j++)
+        {
+            long int jp = j;
+            if (j < STARTINGX(image)) jp = 2*STARTINGX(image) - j;
+            else if (j > FINISHINGX(image)) jp = 2*FINISHINGX(image) - j;
+
+            A2D_ELEM(Mbig, i, j) = A2D_ELEM(image, ip, jp);
+        }
+    }
 
     // Rotate the large image, and store downscaled images by cropping their Fourier Transform
     std::vector<MultidimArray<RFLOAT> > rotated_imgs(nr_psi), rotated_scores_perline(nr_psi), rotated_scores(nr_psi);
@@ -241,7 +273,12 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         MultidimArray<RFLOAT> Mrot;
         Mrot.setXmippOrigin();
         Mrot.initZeros(large_box, large_box);
-        rotate(image, Mrot, psi, 'Z', true);
+        rotate(Mbig, Mrot, psi, 'Z', true);
+
+        //Image<RFLOAT> Ir;
+        //Ir()=Mrot;
+        //Ir.write("Ir_psi"+ integerToString(ipsi)+".spi");
+        //std::cerr << " written: " << "Ir_psi"<< integerToString(ipsi)<<".spi" << std::endl;
 
         // Re-scale image so that Nyquist is at down_angpix
         MultidimArray<Complex > FT, FT2;
@@ -272,20 +309,20 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         init_progress_bar(nr_psi);
     }
 
-    int my_skip_sides = ilengthmax/2;
+    int my_skip_side_length = ilengthmax/2;
     for (int ipsi = 0; ipsi < nr_psi; ipsi++)
     {
 #pragma omp parallel for num_threads(nr_threads)
-        for (int ypos = my_skip_sides; ypos < down_ysize - my_skip_sides; ypos += 1)
+        for (int ypos = my_skip_side_length; ypos < YSIZE(rotated_imgs[ipsi]) - my_skip_side_length; ypos += 1)
         {
-            int cen_ypos = ypos - down_ysize/2;
+            int cen_ypos = ypos - YSIZE(rotated_imgs[ipsi])/2;
             const int tid = omp_get_thread_num();
             MultidimArray<RFLOAT> oneline(ilengthmax);
             MultidimArray<Complex> FTline(ilengthmax/2 + 1);
 
-            for (int xpos = my_skip_sides; xpos < down_xsize - my_skip_sides; xpos += 1)
+            for (int xpos = my_skip_side_length; xpos < XSIZE(rotated_imgs[ipsi]) - my_skip_side_length; xpos += 1)
             {
-                int cen_xpos = xpos - down_xsize/2;
+                int cen_xpos = xpos - XSIZE(rotated_imgs[ipsi])/2;
 
                 // Grab the line from the rotated image, in X and in Y directions
                 for (int iline = 0; iline < ilengthmax; iline++)
@@ -311,15 +348,16 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
 
         // Now that we have signal per individual line for each coordinate, sum over the width of the search box
         // The below is split in two halves, becauses otherwise cen_pos=0 may be sampled twice!!!
+        int my_skip_side_width = iwidthmax/2;
  #pragma omp parallel for num_threads(nr_threads)
-       for (int ypos = 0; ypos < down_ysize/2 - my_skip_sides; ypos += shift_step)
+       for (int ypos = 0; ypos < YSIZE(rotated_imgs[ipsi])/2 - my_skip_side_width; ypos += shift_step)
        {
            for (int ipassy = 0; ipassy < 2; ipassy++)
            {
                int cen_ypos = (ipassy == 0) ? ypos : -ypos;
                if (ypos == 0 && ipassy == 1) continue;
 
-               for (int xpos = 0; xpos < down_xsize/2 - my_skip_sides; xpos += shift_step)
+               for (int xpos = 0; xpos < XSIZE(rotated_imgs[ipsi])/2 - my_skip_side_width; xpos += shift_step)
                {
                    for (int ipass = 0; ipass < 2; ipass++)
                    {
@@ -392,6 +430,51 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
     }
     if (myverb) progress_bar(nr_psi);
 
+    // 1D-convolution in direction perpendicular to psi!
+    // Pre-made coordinates of a line along Y-axis
+    // exclude (0,0) as later in convolution all ypoints will be added to that one
+    std::vector<Matrix1D<RFLOAT> > ypoints;
+    Matrix1D<RFLOAT> ypoint(2);
+    // Try twice the normal width of the filament and hope that different psi angles will limit this!
+    for (int iwidth = 1, ii = 0; iwidth < iwidthmax; iwidth+=shift_step, ii++)
+    {
+        YY(ypoint) = (RFLOAT)ii;
+        ypoints.push_back(ypoint);
+        YY(ypoint) = -(RFLOAT)ii;
+        ypoints.push_back(ypoint);
+    }
+
+    MultidimArray<RFLOAT> Mconv;
+    Mconv.resize(Mscore);
+    RFLOAT max_psidiff = (1.5 * psi_step);
+    #pragma omp parallel for num_threads(nr_threads)
+    for (int ypos = 0; ypos < down_ysize; ypos ++)
+    {
+        int cen_ypos = ypos - down_ysize/2;
+        for (int xpos = 0; xpos < down_xsize; xpos ++)
+        {
+            int cen_xpos = xpos - down_xsize/2;
+            RFLOAT mypsi = A2D_ELEM(Mangle, cen_ypos, cen_xpos);
+
+            Matrix2D<RFLOAT> A2D;
+            Matrix1D<RFLOAT> vec_p(2);
+            rotation2DMatrix(mypsi, A2D, false);
+            A2D_ELEM(Mconv, cen_ypos, cen_xpos) = A2D_ELEM(Mscore, cen_ypos, cen_xpos);
+            for (int ipoint = 0; ipoint < ypoints.size(); ipoint++)
+            {
+                vec_p = A2D * ypoints[ipoint];
+                int newy = cen_ypos + ROUND(YY(vec_p));
+                int newx = cen_xpos + ROUND(XX(vec_p));
+                RFLOAT nearpsi = A2D_ELEM(Mangle, newy, newx);
+                RFLOAT psidiff = getPsiDiff(mypsi, nearpsi);
+                if (psidiff < max_psidiff)
+                    A2D_ELEM(Mconv, cen_ypos, cen_xpos) += A2D_ELEM(Mscore, newy, newx);
+            }
+        }
+    }
+    Mscore=Mconv;
+    Mconv.clear();
+
     // Re-scale and re-box image to original size
     int newsize = (XSIZE(Mangle)*down_angpix) / angpix;
     if (newsize%2 !=0) newsize++;
@@ -400,8 +483,9 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
     Mangle.setXmippOrigin();
     Mscore.setXmippOrigin();
     Mangle.window(STARTINGY(image), STARTINGX(image), FINISHINGY(image), FINISHINGX(image));
-    int skip_sides = ROUND(length/(angpix*2.));
     Mscore.window(STARTINGY(image), STARTINGX(image), FINISHINGY(image), FINISHINGX(image));
+    int skip_sides = ROUND(filament_length/(angpix*2.));
+    skip_sides = 25;
     RFLOAT sum = 0., sum2 = 0., nn= 0.;
     FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(Mscore)
         {
@@ -440,6 +524,8 @@ std::vector<AmyloidCoordinate> AmyloidFinder::findNextCandidateCoordinates(Amylo
 	Matrix1D<RFLOAT> vec_c(2), vec_p(2);
 	rotation2DMatrix(-mycoord.psi, A2D, false);
 
+    // How many psi-steps away is this segment allowed to be from the previous one: just a bit more than original psi_steps?
+    RFLOAT max_psidiff = (1.5 * psi_step);
 	for (int icoor = 0; icoor < circle.size(); icoor++)
 	{
 		// Rotate the circle-vector coordinates along the mycoord.psi
@@ -452,18 +538,10 @@ std::vector<AmyloidCoordinate> AmyloidFinder::findNextCandidateCoordinates(Amylo
 
         RFLOAT myscore = A2D_ELEM(Mscore, ii, jj);
         RFLOAT mypsi = A2D_ELEM(Mpsi, ii, jj);
-
-        // Small difference in psi-angle with mycoord
-        RFLOAT psidiff = fabs(mycoord.psi - mypsi);
-        psidiff = realWRAP(psidiff, 0., 360.);
-        if (psidiff > 180.)
-                psidiff -= 180.;
-        if (psidiff > 90.)
-                psidiff -= 180.;
-
-        // How many psi-steps away is this segment allowed to be from the previous one: just two original psi_steps?
-        RFLOAT max_psidiff = (2. * psi_step) + 0.1;
-        if (fabs(psidiff) < max_psidiff && myscore > zscore_threshold)
+        // Impose small difference in psi-angle with mycoord
+        RFLOAT psidiff = getPsiDiff(mycoord.psi, mypsi);
+        //std::cerr <<" icoor= " << icoor <<"x= "<<jj<<" y=" << ii<< " elem=" << A2D_ELEM(Mpsi, ii, jj)<< " mypsi= " <<mypsi << " mycoord.psi=" << mycoord.psi<< " max_psidiff= " << max_psidiff << " myscore= " << myscore << " zscore_threshold= " << zscore_threshold << std::endl;
+        if (fabs(psidiff) < max_psidiff && myscore > inifactor_threshold * zscore_threshold)
         {
             AmyloidCoordinate newcoord;
             newcoord.x = mycoord.x + XX(vec_p);
@@ -488,8 +566,12 @@ AmyloidCoordinate AmyloidFinder::findNextAmyloidCoordinate(AmyloidCoordinate &my
 	AmyloidCoordinate result;
 	result.x = result.y = result.psi = 0.;
 	result.fom = -2.;
-	if (A2D_ELEM(Mscore, ROUND(mycoord.y), ROUND(mycoord.x)) < zscore_threshold)
-		return result;
+    RFLOAT myfom = A2D_ELEM(Mscore, ROUND(mycoord.y), ROUND(mycoord.x));
+    if (myfom < inifactor_threshold * zscore_threshold)
+    {
+        //std::cerr << " myfom=" << myfom << " mycoord.fom= " << mycoord.fom << " x= " << mycoord.x << " y= " << mycoord.y << std::endl;
+        return result;
+    }
 
     // Set FOM to small value (-2.) in rectangle around mycoord (filament-width wide, distance to new segment high)
     Matrix2D<RFLOAT> A2D;
@@ -514,8 +596,11 @@ AmyloidCoordinate AmyloidFinder::findNextAmyloidCoordinate(AmyloidCoordinate &my
             }
         }
     }
+
     /*
     Image<RFLOAT> It;
+    It()=Mpsi;
+    It.write("Mpsi.spi");
     It()=Mscore;
     It.write("Mscore.spi");
     char c;
@@ -591,63 +676,23 @@ AmyloidCoordinate AmyloidFinder::findNextAmyloidCoordinate(AmyloidCoordinate &my
 	}
 	else
 	{
-
-		RFLOAT prevpsi = (best_inew1 > 0) ? new1coords[best_inew1-1].psi : -99999.;
-		RFLOAT nextpsi = (new1coords.size() - best_inew1 > 1) ? new1coords[best_inew1+1].psi : -99999.;
-
-		RFLOAT nextpsidiff = -9999., prevpsidiff=-9999.;
-		if (prevpsi > -999.)
-		{
-			RFLOAT psidiff = fabs(mycoord.psi - prevpsi);
-			psidiff = realWRAP(psidiff, 0., 360.);
-			if (psidiff > 180.)
-					psidiff -= 180.;
-			if (psidiff > 90.)
-					psidiff -= 180.;
-			prevpsidiff = psidiff;
-		}
-		if (nextpsi > -999.)
-		{
-			RFLOAT psidiff = fabs(mycoord.psi - nextpsi);
-			psidiff = realWRAP(psidiff, 0., 360.);
-			if (psidiff > 180.)
-					psidiff -= 180.;
-			if (psidiff > 90.)
-					psidiff -= 180.;
-			nextpsidiff = psidiff;
-		}
-
-
-
-/*         std::cerr << " new1coords[best_inew1].fom= " << new1coords[best_inew1].fom
-				<< " x= " << new1coords[best_inew1].x
-				<< " y= " << new1coords[best_inew1].y
-				<< " myx= " << mycoord.x
-				<< " myy= " << mycoord.y
-				<< " mypsi= " << mycoord.psi
-				<< " new1coords[best_inew1].psi= " << new1coords[best_inew1].psi
-				<< " prevpsi= " << prevpsi << " prevpsidiff= " << prevpsidiff
-				<< " nextpsi= " << nextpsi << " nextpsidiff= " << nextpsidiff
-				<< std::endl;
-		*/
-
 		return new1coords[best_inew1];
 	}
 
 }
 
 
-RFLOAT AmyloidFinder::maxIndex_multithreaded(MultidimArray<RFLOAT> &m, long int &imax, long int &jmax)
+RFLOAT AmyloidFinder::maxIndex_multithreaded(MultidimArray<RFLOAT> &m, long int &imax, long int &jmax, int skip_sides)
 {
     RFLOAT maxval= -99.e99;
     std::vector<RFLOAT> maxval_per_thread(nr_threads, -99.e99);
     std::vector<size_t> maxi_per_thread(nr_threads), maxj_per_thread(nr_threads);
 
 #pragma omp parallel for num_threads(nr_threads)
-    for (long int i=STARTINGY(m); i<=FINISHINGY(m); i++)
+    for (long int i=STARTINGY(m)+skip_sides; i<=FINISHINGY(m)-skip_sides; i++)
     {
         const int tid = omp_get_thread_num();
-        for (long int j=STARTINGX(m); j<=FINISHINGX(m); j++)
+        for (long int j=STARTINGX(m)+skip_sides; j<=FINISHINGX(m)-skip_sides; j++)
         {
             const int tid = omp_get_thread_num();
             RFLOAT aux = A2D_ELEM(m, i, j);
@@ -678,21 +723,20 @@ RFLOAT AmyloidFinder::maxIndex_multithreaded(MultidimArray<RFLOAT> &m, long int 
 MetaDataTable AmyloidFinder::traceFilaments(MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mpsi)
 {
 
-	std::vector< std::vector <AmyloidCoordinate> > helices;
+    std::vector< std::vector <AmyloidCoordinate> > helices;
 	bool no_more_ccf_peaks = false;
 	int nr_fail = 0;
+    int skip_sides = CEIL(0.6*filament_width/angpix);
     while (!no_more_ccf_peaks)
 	{
 		long int imax, jmax;
-		float myscore = maxIndex_multithreaded(Mscore, imax, jmax);
+		float myscore = maxIndex_multithreaded(Mscore, imax, jmax, skip_sides);
 		float mypsi = Mpsi(imax, jmax);
 
-		// Stop searching if all pixels are below min_ccf!
-		//std::cerr << " myscore= " << myscore << " imax= " << imax << " jmax= " << jmax << std::endl;
-		//std::cerr << " helices.size()= " << helices.size() << " threshold_value= " << threshold_value << " mypsi= " << mypsi << std::endl;
-		// Peaks to seed new filaments have to be at least 50% higher than the threshold
-        if (myscore < zscore_threshold || nr_fail >250)
+		// Peaks to seed new filaments have to be at least the zscore_threshold
+        if (myscore < zscore_threshold )
         {
+            //std::cerr << " myscore= " << myscore << " nr_fail= " << nr_fail << std::endl;
             no_more_ccf_peaks = true;
         }
 
@@ -711,8 +755,8 @@ MetaDataTable AmyloidFinder::traceFilaments(MultidimArray<RFLOAT> &Mscore, Multi
         {
             //std::cerr << " START-in: x= "<< helix[0].x <<" y= " << helix[0].y << " psi= " <<  helix[0].psi << " fom= " <<  helix[0].fom << std::endl;
             newcoord = findNextAmyloidCoordinate(helix[0],Mscore, Mpsi);
-            //std::cerr << " START newcoord.x= " << newcoord.x << " newcoord.y= " << newcoord.y << " newcoord.fom= " << newcoord.fom << " helix.size()= " << helix.size() << std::endl;
-            if (newcoord.fom > zscore_threshold)
+            //std::cerr << " START newcoord.x= " << newcoord.x << " newcoord.y= " << newcoord.y << " newcoord.fom= " << newcoord.fom << " newcoord.psi= " << newcoord.psi << " helix.size()= " << helix.size() << std::endl;
+            if (newcoord.fom > inifactor_threshold * zscore_threshold)
             {
                 newcoord.order = helix[0].order - 1;
                 helix.insert(helix.begin(), newcoord);
@@ -735,8 +779,8 @@ MetaDataTable AmyloidFinder::traceFilaments(MultidimArray<RFLOAT> &Mscore, Multi
             {
                 //std::cerr << " END-in: x= "<< helix[helix.size()-1].x <<" y= " << helix[helix.size()-1].y  << " psi= " <<  helix[helix.size()-1].psi << " fom= " <<  helix[helix.size()-1].fom << std::endl;
                 newcoord = findNextAmyloidCoordinate(helix[helix.size()-1], Mscore, Mpsi);
-                //std::cerr << " END newcoord.x= " << newcoord.x << " newcoord.y= " << newcoord.y << " newcoord.fom= " << newcoord.fom << " helix.size()= " << helix.size() << std::endl;
-                if (newcoord.fom > zscore_threshold)
+                //std::cerr << " END newcoord.x= " << newcoord.x << " newcoord.y= " << newcoord.y << " newcoord.fom= " << newcoord.fom << " newcoord.psi= " << newcoord.psi << " helix.size()= " << helix.size() << std::endl;
+                if (newcoord.fom > inifactor_threshold * zscore_threshold)
                 {
                     newcoord.order = helix[0].order + 1;
                     helix.push_back(newcoord);
@@ -751,7 +795,7 @@ MetaDataTable AmyloidFinder::traceFilaments(MultidimArray<RFLOAT> &Mscore, Multi
         }
 
 
-		if (nr_rungs_per_segment * amyloid_rung * helix.size() > minimum_filament_length)
+		if (nr_rungs_per_segment * amyloid_rung * helix.size() > min_filament_length)
 		{
 			helices.push_back(helix);
 
@@ -851,8 +895,8 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
 {
 
     FileName fn_root = getOutputRootName(fn_mic);
-    FileName fn_fom = fn_root + "_" + fn_out + "_fom.mrc";
-    FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
+    FileName fn_fom = fn_root + "_" + fn_out + "_fom.spi";
+    FileName fn_psi = fn_root + "_" + fn_out + "_psi.spi";
     MultidimArray<RFLOAT> Mscore, Mangle;
 
     if (!do_write_intermediate || !exists(fn_fom) || !exists(fn_psi))
@@ -891,6 +935,14 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         std::cout << " - Tracing filaments ..." << std::endl;
         init_progress_bar(1);
     }
+    // set Mscore in a slightly bigger box to avoid to have to search boundary conditions
+    int rectangle_diam = sqrt(filament_width*filament_width + nr_rungs_per_segment*amyloid_rung*nr_rungs_per_segment*amyloid_rung)/angpix;
+    int larger_box_x = XSIZE(Mscore) + 1.5*rectangle_diam;
+    int larger_box_y = YSIZE(Mscore) + 1.5*rectangle_diam;
+    Mscore.window(FIRST_XMIPP_INDEX(larger_box_y), FIRST_XMIPP_INDEX(larger_box_x), LAST_XMIPP_INDEX(larger_box_y), LAST_XMIPP_INDEX(larger_box_x));
+    Mscore.setXmippOrigin();
+    Mangle.window(FIRST_XMIPP_INDEX(larger_box_y), FIRST_XMIPP_INDEX(larger_box_x), LAST_XMIPP_INDEX(larger_box_y), LAST_XMIPP_INDEX(larger_box_x));
+    Mangle.setXmippOrigin();
     MetaDataTable MDmic = traceFilaments(Mscore, Mangle);
     if (myverb) progress_bar(1);
 

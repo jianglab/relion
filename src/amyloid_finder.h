@@ -57,7 +57,7 @@ public:
     RFLOAT signal_minres, signal_maxres;
 
     // Threshold for selecting peaks in Zscore map
-    RFLOAT zscore_threshold;
+    RFLOAT zscore_threshold, inifactor_threshold;
 
     // Number of new amyloid rungs per segment (particle)
     int nr_rungs_per_segment;
@@ -65,11 +65,11 @@ public:
     // Allowed psi-deviation per segment (particle)
     RFLOAT psidiff_per_segment;
 
-    // Minimum width and length of filaments (in A) for tracing of segments
-    RFLOAT minimum_filament_length, filament_width;
+    // width and length of filaments (in A) for searching of 4.7A signal
+    RFLOAT filament_length, filament_width;
 
-    // Width and length of the filament searching motifs (in A)
-    int width, length;
+    // Minimum length for tracing filaments
+    RFLOAT min_filament_length;
 
     // Sampling of positions
     int shift_step, ori_xsize, ori_ysize, down_xsize, down_ysize;
@@ -114,6 +114,9 @@ public:
     // Make sure all pieces of code use same psi angles from ipsi
     RFLOAT getPsiAngle(int ipsi);
 
+    // Difference between two psi angles that range from 0-180
+    RFLOAT getPsiDiff(RFLOAT psi1, RFLOAT psi2);
+
     // Loop over all psi-angles and coordinates to get accumulated score and angle image for a given micrograph
     void getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mangle, bool myverb = false);
 
@@ -124,7 +127,7 @@ public:
     AmyloidCoordinate findNextAmyloidCoordinate(AmyloidCoordinate &mycoord, MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mpsi);
 
     // Multi-threaded maxIndex
-    RFLOAT maxIndex_multithreaded(MultidimArray<RFLOAT> &Mscore, long int &imax, long int &jmax);
+    RFLOAT maxIndex_multithreaded(MultidimArray<RFLOAT> &Mscore, long int &imax, long int &jmax, int skip_sides = 0);
 
     // Trace individual segments in the images based on the scores and angles
     MetaDataTable traceFilaments(MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mpsi);
