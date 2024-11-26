@@ -41,7 +41,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     search_filament_length = textToFloat(parser.getOption("--search_filament_length", "Length of searching image (in A)", "250"));
 
     int pick_section = parser.addSection("Filament tracing options ");
-    zscore_threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "2."));
+    zscore_threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "0.5"));
     nr_rungs_per_segment = textToInteger(parser.getOption("--rungs_per_segment", "Number of new amyloid rungs per segment", "3"));
     trace_filament_width = textToFloat(parser.getOption("--trace_filament_width", "Minimum width occupied by a traced filaments (in A)", "200"));
     trace_filament_length = textToFloat(parser.getOption("--trace_filament_length", "Minimum length of traced filaments (in A)", "300"));
@@ -53,7 +53,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     int expert_section = parser.addSection("Expert options (typically no need to change)");
     signal_minres = textToFloat(parser.getOption("--signal_minres", "Minimum resolution value for signal (in A)", "4.85"));
     signal_maxres = textToFloat(parser.getOption("--signal_maxres", "Maximum resolution value for signal (in A)", "4.65"));
-    inifactor_threshold = textToFloat(parser.getOption("--inifactor_threshold", "What fraction of the Z-score threshold for allowing to grow filaments?", "0.5"));
+    inifactor_threshold = textToFloat(parser.getOption("--inifactor_threshold", "What fraction of the Z-score threshold for allowing to grow filaments?", "0.33"));
     down_angpix = textToFloat(parser.getOption("--down_angpix", "Pixel size for downscaled images (needs to include signal frequency!)", "2.25"));
     angpix = textToFloat(parser.getOption("--force_angpix", "Force this pixel size, regardless of what is in the image header", "-1"));
     verb =textToInteger(parser.getOption("--verb", "Verbosity", "1"));
@@ -156,7 +156,7 @@ void AmyloidFinder::initialise(bool is_leader)
     imax_signal = CEIL(ilengthmax*down_angpix/signal_maxres);
 
     // Box size, orginal and cropped: set size of rectangular image to largest dimension
-    large_box = 1.05*XMIPP_MAX(ori_xsize, ori_ysize);
+    large_box = sqrt(2.)*XMIPP_MAX(ori_xsize, ori_ysize);
     large_box += ROUND(XMIPP_MAX(search_filament_width, search_filament_length) / angpix);
     if (large_box%2 != 0) large_box++;
     // Also calculate size of cropped box:
@@ -404,8 +404,11 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
     Mangle.resize(down_ysize, down_xsize);
     Mangle.setXmippOrigin();
     Mscore.resize(Mangle);
+    MultidimArray<RFLOAT> Msum;
+    Msum.resize(Mangle);
 
-    // This can't be parallelised efficiently because need to protect Izscore from simultaneous writing...
+    // This can't be parallelised efficiently because need to protect Msums, Mscore and Mangle from simultaneous writing...
+    // Calculate Z-scores over psi: (max_psi - avg_psi) /stddev_psi
     for (int ipsi = 0; ipsi < nr_psi; ipsi++)
     {
         RFLOAT mypsi = getPsiAngle(ipsi);
@@ -417,6 +420,7 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
                 int cen_xpos = xpos - down_xsize/2;
 
                 RFLOAT myscore = A2D_ELEM(rotated_scores[ipsi], cen_ypos/shift_step, cen_xpos/shift_step);
+                A2D_ELEM(Msum, cen_ypos, cen_xpos) += myscore;
 
                 if (myscore > A2D_ELEM(Mscore, cen_ypos, cen_xpos))
                 {
@@ -428,24 +432,23 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         }
     }
 
-    // And normalise
-    RFLOAT sum = 0., sum2 = 0., nn= 0.;
-    FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(Mscore)
+    // Now need to subtract the Mscore for the best psi, as the mean and stddev should be calculated for the non-signal!
+    FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Msum)
     {
-        sum += DIRECT_A2D_ELEM(Mscore, i, j);
-        sum2 += DIRECT_A2D_ELEM(Mscore, i, j) * DIRECT_A2D_ELEM(Mscore, i, j);
-        nn+= 1.;
-    }
-    sum /= nn;
-    sum2 /= nn;
-    RFLOAT stddev = sqrt(sum2 - sum * sum);
-    if (stddev <= 0.) REPORT_ERROR("ERROR: stddev of scores= " + floatToString(stddev));
-    FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Mscore)
-    {
-        if (DIRECT_MULTIDIM_ELEM(Mscore, n) > 0.)
-            DIRECT_MULTIDIM_ELEM(Mscore, n) = (DIRECT_MULTIDIM_ELEM(Mscore, n) - sum) / stddev;
+        DIRECT_MULTIDIM_ELEM(Msum, n) -= DIRECT_MULTIDIM_ELEM(Mscore, n);
+        DIRECT_MULTIDIM_ELEM(Msum, n) /= (RFLOAT)(nr_psi-1);
+        // calculate as normalised score:
+        // (max_psi - adjusted_mean_psi) / adjusted_mean_psi
+        // where adjusted_mean is the average of the score over all psi-values, except the maximum
+        if (DIRECT_MULTIDIM_ELEM(Msum, n) > 0.)
+            DIRECT_MULTIDIM_ELEM(Mscore, n) = (DIRECT_MULTIDIM_ELEM(Mscore, n) - DIRECT_MULTIDIM_ELEM(Msum, n)) / DIRECT_MULTIDIM_ELEM(Msum, n);
     }
 
+    Image<RFLOAT> Itt;
+    Itt()=Msum;
+    Itt.write("Mscore_avg_over_psi.spi");
+    Itt()=Mscore;
+    Itt.write("Mscore_Zscore_over_psi.spi");
 
     if (myverb) progress_bar(nr_psi);
 
@@ -881,7 +884,7 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
     FileName fn_conv = fn_root + "_" + fn_out + "_conv.spi";
     MultidimArray<RFLOAT> Mscore, Mangle;
 
-    if (!do_write_intermediate || !exists(fn_fom) || !exists(fn_psi))
+    if (!(do_write_intermediate || do_only_write_intermediate) || !exists(fn_fom) || !exists(fn_psi))
     {
 
         Image<RFLOAT> Iin;
