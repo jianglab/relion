@@ -27,6 +27,7 @@
 #include <src/filename.h>
 #include <src/time.h>
 #include <src/transformations.h>
+#include <src/jaz/single_particle/obs_model.h>
 #include <omp.h>
 
 struct AmyloidCoordinate
@@ -114,7 +115,8 @@ public:
     RFLOAT getPsiDiff(RFLOAT psi1, RFLOAT psi2);
 
     // Loop over all psi-angles and coordinates to get accumulated score and angle image for a given micrograph
-    void getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mangle, bool myverb = false);
+    void getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore,
+                                  MultidimArray<RFLOAT> &Mangle, RFLOAT &skew, RFLOAT &kurt, bool myverb = false);
 
     // Find next candidate coordinates around a previous coordinate
     std::vector<AmyloidCoordinate> findNextCandidateCoordinates(AmyloidCoordinate &mycoord, MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mpsi);

@@ -27,7 +27,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
 
     int general_section = parser.addSection("General options");
     fn_in = parser.getOption("--i", "Input image (.mrc) or STAR file with micrographs");
-    fn_out = parser.getOption("--pickname", "Rootname for coordinate STAR files", "amypick");
+    fn_out = parser.getOption("--pickname", "Rootname for coordinate STAR files", "autopick");
     fn_odir = parser.getOption("--odir", "Output directory for coordinate files (default is to store next to micrographs)", "AutoPick/");
     do_only_unfinished = parser.checkOption("--only_do_unfinished", "Only estimate CTFs for those tomograms for which there is not yet a logfile with Final values.");
     do_write_intermediate = parser.checkOption("--write_intermediates", "Write out intermediate FOM & PSI maps for faster testing of tracing parameters?");
@@ -230,7 +230,8 @@ RFLOAT AmyloidFinder::getPsiDiff(RFLOAT psi1, RFLOAT psi2)
 
 }
 
-void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mangle, bool myverb)
+void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore,
+                                             MultidimArray<RFLOAT> &Mangle, RFLOAT &skew, RFLOAT &kurt, bool myverb)
 {
 
     MultidimArray<RFLOAT> Mbig(large_box, large_box);
@@ -433,6 +434,7 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
     }
 
     // Now need to subtract the Mscore for the best psi, as the mean and stddev should be calculated for the non-signal!
+    RFLOAT sum=0., sum2=0.;
     FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Msum)
     {
         DIRECT_MULTIDIM_ELEM(Msum, n) -= DIRECT_MULTIDIM_ELEM(Mscore, n);
@@ -442,13 +444,34 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         // where adjusted_mean is the average of the score over all psi-values, except the maximum
         if (DIRECT_MULTIDIM_ELEM(Msum, n) > 0.)
             DIRECT_MULTIDIM_ELEM(Mscore, n) = (DIRECT_MULTIDIM_ELEM(Mscore, n) - DIRECT_MULTIDIM_ELEM(Msum, n)) / DIRECT_MULTIDIM_ELEM(Msum, n);
+        sum  += DIRECT_MULTIDIM_ELEM(Mscore, n);
+        sum2 += DIRECT_MULTIDIM_ELEM(Mscore, n) * DIRECT_MULTIDIM_ELEM(Mscore, n);
     }
 
+    // Output skewness and kurtosis of Mscore distribution to detect which micrographs have filaments
+    RFLOAT n = NZYXSIZE(Msum);
+    sum /= n;
+    sum2 /= n;
+    sum2 = sqrt(sum2-sum*sum);
+    skew = 0.;
+    kurt = 0.;
+    FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Msum)
+    {
+        RFLOAT aux = (DIRECT_MULTIDIM_ELEM(Mscore, n) - sum)/sum2;
+        skew += aux*aux*aux;
+        kurt += aux*aux*aux*aux;
+    }
+    kurt *= n*(n+1)/((n-1)*(n-2)*(n-3));
+    skew *= n/((n-1)*(n-2));
+
+    /*
+    std::cerr << " skewness= " << skew << " excess kurtosis= " << kurt -3 << std::endl;
     Image<RFLOAT> Itt;
     Itt()=Msum;
     Itt.write("Mscore_avg_over_psi.spi");
     Itt()=Mscore;
     Itt.write("Mscore_Zscore_over_psi.spi");
+    */
 
     if (myverb) progress_bar(nr_psi);
 
@@ -879,9 +902,9 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
 {
 
     FileName fn_root = getOutputRootName(fn_mic);
-    FileName fn_fom = fn_root + "_" + fn_out + "_fom.spi";
-    FileName fn_psi = fn_root + "_" + fn_out + "_psi.spi";
-    FileName fn_conv = fn_root + "_" + fn_out + "_conv.spi";
+    FileName fn_fom = fn_root + "_" + fn_out + "_fom.mrc";
+    FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
+    FileName fn_skew = fn_root + "_" + fn_out + "_skew.star";
     MultidimArray<RFLOAT> Mscore, Mangle;
 
     if (!(do_write_intermediate || do_only_write_intermediate) || !exists(fn_fom) || !exists(fn_psi))
@@ -893,7 +916,15 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         if (XSIZE(Iin()) != ori_xsize || YSIZE(Iin()) != ori_ysize || fabs(angpix - Iin.samplingRateX()) > 0.001)
             REPORT_ERROR("ERROR: incorrect size or pixel size for image " + fn_mic);
 
-        getScoreForOneMicrograph(Iin(), Mscore, Mangle, myverb);
+        RFLOAT skew, kurt;
+        getScoreForOneMicrograph(Iin(), Mscore, Mangle, skew, kurt, myverb);
+
+        MetaDataTable MDskew;
+        MDskew.setIsList(true);
+        MDskew.addObject();
+        MDskew.setValue(EMDL_MICROGRAPH_SCORE_SKEWNESS, skew);
+        MDskew.setValue(EMDL_MICROGRAPH_SCORE_KURTOSIS, kurt);
+        MDskew.write(fn_skew);
 
         if (do_write_intermediate || do_only_write_intermediate)
         {
@@ -997,14 +1028,24 @@ void AmyloidFinder::finalise()
 		init_progress_bar(fn_ori_micrographs.size());
 	}
 
+    MetaDataTable MDin;
+    ObservationModel obsModel;
+    ObservationModel::loadSafely(fn_in, obsModel, MDin, "micrographs", verb);
+
 	MetaDataTable MDcoords;
 	MetaDataTable MDresult;
 	long total_nr_picked = 0;
 	int nr_coord_files = 0;
 	for (long int imic = 0; imic < fn_ori_micrographs.size(); imic++)
 	{
+
+        FileName fn_root = getOutputRootName(fn_ori_micrographs[imic]);
+        FileName fn_fom = fn_root + "_" + fn_out + "_fom.mrc";
+        FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
+        FileName fn_skew = fn_root + "_" + fn_out + "_skew.star";
+        FileName fn_pick = fn_root + "_" + fn_out + ".star";
+
 		MetaDataTable MD;
-		FileName fn_pick = getOutputRootName(fn_ori_micrographs[imic]) + "_" + fn_out + ".star";
 		if (exists(fn_pick))
 		{
 
@@ -1033,6 +1074,23 @@ void AmyloidFinder::finalise()
 			}
 		}
 
+        if (exists(fn_skew))
+		{
+            MetaDataTable MDskew;
+            RFLOAT kurt, skew;
+            MDskew.read(fn_skew);
+            MDskew.getValue(EMDL_MICROGRAPH_SCORE_KURTOSIS, kurt);
+            MDskew.getValue(EMDL_MICROGRAPH_SCORE_SKEWNESS, skew);
+            MDin.setValue(EMDL_MICROGRAPH_SCORE_KURTOSIS, kurt, imic);
+            MDin.setValue(EMDL_MICROGRAPH_SCORE_SKEWNESS, skew, imic);
+
+            if (do_write_intermediate || do_only_write_intermediate)
+            {
+                MDin.setValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom, imic);
+                MDin.setValue(EMDL_MICROGRAPH_AUTOPICK_PSI, fn_psi, imic);
+            }
+        }
+
 		if (verb > 0 && imic % 60 == 0) progress_bar(imic);
 
 	}
@@ -1041,6 +1099,10 @@ void AmyloidFinder::finalise()
 	FileName fn_coords = fn_odir + fn_out + ".star";
 	MDcoords.setName("coordinate_files");
 	MDcoords.write(fn_coords);
+
+    MDin.write(std::cerr);
+    FileName fn_mics = fn_odir + "micrographs_" + fn_out + ".star";
+    obsModel.save(MDin, fn_mics, "micrographs");
 
 	if (verb > 0 )
 	{

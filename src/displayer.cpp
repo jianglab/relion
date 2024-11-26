@@ -2888,8 +2888,13 @@ int Displayer::runGui()
             win.display_labels.push_back(EMDL::label2Str(EMDL_TOMO_RECONSTRUCTED_TOMOGRAM_PROJ2D_HALF1_FILE_NAME));
         if (MD.containsLabel(EMDL_TOMO_RECONSTRUCTED_TOMOGRAM_PROJ2D_HALF2_FILE_NAME))
             win.display_labels.push_back(EMDL::label2Str(EMDL_TOMO_RECONSTRUCTED_TOMOGRAM_PROJ2D_HALF2_FILE_NAME));
+        if (MD.containsLabel(EMDL_MICROGRAPH_AUTOPICK_FOM))
+            win.display_labels.push_back(EMDL::label2Str(EMDL_MICROGRAPH_AUTOPICK_FOM));
+        if (MD.containsLabel(EMDL_MICROGRAPH_AUTOPICK_PSI))
+            win.display_labels.push_back(EMDL::label2Str(EMDL_MICROGRAPH_AUTOPICK_PSI));
 
-	}
+
+    }
 	else
 	{
 		// Try reading as an image/stack header
