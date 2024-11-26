@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/amyloid_finder.h"
+//#define DEBUG_BOUNDS
 
 void AmyloidFinder::read(int argc, char **argv, int rank)
 {
@@ -29,19 +30,21 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     fn_out = parser.getOption("--pickname", "Rootname for coordinate STAR files", "amypick");
     fn_odir = parser.getOption("--odir", "Output directory for coordinate files (default is to store next to micrographs)", "AutoPick/");
     do_only_unfinished = parser.checkOption("--only_do_unfinished", "Only estimate CTFs for those tomograms for which there is not yet a logfile with Final values.");
-    do_write_intermediate = parser.checkOption("--write_intermediates", "Write out intermediate FOM maps for fast testing of tracing parameters?");
+    do_write_intermediate = parser.checkOption("--write_intermediates", "Write out intermediate FOM & PSI maps for faster testing of tracing parameters?");
+    do_only_write_intermediate = parser.checkOption("--only_write_intermediates", "Write out only intermediate FOM & PSI maps?");
     nr_threads = textToInteger(parser.getOption("--j", "Number of threads to us in parallel", "1"));
 
     int search_section = parser.addSection("Filament searching options ");
     psi_step = textToFloat(parser.getOption("--psi_step", "Angular sampling rate (in degrees)", "10."));
     shift_step = textToInteger(parser.getOption("--shift_step", "Step in shifts to search (in downscaled pixels)", "5"));
-    filament_width = textToFloat(parser.getOption("--filament_width", "Width of searching image (in A)", "200"));
-    filament_length = textToFloat(parser.getOption("--filament_length", "Length of searching image (in A)", "400"));
+    search_filament_width = textToFloat(parser.getOption("--search_filament_width", "Width of searching image (in A)", "50"));
+    search_filament_length = textToFloat(parser.getOption("--search_filament_length", "Length of searching image (in A)", "250"));
 
     int pick_section = parser.addSection("Filament tracing options ");
-    zscore_threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "1."));
+    zscore_threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "2."));
     nr_rungs_per_segment = textToInteger(parser.getOption("--rungs_per_segment", "Number of new amyloid rungs per segment", "3"));
-    min_filament_length = textToFloat(parser.getOption("--min_filament_length", "Minimum length of traced filaments (in A)", "300"));
+    trace_filament_width = textToFloat(parser.getOption("--trace_filament_width", "Minimum width occupied by a traced filaments (in A)", "200"));
+    trace_filament_length = textToFloat(parser.getOption("--trace_filament_length", "Minimum length of traced filaments (in A)", "300"));
     RFLOAT kappa = textToFloat(parser.getOption("--kappa", "Curvature parameter kappa ", "0.07"));
     if (kappa > 0.101)
         REPORT_ERROR("ERROR: for amyloids you cannot use kappa larger than 0.1!");
@@ -53,7 +56,6 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     inifactor_threshold = textToFloat(parser.getOption("--inifactor_threshold", "What fraction of the Z-score threshold for allowing to grow filaments?", "0.5"));
     down_angpix = textToFloat(parser.getOption("--down_angpix", "Pixel size for downscaled images (needs to include signal frequency!)", "2.25"));
     angpix = textToFloat(parser.getOption("--force_angpix", "Force this pixel size, regardless of what is in the image header", "-1"));
-
     verb =textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 
     // Check for errors in the command-line option
@@ -115,12 +117,10 @@ void AmyloidFinder::initialise(bool is_leader)
     }
 
     // If there is nothing to do, then go out of initialise
-    todo_anything = true;
     if (fn_micrographs.size() == 0)
     {
         if (verb > 0)
             std::cout << " + No new micrographs to do, so exiting finding amyloids ..." << std::endl;
-        todo_anything = false;
         return;
     }
 
@@ -142,8 +142,8 @@ void AmyloidFinder::initialise(bool is_leader)
     if (angpix > down_angpix) REPORT_ERROR("ERROR: this program requires input images with a pixel size of at least down_angpix (" + floatToString(down_angpix) + ")!");
 
     // Width and length in the downscaled pixels
-    iwidthmax = ROUND(filament_width / down_angpix );
-    ilengthmax = CEIL(filament_length/ down_angpix );
+    iwidthmax = ROUND(search_filament_width / down_angpix );
+    ilengthmax = CEIL(search_filament_length / down_angpix );
 
     down_xsize = FLOOR( (ori_xsize * angpix) / down_angpix );
     down_ysize = FLOOR( (ori_ysize * angpix) / down_angpix );
@@ -156,8 +156,8 @@ void AmyloidFinder::initialise(bool is_leader)
     imax_signal = CEIL(ilengthmax*down_angpix/signal_maxres);
 
     // Box size, orginal and cropped: set size of rectangular image to largest dimension
-    large_box = 1.1*XMIPP_MAX(ori_xsize, ori_ysize);
-    large_box += ROUND(XMIPP_MAX(filament_width, filament_length)/angpix);
+    large_box = 1.05*XMIPP_MAX(ori_xsize, ori_ysize);
+    large_box += ROUND(XMIPP_MAX(search_filament_width, search_filament_length) / angpix);
     if (large_box%2 != 0) large_box++;
     // Also calculate size of cropped box:
     crop_box = large_box * angpix/down_angpix;
@@ -330,7 +330,6 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
 
                 transformer[tid].FourierTransform(oneline, FTline, false);
 
-                //std::cerr << " ypos= "<< cen_ypos <<" "<< cen_xpos << std::endl;
                 for (int isig = imin_signal; isig <= imax_signal; isig++)
                 {
                     A2D_ELEM(rotated_scores_perline[ipsi], cen_ypos, cen_xpos)  += norm(DIRECT_A1D_ELEM(FTline, isig));
@@ -402,7 +401,7 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         selfRotate(rotated_scores[ipsi], -psi);
     }
 
-    Mangle.resize(rotated_imgs[0]);
+    Mangle.resize(down_ysize, down_xsize);
     Mangle.setXmippOrigin();
     Mscore.resize(Mangle);
 
@@ -428,79 +427,15 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
             }
         }
     }
-    if (myverb) progress_bar(nr_psi);
 
-    // 1D-convolution in direction perpendicular to psi!
-    // Pre-made coordinates of a line along Y-axis
-    // exclude (0,0) as later in convolution all ypoints will be added to that one
-    std::vector<Matrix1D<RFLOAT> > ypoints;
-    Matrix1D<RFLOAT> ypoint(2);
-    // Try twice the normal width of the filament and hope that different psi angles will limit this!
-    for (int iwidth = 1, ii = 0; iwidth < iwidthmax; iwidth+=shift_step, ii++)
-    {
-        YY(ypoint) = (RFLOAT)ii;
-        ypoints.push_back(ypoint);
-        YY(ypoint) = -(RFLOAT)ii;
-        ypoints.push_back(ypoint);
-    }
-
-    MultidimArray<RFLOAT> Mconv;
-    Mconv.resize(Mscore);
-    RFLOAT max_psidiff = (1.5 * psi_step);
-    #pragma omp parallel for num_threads(nr_threads)
-    for (int ypos = 0; ypos < down_ysize; ypos ++)
-    {
-        int cen_ypos = ypos - down_ysize/2;
-        for (int xpos = 0; xpos < down_xsize; xpos ++)
-        {
-            int cen_xpos = xpos - down_xsize/2;
-            RFLOAT mypsi = A2D_ELEM(Mangle, cen_ypos, cen_xpos);
-
-            Matrix2D<RFLOAT> A2D;
-            Matrix1D<RFLOAT> vec_p(2);
-            rotation2DMatrix(mypsi, A2D, false);
-            A2D_ELEM(Mconv, cen_ypos, cen_xpos) = A2D_ELEM(Mscore, cen_ypos, cen_xpos);
-            for (int ipoint = 0; ipoint < ypoints.size(); ipoint++)
-            {
-                vec_p = A2D * ypoints[ipoint];
-                int newy = cen_ypos + ROUND(YY(vec_p));
-                int newx = cen_xpos + ROUND(XX(vec_p));
-                RFLOAT nearpsi = A2D_ELEM(Mangle, newy, newx);
-                RFLOAT psidiff = getPsiDiff(mypsi, nearpsi);
-                if (psidiff < max_psidiff)
-                    A2D_ELEM(Mconv, cen_ypos, cen_xpos) += A2D_ELEM(Mscore, newy, newx);
-            }
-        }
-    }
-    Mscore=Mconv;
-    Mconv.clear();
-
-    // Re-scale and re-box image to original size
-    int newsize = (XSIZE(Mangle)*down_angpix) / angpix;
-    if (newsize%2 !=0) newsize++;
-    resizeMap(Mangle, newsize);
-    resizeMap(Mscore, newsize);
-    Mangle.setXmippOrigin();
-    Mscore.setXmippOrigin();
-    Mangle.window(STARTINGY(image), STARTINGX(image), FINISHINGY(image), FINISHINGX(image));
-    Mscore.window(STARTINGY(image), STARTINGX(image), FINISHINGY(image), FINISHINGX(image));
-    int skip_sides = ROUND(filament_length/(angpix*2.));
-    skip_sides = 25;
+    // And normalise
     RFLOAT sum = 0., sum2 = 0., nn= 0.;
     FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(Mscore)
-        {
-            if (i > skip_sides && i < YSIZE(Mscore) - skip_sides &&
-                j > skip_sides && j < XSIZE(Mscore) - skip_sides)
-            {
-                sum += DIRECT_A2D_ELEM(Mscore, i, j);
-                sum2 += DIRECT_A2D_ELEM(Mscore, i, j) * DIRECT_A2D_ELEM(Mscore, i, j);
-                nn+= 1.;
-            }
-            else
-            {
-                DIRECT_A2D_ELEM(Mscore, i, j) = 0.;
-            }
-        }
+    {
+        sum += DIRECT_A2D_ELEM(Mscore, i, j);
+        sum2 += DIRECT_A2D_ELEM(Mscore, i, j) * DIRECT_A2D_ELEM(Mscore, i, j);
+        nn+= 1.;
+    }
     sum /= nn;
     sum2 /= nn;
     RFLOAT stddev = sqrt(sum2 - sum * sum);
@@ -511,6 +446,8 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
             DIRECT_MULTIDIM_ELEM(Mscore, n) = (DIRECT_MULTIDIM_ELEM(Mscore, n) - sum) / stddev;
     }
 
+
+    if (myverb) progress_bar(nr_psi);
 
 }
 
@@ -546,6 +483,14 @@ std::vector<AmyloidCoordinate> AmyloidFinder::findNextCandidateCoordinates(Amylo
             AmyloidCoordinate newcoord;
             newcoord.x = mycoord.x + XX(vec_p);
             newcoord.y = mycoord.y + YY(vec_p);
+#ifdef DEBUG_BOUNDS
+            if (ii < STARTINGY(Mscore) || ii > FINISHINGY(Mscore) ||
+                    jj < STARTINGX(Mscore) || jj > FINISHINGX(Mscore))
+            {
+                 REPORT_ERROR("ERROR: out of bounds in findNextCandidateCoordinates");
+            }
+#endif
+
             newcoord.psi = A2D_ELEM(Mpsi, ii, jj);
             newcoord.fom = myscore;
             //std::cerr << " myccf= " << myccf << " psi= " << newcoord.psi << std::endl;
@@ -577,7 +522,7 @@ AmyloidCoordinate AmyloidFinder::findNextAmyloidCoordinate(AmyloidCoordinate &my
     Matrix2D<RFLOAT> A2D;
     Matrix1D<RFLOAT> vec_c(2), vec_p(2);
     rotation2DMatrix(mycoord.psi, A2D, false);
-    int rectangle_hwidth = CEIL(0.6 * filament_width / angpix);
+    int rectangle_hwidth = CEIL(0.5 * trace_filament_width / angpix);
     int rectangle_hheight = CEIL(0.6 * nr_rungs_per_segment*amyloid_rung / angpix);
     int maxr = XMIPP_MAX(rectangle_hwidth, rectangle_hheight);
     for (int ii = -maxr; ii <= maxr; ii++)
@@ -592,6 +537,16 @@ AmyloidCoordinate AmyloidFinder::findNextAmyloidCoordinate(AmyloidCoordinate &my
             {
                 long int jp = ROUND(mycoord.x + jj);
                 long int ip = ROUND(mycoord.y + ii);
+#ifdef DEBUG_BOUNDS
+                if (ip < STARTINGY(Mscore) || ip > FINISHINGY(Mscore) ||
+                    jp < STARTINGX(Mscore) || jp > FINISHINGX(Mscore))
+                {
+                    Mscore.printShape();
+                    std::cerr << " ii= " << ii << " + " << mycoord.y << " = " << ip << std::endl;
+                    std::cerr << " jj= " << jj << " + " << mycoord.x << " = " << jp << std::endl;
+                    REPORT_ERROR("ERROR: coordinates out of bound");
+                }
+#endif
                 A2D_ELEM(Mscore, ip, jp) = -2.;
             }
         }
@@ -723,16 +678,42 @@ RFLOAT AmyloidFinder::maxIndex_multithreaded(MultidimArray<RFLOAT> &m, long int 
 MetaDataTable AmyloidFinder::traceFilaments(MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mpsi)
 {
 
+    // Re-scale and re-box image to original size
+    int new_box  = XMIPP_MAX(YSIZE(Mscore), XSIZE(Mscore));
+    Mscore.window(FIRST_XMIPP_INDEX(new_box), FIRST_XMIPP_INDEX(new_box), LAST_XMIPP_INDEX(new_box),
+                LAST_XMIPP_INDEX(new_box));
+    Mpsi.window(FIRST_XMIPP_INDEX(new_box), FIRST_XMIPP_INDEX(new_box), LAST_XMIPP_INDEX(new_box),
+                  LAST_XMIPP_INDEX(new_box));
+    Mscore.setXmippOrigin();
+    Mpsi.setXmippOrigin();
+
+    int newsize = (XSIZE(Mpsi)*down_angpix) / angpix;
+    if (newsize%2 !=0) newsize++;
+    resizeMap(Mscore, newsize);
+    resizeMap(Mpsi, newsize);
+    Mscore.setXmippOrigin();
+    Mpsi.setXmippOrigin();
+
+    // Again, leave some space near the edges to account for setting the rectangles to zero
+    int larger_side = CEIL(1.5 * trace_filament_width / angpix);
+    if (larger_side%2 != 0) larger_side++;
+
+    Mscore.window(FIRST_XMIPP_INDEX(ori_ysize + larger_side), FIRST_XMIPP_INDEX(ori_xsize + larger_side),
+                  LAST_XMIPP_INDEX(ori_ysize + larger_side), LAST_XMIPP_INDEX(ori_xsize + larger_side));
+    Mpsi.window(FIRST_XMIPP_INDEX(ori_ysize + larger_side), FIRST_XMIPP_INDEX(ori_xsize + larger_side),
+                  LAST_XMIPP_INDEX(ori_ysize + larger_side), LAST_XMIPP_INDEX(ori_xsize + larger_side));
+    Mscore.setXmippOrigin();
+    Mpsi.setXmippOrigin();
+
     std::vector< std::vector <AmyloidCoordinate> > helices;
 	bool no_more_ccf_peaks = false;
 	int nr_fail = 0;
-    int skip_sides = CEIL(0.6*filament_width/angpix);
+    int skip_sides = 25;
     while (!no_more_ccf_peaks)
 	{
 		long int imax, jmax;
 		float myscore = maxIndex_multithreaded(Mscore, imax, jmax, skip_sides);
 		float mypsi = Mpsi(imax, jmax);
-
 		// Peaks to seed new filaments have to be at least the zscore_threshold
         if (myscore < zscore_threshold )
         {
@@ -795,7 +776,7 @@ MetaDataTable AmyloidFinder::traceFilaments(MultidimArray<RFLOAT> &Mscore, Multi
         }
 
 
-		if (nr_rungs_per_segment * amyloid_rung * helix.size() > min_filament_length)
+		if (nr_rungs_per_segment * amyloid_rung * helix.size() > trace_filament_length)
 		{
 			helices.push_back(helix);
 
@@ -897,6 +878,7 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
     FileName fn_root = getOutputRootName(fn_mic);
     FileName fn_fom = fn_root + "_" + fn_out + "_fom.spi";
     FileName fn_psi = fn_root + "_" + fn_out + "_psi.spi";
+    FileName fn_conv = fn_root + "_" + fn_out + "_conv.spi";
     MultidimArray<RFLOAT> Mscore, Mangle;
 
     if (!do_write_intermediate || !exists(fn_fom) || !exists(fn_psi))
@@ -910,7 +892,7 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
 
         getScoreForOneMicrograph(Iin(), Mscore, Mangle, myverb);
 
-        if (do_write_intermediate)
+        if (do_write_intermediate || do_only_write_intermediate)
         {
             Image<RFLOAT> Ipsi, Izscore;
             Ipsi()=Mangle;
@@ -930,28 +912,25 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         Mscore.setXmippOrigin();
     }
 
-    if (myverb)
+    if (!do_only_write_intermediate)
     {
-        std::cout << " - Tracing filaments ..." << std::endl;
-        init_progress_bar(1);
-    }
-    // set Mscore in a slightly bigger box to avoid to have to search boundary conditions
-    int rectangle_diam = sqrt(filament_width*filament_width + nr_rungs_per_segment*amyloid_rung*nr_rungs_per_segment*amyloid_rung)/angpix;
-    int larger_box_x = XSIZE(Mscore) + 1.5*rectangle_diam;
-    int larger_box_y = YSIZE(Mscore) + 1.5*rectangle_diam;
-    Mscore.window(FIRST_XMIPP_INDEX(larger_box_y), FIRST_XMIPP_INDEX(larger_box_x), LAST_XMIPP_INDEX(larger_box_y), LAST_XMIPP_INDEX(larger_box_x));
-    Mscore.setXmippOrigin();
-    Mangle.window(FIRST_XMIPP_INDEX(larger_box_y), FIRST_XMIPP_INDEX(larger_box_x), LAST_XMIPP_INDEX(larger_box_y), LAST_XMIPP_INDEX(larger_box_x));
-    Mangle.setXmippOrigin();
-    MetaDataTable MDmic = traceFilaments(Mscore, Mangle);
-    if (myverb) progress_bar(1);
+        if (myverb)
+        {
+            std::cout << " - Tracing filaments ..." << std::endl;
+            init_progress_bar(1);
+        }
 
-    if (MDmic.numberOfObjects() > 0)
-	{
-		if (myverb) std::cout << "Picked " << MDmic.numberOfObjects() << " particles " << std::endl;
-		FileName fn_pick = getOutputRootName(fn_mic) + "_" + fn_out + ".star";
-		MDmic.write(fn_pick);
-	}
+        MetaDataTable MDmic = traceFilaments(Mscore, Mangle);
+
+        if (myverb) progress_bar(1);
+
+        if (MDmic.numberOfObjects() > 0)
+        {
+            if (myverb) std::cout << "Picked " << MDmic.numberOfObjects() << " particles " << std::endl;
+            FileName fn_pick = getOutputRootName(fn_mic) + "_" + fn_out + ".star";
+            MDmic.write(fn_pick);
+        }
+    }
 
     if (myverb) std::cout << "done!" << std::endl;
 

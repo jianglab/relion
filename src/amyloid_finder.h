@@ -66,10 +66,10 @@ public:
     RFLOAT psidiff_per_segment;
 
     // width and length of filaments (in A) for searching of 4.7A signal
-    RFLOAT filament_length, filament_width;
+    RFLOAT search_filament_length, search_filament_width;
 
     // Minimum length for tracing filaments
-    RFLOAT min_filament_length;
+    RFLOAT trace_filament_length, trace_filament_width;
 
     // Sampling of positions
     int shift_step, ori_xsize, ori_ysize, down_xsize, down_ysize;
@@ -91,12 +91,8 @@ public:
     // Continue an old run: only estimate CTF if logfile WITH Final Values line does not yet exist, otherwise skip the tomogram
     bool do_only_unfinished;
 
-    // Write out intermediate FOM and Psi maps?
-    bool do_write_intermediate;
-
-    // Is there any work to be done?
-    bool todo_anything;
-
+    // Write out (only) intermediate FOM and Psi maps?
+    bool do_write_intermediate, do_only_write_intermediate;
 
 public:
     // Read command line arguments
