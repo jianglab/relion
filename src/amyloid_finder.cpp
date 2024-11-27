@@ -1164,34 +1164,34 @@ void AmyloidFinder::finalise()
 	}
 
     CPlot2D *plot2De=new CPlot2D("Skewness of FOM for all micrographs");
-    MDresult.addToCPlot2D(plot2De, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_SKEWNESS, 1.);
+    MDin.addToCPlot2D(plot2De, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_SKEWNESS, 1.);
     plot2De->SetDrawLegend(false);
     fn_eps = fn_odir + "all_FOM_skew.eps";
     plot2De->OutputPostScriptPlot(fn_eps);
     all_fn_eps.push_back(fn_eps);
     delete plot2De;
-    if (MDresult.numberOfObjects() > 3)
+    if (MDin.numberOfObjects() > 3)
     {
         CPlot2D *plot2Df=new CPlot2D("");
-        MDresult.columnHistogram(EMDL_MICROGRAPH_SCORE_SKEWNESS,histX,histY,0, plot2Df);
+        MDin.columnHistogram(EMDL_MICROGRAPH_SCORE_SKEWNESS,histX,histY,0, plot2Df);
         fn_eps = fn_odir + "histogram_FOM_skew.eps";
         plot2Df->SetTitle("Histogram of FOM skewness per micrograph");
         plot2Df->OutputPostScriptPlot(fn_eps);
         all_fn_eps.push_back(fn_eps);
         delete plot2Df;
     }
-    
+
     CPlot2D *plot2Dg=new CPlot2D("Kurtosis of FOM for all micrographs");
-    MDresult.addToCPlot2D(plot2Dg, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_KURTOSIS, 1.);
+    MDin.addToCPlot2D(plot2Dg, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_KURTOSIS, 1.);
     plot2Dg->SetDrawLegend(false);
     fn_eps = fn_odir + "all_FOM_kurt.eps";
     plot2Dg->OutputPostScriptPlot(fn_eps);
     all_fn_eps.push_back(fn_eps);
     delete plot2Dg;
-    if (MDresult.numberOfObjects() > 3)
+    if (MDin.numberOfObjects() > 3)
     {
         CPlot2D *plot2Dh=new CPlot2D("");
-        MDresult.columnHistogram(EMDL_MICROGRAPH_SCORE_KURTOSIS,histX,histY,0, plot2Dh);
+        MDin.columnHistogram(EMDL_MICROGRAPH_SCORE_KURTOSIS,histX,histY,0, plot2Dh);
         fn_eps = fn_odir + "histogram_FOM_kurt.eps";
         plot2Dh->SetTitle("Histogram of FOM kurtosis per micrograph");
         plot2Dh->OutputPostScriptPlot(fn_eps);

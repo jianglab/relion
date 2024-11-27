@@ -386,7 +386,7 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 }
 
 int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
-                                              RFLOAT _scale, RFLOAT _coord_scale, int _particle_radius, bool _do_startend, FileName _fn_coords,
+                                              RFLOAT _scale, RFLOAT _coord_scale, int _particle_radius, bool _do_startend, bool _do_lines, FileName _fn_coords,
                                               FileName _fn_color, FileName _fn_mic, FileName _color_label, RFLOAT _color_blue_value, RFLOAT _color_red_value,
 											  RFLOAT _minimum_pick_fom)
 {
@@ -398,7 +398,8 @@ int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, RFLOA
 	int ysize_canvas = CEIL(YSIZE(image)*_scale);
 	pickerViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
 	canvas.particle_radius = _particle_radius;
-	canvas.do_startend = _do_startend;
+    canvas.do_startend = _do_startend;
+    canvas.do_lines = _do_lines;
 	canvas.coord_scale = _coord_scale;
 	canvas.SetScroll(&scroll);
 	canvas.fill(image, _minval, _maxval, _sigma_contrast, _scale);
@@ -1832,50 +1833,57 @@ void pickerViewerCanvas::draw()
         {
             int selected;
             MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, selected);
-            if (selected >= 1 && selected <= 6)
-                fl_color(color_choices[selected - 1].labelcolor_);
-            else
-                REPORT_ERROR("ERROR: rlnParticleSelectionType in coordinate file has value outside allowed [1,6] range");
+            int mycol = (selected-1)%6;
+            fl_color(color_choices[mycol].labelcolor_);
         }
         else
         {
 			fl_color(FL_GREEN);
 		}
 
-		int xcoori, ycoori;
-		xcoori = ROUND(xcoor * coord_scale * scale) + scroll->x() - scroll->hscrollbar.value();
-		ycoori = ROUND(ycoor * coord_scale * scale) + scroll->y() - scroll->scrollbar.value();
-		fl_circle(xcoori, ycoori, particle_radius);
+        int xcoori, ycoori;
+        xcoori = ROUND(xcoor * coord_scale * scale) + scroll->x() - scroll->hscrollbar.value();
+        ycoori = ROUND(ycoor * coord_scale * scale) + scroll->y() - scroll->scrollbar.value();
 
-		if (do_startend)
-		{
-			if (icoord % 2 == 1)
-			{
-				xcoori_start = xcoori;
-				ycoori_start = ycoori;
-			}
-			else
-			{
-				fl_line(xcoori_start, ycoori_start, xcoori, ycoori);
-			}
-		}
-	}
+        fl_circle(xcoori, ycoori, particle_radius);
+
+        if (do_startend)
+        {
+            if (icoord % 2 == 1)
+            {
+                xcoori_start = xcoori;
+                ycoori_start = ycoori;
+            }
+            else
+            {
+                fl_line(xcoori_start, ycoori_start, xcoori, ycoori);
+            }
+        }
+    }
 }
 
 int pickerViewerCanvas::handle(int ev)
 {
 	const int button = Fl::event_button() ;
 	const bool with_shift = (Fl::event_shift() != 0);
-	const bool with_control = (Fl::event_ctrl() != 0);
+    const bool with_control = (Fl::event_ctrl() != 0);
 	const int key = Fl::event_key();
-	if (ev==FL_PUSH || (ev==FL_DRAG && (button == FL_MIDDLE_MOUSE || (button == FL_LEFT_MOUSE && with_shift))))
+    if (do_lines && has_dragged && ev == FL_RELEASE) current_selection_type++;
+    has_dragged = false;
+
+    if (ev==FL_PUSH || (ev==FL_DRAG &&
+                        ( (button == FL_MIDDLE_MOUSE) ||
+                          (do_lines && button == FL_LEFT_MOUSE) ||
+                          (button == FL_LEFT_MOUSE && with_shift) ) ))
 	{
 		RFLOAT scale = boxes[0]->scale;
 		int xc = (int)Fl::event_x() - scroll->x() + scroll->hscrollbar.value();
 		int yc = (int)Fl::event_y() - scroll->y() + scroll->scrollbar.value();
 		RFLOAT xcoor = (RFLOAT)ROUND(xc / (coord_scale * scale));
 		RFLOAT ycoor = (RFLOAT)ROUND(yc / (coord_scale * scale));
+        int iaux = current_selection_type;
 		RFLOAT rad2 = particle_radius * particle_radius / (coord_scale * coord_scale * scale * scale);
+        has_dragged = (ev==FL_DRAG && (do_lines && button == FL_LEFT_MOUSE));
 		if (button == FL_LEFT_MOUSE && !with_shift && !with_control)
 		{
 			// Left mouse for picking
@@ -1892,8 +1900,6 @@ int pickerViewerCanvas::handle(int ev)
 					return 0;
 			}
 			RFLOAT aux = -999., zero = 0.;
-			int iaux = current_selection_type;
-
 			// Else store new coordinate
 			if (!MDcoords.isEmpty())
 			{
@@ -1937,7 +1943,25 @@ int pickerViewerCanvas::handle(int ev)
 
 				if (xcoor_p*xcoor_p + ycoor_p*ycoor_p < rad2)
 				{
-					MDcoords.removeObject();
+					if (do_lines)
+                    {
+                        int delval;
+                        MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, delval);
+                        MetaDataTable MDout;
+                        MDout.setName(MDcoords.getName());
+                        FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDcoords)
+                        {
+                            int val;
+                            MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, val);
+
+                            if (val != delval) MDout.addObject(MDcoords.getObject(current_object));
+                        }
+                        MDcoords = MDout;
+                    }
+                    else
+                    {
+                        MDcoords.removeObject();
+                    }
 					break;
 				}
 			}
@@ -2644,7 +2668,8 @@ void Displayer::read(int argc, char **argv)
 
 	int pick_section  = parser.addSection("Picking options");
 	do_pick = parser.checkOption("--pick", "Pick coordinates in input image");
-	do_pick_startend = parser.checkOption("--pick_start_end", "Pick start-end coordinates in input image");
+    do_pick_startend = parser.checkOption("--pick_start_end", "Pick start-end coordinates in input image");
+    do_pick_lines = parser.checkOption("--pick_lines", "Pick lines in input image");
 	fn_coords = parser.getOption("--coords", "STAR file with picked particle coordinates", "");
 	coord_scale = textToFloat(parser.getOption("--coord_scale", "Scale particle coordinates before display", "1.0"));
 	particle_radius = textToFloat(parser.getOption("--particle_radius", "Particle radius in pixels", "100"));
@@ -2769,7 +2794,7 @@ void Displayer::initialise()
 		REPORT_ERROR("Displayer::initialise ERROR: cannot display Fourier amplitudes and phase angles at the same time!");
 	if (show_fourier_amplitudes || show_fourier_phase_angles)
 	{
-		if (do_pick || do_pick_startend)
+		if (do_pick || do_pick_startend || do_pick_lines)
 			REPORT_ERROR("Displayer::initialise ERROR: cannot pick particles from Fourier maps!");
 		if (fn_in.isStarFile())
 			REPORT_ERROR("Displayer::initialise ERROR: use single 2D image files as input!");
@@ -2922,7 +2947,7 @@ void Displayer::run()
 		basisViewerWindow win(CEIL(scale*XSIZE(img())), CEIL(scale*YSIZE(img())), fnt.c_str());
 		win.fillSingleViewerCanvas(img(), 0., 255., 0., scale);
 	}
-	else if (do_pick || do_pick_startend)
+	else if (do_pick || do_pick_startend || do_pick_lines)
 	{
 		Image<RFLOAT> img;
 
@@ -2943,7 +2968,7 @@ void Displayer::run()
 		basisViewerWindow win(CEIL(scale*XSIZE(img())), CEIL(scale*YSIZE(img())), fn_in.c_str());
 		if (fn_coords=="")
 			fn_coords = fn_in.withoutExtension()+"_coords.star";
-		win.fillPickerViewerCanvas(img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, fn_coords,
+		win.fillPickerViewerCanvas(img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, do_pick_lines, fn_coords,
     		fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom);
 	}
 	else if (fn_in.isStarFile())
