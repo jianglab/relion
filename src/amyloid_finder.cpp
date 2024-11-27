@@ -929,6 +929,7 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         if (do_write_intermediate || do_only_write_intermediate)
         {
             Image<RFLOAT> Ipsi, Izscore;
+            Ipsi.setSamplingRateInHeader(down_angpix);
             Ipsi()=Mangle;
             Izscore()=Mscore;
             Ipsi.write(fn_psi);
@@ -1100,7 +1101,6 @@ void AmyloidFinder::finalise()
 	MDcoords.setName("coordinate_files");
 	MDcoords.write(fn_coords);
 
-    MDin.write(std::cerr);
     FileName fn_mics = fn_odir + "micrographs_" + fn_out + ".star";
     obsModel.save(MDin, fn_mics, "micrographs");
 
