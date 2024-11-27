@@ -1768,6 +1768,7 @@ void pickerViewerCanvas::draw()
 	RFLOAT scale = boxes[0]->scale;
 
 	long int icoord = 0;
+    int my_prev_type = 0;
 	int xcoori_start, ycoori_start;
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDcoords)
 	{
@@ -1776,6 +1777,8 @@ void pickerViewerCanvas::draw()
 		RFLOAT xcoor, ycoor;
 		MDcoords.getValue(EMDL_IMAGE_COORD_X, xcoor);
 		MDcoords.getValue(EMDL_IMAGE_COORD_Y, ycoor);
+        int mytype;
+        MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, mytype);
 
 		if (MDcoords.containsLabel(EMDL_PARTICLE_AUTOPICK_FOM) && fabs(minimum_pick_fom + 9999.) > 1e-6)
 		{
@@ -1845,20 +1848,33 @@ void pickerViewerCanvas::draw()
         xcoori = ROUND(xcoor * coord_scale * scale) + scroll->x() - scroll->hscrollbar.value();
         ycoori = ROUND(ycoor * coord_scale * scale) + scroll->y() - scroll->scrollbar.value();
 
-        fl_circle(xcoori, ycoori, particle_radius);
-
-        if (do_startend)
+        if (do_lines)
         {
-            if (icoord % 2 == 1)
-            {
-                xcoori_start = xcoori;
-                ycoori_start = ycoori;
-            }
-            else
+            if (mytype == my_prev_type)
             {
                 fl_line(xcoori_start, ycoori_start, xcoori, ycoori);
             }
+            xcoori_start = xcoori;
+            ycoori_start = ycoori;
         }
+        else
+        {
+            fl_circle(xcoori, ycoori, particle_radius);
+
+            if (do_startend)
+            {
+                if (icoord % 2 == 1)
+                {
+                    xcoori_start = xcoori;
+                    ycoori_start = ycoori;
+                }
+                else
+                {
+                    fl_line(xcoori_start, ycoori_start, xcoori, ycoori);
+                }
+            }
+        }
+        my_prev_type = mytype;
     }
 }
 
@@ -1868,7 +1884,10 @@ int pickerViewerCanvas::handle(int ev)
 	const bool with_shift = (Fl::event_shift() != 0);
     const bool with_control = (Fl::event_ctrl() != 0);
 	const int key = Fl::event_key();
-    if (do_lines && has_dragged && ev == FL_RELEASE) current_selection_type++;
+    if (do_lines && has_dragged && ev == FL_RELEASE)
+    {
+        current_selection_type++;
+    }
     has_dragged = false;
 
     if (ev==FL_PUSH || (ev==FL_DRAG &&
@@ -1925,9 +1944,8 @@ int pickerViewerCanvas::handle(int ev)
 			MDcoords.setValue(EMDL_PARTICLE_SELECTION_TYPE, iaux);
 			MDcoords.setValue(EMDL_ORIENT_PSI, aux);
 			MDcoords.setValue(EMDL_PARTICLE_AUTOPICK_FOM, aux);
-
 			redraw();
-			return 1;
+            return 1;
 		}
 		else if ((button == FL_MIDDLE_MOUSE) || (button == FL_LEFT_MOUSE && with_shift))
 		{

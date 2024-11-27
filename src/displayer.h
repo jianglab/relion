@@ -72,7 +72,6 @@ static int predrag_xc;
 static int predrag_yc;
 static bool has_shift;
 static int preshift_ipos;
-
 static int current_selection_type;
 static int colour_scheme;
 
