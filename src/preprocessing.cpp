@@ -93,8 +93,9 @@ void Preprocessing::read(int argc, char **argv, int rank)
 
 	int helix_section = parser.addSection("Helix extraction");
 	do_extract_helix = parser.checkOption("--helix", "Extract helical segments");
-	helical_tube_outer_diameter = textToFloat(parser.getOption("--helical_outer_diameter", "Outer diameter of helical tubes in Angstroms (for masks of helical segments)", "-1."));
-	do_extract_helical_tubes = parser.checkOption("--helical_tubes", "Extract helical segments from tube coordinates");
+    helical_tube_outer_diameter = textToFloat(parser.getOption("--helical_outer_diameter", "Outer diameter of helical tubes in Angstroms (for masks of helical segments)", "-1."));
+    do_startend = parser.checkOption("--from_startend", "Extract helical segments from tube start-end coordinates");
+    do_lines = parser.checkOption("--from_lines", "Extract helical segments from picked lines");
 	helical_nr_asu = textToInteger(parser.getOption("--helical_nr_asu", "Number of helical asymmetrical units", "1"));
 	helical_rise = textToFloat(parser.getOption("--helical_rise", "Helical rise (in Angstroms)", "0."));
 	helical_bimodal_angular_priors = parser.checkOption("--helical_bimodal_angular_priors", "Add bimodal angular priors for helical segments");
@@ -630,6 +631,115 @@ void Preprocessing::readCoordinates(FileName fn_coord, MetaDataTable &MD)
 	}
 }
 
+void Preprocessing::addOneHelicalSegment(MetaDataTable &MD, RFLOAT xcoord, RFLOAT ycoord, int tube_id,
+                                  RFLOAT psi_prior, RFLOAT helix_length, RFLOAT psi_prior_flip_ratio)
+{
+    MD.addObject();
+    MD.setValue(EMDL_IMAGE_COORD_X, xcoord);
+    MD.setValue(EMDL_IMAGE_COORD_Y, ycoord);
+    MD.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube_id);
+    MD.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
+    MD.setValue(EMDL_ORIENT_PSI_PRIOR, psi_prior);
+    MD.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, helix_length);
+    MD.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
+
+}
+
+void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
+		FileName& fn_in, MetaDataTable& MD_out, int& total_segments, int& total_tubes,
+		int nr_asu, RFLOAT rise_A, RFLOAT pixel_size_A, RFLOAT Xdim, RFLOAT Ydim, RFLOAT box_size_pix,
+		bool bimodal_angular_priors, bool cut_into_segments)
+{
+
+    std::cerr << "convertHelicalLineCoordsToMetaDataTable" << std::endl;
+    // Check parameters and open files
+    if ( (nr_asu < 1) || (rise_A < 0.001) || (pixel_size_A < 0.01) )
+        REPORT_ERROR("Preprocessing::convertHelicalLineCoordsToMetaDataTable: Wrong parameters!");
+    if ( (box_size_pix < 2) || (Xdim < box_size_pix) || (Ydim < box_size_pix))
+        REPORT_ERROR("Preprocessing::convertHelicalLineCoordsToMetaDataTable: Wrong dimensions or box size!");
+    if (fn_in.getExtension() != "star")
+        REPORT_ERROR("Preprocessing::convertHelicalLineCoordsToMetaDataTable: MetadataTable should have .star extension. Error(s) in " + fn_in);
+
+    // Read input STAR file
+    MetaDataTable MD_in;
+    MD_in.read(fn_in);
+    if (MD_in.numberOfObjects() < 1) // Handle empty input files
+        return;
+
+    if ( (!MD_in.containsLabel(EMDL_IMAGE_COORD_X)) || (!MD_in.containsLabel(EMDL_IMAGE_COORD_Y)) ||
+            (!MD_in.containsLabel(EMDL_PARTICLE_SELECTION_TYPE)) )
+        REPORT_ERROR("Preprocessing::convertHelicalLineCoordsToMetaDataTable: Input STAR file does not contain X, Y coordinates or particle selection type! Error(s) in " + fn_in);
+
+    MD_out.clear();
+    MD_out.addLabel(EMDL_IMAGE_COORD_X);
+    MD_out.addLabel(EMDL_IMAGE_COORD_Y);
+    MD_out.addLabel(EMDL_PARTICLE_HELICAL_TUBE_ID);
+    MD_out.addLabel(EMDL_ORIENT_TILT_PRIOR);
+    MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR);
+    MD_out.addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM);
+    MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO);
+    RFLOAT psi_prior_flip_ratio = (bimodal_angular_priors) ? BIMODAL_PSI_PRIOR_FLIP_RATIO : UNIMODAL_PSI_PRIOR_FLIP_RATIO;
+
+    int filament_id=0;
+    RFLOAT filament_length = 0.;
+    RFLOAT remaining_step = 0.;
+    RFLOAT step_A = nr_asu * rise_A;
+    RFLOAT step_pix = step_A / pixel_size_A;
+
+    total_tubes = total_segments = 0;
+    int my_type=0, my_prev_type= 0;
+    bool is_first = false;
+    RFLOAT my_xcoord, my_ycoord, prev_xcoord, prev_ycoord;
+    FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD_in)
+    {
+        MD_in.getValue(EMDL_IMAGE_COORD_X, my_xcoord);
+        MD_in.getValue(EMDL_IMAGE_COORD_Y, my_ycoord);
+        MD_in.getValue(EMDL_PARTICLE_SELECTION_TYPE, my_type);
+        if (my_type != my_prev_type)
+        {
+            if (is_first) REPORT_ERROR("ERROR: encountered a filament with only a single point in " + fn_in);
+
+            // start a new filament (initialise psi to zero!!)
+            is_first = true;
+            filament_length = 0.;
+            remaining_step = 0.;
+            filament_id++;
+            total_tubes++;
+            total_segments++;
+            //std::cerr << "is_first= "<<is_first << " x,y= " << my_xcoord << " , " << my_ycoord<< " id= " << filament_id<< " l= "<<filament_length<< std::endl;
+            addOneHelicalSegment(MD_out, my_xcoord, my_ycoord,
+                                 filament_id, 0., filament_length, psi_prior_flip_ratio);
+        }
+        else
+        {
+            // grow a filament
+            RFLOAT dist = sqrt((my_xcoord-prev_xcoord)*(my_xcoord-prev_xcoord) + (my_ycoord-prev_ycoord)*(my_ycoord-prev_ycoord));
+            RFLOAT added = -remaining_step;
+            while (added < dist)
+            {
+                added+= step_pix;
+                total_segments++;
+                filament_length += step_A;
+                RFLOAT new_x = prev_xcoord + (added / dist) * (my_xcoord-prev_xcoord);
+                RFLOAT new_y = prev_ycoord + (added / dist) * (my_ycoord-prev_ycoord);
+                RFLOAT psi_prior = -RAD2DEG(atan2(my_ycoord-prev_ycoord, my_xcoord-prev_xcoord));
+                // for second segment in a filament: set psi-prior of the first one equal to this one's psi-prior
+                if (is_first) MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, psi_prior, MD_out.numberOfObjects()-1);
+                //std::cerr << "added="<<added << " newx,y= " << new_x << " , " << new_y<< " psi= " << psi_prior << " id= " << filament_id<< " l= "<<filament_length<< std::endl;
+                addOneHelicalSegment(MD_out, new_x, new_y,filament_id,
+                                     psi_prior, filament_length, psi_prior_flip_ratio);
+            }
+            remaining_step = added - dist;
+            is_first = false;
+        }
+
+        prev_xcoord = my_xcoord;
+        prev_ycoord = my_ycoord;
+        my_prev_type = my_type;
+    }
+
+}
+
 void Preprocessing::readHelicalCoordinates(FileName fn_mic, FileName fn_coord, MetaDataTable &MD)
 {
 	MD.clear();
@@ -666,26 +776,31 @@ void Preprocessing::readHelicalCoordinates(FileName fn_mic, FileName fn_coord, M
 	if (is_star)
 	{
 		//std::cerr << " DEBUG: Extracting helical segments / subtomograms from RELION STAR coordinate files..." << std::endl;
-		if (do_extract_helical_tubes)
+		if (do_startend || do_lines)
 		{
 			if (is_3D)
 				REPORT_ERROR("Preprocessing::readCoordinates ERROR: Cannot extract 3D helical subtomograms from start-end coordinates!");
-			convertHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
+			if (do_lines) convertHelicalLineCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
+            else convertHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
 		}
 		else
 			convertHelicalSegmentCoordsToMetaDataTable(fn_coord, MD, total_segments, is_3D, xdim, ydim, zdim, extract_size, helical_bimodal_angular_priors);
 	}
 	else if (is_box)
 	{
-		if (do_extract_helical_tubes)
+		if (do_startend)
 			convertEmanHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
-		else
+		else if (do_lines)
+            REPORT_ERROR("ERROR: extracting lines for EMAN box files is not possible");
+        else
 			convertEmanHelicalSegmentCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors);
 	}
 	else if (is_coords)
 	{
-		if (do_extract_helical_tubes)
+		if (do_startend)
 			convertXimdispHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
+        else if (do_lines)
+            REPORT_ERROR("ERROR: extracting lines for Ximdisp coordinate files is not possible");
 		else
 			convertXimdispHelicalSegmentCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors);
 	}

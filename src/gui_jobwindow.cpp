@@ -695,7 +695,8 @@ void JobWindow::initialiseManualpickWindow()
 	place("fn_in", TOGGLE_DEACTIVATE);
 
 	current_y += STEPY/2;
-	place ("do_startend");
+    place ("do_startend");
+    place ("do_lines");
 
 	current_y += STEPY/2;
 
@@ -1064,8 +1065,7 @@ Pixels values higher than this many times the image stddev will be replaced with
 	place("do_extract_helical_tubes", TOGGLE_DEACTIVATE, group6);
 
 	group6->begin();
-
-	place("do_cut_into_segments", TOGGLE_DEACTIVATE);
+    place("do_lines", TOGGLE_DEACTIVATE);
 	place("helical_nr_asu", TOGGLE_DEACTIVATE);
 	place("helical_rise", TOGGLE_DEACTIVATE);
 
