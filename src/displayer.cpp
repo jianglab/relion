@@ -267,6 +267,111 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, i
 	}
 }
 
+void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_img, MetaDataContainer *MDCin, int _ipos,
+                         RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale, bool do_relion_scale)
+{
+	scale = _scale;
+	minval = _minval;
+	maxval = _maxval;
+	ipos = _ipos;
+	selected = NOTSELECTED;
+
+    RFLOAT fom_min=9999., fom_max=-9999.;
+    FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(fom_img)
+    {
+        RFLOAT aux = DIRECT_MULTIDIM_ELEM(fom_img, n);
+        if (aux > fom_max) fom_max = aux;
+        if (aux < fom_min) fom_min = aux;
+    }
+    RFLOAT fom_range = fom_max-fom_min;
+    RFLOAT fom_step = fom_range / 255;
+	// Set its own MetaDataTable
+	MDimg.setIsList(true);
+	MDimg.addObject(MDCin);
+
+	// For volumes only show the central slice
+	if (ZSIZE(img) > 1)
+	{
+		MultidimArray<RFLOAT> slice;
+		img.getSlice(ZSIZE(img)/2, slice);
+		img=slice;
+	}
+
+	// create array for the scaled image data
+	xsize_data = CEIL(XSIZE(img) * scale);
+	ysize_data = CEIL(YSIZE(img) * scale);
+	xoff = (xsize_data < w() ) ? (w() - xsize_data) / 2 : 0;
+	yoff = (ysize_data < h() ) ? (h() - ysize_data) / 2 : 0;
+        img_data = new unsigned char [3 * xsize_data * ysize_data];
+	RFLOAT range = maxval - minval;
+	RFLOAT step = range / 255; // 8-bit scaling range from 0 to 255
+	RFLOAT* old_ptr=NULL;
+	long int n;
+
+	// For micrographs use relion-scaling to avoid bias in down-sampled positions
+	// For multi-image viewers, do not use this scaling as it is slower...
+	if (do_relion_scale && ABS(scale - 1.0) > 0.01)
+    {
+        selfScaleToSize(img, xsize_data, ysize_data);
+        selfScaleToSize(fom_img, xsize_data, ysize_data);
+    }
+
+	// Use the same nearest-neighbor algorithm as in the copy function of Fl_Image...
+	if (ABS(scale - 1.0) > 0.01 && !do_relion_scale)
+	{
+		int xmod   = XSIZE(img) % xsize_data;
+		int xstep  = XSIZE(img) / xsize_data;
+		int ymod   = YSIZE(img) % ysize_data;
+		int ystep  = YSIZE(img) / ysize_data;
+		int line_d = XSIZE(img);
+		int dx, dy, sy, xerr, yerr;
+
+        for (dy = ysize_data, sy = 0, yerr = ysize_data, n = 0; dy > 0; dy --)
+        {
+            for (dx = xsize_data, xerr = xsize_data, old_ptr = img.data + sy * line_d; dx > 0; dx --, n++)
+            {
+                RFLOAT myval = (DIRECT_MULTIDIM_ELEM(img, n) - minval) / step;
+                RFLOAT myfom = (DIRECT_MULTIDIM_ELEM(fom_img, n) - fom_min) / fom_step;
+                std::cerr << myval << " + " << myfom << " = " << myval+myfom << std::endl;
+                img_data[3*n] = FLOOR(0.5*myval + myfom);
+                img_data[3*n+1] = FLOOR(0.5*myval);
+                img_data[3*n+2] = FLOOR(0.5*myval);
+                old_ptr += xstep;
+                xerr    -= xmod;
+                if (xerr <= 0)
+                {
+                    xerr    += xsize_data;
+                    old_ptr += 1;
+                }
+            }
+
+            sy   += ystep;
+            yerr -= ymod;
+            if (yerr <= 0)
+            {
+                yerr += ysize_data;
+                sy ++;
+            }
+        }
+        }
+	else
+	{
+        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(img)
+        {
+            RFLOAT val = (DIRECT_MULTIDIM_ELEM(img, n) - minval) / step;
+            RFLOAT fom = (DIRECT_MULTIDIM_ELEM(fom_img, n) - fom_min) / fom_step;
+            if (FLOOR(0.5*val+0.5*fom)>254) std::cerr << "v= "<<val << " f= " << fom << " s= " << FLOOR(0.5*val+0.5*fom) << std::endl;
+            img_data[3*n] = FLOOR(0.5*val + 0.5*fom);
+            img_data[3*n+1] = FLOOR(0.5*val);
+            img_data[3*n+2] = FLOOR(0.5*val);
+	}
+        }
+}
+
+
+
+
+
 int DisplayBox::toggleSelect(int set_selected)
 {
 	if (selected > 0)
@@ -385,7 +490,7 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 	return -1;
 }
 
-int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
+int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
                                               RFLOAT _scale, RFLOAT _coord_scale, int _particle_radius, bool _do_startend, bool _do_lines, FileName _fn_coords,
                                               FileName _fn_color, FileName _fn_mic, FileName _color_label, RFLOAT _color_blue_value, RFLOAT _color_red_value,
 											  RFLOAT _minimum_pick_fom)
@@ -398,12 +503,16 @@ int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, RFLOA
 	int ysize_canvas = CEIL(YSIZE(image)*_scale);
 	pickerViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
 	canvas.particle_radius = _particle_radius;
-    canvas.do_startend = _do_startend;
-    canvas.do_lines = _do_lines;
+        canvas.do_startend = _do_startend;
+        canvas.do_lines = _do_lines;
 	canvas.coord_scale = _coord_scale;
 	canvas.SetScroll(&scroll);
-	canvas.fill(image, _minval, _maxval, _sigma_contrast, _scale);
-	canvas.fn_coords = _fn_coords;
+	if (NZYXSIZE(fom_image) > 0)
+        canvas.fill(image, fom_image, _minval, _maxval, _sigma_contrast, _scale);
+	else
+        canvas.fill(image, _minval, _maxval, _sigma_contrast, _scale);
+
+        canvas.fn_coords = _fn_coords;
 	canvas.fn_color = _fn_color;
 	canvas.fn_mic = _fn_mic;
 	canvas.color_label = EMDL::str2Label(_color_label);
@@ -645,6 +754,23 @@ void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOA
 	//FileName fn_tmp = "dummy";
 	//MDtmp.setValue(EMDL_IMAGE_NAME, fn_tmp);
 	my_box->setData(image, MDtmp.getObject(), 0, _minval, _maxval, _scale, true);
+	my_box->redraw();
+	boxes.push_back(my_box);
+}
+
+void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale)
+{
+	xoff = yoff = 0;
+	nrow = ncol = 1;
+	getImageContrast(image, _minval, _maxval, _sigma_contrast);
+	xsize_box = CEIL(_scale * XSIZE(image));
+	ysize_box = CEIL(_scale * YSIZE(image));
+	DisplayBox* my_box = new DisplayBox(0, 0, xsize_box, ysize_box, "dummy");
+	MetaDataTable MDtmp;
+	MDtmp.addObject();
+	//FileName fn_tmp = "dummy";
+	//MDtmp.setValue(EMDL_IMAGE_NAME, fn_tmp);
+	my_box->setData(image, fom_image, MDtmp.getObject(), 0, _minval, _maxval, _scale, true);
 	my_box->redraw();
 	boxes.push_back(my_box);
 }
@@ -2116,6 +2242,17 @@ void pickerViewerCanvas::loadCoordinates(bool ask_filename)
 		fn_coord_in = (fn_coords=="") ? "picked.star" : fn_coords;
 	}
 	MDcoords.read(fn_coord_in);
+        if (do_lines)
+        {
+            int ifil_max =0;
+            FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDcoords)
+            {
+                int ifil;
+                MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, ifil);
+                if (ifil > ifil_max) ifil_max=ifil;
+            }
+            current_selection_type = ifil_max+1;
+        }
 
 	if (fn_color != "")
 	{
@@ -2645,7 +2782,7 @@ void Displayer::read(int argc, char **argv)
 	parser.setCommandLine(argc, argv);
 
 	int gen_section = parser.addSection("General options");
-	fn_in = parser.getOption("--i", "Input STAR file, image or stack","");
+    fn_in = parser.getOption("--i", "Input STAR file, image or stack","");
 	do_gui = parser.checkOption("--gui", "Use this to provide all other parameters through a GUI");
 	display_label = EMDL::str2Label(parser.getOption("--display", "Metadata label to display", "rlnImageName"));
 	text_label = EMDL::str2Label(parser.getOption("--text_label", "Metadata label to display text", "EMDL_UNDEFINED"));
@@ -2701,6 +2838,7 @@ void Displayer::read(int argc, char **argv)
 	color_label = parser.getOption("--color_label", "MetaDataLabel to color particles on (e.g. rlnParticleSelectZScore)", "");
 	color_blue_value = textToFloat(parser.getOption("--blue", "Value of the blue color", "1."));
 	color_red_value = textToFloat(parser.getOption("--red", "Value of the red color", "0."));
+    fn_fom = parser.getOption("--fom", "FOM-image to colour the micrograph for picking","");
 
 	verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 
@@ -2967,7 +3105,7 @@ void Displayer::run()
 	}
 	else if (do_pick || do_pick_startend || do_pick_lines)
 	{
-		Image<RFLOAT> img;
+		Image<RFLOAT> img, fom_img;
 
 		if (do_topaz_denoise)
 		{
@@ -2977,8 +3115,14 @@ void Displayer::run()
 		{
 			img.read(fn_in); // dont read data yet: only header to get size
 		}
+        if (fn_fom != "")
+        {
+            colour_scheme = BLACKGREYREDSCALE;
+            fom_img.read(fn_fom);
+            selfScaleToSize(fom_img(), img().xdim, img().ydim);
+        }
 
-		if (lowpass > 0.)
+        if (lowpass > 0.)
 			lowPassFilterMap(img(), lowpass, angpix);
 		if (highpass > 0.)
 			highPassFilterMap(img(), highpass, angpix, 25); // use a rather soft high-pass edge of 25 pixels wide
@@ -2986,7 +3130,7 @@ void Displayer::run()
 		basisViewerWindow win(CEIL(scale*XSIZE(img())), CEIL(scale*YSIZE(img())), fn_in.c_str());
 		if (fn_coords=="")
 			fn_coords = fn_in.withoutExtension()+"_coords.star";
-		win.fillPickerViewerCanvas(img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, do_pick_lines, fn_coords,
+		win.fillPickerViewerCanvas(img(), fom_img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, do_pick_lines, fn_coords,
     		fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom);
 	}
 	else if (fn_in.isStarFile())
