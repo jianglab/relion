@@ -2887,6 +2887,7 @@ void JobWindow::initialiseTomoSubtomoWindow()
 
     current_y += STEPY /2 ;
 
+    place("do_reproject_subtomo", TOGGLE_DEACTIVATE);
     place("do_real_subtomo", TOGGLE_DEACTIVATE);
 
 	tab2->end();
