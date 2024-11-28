@@ -2277,17 +2277,17 @@ void pickerViewerCanvas::loadCoordinates(bool ask_filename)
 		fn_coord_in = (fn_coords=="") ? "picked.star" : fn_coords;
 	}
 	MDcoords.read(fn_coord_in);
-        if (do_lines)
+    if (do_lines)
+    {
+        int ifil_max =0;
+        FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDcoords)
         {
-            int ifil_max =0;
-            FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDcoords)
-            {
-                int ifil;
-                MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, ifil);
-                if (ifil > ifil_max) ifil_max=ifil;
-            }
-            current_selection_type = ifil_max+1;
+            int ifil;
+            MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, ifil);
+            if (ifil > ifil_max) ifil_max=ifil;
         }
+        current_selection_type = ifil_max+1;
+    }
 
 	if (fn_color != "")
 	{

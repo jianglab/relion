@@ -152,7 +152,7 @@ void cb_viewmic(Fl_Widget* w, void* data)
 		{
 			command += " --minimum_pick_fom " + floatToString(global_minimum_fom);
 		}
-		if (global_color_label != "")
+		if (global_fn_foms.size() ==0 & global_color_label != "")
 		{
 			command += " --color_label " + global_color_label;
 			command += " --blue " + floatToString(global_blue_value);
