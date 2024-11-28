@@ -31,7 +31,7 @@ int main(int argc, char *argv[])
 
         prm.run();
 
-        if (!prm.do_only_write_intermediate) prm.finalise();
+        prm.finalise();
 
 #ifdef TIMING
 		std::cout << "timings:" << std::endl;

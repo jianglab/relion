@@ -24,6 +24,7 @@ std::vector<int> imics;
 std::vector<FileName> global_fn_mics;
 std::vector<FileName> global_fn_picks;
 std::vector<FileName> global_fn_ctfs;
+std::vector<FileName> global_fn_foms;
 std::vector<bool> selected;
 std::vector<int> number_picked;
 std::vector<Fl_Button*> viewmic_buttons;
@@ -159,9 +160,15 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			if (global_fn_color != "")
 				command += " --color_star " + global_fn_color;
 		}
+        if (global_fn_foms.size() > 0)
+        {
+            command += " --fom_img " + global_fn_foms[mymic];
+            command += " --fom_min " + floatToString(global_blue_value);
+            command += " --fom_max " + floatToString(global_red_value);
+        }
 
 		command += " &";
-		std::cerr << " command= " << command << std::endl;
+		//std::cerr << " command= " << command << std::endl;
 		int res = system(command.c_str());
 	}
 
@@ -190,7 +197,7 @@ void cb_viewctf(Fl_Widget* w, void* data)
 	command =  "relion_display --i " + global_fn_ctfs[imic];
 	command += " --scale " + floatToString(global_ctfscale);
 	command += " --sigma_contrast " + floatToString(global_ctfsigma);
-	command += " &";
+    command += " &";
 	int res = system(command.c_str());
 
 	last_ctf_viewed = imic;
@@ -276,7 +283,7 @@ int manualpickerGuiWindow::fill()
 
 	global_has_ctf = MDin.containsLabel(EMDL_CTF_IMAGE);
 
-	FileName fn_mic, fn_pick, fn_ctf;
+	FileName fn_mic, fn_pick, fn_ctf, fn_fom;
 	int ystep = 35;
 
 	imics.clear();
@@ -289,6 +296,7 @@ int manualpickerGuiWindow::fill()
 	global_fn_mics.clear();
 	global_fn_picks.clear();
 	global_fn_ctfs.clear();
+    global_fn_foms.clear();
 	text_displays.clear();
 	viewmic_buttons.clear();
 	viewctf_buttons.clear();
@@ -313,6 +321,12 @@ int manualpickerGuiWindow::fill()
 			fn_pick = global_fn_odir + fn_post.withoutExtension() + "_" + global_pickname + ".star";
 		}
 		global_fn_picks.push_back(fn_pick);
+
+        if (MDin.containsLabel(EMDL_MICROGRAPH_AUTOPICK_FOM))
+        {
+            MDin.getValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom);
+            global_fn_foms.push_back(fn_fom);
+        }
 
 		Fl_Check_Button *mycheck = new Fl_Check_Button(4, current_y, ystep-8, ystep-8, "");
 		mycheck->callback(cb_selectmic, &(imics[imic]));

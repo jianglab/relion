@@ -268,7 +268,7 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, i
 }
 
 void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_img, MetaDataContainer *MDCin, int _ipos,
-                         RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale, bool do_relion_scale)
+                         RFLOAT _minval, RFLOAT _maxval, RFLOAT _fom_min, RFLOAT _fom_max, RFLOAT _scale, bool do_relion_scale)
 {
 	scale = _scale;
 	minval = _minval;
@@ -276,14 +276,28 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
 	ipos = _ipos;
 	selected = NOTSELECTED;
 
-    RFLOAT fom_min=9999., fom_max=-9999.;
+    if (fabs(_fom_min) < 0.001 && fabs(_fom_max) < 0.001 )
+    {
+        RFLOAT fom_min=9999., fom_max=-9999.;
+        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(fom_img)
+        {
+            RFLOAT aux = DIRECT_MULTIDIM_ELEM(fom_img, n);
+            if (aux > fom_max) fom_max = aux;
+            if (aux < fom_min) fom_min = aux;
+        }
+        _fom_min= fom_min;
+        _fom_max = fom_max;
+    }
+    // Cap high and low values of FOM
     FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(fom_img)
     {
         RFLOAT aux = DIRECT_MULTIDIM_ELEM(fom_img, n);
-        if (aux > fom_max) fom_max = aux;
-        if (aux < fom_min) fom_min = aux;
+        if (aux > _fom_max) DIRECT_MULTIDIM_ELEM(fom_img, n) = _fom_max;
+        if (aux < _fom_min) DIRECT_MULTIDIM_ELEM(fom_img, n) = _fom_min;
     }
-    RFLOAT fom_range = fom_max-fom_min;
+
+
+    RFLOAT fom_range = _fom_max - _fom_min;
     RFLOAT fom_step = fom_range / 255;
 	// Set its own MetaDataTable
 	MDimg.setIsList(true);
@@ -330,12 +344,21 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
         {
             for (dx = xsize_data, xerr = xsize_data, old_ptr = img.data + sy * line_d; dx > 0; dx --, n++)
             {
-                RFLOAT myval = (DIRECT_MULTIDIM_ELEM(img, n) - minval) / step;
-                RFLOAT myfom = (DIRECT_MULTIDIM_ELEM(fom_img, n) - fom_min) / fom_step;
-                std::cerr << myval << " + " << myfom << " = " << myval+myfom << std::endl;
-                img_data[3*n] = FLOOR(0.5*myval + myfom);
-                img_data[3*n+1] = FLOOR(0.5*myval);
-                img_data[3*n+2] = FLOOR(0.5*myval);
+                RFLOAT val = (maxval - DIRECT_MULTIDIM_ELEM(img, n)) / range;
+                RFLOAT fom = (DIRECT_MULTIDIM_ELEM(fom_img, n) - _fom_min) / fom_range;
+                if (fom < 0.5)
+                {
+                    img_data[3*n] = FLOOR(127*val);
+                    img_data[3*n+1] = FLOOR(127*val);
+                    img_data[3*n+2] = FLOOR(127*val);
+                }
+                else
+                {
+                    img_data[3*n] = FLOOR(127*val + 127*fom);
+                    img_data[3*n+1] = FLOOR(127*val + 127*(2*fom-1));
+                    img_data[3*n+2] = FLOOR(127*val);
+
+                }
                 old_ptr += xstep;
                 xerr    -= xmod;
                 if (xerr <= 0)
@@ -358,14 +381,23 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
 	{
         FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(img)
         {
-            RFLOAT val = (DIRECT_MULTIDIM_ELEM(img, n) - minval) / step;
-            RFLOAT fom = (DIRECT_MULTIDIM_ELEM(fom_img, n) - fom_min) / fom_step;
-            if (FLOOR(0.5*val+0.5*fom)>254) std::cerr << "v= "<<val << " f= " << fom << " s= " << FLOOR(0.5*val+0.5*fom) << std::endl;
-            img_data[3*n] = FLOOR(0.5*val + 0.5*fom);
-            img_data[3*n+1] = FLOOR(0.5*val);
-            img_data[3*n+2] = FLOOR(0.5*val);
-	}
+            RFLOAT val = (maxval - DIRECT_MULTIDIM_ELEM(img, n)) / range;
+            RFLOAT fom = (DIRECT_MULTIDIM_ELEM(fom_img, n) - _fom_min) / fom_range;
+            if (fom < 0.5)
+            {
+                img_data[3*n] = FLOOR(127*val);
+                img_data[3*n+1] = FLOOR(127*val);
+                img_data[3*n+2] = FLOOR(127*val);
+            }
+            else
+            {
+                img_data[3*n] = FLOOR(127*val + 127*fom);
+                img_data[3*n+1] = FLOOR(127*val + 127*(2*fom-1));
+                img_data[3*n+2] = FLOOR(127*val);
+
+            }
         }
+    }
 }
 
 
@@ -493,7 +525,7 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
                                               RFLOAT _scale, RFLOAT _coord_scale, int _particle_radius, bool _do_startend, bool _do_lines, FileName _fn_coords,
                                               FileName _fn_color, FileName _fn_mic, FileName _color_label, RFLOAT _color_blue_value, RFLOAT _color_red_value,
-											  RFLOAT _minimum_pick_fom)
+											  RFLOAT _minimum_pick_fom, RFLOAT _min_fom, RFLOAT _max_fom)
 {
 	current_selection_type = 2; // Green
 
@@ -508,7 +540,7 @@ int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, Multi
 	canvas.coord_scale = _coord_scale;
 	canvas.SetScroll(&scroll);
 	if (NZYXSIZE(fom_image) > 0)
-        canvas.fill(image, fom_image, _minval, _maxval, _sigma_contrast, _scale);
+        canvas.fill(image, fom_image, _minval, _maxval, _min_fom, _max_fom, _sigma_contrast, _scale);
 	else
         canvas.fill(image, _minval, _maxval, _sigma_contrast, _scale);
 
@@ -758,7 +790,9 @@ void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOA
 	boxes.push_back(my_box);
 }
 
-void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale)
+void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &fom_image,
+                             RFLOAT _minval, RFLOAT _maxval, RFLOAT _fom_min, RFLOAT _fom_max,
+                             RFLOAT _sigma_contrast, RFLOAT _scale)
 {
 	xoff = yoff = 0;
 	nrow = ncol = 1;
@@ -770,7 +804,8 @@ void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT>
 	MDtmp.addObject();
 	//FileName fn_tmp = "dummy";
 	//MDtmp.setValue(EMDL_IMAGE_NAME, fn_tmp);
-	my_box->setData(image, fom_image, MDtmp.getObject(), 0, _minval, _maxval, _scale, true);
+	my_box->setData(image, fom_image, MDtmp.getObject(), 0,
+                    _minval, _maxval, _fom_min, _fom_max, _scale, true);
 	my_box->redraw();
 	boxes.push_back(my_box);
 }
@@ -2838,7 +2873,9 @@ void Displayer::read(int argc, char **argv)
 	color_label = parser.getOption("--color_label", "MetaDataLabel to color particles on (e.g. rlnParticleSelectZScore)", "");
 	color_blue_value = textToFloat(parser.getOption("--blue", "Value of the blue color", "1."));
 	color_red_value = textToFloat(parser.getOption("--red", "Value of the red color", "0."));
-    fn_fom = parser.getOption("--fom", "FOM-image to colour the micrograph for picking","");
+    fn_fom = parser.getOption("--fom_img", "FOM-image to colour the micrograph for picking","");
+    fom_min = textToFloat(parser.getOption("--fom_min", "Pixel value for lowest FOM value (black)", "0"));
+    fom_max = textToFloat(parser.getOption("--fom_max", "Pixel value for highest FOM value (yellow)", "0"));
 
 	verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 
@@ -3131,7 +3168,7 @@ void Displayer::run()
 		if (fn_coords=="")
 			fn_coords = fn_in.withoutExtension()+"_coords.star";
 		win.fillPickerViewerCanvas(img(), fom_img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, do_pick_lines, fn_coords,
-    		fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom);
+    		fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom, fom_min, fom_max);
 	}
 	else if (fn_in.isStarFile())
 	{

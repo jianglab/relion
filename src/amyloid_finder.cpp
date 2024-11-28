@@ -31,7 +31,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     fn_odir = parser.getOption("--odir", "Output directory for coordinate files (default is to store next to micrographs)", "AutoPick/");
     do_only_unfinished = parser.checkOption("--only_do_unfinished", "Only estimate CTFs for those tomograms for which there is not yet a logfile with Final values.");
     do_write_intermediate = parser.checkOption("--write_intermediates", "Write out intermediate FOM & PSI maps for faster testing of tracing parameters?");
-    do_only_write_intermediate = parser.checkOption("--only_write_intermediates", "Write out only intermediate FOM & PSI maps?");
+    do_only_write_intermediate = !parser.checkOption("--dont_only_write_intermediates", "For now, default is to only intermediate FOM & PSI maps, as picking doesn't work well yet");
     nr_threads = textToInteger(parser.getOption("--j", "Number of threads to us in parallel", "1"));
 
     int search_section = parser.addSection("Filament searching options ");
@@ -1102,6 +1102,7 @@ void AmyloidFinder::finalise()
 	MDcoords.write(fn_coords);
 
     FileName fn_mics = fn_odir + "micrographs_" + fn_out + ".star";
+    std::cerr <<" fn_mics= " << fn_mics << std::endl;
     obsModel.save(MDin, fn_mics, "micrographs");
 
 	if (verb > 0 )
