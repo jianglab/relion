@@ -24,6 +24,7 @@ std::vector<int> imics;
 std::vector<FileName> global_fn_mics;
 std::vector<FileName> global_fn_picks;
 std::vector<FileName> global_fn_ctfs;
+std::vector<FileName> global_fn_foms;
 std::vector<bool> selected;
 std::vector<int> number_picked;
 std::vector<Fl_Button*> viewmic_buttons;
@@ -37,6 +38,7 @@ int last_ctf_viewed;
 
 bool   global_has_ctf;
 bool   global_pick_startend;
+bool   global_pick_lines;
 RFLOAT global_angpix;
 RFLOAT global_coord_scale;
 RFLOAT global_lowpass;
@@ -143,12 +145,14 @@ void cb_viewmic(Fl_Widget* w, void* data)
 		command += " --angpix " + floatToString(global_angpix);
 		if (global_pick_startend)
 			command += " --pick_start_end ";
+        else if (global_pick_lines)
+            command += " --pick_lines ";
 
 		if (fabs(global_minimum_fom + 9999.) > 1e-6)
 		{
 			command += " --minimum_pick_fom " + floatToString(global_minimum_fom);
 		}
-		if (global_color_label != "")
+		if (global_fn_foms.size() ==0 & global_color_label != "")
 		{
 			command += " --color_label " + global_color_label;
 			command += " --blue " + floatToString(global_blue_value);
@@ -156,6 +160,12 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			if (global_fn_color != "")
 				command += " --color_star " + global_fn_color;
 		}
+        if (global_fn_foms.size() > 0)
+        {
+            command += " --fom_img " + global_fn_foms[mymic];
+            command += " --fom_min " + floatToString(global_blue_value);
+            command += " --fom_max " + floatToString(global_red_value);
+        }
 
 		command += " &";
 		//std::cerr << " command= " << command << std::endl;
@@ -187,7 +197,7 @@ void cb_viewctf(Fl_Widget* w, void* data)
 	command =  "relion_display --i " + global_fn_ctfs[imic];
 	command += " --scale " + floatToString(global_ctfscale);
 	command += " --sigma_contrast " + floatToString(global_ctfsigma);
-	command += " &";
+    command += " &";
 	int res = system(command.c_str());
 
 	last_ctf_viewed = imic;
@@ -273,7 +283,7 @@ int manualpickerGuiWindow::fill()
 
 	global_has_ctf = MDin.containsLabel(EMDL_CTF_IMAGE);
 
-	FileName fn_mic, fn_pick, fn_ctf;
+	FileName fn_mic, fn_pick, fn_ctf, fn_fom;
 	int ystep = 35;
 
 	imics.clear();
@@ -286,6 +296,7 @@ int manualpickerGuiWindow::fill()
 	global_fn_mics.clear();
 	global_fn_picks.clear();
 	global_fn_ctfs.clear();
+    global_fn_foms.clear();
 	text_displays.clear();
 	viewmic_buttons.clear();
 	viewctf_buttons.clear();
@@ -310,6 +321,12 @@ int manualpickerGuiWindow::fill()
 			fn_pick = global_fn_odir + fn_post.withoutExtension() + "_" + global_pickname + ".star";
 		}
 		global_fn_picks.push_back(fn_pick);
+
+        if (MDin.containsLabel(EMDL_MICROGRAPH_AUTOPICK_FOM))
+        {
+            MDin.getValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom);
+            global_fn_foms.push_back(fn_fom);
+        }
 
 		Fl_Check_Button *mycheck = new Fl_Check_Button(4, current_y, ystep-8, ystep-8, "");
 		mycheck->callback(cb_selectmic, &(imics[imic]));
@@ -693,6 +710,8 @@ void ManualPicker::read(int argc, char **argv)
 	global_coord_scale = textToFloat(parser.getOption("--coord_scale", "Scale coordinates before display", "1.0"));
 	global_particle_diameter = textToFloat(parser.getOption("--particle_diameter", "Diameter of the circles that will be drawn around each picked particle (in Angstroms)"));
 	global_pick_startend = parser.checkOption("--pick_start_end", "Pick start-end coordinates of helices");
+    global_pick_lines = parser.checkOption("--pick_lines", "Pick lines for curvy helices");
+
 	do_allow_save = parser.checkOption("--allow_save", "Allow saving of the selected micrographs");
 	do_fast_save = parser.checkOption("--fast_save", "Save a default selection of all micrographs immediately");
 	global_nr_simultaneous = textToInteger(parser.getOption("--open_simultaneous", "Open this many of the next micrographs simultaneously when pressing CTRL and a Pick button", "10"));

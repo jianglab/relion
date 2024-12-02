@@ -70,6 +70,7 @@ class SubtomoProgram
 				write_float16,
 				run_from_GUI,
 				run_from_MPI,
+                do_reproject_subtomo,
                 do_real_subtomo;
 
 		void readBasicParameters(IOParser& parser);
@@ -88,7 +89,7 @@ class SubtomoProgram
         BufferedImage<float> extractSubtomogramsAndReProject(
                 ParticleIndex part_id, MultidimArray<RFLOAT> &recTomo,
                 const Tomogram& tomogram, const ParticleSet &particleSet,
-                const std::vector<bool> &isVisible, RFLOAT tomogram_angpix);
+                const std::vector<bool> &isVisible, RFLOAT tomogram_angpix, bool do_reproject);
 
 		void processTomograms(
 				const std::vector<int>& tomoIndices,

@@ -72,7 +72,6 @@ static int predrag_xc;
 static int predrag_yc;
 static bool has_shift;
 static int preshift_ipos;
-
 static int current_selection_type;
 static int colour_scheme;
 
@@ -112,6 +111,10 @@ public:
 	void setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, int ipos, RFLOAT minval, RFLOAT maxval,
 	             RFLOAT _scale, bool do_relion_scale = false);
 
+    void setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_img, MetaDataContainer *MDCin, int ipos,
+                 RFLOAT minval, RFLOAT maxval, RFLOAT _fom_min, RFLOAT _fom_max,
+                 RFLOAT _scale, bool do_relion_scale = false);
+
 	// Destructor
 	~DisplayBox()
 	{
@@ -147,10 +150,10 @@ public:
 	               int _nr_regroup = -1, bool do_recenter = false, bool _is_data = false, MetaDataTable *MDgroups = NULL,
 	               bool do_allow_save = false, FileName fn_selected_imgs="", FileName fn_selected_parts="", int max_nr_parts_per_class = -1);
 	int fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale);
-	int fillPickerViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _coord_scale,
-	                           int _particle_radius, bool do_startend = false, FileName _fn_coords = "",
+	int fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _coord_scale,
+	                           int _particle_radius, bool do_startend = false, bool do_lines = false, FileName _fn_coords = "",
 	                           FileName _fn_color = "", FileName _fn_mic= "", FileName _color_label = "", RFLOAT _color_blue_value = 0., RFLOAT _color_red_value = 1.,
-							   RFLOAT _minimum_pick_fom = -999.);
+							   RFLOAT _minimum_pick_fom = -999., RFLOAT _min_fom = 0., RFLOAT _max_fom = 0.);
 };
 
 class basisViewerCanvas : public Fl_Widget
@@ -189,7 +192,8 @@ public:
 	void fill(MetaDataTable &MDin, ObservationModel *obsModel, EMDLabel display_label, EMDLabel text_label, bool _do_apply_orient, RFLOAT _minval, RFLOAT _maxval,
 	          RFLOAT _sigma_contrast, RFLOAT _scale, int _ncol, bool do_recenter = false, long int max_images = -1,
 	          RFLOAT lowpass = -1.0, RFLOAT highpass = -1.0);
-	void fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale = 1.);
+    void fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale = 1.);
+    void fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _fom_min, RFLOAT _fom_max, RFLOAT _sigma_contrast, RFLOAT _scale = 1.);
 	void setSelectionType();
 	void setFOMThreshold();
 };
@@ -410,6 +414,9 @@ public:
 	// Draw lines between start-end coordinates?
 	bool do_startend;
 
+    // Draw lines for curvy filaments?
+    bool do_lines;
+
 	// Micrograph name (useful to search relevant particles in fn_color)
 	FileName fn_mic;
 
@@ -555,7 +562,10 @@ public:
 	RFLOAT coord_scale;
 
 	// Input & Output rootname
-	FileName fn_in;
+	FileName fn_in, fn_fom;
+
+    // Min and max for FOM scale
+    RFLOAT fom_min, fom_max;
 
 	// Ignore optics groups
 	bool do_ignore_optics;
@@ -583,6 +593,9 @@ public:
 
 	// Flag to pick start-end
 	bool do_pick_startend;
+
+    // Flag to pick lines
+    bool do_pick_lines;
 
 	// Flag for looking at classes
 	bool do_class;
