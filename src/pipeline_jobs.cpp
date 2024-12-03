@@ -3909,7 +3909,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	{
         if (is_tomo)
         {
-            error_message = getTomoInputCommmand(true, command, HAS_COMPULSORY, HAS_COMPULSORY, HAS_NOT, HAS_NOT);
+            error_message = getTomoInputCommmand(true, command, HAS_OPTIONAL, HAS_COMPULSORY, HAS_NOT, HAS_NOT);
             if (error_message != "") return false;
 
             Node node1( outputname + fn_run + "_optimisation_set.star", LABEL_CLASS3D_OPTSET);
@@ -4399,7 +4399,7 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 
         if (is_tomo)
         {
-            error_message = getTomoInputCommmand(true, command, HAS_COMPULSORY, HAS_COMPULSORY, HAS_NOT, HAS_NOT);
+            error_message = getTomoInputCommmand(true, command, HAS_OPTIONAL, HAS_COMPULSORY, HAS_NOT, HAS_NOT);
             if (error_message != "") return false;
 
             Node node1( outputname + fn_run + "_optimisation_set.star", LABEL_REFINE3D_OPTSET);
@@ -6422,14 +6422,17 @@ std::string RelionJob::getTomoInputCommmand(bool is_for_refine, std::string &com
             inputNodes.push_back(node);
             command += " --i " + joboptions["in_particles"].getString();
 
-            Node node2(joboptions["in_tomograms"].getString(), joboptions["in_tomograms"].node_type);
-            inputNodes.push_back(node2);
-            command += " --tomograms " + joboptions["in_tomograms"].getString();
+            if (joboptions["in_tomograms"].getString() != "")
+            {
+                Node node2(joboptions["in_tomograms"].getString(), joboptions["in_tomograms"].node_type);
+                inputNodes.push_back(node2);
+                command += " --tomograms " + joboptions["in_tomograms"].getString();
+            }
 
             if (joboptions["in_trajectories"].getString() != "")
             {
                 Node node3(joboptions["in_trajectories"].getString(), joboptions["in_trajectories"].node_type);
-                inputNodes.push_back(node2);
+                inputNodes.push_back(node3);
                 command += " --trajectories " + joboptions["in_trajectories"].getString();
             }
 
