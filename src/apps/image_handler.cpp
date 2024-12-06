@@ -37,7 +37,7 @@ class image_handler_parameters
 	public:
    	FileName fn_in, fn_out, fn_sel, fn_img, fn_sym, fn_sub, fn_mult, fn_div, fn_add, fn_subtract, fn_mask, fn_fsc, fn_adjust_power, fn_correct_ampl, fn_fourfilter, fn_cosDPhi;
 	int bin_avg, avg_first, avg_last, edge_x0, edge_xF, edge_y0, edge_yF, filter_edge_width, new_box, minr_ampl_corr, my_new_box_size, pix_x, pix_y, pix_z;
-	bool do_add_edge, do_invert_hand, do_flipXY, do_flipmXY, do_flipZ, do_flipX, do_flipY, do_shiftCOM, do_stats, do_calc_com, do_avg_ampl, do_avg_ampl2, do_avg_ampl2_ali, do_average, do_remove_nan, do_average_all_frames, do_power, do_guinier, do_ignore_optics, do_optimise_scale_subtract, write_float16, do_set_pixel;
+	bool do_add_edge, do_invert_hand, do_flipXY, do_flipmXY, do_flipZ, do_flipX, do_flipY, do_shiftCOM, do_stats, do_power_image, do_calc_com, do_avg_ampl, do_avg_ampl2, do_avg_ampl2_ali, do_average, do_remove_nan, do_average_all_frames, do_power, do_guinier, do_ignore_optics, do_optimise_scale_subtract, write_float16, do_set_pixel;
 	RFLOAT multiply_constant, divide_constant, add_constant, subtract_constant, threshold_above, threshold_below, angpix, requested_angpix, real_angpix, force_header_angpix, lowpass, highpass, logfilter, bfactor, shift_x, shift_y, shift_z, replace_nan, randomize_at, optimise_bfactor_subtract, pix_val;
 	// PNG options
 	RFLOAT minval, maxval, sigma_contrast, guinier_fit_minres, guinier_fit_maxres;
@@ -124,7 +124,8 @@ class image_handler_parameters
 		shift_x = textToFloat(parser.getOption("--shift_x", "Shift images this many pixels in the X-direction", "0."));
 		shift_y = textToFloat(parser.getOption("--shift_y", "Shift images this many pixels in the Y-direction", "0."));
 		shift_z = textToFloat(parser.getOption("--shift_z", "Shift images this many pixels in the Z-direction", "0."));
-		do_avg_ampl = parser.checkOption("--avg_ampl", "Calculate average amplitude spectrum for all images?");
+		do_power_image = parser.checkOption("--power_image", "Output image with Fourier squared amplitudes?");
+        do_avg_ampl = parser.checkOption("--avg_ampl", "Calculate average amplitude spectrum for all images?");
 		do_avg_ampl2 = parser.checkOption("--avg_ampl2", "Calculate average amplitude spectrum for all images?");
 		do_avg_ampl2_ali = parser.checkOption("--avg_ampl2_ali", "Calculate average amplitude spectrum for all aligned images?");
 		do_average = parser.checkOption("--average", "Calculate average of all images (without alignment)");
@@ -435,6 +436,18 @@ class image_handler_parameters
 			}
 			MDpower.write(std::cout);
 		}
+        else if (do_power_image)
+        {
+            MultidimArray< Complex > FT;
+            FourierTransformer transformer;
+            transformer.FourierTransform(Iin(), FT);
+            Iout().resize(ZSIZE(FT), YSIZE(FT), XSIZE(FT));
+            FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(FT)
+            {
+                DIRECT_MULTIDIM_ELEM(Iout(), n) = NZYXSIZE(Iin())*norm(DIRECT_MULTIDIM_ELEM(FT, n));
+            }
+            DIRECT_MULTIDIM_ELEM(Iout(), 0) = 0.; //remove zero-component
+        }
 		else if (do_guinier)
 		{
 
