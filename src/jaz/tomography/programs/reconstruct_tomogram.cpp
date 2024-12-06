@@ -63,43 +63,48 @@ void TomoBackprojectProgram::readParameters(int argc, char *argv[])
 	tomoName = parser.getOption("--tn", "Tomogram name", "*");
 	outFn = parser.getOption("--o", "Output filename (or output directory in case of reconstructing multiple tomograms)");
  	do_even_odd_tomograms = parser.checkOption("--generate_split_tomograms", "Reconstruct tomograms from even/odd movie frames or tilt image index for denoising");
+    do_only_unfinished = parser.checkOption("--only_do_unfinished", "Only reconstruct those tomograms that haven't finished yet");
 
     w = textToInteger(parser.getOption("--w", "Width"));
 	h = textToInteger(parser.getOption("--h", "Height" ));
 	d = textToInteger(parser.getOption("--d", "Thickness"));
 
-    fourierInversion = parser.checkOption("--fourier", "Use a Fourier-inversion reconstruction algorithm");
-    lambda = textToDouble(parser.getOption("--lambda", "Regularisation constant for CTF-correction of the SNRs in the Fourier-inversion algorithm", "10"));
-	ctf_intact_first_peak = parser.checkOption("--ctf_intact_first_peak", "Leave CTFs intact until first peak");
-    applyWeight = !parser.checkOption("--no_weight", "Do not perform weighting in Fourier space using a Wiener filter");
-	applyPreWeight = parser.checkOption("--pre_weight", "Pre-weight the 2D slices prior to backprojection");
-    FourierCrop = parser.checkOption("--Fc", "Downsample the 2D images by Fourier cropping");
-    do_only_unfinished = parser.checkOption("--only_do_unfinished", "Only reconstruct those tomograms that haven't finished yet");
-    SNR = textToDouble(parser.getOption("--SNR", "SNR assumed by the Wiener filter", "10"));
-
-	applyCtf = parser.checkOption("--ctf", "Perform CTF correction");
-    doWiener = !parser.checkOption("--skip_wiener", "Do multiply images with CTF, but don't divide by CTF^2 in Wiener filter");
-
-    if (!doWiener) applyCtf = true;
-
-    zeroDC = !parser.checkOption("--keep_mean", "Do not zero the DC component of each frame");
-
-	taperDist = textToDouble(parser.getOption("--td", "Tapering distance", "0.0"));
-	taperFalloff = textToDouble(parser.getOption("--tf", "Tapering falloff", "0.0"));
-
-    // SHWS & Aburt 19Jul2022: use zero-origins from relion-4.1 onwards....
-    x0 = textToDouble(parser.getOption("--x0", "X origin", "0.0"));
-    y0 = textToDouble(parser.getOption("--y0", "Y origin", "0.0"));
-    z0 = textToDouble(parser.getOption("--z0", "Z origin", "0.0"));
-
-	spacing = textToDouble(parser.getOption("--bin", "Binning", "1.0"));
+    spacing = textToDouble(parser.getOption("--bin", "Binning", "1.0"));
     angpix_spacing = textToDouble(parser.getOption("--binned_angpix", "OR: desired pixel size after binning", "-1"));
 
     tiltAngleOffset = textToDouble(parser.getOption("--tiltangle_offset", "Offset applied to all tilt angles (in deg)", "0"));
     BfactorPerElectronDose = textToDouble(parser.getOption("--bfactor_per_edose", "B-factor dose-weighting per electron/A^2 dose (default is use Niko's model)", "0"));
     n_threads = textToInteger(parser.getOption("--j", "Number of threads", "1"));
 
-    do_2dproj = parser.checkOption("--do_proj", "Use this to skip calculation of 2D projection of the tomogram along the Z-axis");
+    int wbp_section = parser.addSection("Weighted backprojection options");
+    applyWeight = !parser.checkOption("--no_weight", "Do not perform weighting in Fourier space using a Wiener filter");
+	applyPreWeight = parser.checkOption("--pre_weight", "Pre-weight the 2D slices prior to backprojection");
+    FourierCrop = parser.checkOption("--Fc", "Downsample the 2D images by Fourier cropping");
+    SNR = textToDouble(parser.getOption("--SNR", "SNR assumed by the Wiener filter", "10"));
+
+	applyCtf = parser.checkOption("--ctf", "Perform CTF correction");
+    doWiener = !parser.checkOption("--skip_wiener", "Do multiply images with CTF, but don't divide by CTF^2 in Wiener filter");
+    if (doWiener) applyCtf = true;
+
+    zeroDC = !parser.checkOption("--keep_mean", "Do not zero the DC component of each frame");
+    taperDist = textToDouble(parser.getOption("--td", "Tapering distance", "0.0"));
+    taperFalloff = textToDouble(parser.getOption("--tf", "Tapering falloff", "0.0"));
+
+    // SHWS & Aburt 19Jul2022: use zero-origins from relion-4.1 onwards....
+    x0 = textToDouble(parser.getOption("--x0", "X origin", "0.0"));
+    y0 = textToDouble(parser.getOption("--y0", "Y origin", "0.0"));
+    z0 = textToDouble(parser.getOption("--z0", "Z origin", "0.0"));
+
+
+    int fourier_section = parser.addSection("Fourier inversion options");
+    fourierInversion = parser.checkOption("--fourier", "Use a Fourier-inversion reconstruction algorithm");
+    fourierWienerFilter = !parser.checkOption("--skip_fourier_wiener", "Only CTF-premultiplication will be performed, but Wiener-type division is skipped");
+    lambda = textToDouble(parser.getOption("--lambda", "Regularisation constant for CTF-correction of the SNRs in the Fourier-inversion algorithm", "10"));
+    ctf_intact_first_peak = parser.checkOption("--ctf_intact_first_peak", "Leave CTFs intact until first peak");
+
+    int proj_section = parser.addSection("2D projection options");
+
+    do_2dproj = parser.checkOption("--do_proj", "Use this to also generate 2D projection of the entire tomogram along the Z-axis");
     centre_2dproj = textToInteger(parser.getOption("--centre_proj", "Central Z-slice for 2D projection (in tomogram pixels from the middle)", "0"));
     thickness_2dproj = textToInteger(parser.getOption("--thickness_proj", "Thickness of the 2D projection (in tomogram pixels)", "10"));
 
@@ -165,6 +170,12 @@ void TomoBackprojectProgram::initialise(bool verbose)
             std::cout << "    - centered at " << centre_2dproj << " tomogram pixels from the centre of the tomogram" << std::endl;
             std::cout << "    - and a thickness of " << thickness_2dproj << " tomogram pixels" << std::endl;
         }
+        std::cout << "  - fourierInversion= " << fourierInversion << " fourierWienerFilter= " << fourierWienerFilter << std::endl;
+        std::cout << "  - doWiener= " << doWiener << std::endl;
+        std::cout << "  - applyCtf= " << applyCtf << std::endl;
+        std::cout << "  - applyPreWeight= " << applyPreWeight << std::endl;
+        if (doWiener) std::cout << "  - applyWeight= " << applyWeight << std::endl;
+
     }
 
 }
@@ -337,9 +348,15 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
 
     Tomogram tomogram1, tomogram2;
 
-    tomogram1 = tomogramSet.loadTomogram(tomoIndex, true, true, false, w, h, d);
-    tomogram2 = tomogramSet.loadTomogram(tomoIndex, true, false, true, w, h, d);
-
+    if (fourierWienerFilter)
+    {
+        tomogram1 = tomogramSet.loadTomogram(tomoIndex, true, true, false, w, h, d);
+        tomogram2 = tomogramSet.loadTomogram(tomoIndex, true, false, true, w, h, d);
+    }
+    else
+    {
+        tomogram1 = tomogramSet.loadTomogram(tomoIndex, true, false, false, w, h, d);
+    }
     MetaDataTable& m = tomogramSet.tomogramTables[tomoIndex];
 
     if (!tomogram1.hasMatrices) REPORT_ERROR("ERROR; tomograms do not have tilt series alignment parameters to calculate projectionMatrices!");
@@ -352,6 +369,7 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
     int square_box = (tomogram1.stack.xdim == tomogram1.stack.ydim) ? tomogram1.stack.xdim : XMIPP_MAX(tomogram1.stack.xdim, tomogram1.stack.ydim);
     // Make sqrt(2) bigger to account for the empty corners that otherwise appear with the spherical mask....
     square_box *= sqrt(2.);
+    if (square_box%2 != 0) square_box++;
 
     double pixelSizeAct = tomogramSet.getTiltSeriesPixelSize(tomoIndex);
     int new_box = square_box;
@@ -370,18 +388,14 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
     }
     tomogramSet.globalTable.setValue(EMDL_TOMO_TOMOGRAM_BINNING, spacing, tomoIndex);
 
-    float padding_factor = 1;
-    bool skip_gridding = true;
     BackProjector BP = BackProjector(new_box, 3,
-                                     "C1", TRILINEAR, padding_factor,
-                                     10, 0, 1.9, 15, 2, skip_gridding);
+                                     "C1", TRILINEAR, 1.,
+                                     10, 0, 1.9, 15, 2, true);
 	BP.initZeros();
 
     #pragma omp parallel for num_threads(n_threads)
     for (int f = 0; f < fc; f++)
     {
-        //std::cerr << " f= " << f << std::endl;
-
         CTF ctf = tomogram1.centralCTFs[f];
         // Don't use CTF scale factors, as we will measure SNRs using the FSC!
         ctf.scale = 1.0;
@@ -389,55 +403,93 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
         if (ctf.DeltafU < 100. || ctf.DeltafV < 100.)
             continue;
 
-        // Get frame from Jasenko's stack
-        MultidimArray<RFLOAT> frame1(tomogram1.stack.ydim, tomogram1.stack.xdim);
-        MultidimArray<RFLOAT> frame2(tomogram1.stack.ydim, tomogram1.stack.xdim);
-        for (long int y=0; y<tomogram1.stack.ydim; y++)
-            for (long int x=0; x<tomogram1.stack.xdim; x++)
+        int nr_halves = (fourierWienerFilter) ? 2 : 1;
+        MultidimArray<Complex> FT1, FT2;
+        MultidimArray<RFLOAT> frame(tomogram1.stack.ydim, tomogram1.stack.xdim);
+        for (int ihalf = 0; ihalf < nr_halves; ihalf++)
+        {
+
+            //std::cerr << " ihalf= " << ihalf << std::endl;
+            // Get frame from Jasenko's stack
+            if (ihalf == 0)
             {
-                DIRECT_A2D_ELEM(frame1, y, x) = tomogram1.stack(x, y, f);
-                DIRECT_A2D_ELEM(frame2, y, x) = tomogram2.stack(x, y, f);
+                for (long int y = 0; y < tomogram1.stack.ydim; y++)
+                    for (long int x = 0; x < tomogram1.stack.xdim; x++)
+                        DIRECT_A2D_ELEM(frame, y, x) = tomogram1.stack(x, y, f);
+            }
+            else
+            {
+                for (long int y = 0; y < tomogram2.stack.ydim; y++)
+                    for (long int x = 0; x < tomogram2.stack.xdim; x++)
+                        DIRECT_A2D_ELEM(frame, y, x) = tomogram2.stack(x, y, f);
             }
 
-        // Make square (plus factor 1.4 padding)
-        frame1.setXmippOrigin();
-        frame2.setXmippOrigin();
-        frame1.window(FIRST_XMIPP_INDEX(square_box), FIRST_XMIPP_INDEX(square_box),
-                   LAST_XMIPP_INDEX(square_box), LAST_XMIPP_INDEX(square_box));
-        frame2.window(FIRST_XMIPP_INDEX(square_box), FIRST_XMIPP_INDEX(square_box),
-                      LAST_XMIPP_INDEX(square_box), LAST_XMIPP_INDEX(square_box));
+            //std::cerr <<" got frame"<< std::endl;
+            // Make square (plus factor 1.4 padding)
+            frame.setXmippOrigin();
+            frame.window(FIRST_XMIPP_INDEX(square_box), FIRST_XMIPP_INDEX(square_box),
+                          LAST_XMIPP_INDEX(square_box), LAST_XMIPP_INDEX(square_box));
+            //std::cerr <<" windowed"<< std::endl;
 
-        // Mirror the image back out into the padding area to prevent low-resolution artifacts
-        int first_x = FIRST_XMIPP_INDEX(tomogram1.stack.xdim);
-        int last_x = LAST_XMIPP_INDEX(tomogram1.stack.xdim);
-        int first_y = FIRST_XMIPP_INDEX(tomogram1.stack.ydim);
-        int last_y = LAST_XMIPP_INDEX(tomogram1.stack.ydim);
-        FOR_ALL_ELEMENTS_IN_ARRAY2D(frame1)
-        {
-            int jp = j, ip = i;
-            bool do_change = false;
-            if (j < first_x)      {jp = 2 * first_x  - j; do_change = true;}
-            else if (j > last_x)  {jp = 2 * last_x - j; do_change = true;}
-            if (i < first_y)      {ip = 2 * first_y  - i; do_change = true;}
-            else if (i > last_y)  {ip = 2 * last_y - i; do_change = true;}
-            if (do_change)
+            // Mirror the image back out into the padding area to prevent low-resolution artifacts
+            int first_x = FIRST_XMIPP_INDEX(tomogram1.stack.xdim);
+            int last_x = LAST_XMIPP_INDEX(tomogram1.stack.xdim);
+            int first_y = FIRST_XMIPP_INDEX(tomogram1.stack.ydim);
+            int last_y = LAST_XMIPP_INDEX(tomogram1.stack.ydim);
+            FOR_ALL_ELEMENTS_IN_ARRAY2D(frame)
             {
-                A2D_ELEM(frame1, i, j) = A2D_ELEM(frame1, ip, jp);
-                A2D_ELEM(frame2, i, j) = A2D_ELEM(frame2, ip, jp);
+                int jp = j, ip = i;
+                bool do_change = false;
+                if (j < first_x)
+                {
+                    jp = 2 * first_x - j;
+                    do_change = true;
+                }
+                else if (j > last_x)
+                {
+                    jp = 2 * last_x - j;
+                    do_change = true;
+                }
+                if (i < first_y)
+                {
+                    ip = 2 * first_y - i;
+                    do_change = true;
+                }
+                else if (i > last_y)
+                {
+                    ip = 2 * last_y - i;
+                    do_change = true;
+                }
+                if (do_change)
+                {
+                    A2D_ELEM(frame, i, j) = A2D_ELEM(frame, ip, jp);
+                }
             }
+            //std::cerr <<" dealt with edges"<< std::endl;
 
-        }
+            // Downscale
+            //std::cerr <<" new_box= " << new_box << " square_box= " << square_box << std::endl;
+            if (new_box != square_box) resizeMap(frame, new_box);
 
-        // Downscale
-        if (new_box != square_box)
-        {
-            resizeMap(frame1, new_box);
-            resizeMap(frame2, new_box);
+            //Image<RFLOAT> It;
+            //It()=frame;
+            //It.write("rec_frame"+ integerToString(f)+".mrc");
+
+            // FT and get SNRs
+            // Not entirely sure this is necessary, but FFTW transformers have been troublesome with threads in the past...
+            //std::cerr << " before FT" << std::endl;
+#pragma omp critical
+            {
+                FourierTransformer transformer;
+                if (ihalf == 0) transformer.FourierTransform(frame, FT1);
+                else transformer.FourierTransform(frame, FT2);
+            };
+            //std::cerr << " after FT" << std::endl;
         }
 
         // Get the transformation matrix
-        const Matrix2D<RFLOAT> A(3,3);
-        for (int row= 0; row < 3; row++)
+        const Matrix2D<RFLOAT> A(3, 3);
+        for (int row = 0; row < 3; row++)
             for (int col = 0; col < 3; col++)
                 MAT_ELEM(A, row, col) = tomogram1.projectionMatrices[f](row, col);
 
@@ -445,54 +497,68 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
         m.getValueSafely(EMDL_TOMO_XSHIFT_ANGST, xshift, f);
         m.getValueSafely(EMDL_TOMO_YSHIFT_ANGST, yshift, f);
 
-        // FT and get SNRs
-        MultidimArray<Complex> FT1, FT2;
-        // Not entirely sure this is necessary, but FFTW transformers have been troublesome with threads in the past...
-        #pragma omp critical
+        MultidimArray<RFLOAT> FSC, SNR;
+        if (fourierWienerFilter)
         {
-            FourierTransformer transformer;
-            transformer.FourierTransform(frame1, FT1);
-            transformer.FourierTransform(frame2, FT2);
-        };
-        MultidimArray<RFLOAT> FSC;
-        getFSC(FT1, FT2, FSC);
+            getFSC(FT1, FT2, FSC);
 
-        // Now that we have the FSC, sum the two halves together
-        FT1 += FT2;
-        // Center and shift
+            // Now that we have the FSC, sum the two halves together
+            FT1 += FT2;
+        }
+            // Center and shift
+        //std::cerr << " before centerFFT" << std::endl;
         CenterFFTbySign(FT1);
-        shiftImageInFourierTransform(FT1, FT1, XSIZE(frame1), -xshift/angpix_spacing, -yshift/angpix_spacing);
+        shiftImageInFourierTransform(FT1, FT1, XSIZE(frame), -xshift/angpix_spacing, -yshift/angpix_spacing);
+        //std::cerr << " after centerFFT" << std::endl;
 
         // Get CTF
-        MultidimArray<RFLOAT>  Fctf, Ftmp;
+        MultidimArray<RFLOAT>  Fctf;
         Fctf.resize(YSIZE(FT1), XSIZE(FT1));
         ctf.getFftwImage(Fctf, new_box, new_box, angpix_spacing, false, false, ctf_intact_first_peak, false);
+        //std::cerr << " after getCTF" << std::endl;
+
+        //Image<RFLOAT> Ictf;
+        //Ictf()=Fctf;
+        //Ictf.write("rec_Ictf_frame"+ integerToString(f)+".mrc");
 
         // Calculate the CTF-corrected SNR from the FSC
-        MultidimArray<RFLOAT> SNR = getCtfCorrectedSNR(FSC, Fctf, lambda, 0);
-
-        FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM2D(FT1)
+        if (fourierWienerFilter)
         {
-            long int idx = XMIPP_MIN(ROUND(sqrt(ip*ip + jp*jp)), XSIZE(SNR)-1);
-            // Wiener filter = Sum(CTF*SNR*X) / (Sum(CTF^2*SNR) + 1.)
-            DIRECT_A2D_ELEM(FT1, i, j)  *= DIRECT_MULTIDIM_ELEM(SNR, idx) * DIRECT_A2D_ELEM(Fctf, i, j);
-            DIRECT_A2D_ELEM(Fctf, i, j) *= DIRECT_MULTIDIM_ELEM(SNR, idx) * DIRECT_A2D_ELEM(Fctf, i, j);
+            // Wiener filter-type correction
+            SNR = getCtfCorrectedSNR(FSC, Fctf, lambda, 0);
+            FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM2D(FT1)
+            {
+                long int idx = XMIPP_MIN(ROUND(sqrt(ip*ip + jp*jp)), XSIZE(SNR)-1);
+                // Wiener filter = Sum(CTF*SNR*X) / (Sum(CTF^2*SNR) + 1.)
+                DIRECT_A2D_ELEM(FT1, i, j)  *= DIRECT_MULTIDIM_ELEM(SNR, idx) * DIRECT_A2D_ELEM(Fctf, i, j);
+                DIRECT_A2D_ELEM(Fctf, i, j) *= DIRECT_MULTIDIM_ELEM(SNR, idx) * DIRECT_A2D_ELEM(Fctf, i, j);
+            }
+        }
+        else
+        {
+            // Just premultiply with the CTF
+            FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM2D(FT1)
+            {
+                DIRECT_A2D_ELEM(FT1, i, j)  *= DIRECT_A2D_ELEM(Fctf, i, j);
+                DIRECT_A2D_ELEM(Fctf, i, j) = 1.;
+            }
         }
 
         #pragma omp critical
         {
             BP.set2DFourierTransform(FT1, A, &Fctf);
         };
+        //std::cerr << " after set2DFT for frame " << f << std::endl;
 
-    }
+
+    } // end for loop over frames
 
     Image<RFLOAT> vol;
     vol().resize(new_box, new_box, new_box);
     vol().setXmippOrigin();
-    bool do_map = true;
     MultidimArray<RFLOAT> tau2(new_box);
     tau2.initConstant(1.);
-    BP.reconstruct(vol(), 0, do_map, tau2);
+    BP.reconstruct(vol(), 0, fourierWienerFilter, tau2);
     if (!do_multiple) Log::print("Writing output");
 
     vol().window(FIRST_XMIPP_INDEX(d/spacing), FIRST_XMIPP_INDEX(h/spacing), FIRST_XMIPP_INDEX(w/spacing),
