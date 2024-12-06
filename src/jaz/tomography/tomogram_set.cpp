@@ -177,9 +177,7 @@ Tomogram TomogramSet::loadTomogram(int index, bool loadImageData, bool loadEvenF
     }
     else
     {
-        out.w0 = -999;
-        out.h0 = -999;
-        out.d0 = -999;
+        REPORT_ERROR("ERROR loadTomogram: tomogram sizes have not been set for tomogram " + tomoName);
     }
 
     // Select only a subset of the tilt series images with the lowest dose
