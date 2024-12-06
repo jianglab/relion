@@ -705,9 +705,6 @@ void SubtomoProgram::processTomograms(
 		}
 
 		Tomogram tomogram = tomogramSet.loadTomogram(t, true);
-        if (tomogram.centre.x == 0 && tomogram.centre.y == 0 && tomogram.centre.z == 0)
-            REPORT_ERROR("ERROR: centre for tomogram " + integerToString(t+1) + " has not been set!");
-
         tomogram.validateParticleOptics(particles[t], particleSet);
 
         // If using the real_subtomo approach, then need to read in the reconstructed tomogram volume
