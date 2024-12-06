@@ -36,9 +36,9 @@ class image_handler_parameters
 {
 	public:
    	FileName fn_in, fn_out, fn_sel, fn_img, fn_sym, fn_sub, fn_mult, fn_div, fn_add, fn_subtract, fn_mask, fn_fsc, fn_adjust_power, fn_correct_ampl, fn_fourfilter, fn_cosDPhi;
-	int bin_avg, avg_first, avg_last, edge_x0, edge_xF, edge_y0, edge_yF, filter_edge_width, new_box, minr_ampl_corr, my_new_box_size;
-	bool do_add_edge, do_invert_hand, do_flipXY, do_flipmXY, do_flipZ, do_flipX, do_flipY, do_shiftCOM, do_stats, do_calc_com, do_avg_ampl, do_avg_ampl2, do_avg_ampl2_ali, do_average, do_remove_nan, do_average_all_frames, do_power, do_guinier, do_ignore_optics, do_optimise_scale_subtract, write_float16;
-	RFLOAT multiply_constant, divide_constant, add_constant, subtract_constant, threshold_above, threshold_below, angpix, requested_angpix, real_angpix, force_header_angpix, lowpass, highpass, logfilter, bfactor, shift_x, shift_y, shift_z, replace_nan, randomize_at, optimise_bfactor_subtract;
+	int bin_avg, avg_first, avg_last, edge_x0, edge_xF, edge_y0, edge_yF, filter_edge_width, new_box, minr_ampl_corr, my_new_box_size, pix_x, pix_y, pix_z;
+	bool do_add_edge, do_invert_hand, do_flipXY, do_flipmXY, do_flipZ, do_flipX, do_flipY, do_shiftCOM, do_stats, do_calc_com, do_avg_ampl, do_avg_ampl2, do_avg_ampl2_ali, do_average, do_remove_nan, do_average_all_frames, do_power, do_guinier, do_ignore_optics, do_optimise_scale_subtract, write_float16, do_set_pixel;
+	RFLOAT multiply_constant, divide_constant, add_constant, subtract_constant, threshold_above, threshold_below, angpix, requested_angpix, real_angpix, force_header_angpix, lowpass, highpass, logfilter, bfactor, shift_x, shift_y, shift_z, replace_nan, randomize_at, optimise_bfactor_subtract, pix_val;
 	// PNG options
 	RFLOAT minval, maxval, sigma_contrast, guinier_fit_minres, guinier_fit_maxres;
 	int color_scheme; // There is a global variable called colour_scheme in displayer.h!
@@ -133,8 +133,12 @@ class image_handler_parameters
 		do_remove_nan = parser.checkOption("--remove_nan", "Replace non-numerical values (NaN, inf, etc) in the image(s)");
 		replace_nan = textToFloat(parser.getOption("--replace_nan", "Replace non-numerical values (NaN, inf, etc) with this value", "0"));
 		randomize_at = textToFloat(parser.getOption("--phase_randomise", "Randomise phases beyond this resolution (in Angstroms)", "-1"));
+        pix_val = textToFloat(parser.getOption("--pixel_value", "Replace pixel specified below with this value (default is don't replace)", "-999"));
+        pix_x = textToInteger(parser.getOption("--pixel_x", "Pixel X-coordinate to replace value n absolute coordinates", "-1"));
+        pix_y = textToInteger(parser.getOption("--pixel_y", "Pixel Y-coordinate to replace value n absolute coordinates", "-1"));
+        pix_z = textToInteger(parser.getOption("--pixel_z", "Pixel Z-coordinate to replace value n absolute coordinates", "-1"));
 
-		int three_d_section = parser.addSection("3D operations");
+        int three_d_section = parser.addSection("3D operations");
 		fn_sym = parser.getOption("--sym", "Symmetrise 3D map with this point group (e.g. D6)", "");
 
 		int preprocess_section = parser.addSection("2D-micrograph (or movie) operations");
@@ -618,6 +622,14 @@ class image_handler_parameters
 				DIRECT_A3D_ELEM(Iout(), k, i, j) = A3D_ELEM(Iin(), k, i, dest_x);
 			}
 		}
+        else if (fabs(pix_val+999) > 0.1)
+        {
+            Iout() = Iin();
+            if (ZSIZE(Iout()) < 2)
+                DIRECT_A2D_ELEM(Iout(), pix_y, pix_x) = pix_val;
+            else
+                DIRECT_A3D_ELEM(Iout(), pix_z, pix_y, pix_x) = pix_val;
+        }
 
 		// Shifting
 		if (do_shiftCOM)
