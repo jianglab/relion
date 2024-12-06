@@ -769,6 +769,10 @@ void TomogramSet::generateSingleMetaDataTable(MetaDataTable &MDout, ObservationM
     MDout.clear();
     for (long int t = 0; t < tomogramTables.size(); t++)
     {
+
+        //Make sure we order tilt series on pre-exposure, as we'll also do this when combining everything at the end
+        tomogramTables[t].newSort(EMDL_MICROGRAPH_PRE_EXPOSURE);
+
         // Store all the necessary optics stuff in an opticsGroup per tomogram
         RFLOAT moviePixelSize, voltage, Cs, Q0;
         std::string tomo_name = getTomogramName(t);
