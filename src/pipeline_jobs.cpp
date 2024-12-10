@@ -6729,7 +6729,8 @@ void RelionJob::initialiseTomoReconstructTomogramsJob()
 	joboptions["ydim"] = JobOption("Unbinned tomogram height (Ydim): ", 4000, 1, 6000, 100, "The tomogram Y-dimension in unbinned pixels.");
 	joboptions["zdim"] = JobOption("Unbinned tomogram thickness (Zdim): ", 2000, 1, 6000, 100, "The tomogram Z-dimension in unbinned pixels.");
 
-    joboptions["do_fourier"] = JobOption("Fourier-inversion with odd/even frames?", true, "When set to Yes, a Wiener-filtered reconstruction will be calculated by Fourier inversion. The SNRs of all frames will be measured from the odd/even frames, which should have thus been calculated");
+    joboptions["do_fourier"] = JobOption("Use Fourier-inversion?", true, "When set to Yes, instead of using real-space backprojection, a Fourier-space inversion algorithm is used.");
+    joboptions["do_skip_wiener"] = JobOption("Skip Wiener filter?", false, "By default, the Fourier-inversion method uses a Wiener-filter, where the signal-to-noise ratios are calculated from Fourier shell correlations between the odd/even frames, which should have thus been calculated during MotionCorrection. If this option is true, then the odd/even frames are not necessary, and the images will only be pre-calculated with the CTF, without any division by CTF^2 as in the Wiener filter. This is the option that should be used for subsequent (real) sub-tomogram averaging");
     joboptions["ctf_intact_first_peak"] =JobOption("Ignore CTFs until first peak?", true, "When set to Yes, the lowest spatial frequencies will not be boosted through CTF-correction, which will lead to a reconstruction with less low-resolution contrast, but better high-resolution details>");
 
     joboptions["do_proj"] = JobOption("Also write 2D sums of central Z-slices?:", true, "When set to Yes, this option will result in the calculation of 2D sums of Z-slices from the reconstructed tomograms. These may be useful to quickly screen for bad tomograms using the relion_display program.");
@@ -6791,9 +6792,14 @@ bool RelionJob::getCommandsTomoReconstructTomogramsJob(std::string &outputname, 
         {
             command += " --ctf_intact_first_peak ";
         }
+        if (joboptions["do_skip_wiener"].getBoolean())
+        {
+            command += " --skip_fourier_wiener ";
+        }
+
     }
 
-        if (joboptions["do_proj"].getBoolean())
+    if (joboptions["do_proj"].getBoolean())
 	{
 		command += " --do_proj ";
         command += " --centre_proj " + joboptions["centre_proj"].getString();
