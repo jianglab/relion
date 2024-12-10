@@ -32,7 +32,6 @@
 #include "src/image.h"
 #include "src/micrograph_model.h"
 #include <src/jaz/single_particle/obs_model.h>
-#include "src/jaz/tomography/tomogram_set.h"
 
 class MotioncorrRunner
 {
@@ -57,19 +56,10 @@ public:
 	// Optics group number for all original micrographs
 	std::vector<int> optics_group_micrographs, optics_group_ori_micrographs;
 
-    // Pre-exposure for each micrograph (mainly used for tomography)
-    std::vector<RFLOAT> pre_exposure_micrographs;
-
 	// Information about the optics groups
 	ObservationModel obsModel;
 
-    // Is this a tomography experiment?
-    bool is_tomo;
-
-    // Information about tomography experiment
-    TomogramSet tomogramSet;
-
-    // Skip generation of logfile
+	// Skip generation of logfile
 	bool do_skip_logfile;
 
 	// Use our own implementation
@@ -122,6 +112,7 @@ public:
 	double voltage;
 	double dose_per_frame;
 	double pre_exposure;
+	std::vector<double> dose_per_frame_vec;
 
 	// Gain reference file
 	FileName fn_gain_reference;
@@ -150,10 +141,7 @@ public:
 
 	// Process at most this number of (unprocessed) micrographs
 	long do_at_most;
-	
-	// Save sums of movies from even and odd frames for denoising
-	bool even_odd_split;
-	
+
 	// EER parameters
 	int eer_upsampling, eer_grouping;
 
@@ -180,7 +168,7 @@ public:
 	void run();
 
 	// Given an input fn_mic filename, this function will determine the names of the output corrected image (fn_avg) and the corrected movie (fn_mov).
-	FileName getOutputFileNames(FileName fn_mic, bool continue_even_odd = false);
+	FileName getOutputFileNames(FileName fn_mic);
 
 	// Execute MOTIONCOR2 for a single micrograph
 	bool executeMotioncor2(Micrograph &mic, int rank = 0);
@@ -224,10 +212,6 @@ private:
 	void realSpaceInterpolation(Image <float> &Isum, std::vector<Image<float> > &Iframes, MotionModel *model, std::ostream &logfile);
 
 	void realSpaceInterpolation_ThirdOrderPolynomial(Image <float> &Isum, std::vector<Image<float> > &Iframes, ThirdOrderPolynomialModel &model, std::ostream &logfile);
-	
-	void realSpaceInterpolation_withoutsum(std::vector<Image<float> > &Ialignedframes, std::vector<Image<float> > &Iframes, MotionModel *model, std::ostream &logfile);
-
-	void realSpaceInterpolation_ThirdOrderPolynomial_withoutsum(std::vector<Image<float> > &Ialignedframes, std::vector<Image<float> > &Iframes, ThirdOrderPolynomialModel &model, std::ostream &logfile);
 
 	void interpolateShifts(std::vector<int> &group_start, std::vector<int> &group_size,
 	                       std::vector<RFLOAT> &xshifts, std::vector<RFLOAT> &yshifts,

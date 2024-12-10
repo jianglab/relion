@@ -140,7 +140,7 @@ Micrograph::Micrograph(const Micrograph& m)
 	copyFieldsFrom(m);
 }
 
-Micrograph::Micrograph(FileName filename, FileName fnGain, RFLOAT binning, int eer_upsampling, int eer_grouping)
+Micrograph::Micrograph(FileName filename, FileName fnGain, RFLOAT binning, int eer_upsampling, int eer_grouping, RFLOAT dose_per_frame)
 :   ready(false),
     model(NULL)
 {
@@ -158,6 +158,10 @@ Micrograph::Micrograph(FileName filename, FileName fnGain, RFLOAT binning, int e
 		this->eer_upsampling = eer_upsampling;
 		this->eer_grouping = eer_grouping;
 		setMovie(filename, fnGain, binning);
+		if (dose_per_frame != -1)
+		{
+			this->dose_per_frame = dose_per_frame;
+		}
 	}
 
 	ready = true;
@@ -330,6 +334,16 @@ int Micrograph::getEERUpsampling() const
 int Micrograph::getEERGrouping() const
 {
 	return eer_grouping;
+}
+
+RFLOAT Micrograph::getDosePerFrame() const
+{
+	return dose_per_frame;
+}
+
+void Micrograph::setDosePerFrame(RFLOAT dose_per_frame)
+{
+	this->dose_per_frame = dose_per_frame;
 }
 
 void Micrograph::fillDefectAndHotpixels(MultidimArray<bool> &mask) const

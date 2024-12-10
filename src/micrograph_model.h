@@ -98,7 +98,7 @@ public:
 	Micrograph(const Micrograph& m);
 
 	// Create from a movie or a STAR file
-	Micrograph(FileName filename, FileName fnGain="", RFLOAT binning=1.0, int eer_upsampling=-1, int eer_grouping=-1);
+	Micrograph(FileName filename, FileName fnGain="", RFLOAT binning=1.0, int eer_upsampling=-1, int eer_grouping=-1, RFLOAT dose_per_frame=-1);
 
 	~Micrograph();
 
@@ -137,6 +137,11 @@ public:
 
 	int getEERUpsampling() const;
 	int getEERGrouping() const;
+	
+	// Get dose per frame
+	RFLOAT getDosePerFrame() const;
+	// Set dose per frame
+	void setDosePerFrame(RFLOAT dose_per_frame);
 
 private:
 	int width, height, n_frames;
