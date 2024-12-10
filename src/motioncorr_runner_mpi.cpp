@@ -52,7 +52,7 @@ void MotioncorrRunnerMpi::run()
 		else if (do_motioncor2)
 			std::cout << " Correcting beam-induced motions using Shawn Zheng's MOTIONCOR2 ..." << std::endl;
 		else
-			REPORT_ERROR("Bug: by now it should be clear whether to use MotionCor2 or Unblur...");
+			REPORT_ERROR("Bug: by now it should be clear whether to use MotionCor2 or our own implementation...");
 
 		init_progress_bar(my_nr_micrographs);
 		barstep = XMIPP_MAX(1, my_nr_micrographs / 60);
@@ -68,6 +68,7 @@ void MotioncorrRunnerMpi::run()
 			MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
 
 		Micrograph mic(fn_micrographs[imic], fn_gain_reference, bin_factor, eer_upsampling, eer_grouping);
+		mic.pre_exposure = pre_exposure + pre_exposure_micrographs[imic];
 		if (!dose_per_frame_vec.empty())
 			mic.setDosePerFrame(dose_per_frame_vec[imic]);
 		        std::cout << "Set dose from vec: " << dose_per_frame_vec[imic] << std::endl;
