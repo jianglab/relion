@@ -593,7 +593,7 @@ BufferedImage<float> SubtomoProgram::extractRealSubtomograms(
             // Get the 2D slice out of the 3D Fourier transform
             F2D.initZeros();
             projector.get2DFourierTransform(F2D, A);
-            //shiftImageInFourierTransform(F2D, F2D, cropSize_tomogram, cropSize_tomogram/2, cropSize_tomogram/2);
+            shiftImageInFourierTransform(F2D, F2D, cropSize_tomogram, cropSize_tomogram/2, cropSize_tomogram/2);
             transformer.inverseFourierTransform();
 
             FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(img)

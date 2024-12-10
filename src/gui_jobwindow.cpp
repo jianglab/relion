@@ -2758,7 +2758,7 @@ void JobWindow::initialiseTomoReconstructTomogramsWindow()
     place("do_fourier", TOGGLE_DEACTIVATE, group2, false);
 
     group2->begin();
-    place("do_skio_wiener", TOGGLE_DEACTIVATE);
+    place("do_skip_wiener", TOGGLE_DEACTIVATE);
     place("ctf_intact_first_peak", TOGGLE_DEACTIVATE);
     group2->end();
     guientries["do_fourier"].cb_menu_i();
