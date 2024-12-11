@@ -29,26 +29,22 @@ class ReconstructSnrOptimisation : public FastDifferentiableOptimization
                 if (ctf > 0.99) has_reached_one = true;
                 if (has_reached_one && ctf < 0.99 && first_peak < 0) first_peak = n;
             }
+            if (first_peak < 0) first_peak = XSIZE(CTF) -1 ;
 
+            // set lambda
+            lambda = _lambda;
+
+
+            // vectors
             ctf2.resize(size);
             snr.resize(size);
             FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(CTF)
             {
                 double ctf = DIRECT_MULTIDIM_ELEM(CTF, n);
-                VEC_ELEM(ctf2, n) = ctf * ctf;
-                VEC_ELEM(snr, n) = DIRECT_MULTIDIM_ELEM(SNR, n);
-
+                ctf2[n] = ctf * ctf;
+                snr[n] = DIRECT_MULTIDIM_ELEM(SNR, n);
             }
 
-            // Set D matrix
-            D.initIdentity(size);
-            for (int i=1; i < size - 1; i++)
-            {
-                MAT_ELEM(D, i+1, i) = -1;
-            }
-
-            // set lambda
-            lambda = _lambda;
 
         }
         double gradAndValue(const std::vector<double>& x, std::vector<double>& gradDest) const;
@@ -57,8 +53,7 @@ class ReconstructSnrOptimisation : public FastDifferentiableOptimization
         int getFirstPeak() {return first_peak;};
 
     private:
-        Matrix1D<double> ctf2, snr;
-        Matrix2D<double> D;
+        std::vector<double> ctf2, snr;
         double lambda;
         int first_peak;
 

@@ -18,15 +18,31 @@ using namespace gravis;
 
 double ReconstructSnrOptimisation::gradAndValue(const std::vector<double> &x, std::vector<double> &gradDest) const
 {
-
     int size = x.size();
     if (size != ctf2.size()) REPORT_ERROR("ReconstructSnrOptimisation ERROR: input x has incorrect size!");
     if (size != gradDest.size()) REPORT_ERROR("ReconstructSnrOptimisation ERROR: input gradDest has incorrect size!");
 
+    // Optimisation target:
+    // F(A) = 1/2 *|| C^2A - X||^2 +lamda/2 ||DA||^2
+    // with
+    //     ( 1  0  0  0)
+    // D = (-1  1  0  0)
+    //     ( 0 -1  1  0)
+    //     ( 0  0 -1  1)
+    //
+    // Then gradient:
+    // Delta F(A) = C^2 * ( C^2 A - X) * lambda * D^T * D * A
+    //
+    // and
+    //           ( 2 -1  0  0)
+    // D ^T * D= (-1  2 -1  0)
+    //           ( 0 -1  2 -1)
+    //           ( 0  0 -1  2)
+
+    /* Old, slow code for readability of the algorithm...
     // Convert input vector to Matrix1D
     Matrix1D<double> xx(size);
-    for (int i = 0; i < size; i++)
-        VEC_ELEM(xx, i) = x[i];
+    for (int i = 0; i < size; i++) VEC_ELEM(xx, i) = x[i];
 
     // Calculate the current value of the target function
     Matrix1D<double> Dy = D * xx;
@@ -37,10 +53,30 @@ double ReconstructSnrOptimisation::gradAndValue(const std::vector<double> &x, st
     Matrix1D<double> grad = ctf2 * diff + lambda * D.transpose() * D * xx;
 
     // Convert output Matrix1D grad to vector
-    for (int i = 0; i < size; i++)
-        gradDest[i] = VEC_ELEM(grad, i);
+    for (int i = 0; i < size; i++) gradDest[i] = VEC_ELEM(grad, i);
+    */
 
-    return value;
+    // Much faster to act on the vectors only
+    std::vector<double> myGrad(size);
+    RFLOAT sumDy2 = 0., mydiff, diff2 = 0, myDtDx;
+    for (long int i = 0; i < size; i++)
+    {
+        RFLOAT elem = x[i];
+        if (i-1 >= 0) elem -=  x[i-1];
+        sumDy2 += elem*elem;
+        mydiff = ctf2[i] * x[i] - snr[i];
+        diff2 += mydiff * mydiff;
+
+        myDtDx = (i == size-1) ? x[i] : 2*x[i];
+        if (i-1 >= 0)  myDtDx -= x[i-1];
+        if (i+1 < size) myDtDx -= x[i+1];
+
+        // set gradient
+        gradDest[i] = ctf2[i] * mydiff + lambda * myDtDx;
+    }
+
+    return diff2 + (lambda / 2.) * sumDy2;
+
 }
 
 void TomoBackprojectProgram::readParameters(int argc, char *argv[])
@@ -299,6 +335,7 @@ MultidimArray<RFLOAT>  TomoBackprojectProgram::getCtfCorrectedSNR(const Multidim
     // Ignore the spatial frequencies until the first peak in the CTF: just divide SNR by CTF^2 for those in the block below this one
     // Because SNRs can be very high here, they can mess up the optimisation below, just set all values before first peak to the SNR at first_peak
     int first_peak = problem.getFirstPeak();
+    if (verb > 0) std::cout << " first_peak= " << first_peak << " xsize= " <<XSIZE(oriSNR)<< std::endl;
 
     std::vector<double> initial(XSIZE(oriSNR));
     FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(oriSNR)
@@ -308,7 +345,9 @@ MultidimArray<RFLOAT>  TomoBackprojectProgram::getCtfCorrectedSNR(const Multidim
         else
             initial[n] = DIRECT_MULTIDIM_ELEM(oriSNR, n);
     }
+    if (verb > 0) std::cout << "before optimise" << std::endl;
     std::vector<double> newSNR= LBFGS::optimize(initial, problem, false, 100, 1e-7, 1e-6);
+    if (verb > 0) std::cout << "after optimise" << std::endl;
 
 
     FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(corrSNR)
@@ -329,7 +368,6 @@ MultidimArray<RFLOAT>  TomoBackprojectProgram::getCtfCorrectedSNR(const Multidim
 
     if (verb > 0)
     {
-        std::cout << " first_peak= " << first_peak << std::endl;
         std::cout << "# shell corrSNR newSNR oriSNR corrSNR*CTF^2 oriSNR*CTF^2 CTF^2 FSC" << std::endl;
         FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(corrSNR)
         {
@@ -512,6 +550,7 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
         // Get CTF
         MultidimArray<RFLOAT>  Fctf;
         Fctf.resize(YSIZE(FT1), XSIZE(FT1));
+        //std::cerr << " new_box= " << new_box << " YSIZE(FT1)= " << YSIZE(FT1) <<" defocus= " << ctf.DeltafU<< std::endl;
         ctf.getFftwImage(Fctf, new_box, new_box, angpix_spacing, false, false, ctf_intact_first_peak, false);
 
         //Image<RFLOAT> Ictf;
@@ -523,6 +562,8 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
         {
             // Wiener filter-type correction
             SNR = getCtfCorrectedSNR(FSC, Fctf, lambda, 0);
+            //for (int i = 0; i < XSIZE(SNR); i++)
+            //    std::cerr << " f= " << f << " i =" << i << " snr= " << DIRECT_MULTIDIM_ELEM(SNR, i)<<std::endl;
             FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM2D(FT1)
             {
                 long int idx = XMIPP_MIN(ROUND(sqrt(ip*ip + jp*jp)), XSIZE(SNR)-1);
@@ -551,10 +592,13 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
     Image<RFLOAT> vol;
     vol().resize(new_box, new_box, new_box);
     vol().setXmippOrigin();
+    vol().printShape(std::cerr);
     MultidimArray<RFLOAT> tau2(new_box);
     tau2.initConstant(1.);
+
     BP.reconstruct(vol(), 0, fourierWienerFilter, tau2);
     if (!do_multiple) Log::print("Writing output");
+
 
     vol().window(FIRST_XMIPP_INDEX(d/spacing), FIRST_XMIPP_INDEX(h/spacing), FIRST_XMIPP_INDEX(w/spacing),
                  LAST_XMIPP_INDEX(d/spacing), LAST_XMIPP_INDEX(h/spacing), LAST_XMIPP_INDEX(w/spacing), 0.);
