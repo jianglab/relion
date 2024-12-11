@@ -426,12 +426,12 @@ void SubtomoProgram::writeParticleSet(
 		int datadim = (do_stack2d || do_reproject_subtomo) ? 2 : 3;
         copy.optTable.setValue(EMDL_IMAGE_DIMENSIONALITY, datadim, og);
 
-        RFLOAT mybinning = (do_real_subtomo) ? real_subtomo_binning : binning;
+        RFLOAT mybinning = (do_real_subtomo || do_reproject_subtomo) ? real_subtomo_binning : binning;
 		copy.optTable.setValue(EMDL_TOMO_SUBTOMOGRAM_BINNING, mybinning, og);
         const double ps_img = copy.optTable.getDouble(EMDL_TOMO_TILT_SERIES_PIXEL_SIZE, og);
         const double ps_out = mybinning * ps_img;
 		copy.optTable.setValue(EMDL_IMAGE_PIXEL_SIZE, ps_out, og);
-		int mysize = (do_real_subtomo) ? cropSize_tomogram : cropSize;
+		int mysize = (do_real_subtomo || do_reproject_subtomo) ? cropSize_tomogram : cropSize;
         copy.optTable.setValue(EMDL_IMAGE_SIZE, mysize, og);
 
 
