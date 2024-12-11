@@ -2869,7 +2869,7 @@ void JobWindow::initialiseTomoSubtomoWindow()
 	tab1->end();
 
 	tab2->begin();
-	tab2->label("Reconstruct");
+	tab2->label("Extract");
 	resetHeight();
 
     place("binning", TOGGLE_DEACTIVATE);
@@ -2884,12 +2884,12 @@ void JobWindow::initialiseTomoSubtomoWindow()
     current_y += STEPY /2 ;
 
     place("do_stack2d", TOGGLE_DEACTIVATE);
-    place("do_float16", TOGGLE_DEACTIVATE);
+    place("do_real_subtomo", TOGGLE_DEACTIVATE);
+    place("do_reproject_subtomo", TOGGLE_DEACTIVATE);
 
     current_y += STEPY /2 ;
 
-    place("do_reproject_subtomo", TOGGLE_DEACTIVATE);
-    place("do_real_subtomo", TOGGLE_DEACTIVATE);
+    place("do_float16", TOGGLE_DEACTIVATE);
 
 	tab2->end();
 }
