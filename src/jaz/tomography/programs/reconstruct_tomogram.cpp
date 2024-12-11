@@ -164,17 +164,22 @@ void TomoBackprojectProgram::initialise(bool verbose)
             std::cout << " + Applying a tilt angle offset of " << tiltAngleOffset << " degrees" << std::endl;
         }
 
+        if (fourierInversion)
+        {
+            std::cout << " + Using a Fourier-inversion reconstruction algorithm " << std::endl;
+            if (fourierWienerFilter) std::cout << "   - with a Wiener-filter correction for the CTFs " << std::endl;
+            else std::cout << "   - with only CTF-premultiplication of the tilt series images (for subsequent subtomogram extraction) " << std::endl;
+        }
+        else
+        {
+            std::cout << " + Using a real-space back-projection algorithm " << std::endl;
+        }
         if (do_2dproj)
         {
-            std::cout << " + Making 2D projections " << std::endl;
+            std::cout << " + Also making 2D projections of the tomograms " << std::endl;
             std::cout << "    - centered at " << centre_2dproj << " tomogram pixels from the centre of the tomogram" << std::endl;
             std::cout << "    - and a thickness of " << thickness_2dproj << " tomogram pixels" << std::endl;
         }
-        std::cout << "  - fourierInversion= " << fourierInversion << " fourierWienerFilter= " << fourierWienerFilter << std::endl;
-        std::cout << "  - doWiener= " << doWiener << std::endl;
-        std::cout << "  - applyCtf= " << applyCtf << std::endl;
-        std::cout << "  - applyPreWeight= " << applyPreWeight << std::endl;
-        if (doWiener) std::cout << "  - applyWeight= " << applyWeight << std::endl;
 
     }
 
@@ -405,10 +410,11 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
 
         int nr_halves = (fourierWienerFilter) ? 2 : 1;
         MultidimArray<Complex> FT1, FT2;
-        MultidimArray<RFLOAT> frame(tomogram1.stack.ydim, tomogram1.stack.xdim);
+        MultidimArray<RFLOAT> frame;
         for (int ihalf = 0; ihalf < nr_halves; ihalf++)
         {
 
+            frame.resize(tomogram1.stack.ydim, tomogram1.stack.xdim);
             // Get frame from Jasenko's stack
             if (ihalf == 0)
             {
@@ -539,8 +545,6 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
         {
             BP.set2DFourierTransform(FT1, A, &Fctf);
         };
-        //std::cerr << " after set2DFT for frame " << f << std::endl;
-
 
     } // end for loop over frames
 
