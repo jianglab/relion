@@ -409,7 +409,6 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
         for (int ihalf = 0; ihalf < nr_halves; ihalf++)
         {
 
-            //std::cerr << " ihalf= " << ihalf << std::endl;
             // Get frame from Jasenko's stack
             if (ihalf == 0)
             {
@@ -424,12 +423,10 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
                         DIRECT_A2D_ELEM(frame, y, x) = tomogram2.stack(x, y, f);
             }
 
-            //std::cerr <<" got frame"<< std::endl;
             // Make square (plus factor 1.4 padding)
             frame.setXmippOrigin();
             frame.window(FIRST_XMIPP_INDEX(square_box), FIRST_XMIPP_INDEX(square_box),
                           LAST_XMIPP_INDEX(square_box), LAST_XMIPP_INDEX(square_box));
-            //std::cerr <<" windowed"<< std::endl;
 
             // Mirror the image back out into the padding area to prevent low-resolution artifacts
             int first_x = FIRST_XMIPP_INDEX(tomogram1.stack.xdim);
@@ -465,10 +462,8 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
                     A2D_ELEM(frame, i, j) = A2D_ELEM(frame, ip, jp);
                 }
             }
-            //std::cerr <<" dealt with edges"<< std::endl;
 
             // Downscale
-            //std::cerr <<" new_box= " << new_box << " square_box= " << square_box << std::endl;
             if (new_box != square_box) resizeMap(frame, new_box);
 
             //Image<RFLOAT> It;
@@ -477,14 +472,12 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
 
             // FT and get SNRs
             // Not entirely sure this is necessary, but FFTW transformers have been troublesome with threads in the past...
-            //std::cerr << " before FT" << std::endl;
 #pragma omp critical
             {
                 FourierTransformer transformer;
                 if (ihalf == 0) transformer.FourierTransform(frame, FT1);
                 else transformer.FourierTransform(frame, FT2);
             };
-            //std::cerr << " after FT" << std::endl;
         }
 
         // Get the transformation matrix
@@ -505,17 +498,15 @@ void TomoBackprojectProgram::reconstructOneTomogramFourier(int tomoIndex)
             // Now that we have the FSC, sum the two halves together
             FT1 += FT2;
         }
-            // Center and shift
-        //std::cerr << " before centerFFT" << std::endl;
+
+        // Center and shift
         CenterFFTbySign(FT1);
         shiftImageInFourierTransform(FT1, FT1, XSIZE(frame), -xshift/angpix_spacing, -yshift/angpix_spacing);
-        //std::cerr << " after centerFFT" << std::endl;
 
         // Get CTF
         MultidimArray<RFLOAT>  Fctf;
         Fctf.resize(YSIZE(FT1), XSIZE(FT1));
         ctf.getFftwImage(Fctf, new_box, new_box, angpix_spacing, false, false, ctf_intact_first_peak, false);
-        //std::cerr << " after getCTF" << std::endl;
 
         //Image<RFLOAT> Ictf;
         //Ictf()=Fctf;
