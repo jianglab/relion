@@ -715,6 +715,7 @@ MetaDataTable AmyloidFinder::traceFilaments(MultidimArray<RFLOAT> &Mscore, Multi
 
     int newsize = (XSIZE(Mpsi)*down_angpix) / angpix;
     if (newsize%2 !=0) newsize++;
+    down_angpix = angpix * XSIZE(Mpsi) / (float)newsize;
     resizeMap(Mscore, newsize);
     resizeMap(Mpsi, newsize);
     Mscore.setXmippOrigin();
@@ -930,6 +931,7 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         {
             Image<RFLOAT> Ipsi, Izscore;
             Ipsi.setSamplingRateInHeader(down_angpix);
+            Izscore.setSamplingRateInHeader(down_angpix);
             Ipsi()=Mangle;
             Izscore()=Mscore;
             Ipsi.write(fn_psi);
