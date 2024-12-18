@@ -31,13 +31,16 @@ class SubtomoProgram
 			int 
 				boxSize, 
 				cropSize,
+                binnedSizePixel,
                 min_frames,
                 num_threads;
 			
 			double 
 				SNR,
 				binning,
-				taper,
+                boxSizeAngst,
+                precropSizeAngst,
+                taper,
 				env_sigma,
 				cone_slope,
 				cone_sig0,
@@ -70,11 +73,11 @@ class SubtomoProgram
 				write_float16,
 				run_from_GUI,
 				run_from_MPI,
-                do_reproject_subtomo,
                 do_real_subtomo;
 
 		void readBasicParameters(IOParser& parser);
 		virtual void readParameters(int argc, char *argv[]);
+        virtual void setBoxsizes(TomogramSet &tomogramSet, bool verb = true);
 		virtual void run();
 
 

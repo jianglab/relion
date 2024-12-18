@@ -2872,9 +2872,9 @@ void JobWindow::initialiseTomoSubtomoWindow()
 	tab2->label("Extract");
 	resetHeight();
 
-    place("binning", TOGGLE_DEACTIVATE);
-	place("box_size", TOGGLE_DEACTIVATE);
-	place("crop_size", TOGGLE_DEACTIVATE);
+    place("box_size_angst", TOGGLE_DEACTIVATE);
+    place("precrop_size_angst", TOGGLE_DEACTIVATE);
+	place("binned_size_pix", TOGGLE_DEACTIVATE);
 
     current_y += STEPY /2 ;
 
@@ -2884,8 +2884,8 @@ void JobWindow::initialiseTomoSubtomoWindow()
     current_y += STEPY /2 ;
 
     place("do_stack2d", TOGGLE_DEACTIVATE);
+    place("do_pseudo3d", TOGGLE_DEACTIVATE);
     place("do_real_subtomo", TOGGLE_DEACTIVATE);
-    place("do_reproject_subtomo", TOGGLE_DEACTIVATE);
 
     current_y += STEPY /2 ;
 

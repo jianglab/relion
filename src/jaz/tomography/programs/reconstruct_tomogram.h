@@ -7,10 +7,12 @@
 #include <src/time.h>
 #include <src/jaz/gravis/t4Matrix.h>
 #include <src/jaz/gravis/t2Vector.h>
+#include <src/jaz/optics/damage.h>
 #include <src/jaz/optimization/optimization.h>
 #include <src/jaz/tomography/optimisation_set.h>
 #include <src/jaz/tomography/tomogram_set.h>
 #include <src/jaz/optimization/lbfgs.h>
+#include <src/jaz/tomography/tomogram_set.h>
 
 class ReconstructSnrOptimisation : public FastDifferentiableOptimization
 {

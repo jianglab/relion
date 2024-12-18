@@ -6716,9 +6716,7 @@ void RelionJob::initialiseTomoReconstructTomogramsJob()
 	hidden_name = ".gui_tomo_reconstruct_tomograms";
 
 	joboptions["in_tiltseries"] = JobOption("Input tilt series:", LABEL_TOMOGRAMS_CPIPE, 1, "", "STAR files (*.star)",  "Input global tilt series star file.");
-
 	joboptions["tiltangle_offset"] = JobOption("Tilt angle offset (deg): ", 0., -25., 25, 1, "The tomogram tilt angles will all be changed by this value. This may be useful to reconstruct lamellae that are all milled under a given angle. All tomograms will be reconstructed with the same offset. Use the tomogram name option below to reconstruct only a single tomogram.");
-
     joboptions["tomo_name"] = JobOption("Reconstruct only this tomogram:", std::string(""), "If not left empty, the program will only reconstruct this particular tomogram");
 	joboptions["generate_split_tomograms"] = JobOption("Generate tomograms for denoising?:", false, "Generate tomograms for input into a denoising job. For this option to work, Save images for denoising? should have been True during Motion Correction. Additionally, adjust zdim to minimise the amount of empty space without sample within the tomograms.");
 
@@ -6796,7 +6794,11 @@ bool RelionJob::getCommandsTomoReconstructTomogramsJob(std::string &outputname, 
         {
             command += " --skip_fourier_wiener ";
         }
-
+    }
+    else
+    {
+        // Let's do CTF-premultiplication by default, in case people want to do real subtomogram averaging afterwards
+        command += " --ctf ";
     }
 
     if (joboptions["do_proj"].getBoolean())
@@ -7102,16 +7104,17 @@ void RelionJob::initialiseTomoSubtomoJob()
 
     addTomoInputOptions(true, true, true, false);
 
-    joboptions["binning"] = JobOption("Binning factor:", 1, 1, 16, 1, "The tilt series images will be binned by this (real-valued) factor and then reconstructed in the specified box size above. Note that thereby the reconstructed region becomes larger when specifying binning factors larger than one.");
-	joboptions["box_size"] = JobOption("Box size (binned pix):", 128, 32, 512, 16, "The initial box size of the reconstruction. A sufficiently large box size allows more of the high-frequency signal to be captured that has been delocalised by the CTF.");
-	joboptions["crop_size"] = JobOption("Cropped box size (binned pix):", -1, -1, 512, 16, "If set to a positive value, after construction, the resulting pseudo subtomograms are cropped to this size. A smaller box size allows the (generally expensive) refinement using relion_refine to proceed more rapidly.");
+
+    joboptions["box_size_angst"] = JobOption("Box size (A):", 128, 32, 512, 16, "The final particle box size in Angstrom.");
+    joboptions["binned_size_pix"] = JobOption("Binning to box size (pixels):", 64, 16, 256, 16, "The box size above will be binned to yield the number of pixels given here. Smaller boxes will refine faster and occupy less space, but will be limited to lower Nyquist frequency.");
+    joboptions["precrop_size_angst"] = JobOption("Pre-cropping box size (A):", -1, -1, 512, 16, "If set to a positive value, then a larger box size can be used to extract 2D slices out of the micrograph, pre-multiply these with the CTF, and then crop to the box size above. A sufficiently large pre-crop box size therefore will allow more of the high-frequency signal to be captured that has been delocalised by the CTF. ");
 
     joboptions["max_dose"] = JobOption("Maximum dose (e/A^2):", -1, -1, 200, 1, "Tilt series frames with a dose higher than this maximum dose (in electrons per squared Angstroms) will not be included in the 3D pseudo-subtomogram, or in the 2D stack. For the latter, this will disc I/O operations and increase speed.");
     joboptions["min_frames"] = JobOption("Minimum nr. frames:", 1, 1, 40, 1, "Each selected pseudo-subtomogram need to be visible in at least this number of tilt series frames with doses below the maximum dose");
 
-	joboptions["do_stack2d"] = JobOption("Write output as 2D stacks?", true ,"If set to Yes, this program will write output subtomograms as 2D substacks. This is new as of relion-4.1, and the preferred way of generating subtomograms. If set to No, then relion-4.0 3D pseudo-subtomograms will be written out. Either can be used in subsequent refinements and classifications.");
-    joboptions["do_real_subtomo"] = JobOption("Extract real subtomograms?", false, "If set to Yes, this program will box out real subtomograms from the input tomogram and write those out as 3D subvolumes. All information about the missing wedge will be lost, and these volumes should probably not be used for alignment, classification or averaging.");
-    joboptions["do_reproject_subtomo"] = JobOption("Extract and re-project real subtomograms?", false, "If set to Yes, this program will box out real subtomograms from the input tomogram and then re-project these into 2D stacks that resemble the 2D stacks from windowed tilt series images. The size of the images is determined by the crop size; the pixel size is that of the tomogram. This will result in a particles.star file that is suitable for low-resolution subtomogram averaging and a particles_for_class2d.star file that can be used for fast 2D classification in order to select good particles. You can re-launch the GUI without the --tomo argument to get access to the Class2D job type. If set to No, the program will write out normal windowed tilt-series images that are suitable for high-resolution subtomogram averaging.");
+    joboptions["do_stack2d"] = JobOption("Output 2D stacks?", true ,"If set to Yes, this program will write output subtomograms as 2D substacks. This is new in relion-5, and the preferred way of generating subtomograms.");
+    joboptions["do_pseudo3d"] = JobOption("OR: output 3D pseudo-subtomograms?", false ,"If set to Yes, this program will write output 3D pseudo-subtomograms as were defined in relion-4.");
+    joboptions["do_real_subtomo"] = JobOption("OR: output real 3D subtomograms?", false, "If set to Yes, this program will box out real subtomograms from the input tomogram and write those out as 3D subvolumes. Information about the 3D CTFs and missing wedge will be stored in ctf volumes, which can be used as they were in relion-3. Note that the binning cannot be changed anymore, so particles will be extracted at the pixel size of the tomogram, using the cropped box size in Angstrom to define the box size.");
 
 	joboptions["do_float16"] = JobOption("Write output in float16?", true ,"If set to Yes, this program will write output images in float16 MRC format. This will save a factor of two in disk space compared to the default of writing in float32. Note that RELION and CCPEM will read float16 images, but other programs may not (yet) do so.");
 
@@ -7127,11 +7130,11 @@ bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<s
 
     int c = 0;
     if (joboptions["do_stack2d"].getBoolean()) c++;
+    if (joboptions["do_pseudo3d"].getBoolean()) c++;
     if (joboptions["do_real_subtomo"].getBoolean()) c++;
-    if (joboptions["do_reproject_subtomo"].getBoolean()) c++;
     if (c == 0 || c > 1)
     {
-        error_message = "You have to choose either to write output as 2D stacks, to extract real subtomos, or to extract and reproject real subtomos.";
+        error_message = "You have to choose either to write output as 2D stacks, 3D pseudo-subtomos, or to extract real subtomograms from the tomographic reconstruction.";
         return false;
     }
 
@@ -7153,14 +7156,9 @@ bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<s
 	outputNodes.push_back(node2);
 
 	// Job-specific stuff goes here
-
-	command += " --b " + joboptions["box_size"].getString();
-
-	int crop_size = joboptions["crop_size"].getNumber(error_message);
-	if (error_message != "") return false;
-	if (crop_size > 0.) command += " --crop " + joboptions["crop_size"].getString();
-
-	command += " --bin " + joboptions["binning"].getString();
+	command += " --box_size_A " + joboptions["box_size_angst"].getString();
+    command += " --precrop_size_A " + joboptions["precrop_size_angst"].getString();
+    command += " --binned_size_pix " + joboptions["binned_size_pix"].getString();
 
     float max_dose = joboptions["max_dose"].getNumber(error_message);
     if (error_message != "") return false;
@@ -7180,21 +7178,12 @@ bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<s
 		command += " --stack2d ";
 	}
 
-    if (joboptions["do_reproject_subtomo"].getBoolean())
-    {
-        if (joboptions["do_real_subtomo"].getBoolean())
-        {
-            error_message = "You can only specify reproject subtomos OR write out real subtomoes.";
-            return false;
-        }
-        command += " --reproject_subtomo ";
-        Node node2(outputname+"particles_for_class2d.star", LABEL_CLASS2D_PARTS);
-        outputNodes.push_back(node2);
-
-    }
-    else if (joboptions["do_real_subtomo"].getBoolean())
+    if (joboptions["do_real_subtomo"].getBoolean())
     {
         command += " --real_subtomo ";
+
+        Node node2(outputname+"particles_for_class2d.star", LABEL_CLASS2D_PARTS);
+        outputNodes.push_back(node2);
     }
 
 	if (is_continue)
