@@ -688,18 +688,18 @@ int TomogramSet::getImageIndexWithSmallestVisibleTiltAngle(int index, std::vecto
     RFLOAT mindiff = 999.;
 
     int nr_idx = tomogramTables[index].numberOfObjects();
-    if (nr_idx != isVisible.size()) REPORT_ERROR("BUG: incofrrect number of elements in isVisible vector...");
+    if ( isVisible.size() > 0 && nr_idx != isVisible.size()) REPORT_ERROR("BUG: incofrrect number of elements in isVisible vector...");
 
     int nr_invisible = 0;
     for (int idx = 0; idx < nr_idx; idx++)
     {
-        if (!isVisible[idx])
+        if (isVisible.size() > 0 && !isVisible[idx])
         {
             nr_invisible++;
             continue;
         }
         RFLOAT tilt;
-        tomogramTables[index].getValue(EMDL_TOMO_NOMINAL_TILT_STAGE_ANGLE, tilt, idx);
+        tomogramTables[index].getValue(EMDL_TOMO_YTILT, tilt, idx);
         if (fabs(tilt) < mindiff)
         {
             mindiff = fabs(tilt);
