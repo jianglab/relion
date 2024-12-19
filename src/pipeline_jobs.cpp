@@ -6795,11 +6795,6 @@ bool RelionJob::getCommandsTomoReconstructTomogramsJob(std::string &outputname, 
             command += " --skip_fourier_wiener ";
         }
     }
-    else
-    {
-        // Let's do CTF-premultiplication by default, in case people want to do real subtomogram averaging afterwards
-        command += " --ctf ";
-    }
 
     if (joboptions["do_proj"].getBoolean())
 	{
