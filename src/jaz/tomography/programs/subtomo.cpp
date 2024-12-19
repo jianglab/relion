@@ -623,20 +623,20 @@ BufferedImage<float> SubtomoProgram::extractRealSubtomograms(
     RFLOAT psum = 0., psum2 = 0., pn = 0.;
     FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(projImage)
     {
-        sum  += projImage(i, j);
-        sum2 += projImage(i, j) * projImage(i, j);
+        psum  += projImage(i, j);
+        psum2 += projImage(i, j) * projImage(i, j);
         pn   += 1.;
     }
-    sum /= pn;
-    sum2 = sqrt( (sum2 / pn) - sum * sum);
-    if (sum2 > 0.)
+    psum /= pn;
+    psum2 = sqrt( (psum2 / pn) - psum * psum);
+    if (psum2 > 0.)
     {
         FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(projImage)
         {
-            projImage(i, j) = (projImage(i, j) - sum) / sum2;
+            projImage(i, j) = (projImage(i, j) - psum) / psum2;
         }
     }
-    
+
     // Now make 3D-CTF and store in ctfImage
     BackProjector backprojector(cropSize_tomogram, 3, "C1", TRILINEAR,
                                 1, 10, 0, 1.9, 15., 2, true);
