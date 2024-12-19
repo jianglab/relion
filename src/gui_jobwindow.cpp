@@ -1407,7 +1407,8 @@ void JobWindow::initialiseInimodelWindow()
 	place("do_ctf_correction", TOGGLE_DEACTIVATE, group1);
 
 	group1->begin();
-	place("ctf_intact_first_peak", TOGGLE_DEACTIVATE);
+	if (is_tomo) place("ctf_intact_first_peak", TOGGLE_ALWAYS_DEACTIVATE);
+    else place("ctf_intact_first_peak", TOGGLE_DEACTIVATE);
 	group1->end();
 
 	guientries["do_ctf_correction"].cb_menu_i(); // To make default effective
@@ -1517,7 +1518,8 @@ void JobWindow::initialiseClass3DWindow()
 	place("do_ctf_correction", TOGGLE_DEACTIVATE, group1);
 	group1->begin();
 
-	place("ctf_intact_first_peak", TOGGLE_DEACTIVATE);
+    if (is_tomo) place("ctf_intact_first_peak", TOGGLE_ALWAYS_DEACTIVATE);
+    else place("ctf_intact_first_peak", TOGGLE_DEACTIVATE);
 
 	group1->end();
 
@@ -1720,7 +1722,8 @@ void JobWindow::initialiseAutorefineWindow()
 
 	group1->begin();
 
-	place("ctf_intact_first_peak", TOGGLE_DEACTIVATE);
+    if (is_tomo) place("ctf_intact_first_peak", TOGGLE_ALWAYS_DEACTIVATE);
+    else place("ctf_intact_first_peak", TOGGLE_DEACTIVATE);
 
 	group1->end();
 	guientries["do_ctf_correction"].cb_menu_i(); // To make default effective
