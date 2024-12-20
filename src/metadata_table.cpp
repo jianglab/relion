@@ -2036,6 +2036,7 @@ MetaDataTable subsetMetaDataTable(MetaDataTable &MDin, EMDLabel label, RFLOAT mi
 		REPORT_ERROR("subsetMetadataTable ERROR: input MetaDataTable does not contain label: " +  EMDL::label2Str(label));
 
 	MetaDataTable MDout;
+    MDout.setName(MDin.getName());
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDin)
 	{
 		bool do_include = false;
