@@ -2699,6 +2699,17 @@ void JobWindow::initialiseTomoAlignTiltseriesWindow()
 
     // Add a little spacer
     current_y += STEPY/2;
+    group6 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+    group6->end();
+    place("do_aretomo_reconstruct", TOGGLE_DEACTIVATE, group6, false);
+    group6->begin();
+    place("aretomo_VolZ", TOGGLE_DEACTIVATE);
+    place("aretomo_OutBin", TOGGLE_DEACTIVATE);
+    group6->end();
+    guientries["do_aretomo_reconstruct"].cb_menu_i(); // make default active
+
+    // Add a little spacer
+    current_y += STEPY/2;
     place("other_aretomo_args", TOGGLE_DEACTIVATE);
     place("gpu_ids");
     group3->end();

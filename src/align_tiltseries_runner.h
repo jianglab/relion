@@ -157,6 +157,21 @@ public:
     // Do phase shift estimation in AreTomo?
     bool do_aretomo_phaseshift;
 
+    // Do AreTomo reconstruction?
+    bool do_aretomo_reconstruct;
+
+    // By default use Wbp in Aretomo, but can also use SART
+    bool do_aretomo_sart;
+
+    // Number of SART iterations and the number of projections per iteration
+    int aretomo_sart_iter, aretomo_sart_proj;
+
+    // AreTomo reconstruction Z-height (in unbinned pixels)
+    int aretomo_VolZ;
+
+    // Aretomo reconstruction binning
+    int aretomo_OutBin;
+
     // estimated tomogram thickness (for -AlignZ)
     RFLOAT tomogram_thickness;
 
