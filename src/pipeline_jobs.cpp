@@ -6609,7 +6609,8 @@ void RelionJob::initialiseTomoAlignTiltSeriesJob()
     joboptions["aretomo_tiltcorrect_angle"] = JobOption("Tilt Angle Offset:", 999 , -50, 50, 5, "The tilt angle (in degrees) to be offset. If set to a value larger than 180, AreTomo will search for the optimal value itself, otherwise the value specified here will be used.");
 
 
-    joboptions["do_aretomo_reconstruct"] = JobOption("Also reconstruct tomograms? ", false, "If set to Yes, AreTomo2 will also perform tomogram reconstruction (the default is to use weighted backprojection, but you can use SART by providing the additional argument --aretomo_sart.");
+    joboptions["do_aretomo_reconstruct"] = JobOption("Reconstruct tomograms? ", false, "If set to Yes, AreTomo2 will also perform tomogram reconstruction (the default is to use weighted backprojection, but you can use SART by providing the additional argument --aretomo_sart.");
+    joboptions["do_skip_aretomo_align"] = JobOption("Skip alignment and only reconstruct?", false, "If set to Yes, AreTomo2 alignment (and CTF estimation) will be skipped, and only tomogram reconstruction will be performed. For this to work, tilt series alignment parameters need to be present in the input tiltseries STAR file. This allows AreTomo2 reconstructions from IMOD alignments.");
     joboptions["aretomo_VolZ"] = JobOption("Tomogram thickness (in unbinned voxels):", 1000 , 50, 5000, 50, "The tomogram will be reconstructed to this thickness, using the -VolZ parameter from AreTomo.");
     joboptions["aretomo_OutBin"] = JobOption("Tomogram binning:", 4 , 1, 20, 1, "The tomogram will be reconstructed with this integer binning factor, using the -OutBin parameter from AreTomo.");
 
@@ -6694,6 +6695,8 @@ bool RelionJob::getCommandsTomoAlignTiltSeriesJob(std::string &outputname, std::
         if (joboptions["do_aretomo_reconstruct"].getBoolean())
         {
             command += " --aretomo_reconstruct ";
+            if (joboptions["do_skip_aretomo_align"].getBoolean())
+                command += " --aretomo_only_reconstruct ";
             command += " --aretomo_VolZ " + joboptions["aretomo_VolZ"].getString();
             command += " --aretomo_OutBin " + joboptions["aretomo_OutBin"].getString();
 

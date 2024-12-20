@@ -2703,6 +2703,7 @@ void JobWindow::initialiseTomoAlignTiltseriesWindow()
     group6->end();
     place("do_aretomo_reconstruct", TOGGLE_DEACTIVATE, group6, false);
     group6->begin();
+    place("do_skip_aretomo_align", TOGGLE_DEACTIVATE);
     place("aretomo_VolZ", TOGGLE_DEACTIVATE);
     place("aretomo_OutBin", TOGGLE_DEACTIVATE);
     group6->end();
