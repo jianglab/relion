@@ -1003,16 +1003,19 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		}
 
 		// Discard particles that are completely outside the micrograph and print a warning
-		if (yF < 0 || y0 >= YSIZE(Imic()) || xF < 0 || x0 >= XSIZE(Imic()) ||
+        if (!do_recenter)
+        {
+            if (yF < 0 || y0 >= YSIZE(Imic()) || xF < 0 || x0 >= XSIZE(Imic()) ||
 				(dimensionality==3 && (zF < 0 || z0 >= ZSIZE(Imic())) ) )
-		{
-			std::cerr << " micrograph x,y,z,n-size= " << XSIZE(Imic()) << " , " << YSIZE(Imic()) << " , " << ZSIZE(Imic()) << " , " << NSIZE(Imic()) << std::endl;
-			std::cerr << " particle position= " << xpos << " , " << ypos;
-			if (dimensionality == 3)
-				std::cerr << " , " << zpos;
-			std::cerr << std::endl;
-			REPORT_ERROR("Preprocessing::extractParticlesFromOneFrame ERROR: particle" + integerToString(ipos+1) + " lies completely outside micrograph " + fn_mic);
-		}
+            {
+                std::cerr << " micrograph x,y,z,n-size= " << XSIZE(Imic()) << " , " << YSIZE(Imic()) << " , " << ZSIZE(Imic()) << " , " << NSIZE(Imic()) << std::endl;
+                std::cerr << " particle position= " << xpos << " , " << ypos;
+                if (dimensionality == 3)
+                    std::cerr << " , " << zpos;
+                std::cerr << std::endl;
+                REPORT_ERROR("Preprocessing::extractParticlesFromOneFrame ERROR: particle" + integerToString(ipos+1) + " lies completely outside micrograph " + fn_mic);
+            }
+        }
 
 		// Read per-particle CTF
 		if (MDin_has_ctf && !keep_ctf_from_micrographs)
