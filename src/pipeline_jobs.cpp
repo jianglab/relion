@@ -7192,17 +7192,14 @@ bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<s
 		command += " --stack2d ";
 	}
 
-<<<<<<< HEAD
-    if (joboptions["do_real_subtomo"].getBoolean())
-    {
-        command += " --real_subtomo ";
+        if (joboptions["do_real_subtomo"].getBoolean())
+        {
+            command += " --real_subtomo ";
 
-        Node node2(outputname+"particles_for_class2d.star", LABEL_CLASS2D_PARTS);
-        outputNodes.push_back(node2);
-    }
+            Node node2(outputname+"particles_for_class2d.star", LABEL_CLASS2D_PARTS);
+            outputNodes.push_back(node2);
+        }
 
-=======
->>>>>>> master
 	if (is_continue)
 	{
 		command += " --only_do_unfinished ";
