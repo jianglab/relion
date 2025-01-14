@@ -1104,7 +1104,6 @@ void AmyloidFinder::finalise()
 	MDcoords.write(fn_coords);
 
     FileName fn_mics = fn_odir + "micrographs_" + fn_out + ".star";
-    std::cerr <<" fn_mics= " << fn_mics << std::endl;
     obsModel.save(MDin, fn_mics, "micrographs");
 
 	if (verb > 0 )
