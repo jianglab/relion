@@ -74,6 +74,7 @@ static bool has_shift;
 static int preshift_ipos;
 static int current_selection_type;
 static int colour_scheme;
+static int fom_is_grey_instead;
 
 class DisplayBox : public Fl_Box
 {
@@ -98,6 +99,9 @@ public:
 
 	// The actual image data array
 	unsigned char *img_data;
+    // A copy of the actual image data array (to allow toggling of FOM-colouring)
+    unsigned char *img_data2;
+
 	std::string img_label;
 
 	// For getting back close the original image values from the uchar ones...
@@ -431,6 +435,7 @@ public:
 private:
 
 	// Functionalities for  popup menu
+    void toggleFomImageIsGreyInstead();
 	void saveCoordinates(bool ask_filename = false);
 	void clearCoordinates();
 	void printHelp();

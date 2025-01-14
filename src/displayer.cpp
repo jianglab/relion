@@ -41,7 +41,7 @@ const int NUM_COLORS = 6;
 /************************************************************************/
 void DisplayBox::draw()
 {
-	if (!img_data) return;
+    if (!img_data) return;
 
 	short xpos = x() + xoff;
 	short ypos = y() + yoff;
@@ -50,8 +50,18 @@ void DisplayBox::draw()
 	//fl_push_clip(x(),y(),w(),h());
 
 	/* Redraw the whole image */
-	int depth = (colour_scheme) ? 3 : 1;
-	fl_draw_image((const uchar *)img_data, xpos, ypos, (short)xsize_data, (short)ysize_data, depth);
+	int depth;
+    if (fom_is_grey_instead)
+    {
+        // Even though we colour the FOM image red/yellow, we can toggle to an only-grey micrograph!
+        depth = 1;
+        fl_draw_image((const uchar *)img_data2, xpos, ypos, (short)xsize_data, (short)ysize_data, depth);
+    }
+    else
+    {
+        depth = (colour_scheme) ? 3 : 1;
+        fl_draw_image((const uchar *)img_data, xpos, ypos, (short)xsize_data, (short)ysize_data, depth);
+    }
 	if (img_label != "")
 	{
 		fl_color(FL_WHITE);
@@ -149,8 +159,9 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, i
 	maxval = _maxval;
 	ipos = _ipos;
 	selected = NOTSELECTED;
+    fom_is_grey_instead = false;
 
-	// Set its own MetaDataTable
+    // Set its own MetaDataTable
 	MDimg.setIsList(true);
 	MDimg.addObject(MDCin);
 
@@ -275,6 +286,7 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
 	maxval = _maxval;
 	ipos = _ipos;
 	selected = NOTSELECTED;
+    fom_is_grey_instead = false;
 
     if (fabs(_fom_min) < 0.001 && fabs(_fom_max) < 0.001 )
     {
@@ -316,7 +328,8 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
 	ysize_data = CEIL(YSIZE(img) * scale);
 	xoff = (xsize_data < w() ) ? (w() - xsize_data) / 2 : 0;
 	yoff = (ysize_data < h() ) ? (h() - ysize_data) / 2 : 0;
-        img_data = new unsigned char [3 * xsize_data * ysize_data];
+    img_data = new unsigned char [3 * xsize_data * ysize_data];
+    img_data2 = new unsigned char [xsize_data * ysize_data];
 	RFLOAT range = maxval - minval;
 	RFLOAT step = range / 255; // 8-bit scaling range from 0 to 255
 	RFLOAT* old_ptr=NULL;
@@ -357,8 +370,11 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
                     img_data[3*n] = FLOOR(127*val + 127*fom);
                     img_data[3*n+1] = FLOOR(127*val + 127*(2*fom-1));
                     img_data[3*n+2] = FLOOR(127*val);
-
                 }
+
+                // Also store greyscale image data in img_data2
+                img_data2[n] = FLOOR((*old_ptr - minval) / step);
+
                 old_ptr += xstep;
                 xerr    -= xmod;
                 if (xerr <= 0)
@@ -376,7 +392,7 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
                 sy ++;
             }
         }
-        }
+    }
 	else
 	{
         FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(img)
@@ -396,6 +412,9 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
                 img_data[3*n+2] = FLOOR(127*val);
 
             }
+            // Also store greyscale image data in img_data2
+            img_data2[n] = FLOOR((DIRECT_MULTIDIM_ELEM(img, n) - minval) / step);
+
         }
     }
 }
@@ -2152,12 +2171,13 @@ int pickerViewerCanvas::handle(int ev)
 			redraw();
 			Fl_Menu_Item rclick_menu[] = {
 				{ "Save STAR with coordinates (CTRL-s)" },
+                { "Toggle FOM colouring (CTRL-f)" },
 //				{ "Save_as STAR with coordinates" },
 				{ "Load coordinates" },
 				{ "Reload coordinates" },
 				{ "Clear coordinates" },
 				{ "Set selection type" },
-				{ "Set FOM threshold" },
+                { "Set FOM threshold" },
 				{ "Help" },
 				{ "Quit (CTRL-q)" },
 				{ 0 }
@@ -2182,6 +2202,8 @@ int pickerViewerCanvas::handle(int ev)
 				setFOMThreshold();
 				loadCoordinates(false);
 			}
+            else if ( strcmp(m->label(), "Toggle FOM colouring (CTRL-f)") == 0)
+                toggleFomImageIsGreyInstead();
 			else if ( strcmp(m->label(), "Help") == 0 )
 				printHelp();
 			else if ( strcmp(m->label(), "Quit (CTRL-q)") == 0 )
@@ -2206,6 +2228,13 @@ int pickerViewerCanvas::handle(int ev)
 			sleep(1); // to prevent multiple saves... dirty but don't know how to do this otherwise...
 			return 1; // (tells caller we handled this event)
 		}
+        if (key == 'f')
+        {
+            toggleFomImageIsGreyInstead();
+            redraw();
+            sleep(0.5); // to prevent multiple toggles?
+            return 1; // (tells caller we handled this event)
+        }
 		else if (key == 'q')
 		{
 			sleep(1);
@@ -2221,6 +2250,13 @@ int pickerViewerCanvas::handle(int ev)
 	}
 	return 0;
 }
+
+void pickerViewerCanvas::toggleFomImageIsGreyInstead()
+{
+    fom_is_grey_instead = !fom_is_grey_instead;
+    boxes[0]->redraw();
+}
+
 
 void pickerViewerCanvas::saveCoordinates(bool ask_filename)
 {
