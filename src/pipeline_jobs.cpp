@@ -7133,7 +7133,6 @@ void RelionJob::initialiseTomoSubtomoJob()
 
 	joboptions["do_float16"] = JobOption("Write output in float16?", true ,"If set to Yes, this program will write output images in float16 MRC format. This will save a factor of two in disk space compared to the default of writing in float32. Note that RELION and CCPEM will read float16 images, but other programs may not (yet) do so.");
 
-
 }
 
 bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<std::string> &commands,
@@ -7193,6 +7192,7 @@ bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<s
 		command += " --stack2d ";
 	}
 
+<<<<<<< HEAD
     if (joboptions["do_real_subtomo"].getBoolean())
     {
         command += " --real_subtomo ";
@@ -7201,6 +7201,8 @@ bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<s
         outputNodes.push_back(node2);
     }
 
+=======
+>>>>>>> master
 	if (is_continue)
 	{
 		command += " --only_do_unfinished ";
