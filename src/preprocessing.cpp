@@ -1359,7 +1359,7 @@ MetaDataTable Preprocessing::getCoordinateMetaDataTable(FileName fn_mic)
 	}
 
 	RFLOAT mag2, dstep2, particle_angpix, rescale_fndata = 1.0;
-	if (MDresult.numberOfObjects() > 0)
+    if (MDresult.numberOfObjects() > 0)
 	{
 		MDresult.goToObject(0);
 
@@ -1467,6 +1467,34 @@ MetaDataTable Preprocessing::getCoordinateMetaDataTable(FileName fn_mic)
 			} // end if recenter
 
 		} // end loop all objects
+
+        // Check whether do_center has moved some particles outside the micrograph and remove those
+        if (do_recenter)
+        {
+
+            Image<RFLOAT> Imic;
+            Imic.read(fn_mic, false);
+
+            MetaDataTable MDcopy;
+            FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDresult)
+            {
+                int xcoord, ycoord, zcoord = 0;
+                MDresult.getValue(EMDL_IMAGE_COORD_X, xcoord);
+                MDresult.getValue(EMDL_IMAGE_COORD_Y, ycoord);
+                if (dimensionality == 3)
+                    MDresult.getValue(EMDL_IMAGE_COORD_Z, zcoord);
+
+                // Discard particles that are completely outside the micrograph and print a warning
+                if (ycoord >= 0 && ycoord < YSIZE(Imic()) && xcoord >= 0 && xcoord < XSIZE(Imic()))
+                {
+                    if (dimensionality == 2 || (zcoord >= 0 && zcoord < ZSIZE(Imic())) )
+                        MDcopy.addObject(MDresult.getObject());
+                }
+            }
+            MDresult = MDcopy;
+
+        }
+
 	}
 
 	return MDresult;
