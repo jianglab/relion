@@ -2232,7 +2232,7 @@ int pickerViewerCanvas::handle(int ev)
         {
             toggleFomImageIsGreyInstead();
             redraw();
-            sleep(0.5); // to prevent multiple toggles?
+            sleep(1); // to prevent multiple toggles?
             return 1; // (tells caller we handled this event)
         }
 		else if (key == 'q')
