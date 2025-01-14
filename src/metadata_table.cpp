@@ -2187,7 +2187,9 @@ MetaDataTable removeDuplicatedParticles(MetaDataTable &MDin, EMDLabel mic_label,
 
 
 	MetaDataTable MDout, MDremoved;
-	long n_removed = 0;
+    MDout.setName(MDin.getName());
+    MDremoved.setName(MDin.getName());
+    long n_removed = 0;
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDin)
 	{
 		if (valid[current_object])
