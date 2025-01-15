@@ -525,7 +525,7 @@ void Preprocessing::runExtractParticles()
 			progress_bar(imic);
 
 		TIMING_TIC(TIMING_TOP);
-		micIsUsed = extractParticlesFromFieldOfView(fn_mic, imic);
+        micIsUsed = extractParticlesFromFieldOfView(fn_mic, imic);
 		TIMING_TOC(TIMING_TOP);
 
 		if(micIsUsed)
@@ -831,7 +831,7 @@ bool Preprocessing::extractParticlesFromFieldOfView(FileName fn_mic, long int im
 	if (fn_data != "")
 	{
 		// Search for this micrograph in the MDdata table
-		MDin = getCoordinateMetaDataTable(fn_mic);
+        MDin = getCoordinateMetaDataTable(fn_mic);
 	}
 	else
 	{
@@ -1479,9 +1479,10 @@ MetaDataTable Preprocessing::getCoordinateMetaDataTable(FileName fn_mic)
             Imic.read(fn_mic, false);
 
             MetaDataTable MDcopy;
+            MDcopy.setName(MDresult.getName());
             FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDresult)
             {
-                int xcoord, ycoord, zcoord = 0;
+                RFLOAT xcoord, ycoord, zcoord = 0.;
                 MDresult.getValue(EMDL_IMAGE_COORD_X, xcoord);
                 MDresult.getValue(EMDL_IMAGE_COORD_Y, ycoord);
                 if (dimensionality == 3)
