@@ -53,8 +53,10 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     int expert_section = parser.addSection("Expert options (typically no need to change)");
     signal_minres = textToFloat(parser.getOption("--signal_minres", "Minimum resolution value for signal (in A)", "4.85"));
     signal_maxres = textToFloat(parser.getOption("--signal_maxres", "Maximum resolution value for signal (in A)", "4.65"));
+    nonsignal_minres = textToFloat(parser.getOption("--nonsignal_minres", "Minimum resolution value for non-signal (in A)", "4.4"));
+    nonsignal_maxres = textToFloat(parser.getOption("--nonsignal_maxres", "Maximum resolution value for non-signal (in A)", "4.2"));
     inifactor_threshold = textToFloat(parser.getOption("--inifactor_threshold", "What fraction of the Z-score threshold for allowing to grow filaments?", "0.33"));
-    down_angpix = textToFloat(parser.getOption("--down_angpix", "Pixel size for downscaled images (needs to include signal frequency!)", "2.25"));
+    down_angpix = textToFloat(parser.getOption("--down_angpix", "Pixel size for downscaled images (needs to include signal frequency!)", "2.1"));
     angpix = textToFloat(parser.getOption("--force_angpix", "Force this pixel size, regardless of what is in the image header", "-1"));
     verb =textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 
@@ -154,6 +156,8 @@ void AmyloidFinder::initialise(bool is_leader)
     // Calculate Fourier shells for amyloid signal
     imin_signal = FLOOR(ilengthmax*down_angpix/signal_minres);
     imax_signal = CEIL(ilengthmax*down_angpix/signal_maxres);
+    imin_nonsignal = FLOOR(ilengthmax*down_angpix/nonsignal_minres);
+    imax_nonsignal = CEIL(ilengthmax*down_angpix/nonsignal_maxres);
 
     // Box size, orginal and cropped: set size of rectangular image to largest dimension
     large_box = sqrt(2.)*XMIPP_MAX(ori_xsize, ori_ysize);
@@ -172,6 +176,7 @@ void AmyloidFinder::initialise(bool is_leader)
         std::cout << " + Original size of the input micrographs: " << ori_xsize << " x " << ori_ysize << " pixels" << std::endl;
         std::cout << " + Size of image to sample (in downscaled pixels): " <<  down_xsize << " x " << down_ysize << std::endl;
         std::cout << " + Fourier shells for the amyloid signal (in downscaled pixels): " << imin_signal  << " - " << imax_signal << std::endl;
+        std::cout << " + Fourier shells for the non-signal control (in downscaled pixels): " << imin_nonsignal  << " - " << imax_nonsignal << std::endl;
         std::cout << "  ========================== " << std::endl;
    }
 
@@ -256,6 +261,7 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
 
     // Rotate the large image, and store downscaled images by cropping their Fourier Transform
     std::vector<MultidimArray<RFLOAT> > rotated_imgs(nr_psi), rotated_scores_perline(nr_psi), rotated_scores(nr_psi);
+    std::vector<MultidimArray<RFLOAT> > rotated_nonscores_perline(nr_psi), rotated_nonscores(nr_psi);
     std::vector<FourierTransformer> transformer(nr_threads);
     // TODO: in principle, only need to rotate to 90 degrees, as I can use both the X and the Y direction for the 1D FFTs!
     if (myverb)
@@ -292,8 +298,12 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         // Just prepare the rotated_scores vector too
         rotated_scores_perline[ipsi].initZeros(crop_box, crop_box);
         rotated_scores_perline[ipsi].setXmippOrigin();
+        rotated_nonscores_perline[ipsi].initZeros(crop_box, crop_box);
+        rotated_nonscores_perline[ipsi].setXmippOrigin();
         rotated_scores[ipsi].initZeros(crop_box/shift_step, crop_box/shift_step);
         rotated_scores[ipsi].setXmippOrigin();
+        rotated_nonscores[ipsi].initZeros(crop_box/shift_step, crop_box/shift_step);
+        rotated_nonscores[ipsi].setXmippOrigin();
 
     }
     if (myverb) progress_bar(nr_psi);
@@ -333,7 +343,11 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
 
                 for (int isig = imin_signal; isig <= imax_signal; isig++)
                 {
-                    A2D_ELEM(rotated_scores_perline[ipsi], cen_ypos, cen_xpos)  += norm(DIRECT_A1D_ELEM(FTline, isig));
+                    A2D_ELEM(rotated_scores_perline[ipsi], cen_ypos, cen_xpos) += norm(DIRECT_A1D_ELEM(FTline, isig));
+                }
+                for (int isig = imin_nonsignal; isig <= imax_nonsignal; isig++)
+                {
+                    A2D_ELEM(rotated_nonscores_perline[ipsi], cen_ypos, cen_xpos) += norm(DIRECT_A1D_ELEM(FTline, isig));
                 }
 
             } // end loop ypos
@@ -368,6 +382,8 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
                            // Grab the line from the rotated image, in X and in Y directions
                            A2D_ELEM(rotated_scores[ipsi], cen_ypos/shift_step, cen_xpos/shift_step) +=
                                    A2D_ELEM(rotated_scores_perline[ipsi], cen_ypos+iwidth-iwidthmax/2, cen_xpos);
+                           A2D_ELEM(rotated_nonscores[ipsi], cen_ypos/shift_step, cen_xpos/shift_step) +=
+                                   A2D_ELEM(rotated_nonscores_perline[ipsi], cen_ypos+iwidth-iwidthmax/2, cen_xpos);
                        } // end loop iwidth
                    } // end loop ipass
                } // end loop xpos
@@ -400,13 +416,16 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
     {
         RFLOAT psi = getPsiAngle(ipsi);
         selfRotate(rotated_scores[ipsi], -psi);
+        selfRotate(rotated_nonscores[ipsi], -psi);
     }
 
     Mangle.resize(down_ysize, down_xsize);
     Mangle.setXmippOrigin();
     Mscore.resize(Mangle);
-    MultidimArray<RFLOAT> Msum;
+    MultidimArray<RFLOAT> Msum, Mnonsum, Mnonscore;
     Msum.resize(Mangle);
+    Mnonsum.resize(Mangle);
+    Mnonscore.resize(Mangle);
 
     // This can't be parallelised efficiently because need to protect Msums, Mscore and Mangle from simultaneous writing...
     // Calculate Z-scores over psi: (max_psi - avg_psi) /stddev_psi
@@ -421,12 +440,19 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
                 int cen_xpos = xpos - down_xsize/2;
 
                 RFLOAT myscore = A2D_ELEM(rotated_scores[ipsi], cen_ypos/shift_step, cen_xpos/shift_step);
+                RFLOAT mynonscore = A2D_ELEM(rotated_nonscores[ipsi], cen_ypos/shift_step, cen_xpos/shift_step);
                 A2D_ELEM(Msum, cen_ypos, cen_xpos) += myscore;
+                A2D_ELEM(Mnonsum, cen_ypos, cen_xpos) += mynonscore;
 
                 if (myscore > A2D_ELEM(Mscore, cen_ypos, cen_xpos))
                 {
                     A2D_ELEM(Mscore, cen_ypos, cen_xpos) = myscore;
                     A2D_ELEM(Mangle, cen_ypos, cen_xpos) = mypsi;
+                }
+
+                if (mynonscore > A2D_ELEM(Mnonscore, cen_ypos, cen_xpos))
+                {
+                    A2D_ELEM(Mnonscore, cen_ypos, cen_xpos) = mynonscore;
                 }
 
             }
@@ -442,8 +468,33 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         // calculate as normalised score:
         // (max_psi - adjusted_mean_psi) / adjusted_mean_psi
         // where adjusted_mean is the average of the score over all psi-values, except the maximum
+        RFLOAT Zscore_signal = 0.;
         if (DIRECT_MULTIDIM_ELEM(Msum, n) > 0.)
-            DIRECT_MULTIDIM_ELEM(Mscore, n) = (DIRECT_MULTIDIM_ELEM(Mscore, n) - DIRECT_MULTIDIM_ELEM(Msum, n)) / DIRECT_MULTIDIM_ELEM(Msum, n);
+            Zscore_signal = (DIRECT_MULTIDIM_ELEM(Mscore, n) - DIRECT_MULTIDIM_ELEM(Msum, n)) / DIRECT_MULTIDIM_ELEM(Msum, n);
+
+        // Also for non-signal
+        DIRECT_MULTIDIM_ELEM(Mnonsum, n) -= DIRECT_MULTIDIM_ELEM(Mnonscore, n);
+        DIRECT_MULTIDIM_ELEM(Mnonsum, n) /= (RFLOAT)(nr_psi-1);
+        RFLOAT Zscore_nonsignal = 0.;
+        if (DIRECT_MULTIDIM_ELEM(Mnonsum, n) > 0.)
+            Zscore_nonsignal = (DIRECT_MULTIDIM_ELEM(Mnonscore, n) - DIRECT_MULTIDIM_ELEM(Mnonsum, n)) / DIRECT_MULTIDIM_ELEM(Mnonsum, n);
+        // Avoid negative non-signals
+        //if (Zscore_nonsignal < 0.) Zscore_nonsignal = 0.;
+        // Calculate a combined score that emphasizes high signals, but low non-signals:
+        // Z_signal * (1 - Z_nonsignal)
+        // If lower than 0, just set score to 0
+        DIRECT_MULTIDIM_ELEM(Mscore, n) = XMIPP_MAX(0., Zscore_signal * (1. - Zscore_nonsignal));
+
+        /*
+        if (DIRECT_MULTIDIM_ELEM(Mscore, n)>0.5)
+        {
+            std::cerr << "score= " << DIRECT_MULTIDIM_ELEM(Mscore, n)<< " Zscore_signal= " << Zscore_signal << " Zscore_nonsignal= " << Zscore_nonsignal
+            << " Msum= " << DIRECT_MULTIDIM_ELEM(Msum, n) << " Mnonsum= " <<  DIRECT_MULTIDIM_ELEM(Mnonsum, n)
+            << " angle= " << DIRECT_MULTIDIM_ELEM(Mangle, n) << " nonangle= " << DIRECT_MULTIDIM_ELEM(Mnonangle, n)<<std::endl;
+        }
+        */
+
+        // Also calculate mean and stddev of final combined score over the whole micrograph, to later calculate skewness and kurtosis for signal detection
         sum  += DIRECT_MULTIDIM_ELEM(Mscore, n);
         sum2 += DIRECT_MULTIDIM_ELEM(Mscore, n) * DIRECT_MULTIDIM_ELEM(Mscore, n);
     }

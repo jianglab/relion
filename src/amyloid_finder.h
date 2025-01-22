@@ -54,8 +54,8 @@ public:
     // Original pixel size, and the downscaled one
     RFLOAT angpix, down_angpix;
 
-    // Fourier shells for amyloid signal
-    RFLOAT signal_minres, signal_maxres;
+    // Fourier shells for amyloid signal and non-signal
+    RFLOAT signal_minres, signal_maxres, nonsignal_minres, nonsignal_maxres;
 
     // Threshold for selecting peaks in Zscore map
     RFLOAT zscore_threshold, inifactor_threshold;
@@ -82,7 +82,7 @@ public:
     int nr_threads;
 
     // Some public parameters
-    int iwidthmax, ilengthmax, imin_signal, imax_signal, large_box, crop_box;
+    int iwidthmax, ilengthmax, imin_signal, imax_signal, imin_nonsignal, imax_nonsignal, large_box, crop_box;
     RFLOAT amyloid_rung;
     std::vector<AmyloidCoordinate> circle;
 
