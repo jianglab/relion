@@ -829,7 +829,11 @@ bool checkParametersFor3DHelicalReconstruction(
 	if (z_percentage_min > z_percentage_max)
 	{
 		if (verboseOutput)
-			std::cout << " ERROR! The range of Z percentage is invalid! To decrease the lower bound, make maximum rise smaller or box size larger. To increase the upper bound, make the particle diameter (along with the box size) larger and the outer tube diameter smaller!" << std::endl;
+        {
+            std::cout << " z_percentage_min= " << z_percentage_min << " z_percentage_max= " << z_percentage_max << std::endl;
+            std::cout << " particle_diameter_A= " << particle_diameter_A << " tube_outer_diameter_A= " << tube_outer_diameter_A << " nr_units_min= " << nr_units_min << " box_len= " << box_len <<std::endl;
+            std::cout << " ERROR! The range of Z percentage is invalid! To decrease the lower bound, make maximum rise smaller or box size larger. To increase the upper bound, make the particle diameter (along with the box size) larger and the outer tube diameter smaller!" << std::endl;
+        }
 		else
 			REPORT_ERROR("helix.cpp::chechParametersFor3DHelicalReconstruction(): The range of Z percentage is invalid! To decrease the lower bound, make maximum rise smaller or box size larger. To increase the upper bound, make the particle diameter (along with the box size) larger and the outer tube diameter smaller!");
 		return false;
@@ -837,7 +841,11 @@ bool checkParametersFor3DHelicalReconstruction(
 	if ( (z_percentage < z_percentage_min) || (z_percentage > z_percentage_max) )
 	{
 		if (verboseOutput)
-			std::cout << " ERROR! Z percentage is out of range under current settings!" << std::endl;
+        {
+            std::cout << " z_percentage_min= " << z_percentage_min << " z_percentage_max= " << z_percentage_max << std::endl;
+            std::cout << " particle_diameter_A= " << particle_diameter_A << " tube_outer_diameter_A= " << tube_outer_diameter_A << " nr_units_min= " << nr_units_min << " box_len= " << box_len <<std::endl;
+            std::cout << " ERROR! Z percentage is out of range under current settings!" << std::endl;
+        }
 		else
 			REPORT_ERROR("helix.cpp::chechParametersFor3DHelicalReconstruction(): Z percentage is out of range under current settings!");
 		return false;
