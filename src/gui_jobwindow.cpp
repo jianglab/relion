@@ -1112,6 +1112,18 @@ void JobWindow::initialiseSelectWindow()
 
 	current_y += STEPY/2;
 
+	group7 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group7->end();
+	
+	place("do_recover_full_filaments", TOGGLE_DEACTIVATE, group7);
+	group7->begin();
+	place("min_fraction_threshold", TOGGLE_DEACTIVATE);
+	place("full_particle_star_file_path", TOGGLE_DEACTIVATE);
+	
+	group7->end();
+	guientries["do_recover_full_filaments"].cb_menu_i();
+
+
 	place("do_recenter", TOGGLE_DEACTIVATE);
 	group1 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group1->end();
