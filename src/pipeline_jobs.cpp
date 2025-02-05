@@ -2050,7 +2050,8 @@ Kappa = 0.3 means that the curvature of the picked helical tubes should not be l
 Kappa ~ 0.05 is recommended for long and straight tubes (e.g. TMV, VipA/VipB and AChR tubes) while 0.20 ~ 0.40 seems suitable for flexible ones (e.g. ParM and MAVS-CARD filaments).");
 	joboptions["helical_tube_length_min"] = JobOption("Minimum length (A): ", 400, 100, 1000, 10, "Minimum length (in Angstroms) of helical tubes for auto-picking. \
 Helical tubes with shorter lengths will not be picked. Note that a long helical tube seen by human eye might be treated as short broken pieces due to low FOM values or high picking threshold.");
-    joboptions["amyloid_threshold"] = JobOption("Amyloid pick threshold (sigma): ", 0.5, 0.2, 2, 0.1, "How many sigma does the peaks need to be above the mean for the filament tracing to include a coordinate?");
+    joboptions["amyloid_threshold"] = JobOption("Amyloid pick threshold (sigma): ", 0.25, 0.05, 1, 0.05, "How many sigma does the peaks need to be above the mean for the filament tracing to include a coordinate?");
+    joboptions["do_amyloid_plot"] = JobOption("Plot results per micrograph?", false, "Set this option to Yes to visualise intermediate results for amyloid tracing, which may help with setting values for filament length, width and picking threshold. Don't use in parallel or in submission to the queue.");
 
 
 }
@@ -2310,6 +2311,14 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
                 command="`which relion_find_amyloid`";
             if (error_message != "") return false;
 
+            if (joboptions["do_amyloid_plot"].getBoolean())
+            {
+                if (joboptions["nr_mpi"].getNumber(error_message) > 1 || joboptions["do_queue"].getBoolean())
+                {
+                    error_message = "You cannot use parallel execution or job submission when plotting intermediate results.";
+                    return false;
+                }
+            }
 
             command += " --odir " + outputname;
             command += " --pickname autopick";
@@ -2332,9 +2341,9 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 
             command += " --trace_filament_length " + joboptions["helical_tube_length_min"].getString();
             command += " --trace_filament_width " + joboptions["helical_tube_outer_diameter"].getString();
-            command += " --rungs_per_segment " + joboptions["helical_nr_asu"].getString();
-            command += " --kappa " + joboptions["helical_tube_kappa_max"].getString();
             command += " --threshold " + joboptions["amyloid_threshold"].getString();
+
+            if (joboptions["do_amyloid_plot"].getBoolean()) command += " --plot ";
 
             command += " --j " + joboptions["nr_threads"].getString();
 

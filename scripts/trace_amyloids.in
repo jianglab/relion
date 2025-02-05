@@ -1,0 +1,251 @@
+#!@PYTHON_EXE_PATH@
+
+import numpy as np
+import mrcfile
+import starfile
+from skimage.filters import gaussian
+from skimage.transform import probabilistic_hough_line
+from skimage.morphology import skeletonize
+import math
+import pandas as pd
+import argparse
+
+
+def load_mrc(mrc_fn: str, multiply_global_origin: bool = True):
+    mrc_file_handle = mrcfile.open(mrc_fn, "r")
+    voxel_size = float(mrc_file_handle.voxel_size.x)
+
+    if voxel_size <= 0:
+        raise RuntimeError(f"Seems like the MRC file: {mrc_fn} does not have a header.")
+
+    c = mrc_file_handle.header["mapc"]
+    r = mrc_file_handle.header["mapr"]
+    s = mrc_file_handle.header["maps"]
+
+    global_origin = mrc_file_handle.header["origin"]
+    global_origin = np.array([global_origin.x, global_origin.y, global_origin.z])
+    global_origin[0] += mrc_file_handle.header["nxstart"]
+    global_origin[1] += mrc_file_handle.header["nystart"]
+    global_origin[2] += mrc_file_handle.header["nzstart"]
+
+    if multiply_global_origin:
+        global_origin *= mrc_file_handle.voxel_size.x
+
+    if c == 1 and r == 2 and s == 3:
+        grid = mrc_file_handle.data
+    elif c == 3 and r == 2 and s == 1:
+        grid = np.moveaxis(mrc_file_handle.data, [0, 1, 2], [2, 1, 0])
+    elif c == 2 and r == 1 and s == 3:
+        grid = np.moveaxis(mrc_file_handle.data, [1, 2, 0], [2, 1, 0])
+    else:
+        raise RuntimeError("MRC file axis arrangement not supported!")
+
+    return grid, voxel_size, global_origin
+
+def is_in_between(point, line):
+    dx = line[1][0] - line[0][0]
+    dy = line[1][1] - line[0][1]
+    dotp = (point[0] - line[0][0])*dx + (point[1] - line[0][1])*dy
+    return 0 <= dotp and dotp <= dx*dx + dy*dy
+
+def distance_point_line(point, line):
+    x1=line[0][0]
+    x2=line[1][0]
+    y1=line[0][1]
+    y2=line[1][1]
+    x0=point[0]
+    y0=point[1]
+    dd = abs( (x2-x1)*(y1-y0) - (x1-x0)*(y2-y1) ) / np.sqrt( (x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) )
+    if not is_in_between(point,line):
+        closest = min(distance_point_point(point,line[0]), distance_point_point(point,line[1]))
+        return max(closest, dd)
+    else:
+        return dd
+
+def distance_point_point(point1, point2):
+    x1=point1[0]
+    y1=point1[1]
+    x2=point2[0]
+    y2=point2[1]
+    return np.sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2))
+
+def angle_line_line(line1, line2):
+    a1 = np.arctan2(line1[1][1]-line1[0][1], line1[1][0]-line1[0][0])
+    a2 = np.arctan2(line2[1][1]-line2[0][1], line2[1][0]-line2[0][0])
+    return abs(a2-a1)
+
+def prune_lines(inlines, mind, min_ang, max_merge):
+    import math
+    lengths = []
+    merged = []
+    lines = np.asarray(inlines)
+    for line in lines:
+        lengths = np.append(lengths, np.linalg.norm(line[0]-line[1]))
+        merged = np.append(merged, 1)
+    sortidx = np.argsort(lengths);
+
+    min_ang_rad = math.radians(min_ang)
+    NN = len(sortidx)
+    idx = NN - 1
+    while idx >= 0:
+        i1 = sortidx[idx]
+
+        for i2 in range(NN):
+            if (i1 != i2 and lengths[i2] > 0. and lengths[i1] > 0.):
+                
+                d11 = distance_point_line(lines[i1][0],lines[i2])
+                d12 = distance_point_line(lines[i1][1],lines[i2])
+                d21 = distance_point_line(lines[i2][0],lines[i1])
+                d22 = distance_point_line(lines[i2][1],lines[i1])
+                ang = angle_line_line(lines[i1], lines[i2])
+                sum = 0
+                if (d11 < mind):
+                    sum = sum + 1
+                if (d12 < mind):
+                    sum = sum + 1
+                if (d21 < mind):
+                    sum = sum + 1
+                if (d22 < mind):
+                    sum = sum + 1
+
+                # merge lines if they haven't been merged too often already, they overlap two or more points and are parallel
+                if ( (merged[i1] + merged[i2] < max_merge) and (sum >= 2) and (ang < min_ang_rad or abs(ang-math.pi) < min_ang_rad) ):
+
+                    # select the two points with the furthest distance
+                    maxd=0
+                    for i in range(2):
+                        for j in range(2):
+                            d = distance_point_point(lines[i1][i], lines[i2][j])
+                            if (d > maxd):
+                                maxd = d
+                                mymax0 = lines[i1][i]
+                                mymax1 = lines[i2][j]
+                    # perhaps original one was longer?
+                    if maxd > lengths[i1]:
+                        lines[i1][0] = mymax0
+                        lines[i1][1] = mymax1
+                        lengths[i1] = np.linalg.norm(lines[i1][0]-lines[i1][1])
+                        merged[i1] = merged[i1] + merged[i2]
+                    
+                    lines[i2][0][0] = -9999
+                    lines[i2][0][1] = -9999
+                    lines[i2][1][0] = -9999
+                    lines[i2][1][1] = -9999
+                    lengths[i2] = 0
+                    merged[i2] = 0
+                    idx = idx + 1
+                    break
+
+                # remove smaller lines with both points close to longer one
+                elif (d21 < 2*mind and d22 < 2*mind):
+                    lines[i2][0][0] = -9999
+                    lines[i2][0][1] = -9999
+                    lines[i2][1][0] = -9999
+                    lines[i2][1][1] = -9999
+                    lengths[i2] = 0
+
+        idx = idx - 1
+
+    return lines
+
+
+def pick_filaments(score, radius, threshold, filaments_length, filaments_plot):
+
+    #Parameters
+    thr = round(0.1*filaments_length)
+    line_length = filaments_length
+    gap = radius
+    mind= 1.5*radius
+    min_angle = 10
+    max_merge = 10
+
+    #bin_score = gaussian(score, 3) > threshold        
+    bin_score = score > threshold        
+    edges = skeletonize(bin_score) 
+    houghs = probabilistic_hough_line(edges, threshold=thr, line_length=line_length, line_gap=gap)
+    lines = prune_lines(houghs, mind=mind, min_ang=min_angle, max_merge=max_merge)
+
+    if filaments_plot:
+        import matplotlib.pyplot as plt
+        from matplotlib import cm
+        fig, axes = plt.subplots(1, 4, figsize=(15, 5), sharex=True, sharey=True)
+        ax = axes.ravel()
+
+        ax[0].imshow(score, cmap=cm.binary, vmin=-20, vmax=5)
+        ax[0].imshow(bin_score, alpha=0.5, cmap=cm.Reds)
+        ax[0].set_title('FOM [-20,5] thr= ' + str(threshold))
+
+        ax[1].imshow(edges, cmap=cm.gray)
+        ax[1].set_title('Skeletonize')
+
+        ax[2].imshow(edges * 0)
+        for hough in houghs:
+            p0, p1 = hough
+            ax[2].plot((p0[0], p1[0]), (p0[1], p1[1]))
+        ax[2].set_xlim((0, score.shape[1]))
+        ax[2].set_ylim((score.shape[0], 0))
+        ax[2].set_title('Hough transform; len= ' + str(line_length) + ' gap= ' + str(gap))
+
+        ax[3].imshow(edges * 0)
+        for line in lines:
+            p0, p1 = line
+            ax[3].plot((p0[0], p1[0]), (p0[1], p1[1]))
+        ax[3].set_xlim((0, score.shape[1]))
+        ax[3].set_ylim((score.shape[0], 0))
+        ax[3].set_title('Prune: mind= ' + str(mind))
+
+        for a in ax:
+            a.set_axis_off()
+
+        plt.tight_layout()
+        plt.show()
+
+    oldlines=lines
+    # Flatten lines into 2D array, as rest of topaz
+    NN=len(lines)
+    if NN>0:
+        lines = lines.reshape(2*NN, 2)
+        # Remove -9999 coordinates
+        newlines = []
+        for i in range(2*NN):
+            if (lines[i,0] != -9999 and lines[i,1] != -9999):
+                newlines = np.append(newlines, lines[i])
+
+        NN=round(len(newlines)/2)
+        if (NN>0):
+            lines = newlines.reshape(NN, 2)
+        else:
+            lines = []
+
+    return lines
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser('Scripts for picking filaments in FOM maps')
+    parser.add_argument('-i', '--input', help='input image to pick filaments in')
+    parser.add_argument('-o', '--output', help='output star file with coordinates')
+    parser.add_argument('-r', '--radius', type=int, help='radius of the regions to extract (in A)')
+    parser.add_argument('-t', '--threshold', default=0.5, type=float, help='FOM threshold at which to terminate region extraction (default: 0.5)')
+    parser.add_argument('-l', '--length', default=-1, type=int, help='minimum length of straight filament segments to be picked (in Angstrom) (default: twice --radius)')
+    parser.add_argument('-s', '--scale', type=float, default=1, help='Multiply outputcoordinates by this factor. (default: 1)')
+    parser.add_argument('-fp', '--plot', action='store_true', help='flag for filament start-end picking plus plotting of its intermediate stages (useful for tuning parameters).')
+
+    args = parser.parse_args()
+
+    image, pixel_size, origin = load_mrc(args.input)
+
+    # Set edges to zero to prevent picking too close to the edge
+    d = round(args.radius/pixel_size)
+    cropimage = image.copy()     # because image was readonly
+    cropimage[:d, :] = 0         # Top edge
+    cropimage[-d:, :] = 0        # Bottom edge
+    cropimage[:, :d] = 0         # Left edge
+    cropimage[:, -d:] = 0        # Right edge
+
+    coords = pick_filaments(cropimage, round(args.radius/pixel_size), args.threshold, round(args.length/pixel_size), args.plot)
+    coords = np.round(coords*args.scale).astype(int)
+    # now write out as starfile...
+
+    if len(coords) > 0:
+        xy = {'rlnCoordinateX': coords[:, 0], 'rlnCoordinateY': coords[:, 1]}
+        df = pd.DataFrame(xy)
+        starfile.write(df, args.output, overwrite=True)

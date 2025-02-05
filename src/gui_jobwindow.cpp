@@ -941,6 +941,7 @@ void JobWindow::initialiseAutopickWindow()
 	current_y += STEPY/2;
 
     place("amyloid_threshold");
+    place("do_amyloid_plot");
 
 	group4->end();
 

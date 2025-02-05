@@ -58,19 +58,19 @@ public:
     RFLOAT signal_minres, signal_maxres, nonsignal_minres, nonsignal_maxres;
 
     // Threshold for selecting peaks in Zscore map
-    RFLOAT zscore_threshold, inifactor_threshold;
+    RFLOAT threshold;
 
-    // Number of new amyloid rungs per segment (particle)
-    int nr_rungs_per_segment;
-
-    // Allowed psi-deviation per segment (particle)
-    RFLOAT psidiff_per_segment;
+    // Plot filament tracing results?
+    bool do_plot;
 
     // width and length of filaments (in A) for searching of 4.7A signal
     RFLOAT search_filament_length, search_filament_width;
 
     // Minimum length for tracing filaments
     RFLOAT trace_filament_length, trace_filament_width;
+
+    // Python executable name
+    FileName fn_exe;
 
     // Sampling of positions
     int shift_step, ori_xsize, ori_ysize, down_xsize, down_ysize;
@@ -83,17 +83,13 @@ public:
 
     // Some public parameters
     int iwidthmax, ilengthmax, imin_signal, imax_signal, imin_nonsignal, imax_nonsignal, large_box, crop_box;
-    RFLOAT amyloid_rung;
     std::vector<AmyloidCoordinate> circle;
 
     // All micrographs to autopick from
-    std::vector<FileName> fn_micrographs, fn_ori_micrographs;
+    std::vector<FileName> fn_micrographs;
 
     // Continue an old run: only estimate CTF if logfile WITH Final Values line does not yet exist, otherwise skip the tomogram
     bool do_only_unfinished;
-
-    // Write out (only) intermediate FOM and Psi maps?
-    bool do_write_intermediate, do_only_write_intermediate;
 
 public:
     // Read command line arguments
@@ -118,17 +114,8 @@ public:
     void getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore,
                                   MultidimArray<RFLOAT> &Mangle, RFLOAT &skew, RFLOAT &kurt, bool myverb = false);
 
-    // Find next candidate coordinates around a previous coordinate
-    std::vector<AmyloidCoordinate> findNextCandidateCoordinates(AmyloidCoordinate &mycoord, MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mpsi);
-
-    // Find next segment in an amyloid
-    AmyloidCoordinate findNextAmyloidCoordinate(AmyloidCoordinate &mycoord, MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mpsi);
-
-    // Multi-threaded maxIndex
-    RFLOAT maxIndex_multithreaded(MultidimArray<RFLOAT> &Mscore, long int &imax, long int &jmax, int skip_sides = 0);
-
     // Trace individual segments in the images based on the scores and angles
-    MetaDataTable traceFilaments(MultidimArray<RFLOAT> &Mscore, MultidimArray<RFLOAT> &Mpsi);
+    void traceFilaments(FileName &fn_fom, FileName &fn_star);
 
     // Run on one micrograph
     void processOneMicrograph(FileName fn_mic, bool myverb = false);

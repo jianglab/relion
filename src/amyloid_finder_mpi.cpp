@@ -35,11 +35,10 @@ void AmyloidFinderMpi::read(int argc, char **argv)
 	if (!node->isLeader())
 		verb = 0;
 
-	if (do_write_intermediate && node->isLeader())
-		std::cerr << "WARNING : --write_intermediates is heavy on disc I/O and is not advised in parallel execution." << std::endl;
-
 	// Possibly also read parallelisation-dependent variables here
 
+    if (do_plot) REPORT_ERROR("ERROR: cannot use --plot in parallel execution!");
+    
 	// Print out MPI info
 	printMpiNodesMachineNames(*node);
 }
