@@ -2720,6 +2720,8 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 		error_message = "Please select an input file.";
 		return false;
 	}
+	
+	std::string ff_command = "";
 
 	int c = 0;
 	if (joboptions["do_select_values"].getBoolean()) c++;
