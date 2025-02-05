@@ -560,6 +560,7 @@ list(APPEND RELION_PYTHON_WRAPPERS
 	python_tomo_denoise
 	filament_selection
 	trace_amyloids
+	schemegui
 )
 
 foreach (SCRIPT_FILE ${RELION_PYTHON_WRAPPERS})
@@ -614,7 +615,6 @@ list(APPEND RELION_SCRIPT_FILES
         star_datablock_ctfdat
         qsub.csh
         it.py
-        schemegui.py
 )
 
 add_custom_target(copy_scripts ALL)
