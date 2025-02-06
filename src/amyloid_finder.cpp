@@ -656,21 +656,10 @@ void AmyloidFinder::finalise()
 			MD.read(fn_pick);
 			long nr_pick = MD.numberOfObjects();
 			total_nr_picked += nr_pick;
-			if (MD.containsLabel(EMDL_PARTICLE_AUTOPICK_FOM))
-			{
-				RFLOAT fom, avg_fom = 0.;
-				FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
-				{
-					MD.getValue(EMDL_PARTICLE_AUTOPICK_FOM, fom);
-					avg_fom += fom;
-				}
-				avg_fom /= nr_pick;
-				// mis-use MetadataTable to conveniently make histograms and value-plots
-				MDresult.addObject();
-				MDresult.setValue(EMDL_MICROGRAPH_NAME, fn_micrographs[imic]);
-				MDresult.setValue(EMDL_PARTICLE_AUTOPICK_FOM, avg_fom);
-				MDresult.setValue(EMDL_MLMODEL_GROUP_NR_PARTICLES, nr_pick);
-			}
+            // mis-use MetadataTable to conveniently make histograms and value-plots
+            MDresult.addObject();
+            MDresult.setValue(EMDL_MICROGRAPH_NAME, fn_micrographs[imic]);
+            MDresult.setValue(EMDL_MLMODEL_GROUP_NR_PARTICLES, nr_pick);
 		}
 
         if (exists(fn_skew))
@@ -738,24 +727,6 @@ void AmyloidFinder::finalise()
 		plot2D->OutputPostScriptPlot(fn_eps);
 		all_fn_eps.push_back(fn_eps);
 		delete plot2D;
-	}
-
-	CPlot2D *plot2Dc=new CPlot2D("Average autopick FOM for all micrographs");
-	MDresult.addToCPlot2D(plot2Dc, EMDL_UNDEFINED, EMDL_PARTICLE_AUTOPICK_FOM, 1.);
-	plot2Dc->SetDrawLegend(false);
-	fn_eps = fn_odir + "all_FOMs.eps";
-	plot2Dc->OutputPostScriptPlot(fn_eps);
-	all_fn_eps.push_back(fn_eps);
-	delete plot2Dc;
-	if (MDresult.numberOfObjects() > 3)
-	{
-		CPlot2D *plot2Dd=new CPlot2D("");
-		MDresult.columnHistogram(EMDL_PARTICLE_AUTOPICK_FOM,histX,histY,0, plot2Dd);
-		fn_eps = fn_odir + "histogram_FOMs.eps";
-		plot2Dd->SetTitle("Histogram of average autopick FOM per micrograph");
-		plot2Dd->OutputPostScriptPlot(fn_eps);
-		all_fn_eps.push_back(fn_eps);
-		delete plot2Dd;
 	}
 
     CPlot2D *plot2De=new CPlot2D("Skewness of FOM for all micrographs");
