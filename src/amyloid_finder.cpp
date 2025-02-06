@@ -43,6 +43,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     trace_filament_width = textToFloat(parser.getOption("--trace_filament_width", "Minimum width occupied by a traced filaments (in A)", "200"));
     trace_filament_length = textToFloat(parser.getOption("--trace_filament_length", "Minimum length of traced filaments (in A)", "300"));
     do_plot = parser.checkOption("--plot", "Display images with intermediate tracing results for each micrograph");
+    do_redo_tracing = parser.checkOption("--redo_all_tracing", "Ignore any autopick.star files already present and redo all tracing.");
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
 
     int expert_section = parser.addSection("Expert options (typically no need to change)");
@@ -86,6 +87,24 @@ void AmyloidFinder::initialise(bool is_leader)
     {
         // Read a single micrograph
         fn_micrographs.push_back(fn_in);
+    }
+
+    fn_ori_micrographs = fn_micrographs;
+    // If we're continuing an old run, see which micrographs have not been finished yet...
+    if (do_only_unfinished && !do_redo_tracing)
+    {
+        if (verb > 0)
+        {
+            std::cout << " + Skipping those micrographs for which coordinate file already exists" << std::endl;
+        }
+        std::vector<FileName> fns_todo;
+        for (long int imic = 0; imic < fn_micrographs.size(); imic++)
+        {
+            FileName fn_tmp = getOutputRootName(fn_micrographs[imic]) + "_" + fn_out + ".star";
+            if (!exists(fn_tmp))
+                fns_todo.push_back(fn_micrographs[imic]);
+        }
+        fn_micrographs = fns_todo;
     }
 
     // If there is nothing to do, then go out of initialise
@@ -601,11 +620,11 @@ void AmyloidFinder::run()
 void AmyloidFinder::finalise()
 {
 
-    long int barstep = XMIPP_MAX(1, fn_micrographs.size() / 60);
+    long int barstep = XMIPP_MAX(1, fn_ori_micrographs.size() / 60);
 	if (verb > 0)
 	{
 		std::cout << " Generating  output list of coordinate files ... " << std::endl;
-		init_progress_bar(fn_micrographs.size());
+		init_progress_bar(fn_ori_micrographs.size());
 	}
 
     MetaDataTable MDin;
@@ -616,10 +635,10 @@ void AmyloidFinder::finalise()
 	MetaDataTable MDresult;
 	long total_nr_picked = 0;
 	int nr_coord_files = 0;
-	for (long int imic = 0; imic < fn_micrographs.size(); imic++)
+	for (long int imic = 0; imic < fn_ori_micrographs.size(); imic++)
 	{
 
-        FileName fn_root = getOutputRootName(fn_micrographs[imic]);
+        FileName fn_root = getOutputRootName(fn_ori_micrographs[imic]);
         FileName fn_fom = fn_root + "_" + fn_out + "_fom.mrc";
         FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
         FileName fn_skew = fn_root + "_" + fn_out + "_skew.star";
@@ -630,7 +649,7 @@ void AmyloidFinder::finalise()
 		{
 
 			MDcoords.addObject();
-			MDcoords.setValue(EMDL_MICROGRAPH_NAME, fn_micrographs[imic]);
+			MDcoords.setValue(EMDL_MICROGRAPH_NAME, fn_ori_micrographs[imic]);
 			MDcoords.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
 			nr_coord_files++;
 
@@ -682,16 +701,16 @@ void AmyloidFinder::finalise()
 
 	if (verb > 0 )
 	{
-		progress_bar(fn_micrographs.size());
+		progress_bar(fn_ori_micrographs.size());
 		std::cout << " Saved list with " << nr_coord_files << " coordinate files in: " << fn_coords << std::endl;
 	}
 
 	if (verb > 0)
 	{
-		std::cout << " Total number of particles from " << fn_micrographs.size() << " micrographs is " << total_nr_picked << std::endl;
+		std::cout << " Total number of particles from " << fn_ori_micrographs.size() << " micrographs is " << total_nr_picked << std::endl;
 
 		long avg = 0;
-		if (fn_micrographs.size() > 0) avg = ROUND((RFLOAT)total_nr_picked/fn_micrographs.size());
+		if (fn_ori_micrographs.size() > 0) avg = ROUND((RFLOAT)total_nr_picked/fn_ori_micrographs.size());
 		std::cout << " i.e. on average there were " << avg << " particles per micrograph" << std::endl;
 
 		std::cout << " Now generating logfile.pdf ... " << std::endl;

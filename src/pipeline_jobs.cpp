@@ -2052,6 +2052,7 @@ Kappa ~ 0.05 is recommended for long and straight tubes (e.g. TMV, VipA/VipB and
 Helical tubes with shorter lengths will not be picked. Note that a long helical tube seen by human eye might be treated as short broken pieces due to low FOM values or high picking threshold.");
     joboptions["amyloid_threshold"] = JobOption("Amyloid pick threshold (sigma): ", 0.25, 0.05, 1, 0.05, "How many sigma does the peaks need to be above the mean for the filament tracing to include a coordinate?");
     joboptions["do_amyloid_plot"] = JobOption("Plot results per micrograph?", false, "Set this option to Yes to visualise intermediate results for amyloid tracing, which may help with setting values for filament length, width and picking threshold. Don't use in parallel or in submission to the queue.");
+    joboptions["redo_all_tracing"] = JobOption("Redo tracing for all micrographs?", false, "Set this option to Yes to redo the tracing for all micrographs (and overwrite any existing output coordinate star files that may exist). If set to No, then only micrographs for which the star files don't exist yet will be traced. This is useful for speeding up on-the-fly processing in continuation jobs.");
 
 
 }
@@ -2319,6 +2320,7 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
                     return false;
                 }
             }
+            if (joboptions["redo_all_tracing"].getBoolean()) command += " --redo_all_tracing ";
 
             command += " --odir " + outputname;
             command += " --pickname autopick";

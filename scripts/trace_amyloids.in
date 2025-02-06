@@ -6,6 +6,7 @@ import starfile
 from skimage.filters import gaussian
 from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize
+from pathlib import Path
 import math
 import pandas as pd
 import argparse
@@ -249,3 +250,5 @@ if __name__ == "__main__":
         xy = {'rlnCoordinateX': coords[:, 0], 'rlnCoordinateY': coords[:, 1]}
         df = pd.DataFrame(xy)
         starfile.write(df, args.output, overwrite=True)
+    else:
+        Path(args.output).touch()

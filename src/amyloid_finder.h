@@ -69,6 +69,9 @@ public:
     // Minimum length for tracing filaments
     RFLOAT trace_filament_length, trace_filament_width;
 
+    // Redo existing tracings?
+    bool do_redo_tracing;
+    
     // Python executable name
     FileName fn_exe;
 
@@ -85,8 +88,8 @@ public:
     int iwidthmax, ilengthmax, imin_signal, imax_signal, imin_nonsignal, imax_nonsignal, large_box, crop_box;
     std::vector<AmyloidCoordinate> circle;
 
-    // All micrographs to autopick from
-    std::vector<FileName> fn_micrographs;
+    // All and selected micrographs to autopick from
+    std::vector<FileName> fn_ori_micrographs, fn_micrographs;
 
     // Continue an old run: only estimate CTF if logfile WITH Final Values line does not yet exist, otherwise skip the tomogram
     bool do_only_unfinished;

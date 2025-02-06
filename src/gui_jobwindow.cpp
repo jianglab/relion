@@ -942,6 +942,7 @@ void JobWindow::initialiseAutopickWindow()
 
     place("amyloid_threshold");
     place("do_amyloid_plot");
+    place("redo_all_tracing");
 
 	group4->end();
 
