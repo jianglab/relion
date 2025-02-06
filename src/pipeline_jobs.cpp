@@ -3046,6 +3046,7 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 	command += " " + joboptions["other_args"].getString();
 
 	commands.push_back(command);
+	commands.push_back(ff_command);
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 }

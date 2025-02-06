@@ -1090,7 +1090,20 @@ void JobWindow::initialiseSelectWindow()
 	place("fn_model", TOGGLE_DEACTIVATE);
 	place("fn_mic", TOGGLE_DEACTIVATE);
 	place("fn_data", TOGGLE_DEACTIVATE);
+	
+	current_y += STEPY/2;
 
+	group7 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group7->end();
+	
+	place("do_recover_full_filaments", TOGGLE_DEACTIVATE, group7);
+	group7->begin();
+	place("min_fraction_threshold", TOGGLE_DEACTIVATE);
+	place("full_particle_star_file_path", TOGGLE_DEACTIVATE);
+	
+	group7->end();
+	guientries["do_recover_full_filaments"].cb_menu_i();
+	
 	tab1->end();
 
 	tab2->begin();
@@ -1111,18 +1124,6 @@ void JobWindow::initialiseSelectWindow()
 	guientries["do_class_ranker"].cb_menu_i();
 
 	current_y += STEPY/2;
-
-	group7 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
-	group7->end();
-	
-	place("do_recover_full_filaments", TOGGLE_DEACTIVATE, group7);
-	group7->begin();
-	place("min_fraction_threshold", TOGGLE_DEACTIVATE);
-	place("full_particle_star_file_path", TOGGLE_DEACTIVATE);
-	
-	group7->end();
-	guientries["do_recover_full_filaments"].cb_menu_i();
-
 
 	place("do_recenter", TOGGLE_DEACTIVATE);
 	group1 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
