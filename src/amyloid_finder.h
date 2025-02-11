@@ -113,6 +113,9 @@ public:
     // Difference between two psi angles that range from 0-180
     RFLOAT getPsiDiff(RFLOAT psi1, RFLOAT psi2);
 
+    // grow nonsignal mask
+    MultidimArray<RFLOAT> growNonSignalMask(MultidimArray<RFLOAT> &inmask, int dist);
+
     // Loop over all psi-angles and coordinates to get accumulated score and angle image for a given micrograph
     void getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore,
                                   MultidimArray<RFLOAT> &Mangle, RFLOAT &skew, RFLOAT &kurt, bool myverb = false);

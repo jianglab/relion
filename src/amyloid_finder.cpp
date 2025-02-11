@@ -33,7 +33,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     nr_threads = textToInteger(parser.getOption("--j", "Number of threads to us in parallel", "1"));
 
     int search_section = parser.addSection("Filament searching options ");
-    psi_step = textToFloat(parser.getOption("--psi_step", "Angular sampling rate (in degrees)", "10."));
+    psi_step = textToFloat(parser.getOption("--psi_step", "Angular sampling rate (in degrees)", "5."));
     shift_step = textToInteger(parser.getOption("--shift_step", "Step in shifts to search (in downscaled pixels)", "5"));
     search_filament_width = textToFloat(parser.getOption("--search_filament_width", "Width of searching image (in A)", "50"));
     search_filament_length = textToFloat(parser.getOption("--search_filament_length", "Length of searching image (in A)", "250"));
@@ -191,7 +191,43 @@ RFLOAT AmyloidFinder::getPsiDiff(RFLOAT psi1, RFLOAT psi2)
     return fabs(psidiff);
 
 }
+MultidimArray<RFLOAT> AmyloidFinder::growNonSignalMask(MultidimArray<RFLOAT> &inmask, int extend_size)
+{
 
+    MultidimArray<RFLOAT> Mresult = inmask;
+    RFLOAT extend_ini_mask2 = extend_size * extend_size;
+
+#pragma omp parallel for num_threads(nr_threads)
+    for (long int i=STARTINGY(inmask)+extend_size; i<=FINISHINGY(inmask)-extend_size; i++)
+    {
+        for (long int j=STARTINGX(inmask)+extend_size; j<=FINISHINGX(inmask)-extend_size; j++)
+        {
+            // only extend from 1 values
+            if (A2D_ELEM(inmask, i, j) > 0.99)
+            {
+                for (long int ip = i - extend_size; ip <= i + extend_size; ip++)
+                {
+                    for (long int jp = j - extend_size; jp <= j + extend_size; jp++)
+                    {
+                        // only check distance if neighbouring pixel is zero
+                        if (A2D_ELEM(inmask, ip, jp) < 0.01)
+                        {
+                            RFLOAT r2 = (RFLOAT)( (ip-i)*(ip-i)+ (jp-j)*(jp-j) );
+                            // Set original voxel to 1 if a neghouring with Im()=1 is within distance extend_ini_mask
+                            if (r2 < extend_ini_mask2)
+                            {
+                                A2D_ELEM(Mresult, ip, jp) = 1.;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return Mresult;
+
+}
 void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore,
                                              MultidimArray<RFLOAT> &Mangle, RFLOAT &skew, RFLOAT &kurt, bool myverb)
 {
@@ -310,19 +346,24 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
             } // end loop ypos
         } // end for xpos
 
-        //Image<RFLOAT> It0;
-        //It0()= rotated_scores_perline[ipsi];
-        //FileName fnt0="It0_psi"+ integerToString(ipsi)+".spi";
-        //It0.write(fnt0);
-        //std::cerr <<" written: "<<fnt0 << std::endl;
-
+        /*
+        Image<RFLOAT> It0;
+        It0()= rotated_scores_perline[ipsi];
+        FileName fnt0="It0_scores_psi"+ integerToString(ipsi)+".spi";
+        It0.write(fnt0);
+        std::cerr <<" written: "<<fnt0 << std::endl;
+        It0()= rotated_nonscores_perline[ipsi];
+        fnt0="It0_nonscores_psi"+ integerToString(ipsi)+".spi";
+        It0.write(fnt0);
+        std::cerr <<" written: "<<fnt0 << std::endl;
+        */
 
         // Now that we have signal per individual line for each coordinate, sum over the width of the search box
         // The below is split in two halves, becauses otherwise cen_pos=0 may be sampled twice!!!
         int my_skip_side_width = iwidthmax/2;
  #pragma omp parallel for num_threads(nr_threads)
-       for (int ypos = 0; ypos < YSIZE(rotated_imgs[ipsi])/2 - my_skip_side_width; ypos += shift_step)
-       {
+        for (int ypos = 0; ypos < YSIZE(rotated_imgs[ipsi])/2 - my_skip_side_width; ypos += shift_step)
+        {
            for (int ipassy = 0; ipassy < 2; ipassy++)
            {
                int cen_ypos = (ipassy == 0) ? ypos : -ypos;
@@ -345,21 +386,15 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
                    } // end loop ipass
                } // end loop xpos
            } // end for ipassy
-       } // end for ypos
+        } // end for ypos
 
-       //Image<RFLOAT> It;
-       //It()= rotated_scores[ipsi];
-       //FileName fnt="It_psi"+ integerToString(ipsi)+".spi";
-       //It.write(fnt);
-       //std::cerr <<" written: "<<fnt << std::endl;
-
-       if (myverb) progress_bar(ipsi);
+        if (myverb) progress_bar(ipsi);
 
     } // end for ipsi
     if (myverb) progress_bar(nr_psi);
 
 
-    // Now loop over all positions ad find the best Zscore and the best ipsi
+    // Now loop over all positions and find the best Zscore and the best ipsi
     // Note that each translation in the original image has a different coordinate in the rotated_score images!
     // So, rotate those back first
     if (myverb)
@@ -374,15 +409,31 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         RFLOAT psi = getPsiAngle(ipsi);
         selfRotate(rotated_scores[ipsi], -psi);
         selfRotate(rotated_nonscores[ipsi], -psi);
+
+        /*
+        Image<RFLOAT> It;
+        It()= rotated_scores[ipsi];
+        FileName fnt="It_scores_psi"+ integerToString(ipsi)+".spi";
+        It.write(fnt);
+        std::cerr <<" written: "<<fnt << std::endl;
+        It()= rotated_nonscores[ipsi];
+        fnt="It_nonscores_psi"+ integerToString(ipsi)+".spi";
+        It.write(fnt);
+        std::cerr <<" written: "<<fnt << std::endl;
+        */
     }
+
+
 
     Mangle.resize(down_ysize, down_xsize);
     Mangle.setXmippOrigin();
     Mscore.resize(Mangle);
-    MultidimArray<RFLOAT> Msum, Mnonsum, Mnonscore;
+    MultidimArray<RFLOAT> Msum, Mnonsum, Mnonscore, Mneighbour, Mneighbour2;
     Msum.resize(Mangle);
     Mnonsum.resize(Mangle);
     Mnonscore.resize(Mangle);
+    Mneighbour.resize(Mangle);
+    Mneighbour2.resize(Mangle);
 
     // This can't be parallelised efficiently because need to protect Msums, Mscore and Mangle from simultaneous writing...
     // Calculate Z-scores over psi: (max_psi - avg_psi) /stddev_psi
@@ -405,56 +456,101 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
                 {
                     A2D_ELEM(Mscore, cen_ypos, cen_xpos) = myscore;
                     A2D_ELEM(Mangle, cen_ypos, cen_xpos) = mypsi;
+                    int ipsi_nb = (ipsi == 0) ? nr_psi - 1 : ipsi - 1;
+                    A2D_ELEM(Mneighbour, cen_ypos, cen_xpos) = A2D_ELEM(rotated_scores[ipsi_nb], cen_ypos/shift_step, cen_xpos/shift_step);
+                    ipsi_nb = (ipsi == nr_psi - 1) ? 0 : ipsi + 1;
+                    A2D_ELEM(Mneighbour, cen_ypos, cen_xpos) += A2D_ELEM(rotated_scores[ipsi_nb], cen_ypos/shift_step, cen_xpos/shift_step);
                 }
 
                 if (mynonscore > A2D_ELEM(Mnonscore, cen_ypos, cen_xpos))
                 {
                     A2D_ELEM(Mnonscore, cen_ypos, cen_xpos) = mynonscore;
+                    int ipsi_nb = (ipsi == 0) ? nr_psi - 1 : ipsi - 1;
+                    A2D_ELEM(Mneighbour2, cen_ypos, cen_xpos) = A2D_ELEM(rotated_nonscores[ipsi_nb], cen_ypos/shift_step, cen_xpos/shift_step);
+                    ipsi_nb = (ipsi == nr_psi - 1) ? 0 : ipsi + 1;
+                    A2D_ELEM(Mneighbour2, cen_ypos, cen_xpos) += A2D_ELEM(rotated_nonscores[ipsi_nb], cen_ypos/shift_step, cen_xpos/shift_step);
                 }
 
             }
         }
     }
 
-    // Now need to subtract the Mscore for the best psi, as the mean and stddev should be calculated for the non-signal!
-    RFLOAT sum=0., sum2=0.;
+//#define DEBUG_FOM
+#ifdef DEBUG_FOM
+    Image<RFLOAT> It, It2;
+    It()= Mscore;
+    FileName fnt="Mscore.spi";
+    It.write(fnt);
+    std::cerr <<" written: "<<fnt << std::endl;
+    It2()= Mnonscore;
+    fnt="Mnonscore.spi";
+    It2.write(fnt);
+    std::cerr <<" written: "<<fnt << std::endl;
+#endif
+
+    // Now need to subtract the max Mscore for the best psi (plus sum of its two neighbouring ipsi), as the mean and stddev should be calculated for the non-signal!
     FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Msum)
     {
-        DIRECT_MULTIDIM_ELEM(Msum, n) -= DIRECT_MULTIDIM_ELEM(Mscore, n);
-        DIRECT_MULTIDIM_ELEM(Msum, n) /= (RFLOAT)(nr_psi-1);
+        DIRECT_MULTIDIM_ELEM(Msum, n) -= DIRECT_MULTIDIM_ELEM(Mscore, n) + DIRECT_MULTIDIM_ELEM(Mneighbour, n);
+        DIRECT_MULTIDIM_ELEM(Msum, n) /= (RFLOAT)(nr_psi-3);
         // calculate as normalised score:
         // (max_psi - adjusted_mean_psi) / adjusted_mean_psi
         // where adjusted_mean is the average of the score over all psi-values, except the maximum
         RFLOAT Zscore_signal = 0.;
         if (DIRECT_MULTIDIM_ELEM(Msum, n) > 0.)
             Zscore_signal = (DIRECT_MULTIDIM_ELEM(Mscore, n) - DIRECT_MULTIDIM_ELEM(Msum, n)) / DIRECT_MULTIDIM_ELEM(Msum, n);
+        DIRECT_MULTIDIM_ELEM(Mscore, n) = Zscore_signal;
+
+#ifdef DEBUG_FOM
+       DIRECT_MULTIDIM_ELEM(It(), n) = Zscore_signal;
+#endif
 
         // Also for non-signal
-        DIRECT_MULTIDIM_ELEM(Mnonsum, n) -= DIRECT_MULTIDIM_ELEM(Mnonscore, n);
-        DIRECT_MULTIDIM_ELEM(Mnonsum, n) /= (RFLOAT)(nr_psi-1);
+        DIRECT_MULTIDIM_ELEM(Mnonsum, n) -= DIRECT_MULTIDIM_ELEM(Mnonscore, n) + DIRECT_MULTIDIM_ELEM(Mneighbour2, n);
+        DIRECT_MULTIDIM_ELEM(Mnonsum, n) /= (RFLOAT)(nr_psi-3);
         RFLOAT Zscore_nonsignal = 0.;
         if (DIRECT_MULTIDIM_ELEM(Mnonsum, n) > 0.)
-            Zscore_nonsignal = (DIRECT_MULTIDIM_ELEM(Mnonscore, n) - DIRECT_MULTIDIM_ELEM(Mnonsum, n)) / DIRECT_MULTIDIM_ELEM(Mnonsum, n);
-        // Avoid negative non-signals
-        //if (Zscore_nonsignal < 0.) Zscore_nonsignal = 0.;
-        // Calculate a combined score that emphasizes high signals, but low non-signals:
-        // Z_signal * (1 - Z_nonsignal)
-        // If lower than 0, just set score to 0
-        DIRECT_MULTIDIM_ELEM(Mscore, n) = XMIPP_MAX(0., Zscore_signal * (1. - Zscore_nonsignal));
-
-        /*
-        if (DIRECT_MULTIDIM_ELEM(Mscore, n)>0.5)
         {
-            std::cerr << "score= " << DIRECT_MULTIDIM_ELEM(Mscore, n)<< " Zscore_signal= " << Zscore_signal << " Zscore_nonsignal= " << Zscore_nonsignal
-            << " Msum= " << DIRECT_MULTIDIM_ELEM(Msum, n) << " Mnonsum= " <<  DIRECT_MULTIDIM_ELEM(Mnonsum, n)
-            << " angle= " << DIRECT_MULTIDIM_ELEM(Mangle, n) << " nonangle= " << DIRECT_MULTIDIM_ELEM(Mnonangle, n)<<std::endl;
-        }
-        */
+            Zscore_nonsignal = (DIRECT_MULTIDIM_ELEM(Mnonscore, n) - DIRECT_MULTIDIM_ELEM(Mnonsum, n)) / DIRECT_MULTIDIM_ELEM(Mnonsum, n);
 
+#ifdef DEBUG_FOM
+            DIRECT_MULTIDIM_ELEM(It2(), n) = Zscore_nonsignal;
+#endif
+            // binarize to generate a non-signal mask
+            Zscore_nonsignal = (Zscore_nonsignal < 0.7) ? 0 : 1;
+        }
+        DIRECT_MULTIDIM_ELEM(Mnonscore, n) = Zscore_nonsignal;
+
+    }
+
+    // Grow the nonsignal mask a bit, as ice crystals give artefacts near their borders
+    Mnonscore = growNonSignalMask(Mnonscore, iwidthmax);
+
+#ifdef DEBUG_FOM
+    fnt="Zscore_signal.spi";
+    It.write(fnt);
+    fnt="Zscore_nonsignal.spi";
+    It2.write(fnt);
+    It()=Mnonscore;
+    It.write("grownmask.spi");
+#endif
+
+    // Apply inverse non-signal mask to the Mscore to calculate final FOM image
+    RFLOAT sum=0., sum2=0.;
+    FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Mscore)
+    {
+        DIRECT_MULTIDIM_ELEM(Mscore, n) *= (1. - DIRECT_MULTIDIM_ELEM(Mnonscore, n));
         // Also calculate mean and stddev of final combined score over the whole micrograph, to later calculate skewness and kurtosis for signal detection
         sum  += DIRECT_MULTIDIM_ELEM(Mscore, n);
         sum2 += DIRECT_MULTIDIM_ELEM(Mscore, n) * DIRECT_MULTIDIM_ELEM(Mscore, n);
+
     }
+
+#ifdef DEBUG_FOM
+    It()=Mscore;
+    fnt="fom.spi";
+    It.write(fnt);
+#endif
 
     // Output skewness and kurtosis of Mscore distribution to detect which micrographs have filaments
     RFLOAT n = NZYXSIZE(Msum);
@@ -471,15 +567,6 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
     }
     kurt *= n*(n+1)/((n-1)*(n-2)*(n-3));
     skew *= n/((n-1)*(n-2));
-
-    /*
-    std::cerr << " skewness= " << skew << " excess kurtosis= " << kurt -3 << std::endl;
-    Image<RFLOAT> Itt;
-    Itt()=Msum;
-    Itt.write("Mscore_avg_over_psi.spi");
-    Itt()=Mscore;
-    Itt.write("Mscore_Zscore_over_psi.spi");
-    */
 
     if (myverb) progress_bar(nr_psi);
 
