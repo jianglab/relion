@@ -10,7 +10,161 @@ from pathlib import Path
 import math
 import pandas as pd
 import argparse
+""" Full assembly of the parts to form the complete network """
 
+""" Parts of the U-Net model """
+import lightning as L
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DoubleConv(nn.Module):
+    """(convolution => [BN] => ReLU) * 2"""
+
+    def __init__(self, in_channels, out_channels, mid_channels=None):
+        super().__init__()
+
+        if not mid_channels:
+            mid_channels = out_channels
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+class Down(nn.Module):
+    """Downscaling with maxpool then double conv"""
+
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
+        )
+
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+
+class Up(nn.Module):
+    """Upscaling then double conv"""
+
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+
+        # if bilinear, use the normal convolutions to reduce the number of channels
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
+        else:
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        # input is CHW
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+        # if you have padding issues, see
+        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
+        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class UNet(L.LightningModule):
+    def __init__(self, n_channels, n_classes, bilinear=False):
+        super(UNet, self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.bilinear = bilinear
+        #self.accuracy = BinaryAccuracy()
+        
+
+        self.inc = (DoubleConv(n_channels, 64))
+        self.down1 = (Down(64, 128))
+        self.down2 = (Down(128, 256))
+        self.down3 = (Down(256, 512))
+        factor = 2 if bilinear else 1
+        self.down4 = (Down(512, 1024 // factor))
+        self.up1 = (Up(1024, 512 // factor, bilinear))
+        self.up2 = (Up(512, 256 // factor, bilinear))
+        self.up3 = (Up(256, 128 // factor, bilinear))
+        self.up4 = (Up(128, 64, bilinear))
+        self.outc = (OutConv(64, n_classes))
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+        logits = self.outc(x)
+        return logits
+
+    def use_checkpointing(self):
+        self.inc = torch.utils.checkpoint(self.inc)
+        self.down1 = torch.utils.checkpoint(self.down1)
+        self.down2 = torch.utils.checkpoint(self.down2)
+        self.down3 = torch.utils.checkpoint(self.down3)
+        self.down4 = torch.utils.checkpoint(self.down4)
+        self.up1 = torch.utils.checkpoint(self.up1)
+        self.up2 = torch.utils.checkpoint(self.up2)
+        self.up3 = torch.utils.checkpoint(self.up3)
+        self.up4 = torch.utils.checkpoint(self.up4)
+        self.outc = torch.utils.checkpoint(self.outc)
+
+    def training_step(self, batch, batch_idx):
+        # training_step defines the train loop.
+        x, y = batch
+        pred = self(x)
+        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
+        self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        # training_step defines the train loop.
+        x, y = batch
+        pred = self(x)
+        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
+        self.log("val_loss", loss)
+        return loss
+    
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        pred = self(x)
+        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
+        self.log("test_loss", loss)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        return optimizer
+    
+#------------------------------------------------------------------------------------------
 
 def load_mrc(mrc_fn: str, multiply_global_origin: bool = True):
     mrc_file_handle = mrcfile.open(mrc_fn, "r")
@@ -83,7 +237,7 @@ def prune_lines(inlines, mind, min_ang, max_merge):
     for line in lines:
         lengths = np.append(lengths, np.linalg.norm(line[0]-line[1]))
         merged = np.append(merged, 1)
-    sortidx = np.argsort(lengths);
+    sortidx = np.argsort(lengths)
 
     min_ang_rad = math.radians(min_ang)
     NN = len(sortidx)
@@ -222,21 +376,40 @@ def pick_filaments(score, radius, threshold, filaments_length, filaments_plot):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('Scripts for picking filaments in FOM maps')
-    parser.add_argument('-i', '--input', help='input image to pick filaments in')
+    parser.add_argument('-if', '--input_fom', help='input fom to pick filaments in')
+    parser.add_argument('-ip', '--input_psi', help='input psi to pick filaments in')
+    parser.add_argument('-m', '--model_path', help="path to model")
     parser.add_argument('-o', '--output', help='output star file with coordinates')
     parser.add_argument('-r', '--radius', type=int, help='radius of the regions to extract (in A)')
     parser.add_argument('-t', '--threshold', default=0.5, type=float, help='FOM threshold at which to terminate region extraction (default: 0.5)')
     parser.add_argument('-l', '--length', default=-1, type=int, help='minimum length of straight filament segments to be picked (in Angstrom) (default: twice --radius)')
     parser.add_argument('-s', '--scale', type=float, default=1, help='Multiply outputcoordinates by this factor. (default: 1)')
     parser.add_argument('-fp', '--plot', action='store_true', help='flag for filament start-end picking plus plotting of its intermediate stages (useful for tuning parameters).')
+    parser.add_argument('-d', '--device', help="Which GPU to use", default="cuda:0")
 
     args = parser.parse_args()
 
-    image, pixel_size, origin = load_mrc(args.input)
+    fom_image, pixel_size, origin = load_mrc(args.input_fom)
+    psi_image, _, _ = load_mrc(args.input_psi)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # For Jenny, load network  add path to weights as an argument (can use the curreent one as default)
+    model = UNet.load_from_checkpoint(args.model_path, n_channels=2, n_classes=1)
+    model.eval()
+    # FOr Jenny, put on device
+    model = model.to(device)
+    # For Jenny, concatenate the two images and run network
+    fp = torch.from_numpy(np.stack((fom_image, psi_image), axis=0)).unsqueeze(0).to(device)
+    # Add GPU stuff to the arguments, look at model-angelo for help
+    with torch.no_grad():
+       output_segmentation = model(fp).cpu().numpy()
+    
+    # Use threshold as defined by arguments to binarize
+    binarized_output = (output_segmentation.reshape(*output_segmentation.shape[-2:]) > args.threshold)
 
     # Set edges to zero to prevent picking too close to the edge
     d = round(args.radius/pixel_size)
-    cropimage = image.copy()     # because image was readonly
+    cropimage = binarized_output.copy()     # because image was readonly
     cropimage[:d, :] = 0         # Top edge
     cropimage[-d:, :] = 0        # Bottom edge
     cropimage[:, :d] = 0         # Left edge
