@@ -13,7 +13,6 @@ import argparse
 """ Full assembly of the parts to form the complete network """
 
 """ Parts of the U-Net model """
-import lightning as L
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -91,7 +90,7 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 
-class UNet(L.LightningModule):
+class UNet(nn.Module):
     def __init__(self, n_channels, n_classes, bilinear=False):
         super(UNet, self).__init__()
         self.n_channels = n_channels
@@ -137,32 +136,17 @@ class UNet(L.LightningModule):
         self.up4 = torch.utils.checkpoint(self.up4)
         self.outc = torch.utils.checkpoint(self.outc)
 
-    def training_step(self, batch, batch_idx):
-        # training_step defines the train loop.
-        x, y = batch
-        pred = self(x)
-        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
-        self.log("train_loss", loss)
-        return loss
+    def load_from_checkpoint(model_path: str, n_channels: int, n_classes: int):
+        model = UNet(n_channels=n_channels, n_classes=n_classes)
+        lightning_dict = torch.load(model_path, map_location="cpu")
+        state_dict = lightning_dict['state_dict']
+        try:
+            model.load_state_dict(state_dict, weights_only=True)
+        except:
+            model.load_state_dict(state_dict)
+        return model
 
-    def validation_step(self, batch, batch_idx):
-        # training_step defines the train loop.
-        x, y = batch
-        pred = self(x)
-        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
-        self.log("val_loss", loss)
-        return loss
-    
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        pred = self(x)
-        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
-        self.log("test_loss", loss)
-        return loss
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        return optimizer
+ 
     
 #------------------------------------------------------------------------------------------
 
@@ -391,16 +375,12 @@ if __name__ == "__main__":
 
     fom_image, pixel_size, origin = load_mrc(args.input_fom)
     psi_image, _, _ = load_mrc(args.input_psi)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(args.device)
 
-    # For Jenny, load network  add path to weights as an argument (can use the curreent one as default)
     model = UNet.load_from_checkpoint(args.model_path, n_channels=2, n_classes=1)
     model.eval()
-    # FOr Jenny, put on device
     model = model.to(device)
-    # For Jenny, concatenate the two images and run network
     fp = torch.from_numpy(np.stack((fom_image, psi_image), axis=0)).unsqueeze(0).to(device)
-    # Add GPU stuff to the arguments, look at model-angelo for help
     with torch.no_grad():
        output_segmentation = model(fp).cpu().numpy()
     
