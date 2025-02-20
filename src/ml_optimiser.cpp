@@ -2026,7 +2026,14 @@ void MlOptimiser::initialiseGeneral(int rank)
 
     char *env_blush_args = getenv("RELION_BLUSH_ARGS");
     if (env_blush_args != nullptr)
+    {
         blush_args += std::string(env_blush_args);
+        if (verb > 0)
+        {
+            std::cout << " +  Picking up from environment variable $RELION_BLUSH_ARGS: " << std::endl;
+            std::cout << " +  " << std::string(env_blush_args) << std::endl;
+        }
+    }
 
     if (skip_spectral_trailing)
         blush_args += " --skip-spectral-trailing ";
