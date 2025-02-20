@@ -7011,6 +7011,20 @@ bool RelionJob::getCommandsTomoPickTomogramsJob(std::string &outputname, std::ve
 
 	if (error_message != "") return false;
 
+    if (joboptions["in_tomoset"].getString() == "")
+    {
+        error_message = "ERROR: you need to provide an input STAR file";
+        return false;
+    }
+
+    MetaDataTable MDtest;
+    MDtest.read(joboptions["in_tomoset"].getString(), "global");
+    if (!MDtest.containsLabel(EMDL_TOMO_RECONSTRUCTED_TOMOGRAM_FILE_NAME))
+    {
+        error_message = "ERROR: the tomogram star file does not contain the label rlnTomoReconstructedTomogram";
+        return false;
+    }
+
     if (joboptions["pick_mode"].getString() == "particles" && joboptions["in_star_file"].getString().length() > 0)
     {
         command0 = "`which relion_python_tomo_get_particle_poses`";
@@ -7027,12 +7041,6 @@ bool RelionJob::getCommandsTomoPickTomogramsJob(std::string &outputname, std::ve
     }
 
 	command="`which relion_python_tomo_pick` ";
-
-	if (joboptions["in_tomoset"].getString() == "")
-	{
-		error_message = "ERROR: you need to provide an input STAR file";
-		return false;
-	}
 
 	/*
 	if (joboptions["pick_mode"].getString() == "surfaces" || joboptions["pick_mode"].getString() == "filaments")
