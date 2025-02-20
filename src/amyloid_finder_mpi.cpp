@@ -43,6 +43,31 @@ void AmyloidFinderMpi::read(int argc, char **argv)
 	printMpiNodesMachineNames(*node);
 }
 
+void AmyloidFinderMpi::deviceInitialise()
+{
+	int devCount;
+	accGPUGetDeviceCount(&devCount);
+
+	std::vector < std::vector < std::string > > allThreadIDs;
+	untangleDeviceIDs(gpu_ids, allThreadIDs);
+
+	// Sequential initialisation of GPUs on all ranks
+	if (!std::isdigit(*gpu_ids.begin()))
+		device_id = node->rank%devCount;
+	else
+		device_id = textToInteger((allThreadIDs[node->rank][0]).c_str());
+
+	for (int follower = 0; follower < node->size; follower++)
+	{
+		if (follower == node->rank)
+		{
+			std::cout << " + Using GPU device: " << device_id << " on MPI node: " << node->rank << std::endl;
+			std::cout.flush();
+		}
+		node->barrierWait();
+	}
+}
+
 void AmyloidFinderMpi::run()
 {
 	// Each node does part of the work

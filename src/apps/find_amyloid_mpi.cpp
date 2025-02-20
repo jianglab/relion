@@ -28,6 +28,7 @@ int main(int argc, char *argv[])
 		prm.read(argc, argv);
 
 		prm.initialise(prm.getRank());
+		if (prm.do_gpu) prm.deviceInitialise();
 
         prm.run();
 

@@ -45,6 +45,9 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     do_plot = parser.checkOption("--plot", "Display images with intermediate tracing results for each micrograph");
     do_redo_tracing = parser.checkOption("--redo_all_tracing", "Ignore any autopick.star files already present and redo all tracing.");
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
+    fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing");
+	do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
+    gpu_ids = parser.getOption("--gpu", "Device ids for each MPI-thread","default");
 
     int expert_section = parser.addSection("Expert options (typically no need to change)");
     signal_minres = textToFloat(parser.getOption("--signal_minres", "Minimum resolution value for signal (in A)", "4.85"));
@@ -171,6 +174,28 @@ void AmyloidFinder::initialise(bool is_leader)
 
 
 }
+
+
+void AmyloidFinder::deviceInitialise()
+{
+	int devCount;
+	accGPUGetDeviceCount(&devCount);
+
+	std::vector < std::vector < std::string > > allThreadIDs;
+	untangleDeviceIDs(gpu_ids, allThreadIDs);
+
+	// Sequential initialisation of GPUs on all ranks
+	if (!std::isdigit(*gpu_ids.begin()))
+		device_id = 0;
+	else
+		device_id = textToInteger((allThreadIDs[0][0]).c_str());
+
+	if (verb>0)
+	{
+		std::cout << " + Using GPU device " << device_id << std::endl;
+	}
+}
+
 
 FileName AmyloidFinder::getOutputRootName(FileName fn_mic)
 {
@@ -573,13 +598,19 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
 }
 
 
-void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_star)
+void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_psi, FileName &fn_star)
 {
 
     // hardcoded python script for now...
     FileName command = fn_exe;
 
-    command += " --i " + fn_fom;
+    command += " -if " + fn_fom;
+    command += " -ip " + fn_psi;
+    command += " -m " + fn_model_path;
+    if (do_gpu)
+        command += " -d cuda:" + integerToString(device_id);
+    else
+        command += " -d cpu";
     command += " --o " + fn_star;
     command += " --t " + floatToString(threshold);
     command += " --r " + floatToString(trace_filament_width/2);
@@ -588,7 +619,7 @@ void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_star)
     if (do_plot)
         command += " --plot ";
 
-    //std::cerr << command << std::endl;
+    std::cerr << command << std::endl;
     int res = system(command.c_str());
 
 
@@ -650,7 +681,7 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
     }
 
     FileName fn_star = getOutputRootName(fn_mic) + "_" + fn_out + ".star";
-    traceFilaments(fn_fom, fn_star);
+    traceFilaments(fn_fom, fn_psi, fn_star);
 
     if (myverb) std::cout << "done!" << std::endl;
 

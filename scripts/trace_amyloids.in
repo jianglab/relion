@@ -310,7 +310,7 @@ def pick_filaments(score, radius, threshold, filaments_length, filaments_plot):
         fig, axes = plt.subplots(1, 4, figsize=(15, 5), sharex=True, sharey=True)
         ax = axes.ravel()
 
-        ax[0].imshow(score, cmap=cm.binary, vmin=-20, vmax=5)
+        ax[0].imshow(score, cmap=cm.binary, vmin=0, vmax=1)
         ax[0].imshow(bin_score, alpha=0.5, cmap=cm.Reds)
         ax[0].set_title('FOM [-20,5] thr= ' + str(threshold))
 
@@ -382,10 +382,11 @@ if __name__ == "__main__":
     model = model.to(device)
     fp = torch.from_numpy(np.stack((fom_image, psi_image), axis=0)).unsqueeze(0).to(device)
     with torch.no_grad():
-       output_segmentation = model(fp).cpu().numpy()
+       output_segmentation = model(fp).sigmoid().cpu().numpy()
     
     # Use threshold as defined by arguments to binarize
-    binarized_output = (output_segmentation.reshape(*output_segmentation.shape[-2:]) > args.threshold)
+    #binarized_output = (output_segmentation.reshape(*output_segmentation.shape[-2:]) > args.threshold)
+    binarized_output = output_segmentation.reshape(*output_segmentation.shape[-2:]) 
 
     # Set edges to zero to prevent picking too close to the edge
     d = round(args.radius/pixel_size)
