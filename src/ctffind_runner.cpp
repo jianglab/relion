@@ -980,15 +980,15 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
         // Now get lines 6 and 7
         std::getline(av,s1);
         tokenize(s1, words);
-        int ilow = -999;
+        //int ilow = -999;
         int imin = -999;
         int imax = -999;
-        int ihigh = -999;
-        for (int i = 0; i < words.size(); i++)
-            if (ilow < 0 && textToFloat(words[i]) >= 0.22222) {
-                ilow = i;
-                break;
-            }
+        //int ihigh = -999;
+        //for (int i = 0; i < words.size(); i++)
+        //    if (ilow < 0 && textToFloat(words[i]) >= 0.22222) {
+        //        ilow = i;
+        //        break;
+        //    }
         for (int i = 0; i < words.size(); i++)
             if (imin < 0 && textToFloat(words[i]) >= 0.25) {
                 imin = i;
@@ -999,37 +999,37 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
                 imax = i;
                 break;
             }
-        for (int i = 0; i < words.size(); i++)
-            if (ihigh < 0 && textToFloat(words[i]) >= 0.33333) {
-                ihigh = i;
-                break;
-            }
-        RFLOAT lowring = 0.;
-        RFLOAT highring = 0.;
+        //for (int i = 0; i < words.size(); i++)
+        //    if (ihigh < 0 && textToFloat(words[i]) >= 0.33333) {
+        //        ihigh = i;
+        //        break;
+        //    }
+        //RFLOAT lowring = 0.;
+        //RFLOAT highring = 0.;
         std::getline(av,s2);
         tokenize(s2, words);
-        for (int i = ilow; i < imin; i++)
-        {
-            lowring += fabs(textToFloat(words[i]));
-        }
+        //for (int i = ilow; i < imin; i++)
+        //{
+        //   lowring += fabs(textToFloat(words[i]));
+        //}
         for (int i = imin; i < imax; i++)
         {
             icering += fabs(textToFloat(words[i]));
         }
-        for (int i = imax; i < ihigh; i++)
-        {
-            highring += fabs(textToFloat(words[i]));
-        }
-        RFLOAT avg_sides = (lowring + highring) / 2.;
-        std::cerr << " lowring= " << lowring << " icering= " << icering << " highring= " << highring << " avg_sides= " << avg_sides << " fraction= " << (icering - avg_sides) / avg_sides << std::endl;
-        if (avg_sides > 0.)
-        {
-            icering = (icering - avg_sides) / avg_sides;
-        }
-        else
-        {
-            icering = 0.;
-        }
+        //for (int i = imax; i < ihigh; i++)
+        //{
+        //    highring += fabs(textToFloat(words[i]));
+        //}
+        //RFLOAT avg_sides = (lowring + highring) / 2.;
+        //std::cerr << " lowring= " << lowring << " icering= " << icering << " highring= " << highring << " avg_sides= " << avg_sides << " fraction= " << (icering - avg_sides) / avg_sides << std::endl;
+        //if (avg_sides > 0.)
+        //{
+        //    icering = (icering - avg_sides) / avg_sides;
+        //}
+        //else
+        //{
+        //    icering = 0.;
+        //}
     }
 
 	return Final_is_found;
