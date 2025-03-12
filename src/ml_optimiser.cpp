@@ -583,6 +583,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     skip_realspace_helical_sym = parser.checkOption("--skip_realspace_helical_sym", "", "false", true);
 
     do_blush = parser.checkOption("--blush", "Perform the reconstruction with the Blush algorithm.");
+    blush_model = parser.getOption("--blush_model", "File location of a non-standard blush model", "");
     skip_spectral_trailing = parser.checkOption("--blush_skip_spectral_trailing", "Skip spectral trailing during Blush reconstruction (WARNING: This may inflate resolution estimates)");
 
 	do_external_reconstruct = parser.checkOption("--external_reconstruct", "Perform the reconstruction step outside relion_refine, e.g. for learned priors?)");
@@ -1004,6 +1005,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     failsafe_threshold = textToInteger(parser.getOption("--failsafe_threshold", "Maximum number of particles permitted to be handled by fail-safe mode, due to zero sum of weights, before exiting with an error (GPU only).", "40"));
 
     do_blush = parser.checkOption("--blush", "Perform the reconstruction with the Blush algorithm.");
+    blush_model = parser.getOption("--blush_model", "File location of a non-standard blush model", "");
     skip_spectral_trailing = parser.checkOption("--blush_skip_spectral_trailing", "Skip spectral trailing during Blush reconstruction (WARNING: This may inflate resolution estimates)");
 
     do_external_reconstruct = parser.checkOption("--external_reconstruct", "Perform the reconstruction step outside relion_refine, e.g. for learned priors?)");
@@ -2026,10 +2028,22 @@ void MlOptimiser::initialiseGeneral(int rank)
 
     char *env_blush_args = getenv("RELION_BLUSH_ARGS");
     if (env_blush_args != nullptr)
+    {
         blush_args += std::string(env_blush_args);
+    }
+
+    if (blush_model != "")
+        blush_args += std::string(" -m " + blush_model);
 
     if (skip_spectral_trailing)
         blush_args += " --skip-spectral-trailing ";
+
+    if (verb > 0 && blush_args != "")
+    {
+        std::cout << " +  Passing the below additional arguments to blush: " << std::endl;
+        std::cout << " +  " << blush_args << std::endl;
+    }
+
 
     if (do_gpu)
     {

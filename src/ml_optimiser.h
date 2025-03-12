@@ -505,7 +505,8 @@ public:
 
 	/** Perform reconstruction using the Blush algorithm */
 	bool do_blush;
-    	bool skip_spectral_trailing;
+	bool skip_spectral_trailing;
+    std::string blush_model;
 
 	/** Argumetns to pass to the Blush call */
 	std::string blush_args;
