@@ -429,6 +429,11 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     else
         do_center_classes = false;
 
+    if (parser.checkOption("--keep_priors_fixed", "Keep priors fixed, even for local angular searches?"))
+        keep_angular_priors_fixed = true;
+    else
+        keep_angular_priors_fixed = false;
+
     do_skip_maximization = parser.checkOption("--skip_maximize", "Skip maximization step (only write out data.star file)?");
 
     int corrections_section = parser.addSection("Corrections");
@@ -765,6 +770,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     do_skip_rotate = parser.checkOption("--skip_rotate", "Skip rotational assignment (only translate and classify)?");
     do_bimodal_psi = parser.checkOption("--bimodal_psi", "Do bimodal searches of psi angle?"); // Oct07,2015 - Shaoda, bimodal psi
     do_skip_maximization = false;
+    keep_angular_priors_fixed = parser.checkOption("--keep_priors_fixed", "Keep priors fixed, even for local angular searches?");
 
     // Helical reconstruction
     int helical_section = parser.addSection("Helical reconstruction (in development...)");
@@ -5993,11 +5999,11 @@ void MlOptimiser::getFourierTransformsAndCtfs(
         // If there were no defined priors (i.e. their values were 999.), then use the "normal" angles
         // Also do this for local angular searches when not doing helical refinement (e.g. for subtomograms picked on certain geometries)
         // Note that helical refinement deals with priors in a special manner... So leave that untouched...
-        if ( (prior_rot > 998.99 && prior_rot < 999.01) || (!do_helical_refine && do_local_angular_searches) )
+        if ( (prior_rot > 998.99 && prior_rot < 999.01) || (!do_helical_refine && do_local_angular_searches && !keep_angular_priors_fixed) )
             prior_rot = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_ROT);
-        if ( (prior_tilt > 998.99 && prior_tilt < 999.01) || (!do_helical_refine && do_local_angular_searches) )
+        if ( (prior_tilt > 998.99 && prior_tilt < 999.01) || (!do_helical_refine && do_local_angular_searches && !keep_angular_priors_fixed) )
             prior_tilt = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_TILT);
-        if ( (prior_psi > 998.99 && prior_psi < 999.01) || (!do_helical_refine && do_local_angular_searches) )
+        if ( (prior_psi > 998.99 && prior_psi < 999.01) || (!do_helical_refine && do_local_angular_searches && !keep_angular_priors_fixed) )
             prior_psi = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_PSI);
         if (prior_psi_flip_ratio > 998.99 && prior_psi_flip_ratio < 999.01)
             prior_psi_flip_ratio = 0.5;
