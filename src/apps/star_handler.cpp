@@ -1012,13 +1012,22 @@ class star_handler_parameters
 			MD.getValue(EMDL_ORIENT_TILT, tilt);
 			MD.getValue(EMDL_ORIENT_PSI, psi);
 
-			xoff /= angpix;
-			yoff /= angpix;
+            Euler_angles2matrix(rot, tilt, psi, A3D, false);
+            if (MD.containsLabel(EMDL_TOMO_SUBTOMOGRAM_ROT))
+            {
+                const double phi = MD.getAngleInRad(EMDL_TOMO_SUBTOMOGRAM_ROT);
+                const double theta = MD.getAngleInRad(EMDL_TOMO_SUBTOMOGRAM_TILT);
+                const double psi = MD.getAngleInRad(EMDL_TOMO_SUBTOMOGRAM_PSI);
+                Matrix2D<RFLOAT> Asubtomo;
+                Euler_angles2matrix( phi, theta, psi, Asubtomo, false);
+                A3D = Asubtomo * A3D;
+            }
 
-			// Project the center-coordinates
-			Euler_angles2matrix(rot, tilt, psi, A3D, false);
+			// Project the recenter-coordinates
 			my_projected_center = A3D * my_center;
 
+            xoff /= angpix;
+            yoff /= angpix;
 			xoff -= XX(my_projected_center);
 			yoff -= YY(my_projected_center);
 
