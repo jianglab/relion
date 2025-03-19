@@ -965,8 +965,53 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
 
 	in2.close();
 
+    // Use Richard's ice ring density instead of Rafa's.
+    // Be careful, because avgrot files from CTFFIND-4.1 are somehow normalized badly, so re-read power spectrum image
+    FileName fn_ps = fn_root + ".mrc";
+    Image<RFLOAT> Ips;
+    Ips.read(fn_ps);
+    Ips().setXmippOrigin();
+    RFLOAT mysize = angpix*XSIZE(Ips());
+    RFLOAT r2low_min=mysize*mysize/(4.5*4.5);
+    RFLOAT r2low_max=mysize*mysize/(4.0*4.0);
+    RFLOAT r2ice_min=mysize*mysize/(3.9*3.9);
+    RFLOAT r2ice_max=mysize*mysize/(3.5*3.5);
+    RFLOAT r2high_min=mysize*mysize/(3.4*3.4);
+    RFLOAT r2high_max=mysize*mysize/(3.0*3.0);
+    RFLOAT sumband = 0., sum2band = 0., band_n = 0.;
+    RFLOAT sumice = 0., ice_n = 0.;
+
+    FOR_ALL_ELEMENTS_IN_ARRAY2D(Ips())
+    {
+        RFLOAT r2 = RFLOAT(i*i + j*j);
+        if (r2 > r2low_min && r2 < r2low_max || r2 > r2high_min && r2 < r2high_max)
+        {
+            sumband += A2D_ELEM(Ips(), i, j);
+            sum2band += A2D_ELEM(Ips(), i, j) * A2D_ELEM(Ips(), i, j);
+            band_n += 1.;
+        }
+        else if (r2 > r2ice_min && r2 < r2ice_max)
+        {
+            sumice += A2D_ELEM(Ips(), i, j);
+            ice_n += 1.;
+        }
+    }
+
+    if (band_n > 0. && ice_n > 0.)
+    {
+        sumice /= ice_n;
+        sumband /= band_n;
+        sum2band = sqrt( (sum2band / band_n) - (sumband * sumband) );
+        if (sum2band > 0.) icering = (sumice - sumband) / sum2band;
+        else icering = 0.;
+    }
+    else
+    {
+        icering = 0.;
+    }
+
+    /*
     // Also try and get rlnIceRingDensity, as suggested by Rafael Leiro from the CNIO in Madrid
-    // SHWS 11mar2024: modified to subtract and divide by average power from bands above and below the water ring
     FileName fn_avrot = fn_root + "_avrot.txt";
     std::ifstream av(fn_avrot.data(), std::ios_base::in);
 	icering = 0.;
@@ -980,15 +1025,8 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
         // Now get lines 6 and 7
         std::getline(av,s1);
         tokenize(s1, words);
-        //int ilow = -999;
         int imin = -999;
         int imax = -999;
-        //int ihigh = -999;
-        //for (int i = 0; i < words.size(); i++)
-        //    if (ilow < 0 && textToFloat(words[i]) >= 0.22222) {
-        //        ilow = i;
-        //        break;
-        //    }
         for (int i = 0; i < words.size(); i++)
             if (imin < 0 && textToFloat(words[i]) >= 0.25) {
                 imin = i;
@@ -999,38 +1037,14 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
                 imax = i;
                 break;
             }
-        //for (int i = 0; i < words.size(); i++)
-        //    if (ihigh < 0 && textToFloat(words[i]) >= 0.33333) {
-        //        ihigh = i;
-        //        break;
-        //    }
-        //RFLOAT lowring = 0.;
-        //RFLOAT highring = 0.;
         std::getline(av,s2);
         tokenize(s2, words);
-        //for (int i = ilow; i < imin; i++)
-        //{
-        //   lowring += fabs(textToFloat(words[i]));
-        //}
         for (int i = imin; i < imax; i++)
         {
             icering += fabs(textToFloat(words[i]));
         }
-        //for (int i = imax; i < ihigh; i++)
-        //{
-        //    highring += fabs(textToFloat(words[i]));
-        //}
-        //RFLOAT avg_sides = (lowring + highring) / 2.;
-        //std::cerr << " lowring= " << lowring << " icering= " << icering << " highring= " << highring << " avg_sides= " << avg_sides << " fraction= " << (icering - avg_sides) / avg_sides << std::endl;
-        //if (avg_sides > 0.)
-        //{
-        //    icering = (icering - avg_sides) / avg_sides;
-        //}
-        //else
-        //{
-        //    icering = 0.;
-        //}
     }
+     */
 
 	return Final_is_found;
 }
