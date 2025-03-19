@@ -532,6 +532,9 @@ public:
 	 */
 	RFLOAT adaptive_fraction;
 
+    // Keep rot, tilt psi priors fixed relative to entries in particle starfile, even when performing local angular searches?
+    bool keep_angular_priors_fixed;
+
 	// Seed for random number generator
 	int random_seed;
 
