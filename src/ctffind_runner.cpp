@@ -450,8 +450,7 @@ void CtffindRunner::joinCtffindResults()
 			if (fabs(valscore + 999.) > 0.)
 				MDctf.setValue(EMDL_CTF_VALIDATIONSCORE, valscore);
 
-            if (icering > 0.)
-                MDctf.setValue(EMDL_CTF_ICERINGDENSITY, icering);
+            MDctf.setValue(EMDL_CTF_ICERINGDENSITY, icering);
 
             if (is_tomo)
             {
@@ -965,86 +964,89 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
 
 	in2.close();
 
-    // Use Richard's ice ring density instead of Rafa's.
     // Be careful, because avgrot files from CTFFIND-4.1 are somehow normalized badly, so re-read power spectrum image
+    // This only works if given the power spectrum from RELION's motioncorr. Otherwise, fall back on Rafa's approach below
     FileName fn_ps = fn_root + ".mrc";
-    Image<RFLOAT> Ips;
-    Ips.read(fn_ps);
-    Ips().setXmippOrigin();
-    RFLOAT mysize = angpix*XSIZE(Ips());
-    RFLOAT r2low_min=mysize*mysize/(4.5*4.5);
-    RFLOAT r2low_max=mysize*mysize/(4.0*4.0);
-    RFLOAT r2ice_min=mysize*mysize/(3.9*3.9);
-    RFLOAT r2ice_max=mysize*mysize/(3.5*3.5);
-    RFLOAT r2high_min=mysize*mysize/(3.4*3.4);
-    RFLOAT r2high_max=mysize*mysize/(3.0*3.0);
-    RFLOAT sumband = 0., sum2band = 0., band_n = 0.;
-    RFLOAT sumice = 0., ice_n = 0.;
-
-    FOR_ALL_ELEMENTS_IN_ARRAY2D(Ips())
+    if (use_given_ps)
     {
-        RFLOAT r2 = RFLOAT(i*i + j*j);
-        if (r2 > r2low_min && r2 < r2low_max || r2 > r2high_min && r2 < r2high_max)
-        {
-            sumband += A2D_ELEM(Ips(), i, j);
-            sum2band += A2D_ELEM(Ips(), i, j) * A2D_ELEM(Ips(), i, j);
-            band_n += 1.;
-        }
-        else if (r2 > r2ice_min && r2 < r2ice_max)
-        {
-            sumice += A2D_ELEM(Ips(), i, j);
-            ice_n += 1.;
-        }
-    }
+        // Use standard deviation in the diagnostics image for ice ring density instead of Rafa's.
+        // Calculate stddev of power, relative to stddev of power in a band with lower resolution than ice ring
+        // Richard suggested using a higher band as well, but some strange ice artefacts extend well into the higher band...
+        Image<RFLOAT> Ips;
+        Ips.read(fn_ps);
+        Ips().setXmippOrigin();
+        RFLOAT mysize = angpix*XSIZE(Ips());
+        RFLOAT r2ice_min=4*mysize*mysize/(3.9*3.9);
+        RFLOAT r2ice_max=4*mysize*mysize/(3.5*3.5);
+        RFLOAT n=0., mean=0., M2=0., M3=0., M4=0.;
+        for (long int i=0; i<=FINISHINGY(Ips()); i++) // Use only bottom half of the diagnostic image, as top contains model and averaged spectra!!
+            for (long int j=STARTINGX(Ips()); j<=FINISHINGX(Ips()); j++)
+            {
+                RFLOAT r2 = RFLOAT(i*i + j*j);
+                if (r2 > r2ice_min && r2 < r2ice_max)
+                {
+                    n += 1;
+                    mean += A2D_ELEM(Ips(), i, j);
+                }
+            }
+        mean /= n;
+        for (long int i=0; i<=FINISHINGY(Ips()); i++) // Use only bottom half of the diagnostic image, as top contains model and averaged spectra!!
+            for (long int j=STARTINGX(Ips()); j<=FINISHINGX(Ips()); j++)
+            {
+                RFLOAT r2 = RFLOAT(i*i + j*j);
+                if (r2 > r2ice_min && r2 < r2ice_max)
+                {
+                    RFLOAT delta = A2D_ELEM(Ips(), i, j) - mean;
+                    M2 += delta*delta;
+                    //M3 += delta*delta*delta;
+                    M4 += delta*delta*delta*delta;
+                }
+            }
 
-    if (band_n > 0. && ice_n > 0.)
-    {
-        sumice /= ice_n;
-        sumband /= band_n;
-        sum2band = sqrt( (sum2band / band_n) - (sumband * sumband) );
-        if (sum2band > 0.) icering = (sumice - sumband) / sum2band;
-        else icering = 0.;
+        RFLOAT s2 = M2 / (n - 1);
+        RFLOAT s = sqrt(s2);
+        //RFLOAT skewness = (s > 0.) ? (n / ((n - 1) * (n - 2))) * (M3 / (s * s * s)) : 0.;
+        RFLOAT kurtosis = (n * (n + 1) * M4) / ((n - 1) * (n - 2) * (n - 3) * (s2 * s2)) - (3 * (n - 1) * (n - 1)) / ((n - 2) * (n - 3));
+        //std::cerr << " s2= " << s2 << " skew= " << skewness << " kurtosis= " << kurtosis << std::endl;
+        icering = XMIPP_MIN(6., kurtosis);
+
     }
     else
     {
+        // Get rlnIceRingDensity, as suggested by Rafael Leiro from the CNIO in Madrid
+        FileName fn_avrot = fn_root + "_avrot.txt";
+        std::ifstream av(fn_avrot.data(), std::ios_base::in);
         icering = 0.;
-    }
-
-    /*
-    // Also try and get rlnIceRingDensity, as suggested by Rafael Leiro from the CNIO in Madrid
-    FileName fn_avrot = fn_root + "_avrot.txt";
-    std::ifstream av(fn_avrot.data(), std::ios_base::in);
-	icering = 0.;
-    if (!av.fail())
-    {
-        std::string s1, s2;
-        //skip 5 lines
-        for(int i = 0; i < 5; ++i)
-            std::getline(av, s1);
-
-        // Now get lines 6 and 7
-        std::getline(av,s1);
-        tokenize(s1, words);
-        int imin = -999;
-        int imax = -999;
-        for (int i = 0; i < words.size(); i++)
-            if (imin < 0 && textToFloat(words[i]) >= 0.25) {
-                imin = i;
-                break;
-            }
-        for (int i = imin; i < words.size(); i++)
-            if (imax < 0 && imin > 0 && textToFloat(words[i]) > 0.28) {
-                imax = i;
-                break;
-            }
-        std::getline(av,s2);
-        tokenize(s2, words);
-        for (int i = imin; i < imax; i++)
+        if (!av.fail())
         {
-            icering += fabs(textToFloat(words[i]));
+            std::string s1, s2;
+            //skip 5 lines
+            for(int i = 0; i < 5; ++i)
+                std::getline(av, s1);
+
+            // Now get lines 6 and 7
+            std::getline(av,s1);
+            tokenize(s1, words);
+            int imin = -999;
+            int imax = -999;
+            for (int i = 0; i < words.size(); i++)
+                if (imin < 0 && textToFloat(words[i]) >= 0.25) {
+                    imin = i;
+                    break;
+                }
+            for (int i = imin; i < words.size(); i++)
+                if (imax < 0 && imin > 0 && textToFloat(words[i]) > 0.28) {
+                    imax = i;
+                    break;
+                }
+            std::getline(av,s2);
+            tokenize(s2, words);
+            for (int i = imin; i < imax; i++)
+            {
+                icering += fabs(textToFloat(words[i]));
+            }
         }
     }
-     */
 
 	return Final_is_found;
 }
