@@ -265,9 +265,9 @@ void CtffindRunner::initialise(bool is_leader)
 		if (continue_old)
 		{
 			FileName fn_microot = fn_mic_ctf_given_all[imic].withoutExtension();
-			RFLOAT defU, defV, defAng, CC, HT, CS, AmpCnst, XMAG, DStep, maxres=-1., valscore = -1., phaseshift = 0., icering = 0.;
+			RFLOAT defU, defV, defAng, CC, HT, CS, AmpCnst, XMAG, DStep, maxres=-1., valscore = -1., phaseshift = 0., icering = 0., icepowfrac = 0., icekurtosis = 0.;
 			if (getCtffindResults(fn_microot, defU, defV, defAng, CC,
-			     HT, CS, AmpCnst, XMAG, DStep, maxres, valscore, phaseshift, icering, false)) // false: dont warn if not found Final values
+			     HT, CS, AmpCnst, XMAG, DStep, maxres, valscore, phaseshift, icering, icepowfrac, icekurtosis, false)) // false: dont warn if not found Final values
 			{
 				process_this = false; // already done
 			}
@@ -415,9 +415,10 @@ void CtffindRunner::joinCtffindResults()
 	{
 		FileName fn_microot = fn_micrographs_ctf_all[imic].withoutExtension();
 		RFLOAT defU, defV, defAng, CC, HT, CS, AmpCnst, XMAG, DStep;
-		RFLOAT maxres = -999., valscore = -999., phaseshift = -999., icering = 0.;
+		RFLOAT maxres = -999., valscore = -999., phaseshift = -999., icering = 0., icepowerfrac = 0., icekurtosis = 0.;
 		bool has_this_ctf = getCtffindResults(fn_microot, defU, defV, defAng, CC,
-		                                      HT, CS, AmpCnst, XMAG, DStep, maxres, valscore, phaseshift, icering);
+		                                      HT, CS, AmpCnst, XMAG, DStep, maxres, valscore, phaseshift,
+                                              icering, icepowerfrac, icekurtosis);
 
 		if (!has_this_ctf)
 		{
@@ -451,6 +452,8 @@ void CtffindRunner::joinCtffindResults()
 				MDctf.setValue(EMDL_CTF_VALIDATIONSCORE, valscore);
 
             MDctf.setValue(EMDL_CTF_ICERINGDENSITY, icering);
+            if (use_given_ps) MDctf.setValue(EMDL_CTF_ICERINGPOWERFRACTION, icepowerfrac);
+            if (use_given_ps) MDctf.setValue(EMDL_CTF_ICERINGKURTOSIS, icekurtosis);
 
             if (is_tomo)
             {
@@ -511,6 +514,11 @@ void CtffindRunner::joinCtffindResults()
 	plot_labels.push_back(EMDL_CTF_FOM);
     plot_labels.push_back(EMDL_CTF_VALIDATIONSCORE);
     plot_labels.push_back(EMDL_CTF_ICERINGDENSITY);
+    if (use_given_ps)
+    {
+        plot_labels.push_back(EMDL_CTF_ICERINGPOWERFRACTION);
+        plot_labels.push_back(EMDL_CTF_ICERINGKURTOSIS);
+    }
 	FileName fn_eps, fn_eps_root = fn_out+"micrographs_ctf";
 	std::vector<FileName> all_fn_eps;
 	for (int i = 0; i < plot_labels.size(); i++)
@@ -531,7 +539,8 @@ void CtffindRunner::joinCtffindResults()
 				// Histogram
 				std::vector<RFLOAT> histX, histY;
 				CPlot2D *plot2D=new CPlot2D("");
-				MDctf.columnHistogram(label,histX,histY,0, plot2D);
+				if (label == EMDL_CTF_ICERINGKURTOSIS) MDctf.columnHistogram(label,histX,histY,0, plot2D, -1, -1, 6);
+                else MDctf.columnHistogram(label,histX,histY,0, plot2D);
 				fn_eps = fn_eps_root + "_hist_" + EMDL::label2Str(label) + ".eps";
 				plot2D->OutputPostScriptPlot(fn_eps);
 				all_fn_eps.push_back(fn_eps);
@@ -787,16 +796,16 @@ void CtffindRunner::executeCtffind4(long int imic)
 
 bool CtffindRunner::getCtffindResults(FileName fn_microot, RFLOAT &defU, RFLOAT &defV, RFLOAT &defAng, RFLOAT &CC,
 		RFLOAT &HT, RFLOAT &CS, RFLOAT &AmpCnst, RFLOAT &XMAG, RFLOAT &DStep,
-		RFLOAT &maxres, RFLOAT &valscore, RFLOAT &phaseshift, RFLOAT &icering, bool do_warn)
+		RFLOAT &maxres, RFLOAT &valscore, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis, bool do_warn)
 {
 	if (is_ctffind4)
 	{
 		return getCtffind4Results(fn_microot, defU, defV, defAng, CC, HT, CS, AmpCnst, XMAG, DStep,
-		                          maxres, phaseshift, icering, do_warn);
+		                          maxres, phaseshift, icering, icepowerfrac, icekurtosis, do_warn);
 	}
 	else
 	{
-		icering = 0.;
+		icering = icepowerfrac = icekurtosis = 0.;
         return getCtffind3Results(fn_microot, defU, defV, defAng, CC, HT, CS, AmpCnst, XMAG, DStep,
 		                          maxres, phaseshift, valscore, do_warn);
 	}
@@ -879,7 +888,7 @@ bool CtffindRunner::getCtffind3Results(FileName fn_microot, RFLOAT &defU, RFLOAT
 
 bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT &defV, RFLOAT &defAng, RFLOAT &CC,
 		RFLOAT &HT, RFLOAT &CS, RFLOAT &AmpCnst, RFLOAT &XMAG, RFLOAT &DStep,
-		RFLOAT &maxres, RFLOAT &phaseshift, RFLOAT &icering, bool do_warn)
+		RFLOAT &maxres, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis, bool do_warn)
 {
 	FileName fn_root = getOutputFileWithNewUniqueDate(fn_microot, fn_out);
 	FileName fn_log = fn_root + "_ctffind4.log";
@@ -964,6 +973,42 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
 
 	in2.close();
 
+
+    // Get rlnIceRingDensity, as suggested by Rafael Leiro from the CNIO in Madrid
+    FileName fn_avrot = fn_root + "_avrot.txt";
+    std::ifstream av(fn_avrot.data(), std::ios_base::in);
+    icering = 0.;
+    if (!av.fail())
+    {
+        std::string s1, s2;
+        //skip 5 lines
+        for(int i = 0; i < 5; ++i)
+            std::getline(av, s1);
+
+        // Now get lines 6 and 7
+        std::getline(av,s1);
+        tokenize(s1, words);
+        int imin = -999;
+        int imax = -999;
+        for (int i = 0; i < words.size(); i++)
+            if (imin < 0 && textToFloat(words[i]) >= 0.25) {
+                imin = i;
+                break;
+            }
+        for (int i = imin; i < words.size(); i++)
+            if (imax < 0 && imin > 0 && textToFloat(words[i]) > 0.28) {
+                imax = i;
+                break;
+            }
+        std::getline(av,s2);
+        tokenize(s2, words);
+        for (int i = imin; i < imax; i++)
+        {
+            icering += fabs(textToFloat(words[i]));
+        }
+    }
+
+
     // Be careful, because avgrot files from CTFFIND-4.1 are somehow normalized badly, so re-read power spectrum image
     // This only works if given the power spectrum from RELION's motioncorr. Otherwise, fall back on Rafa's approach below
     FileName fn_ps = fn_root + ".mrc";
@@ -978,18 +1023,31 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
         RFLOAT mysize = angpix*XSIZE(Ips());
         RFLOAT r2ice_min=4*mysize*mysize/(3.9*3.9);
         RFLOAT r2ice_max=4*mysize*mysize/(3.5*3.5);
-        RFLOAT n=0., mean=0., M2=0., M3=0., M4=0.;
+        RFLOAT r2low_min=4*mysize*mysize/(4.5*4.5);
+        RFLOAT r2low_max=4*mysize*mysize/(4.0*4.0);
+        RFLOAT r2high_min=4*mysize*mysize/(3.4*3.4);
+        RFLOAT r2high_max=4*mysize*mysize/(3.0*3.0);
+        RFLOAT n=0., mean=0., pow_ice=0., pow_band=0., n_band= 0., M2=0., M3=0., M4=0.;
         for (long int i=0; i<=FINISHINGY(Ips()); i++) // Use only bottom half of the diagnostic image, as top contains model and averaged spectra!!
             for (long int j=STARTINGX(Ips()); j<=FINISHINGX(Ips()); j++)
             {
                 RFLOAT r2 = RFLOAT(i*i + j*j);
                 if (r2 > r2ice_min && r2 < r2ice_max)
                 {
-                    n += 1;
+                    n += 1.;
                     mean += A2D_ELEM(Ips(), i, j);
+                }
+                else if (r2 > r2low_min && r2 < r2low_max || r2 > r2high_min && r2 < r2high_max)
+                {
+                    n_band += 1.;
+                    pow_band += A2D_ELEM(Ips(), i, j);
                 }
             }
         mean /= n;
+        pow_band /= n_band;
+        if (pow_band > 0.) icepowerfrac = (mean - pow_band) / pow_band;
+        else icepowerfrac = 0.;
+
         for (long int i=0; i<=FINISHINGY(Ips()); i++) // Use only bottom half of the diagnostic image, as top contains model and averaged spectra!!
             for (long int j=STARTINGX(Ips()); j<=FINISHINGX(Ips()); j++)
             {
@@ -1006,46 +1064,11 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
         RFLOAT s2 = M2 / (n - 1);
         RFLOAT s = sqrt(s2);
         //RFLOAT skewness = (s > 0.) ? (n / ((n - 1) * (n - 2))) * (M3 / (s * s * s)) : 0.;
-        RFLOAT kurtosis = (n * (n + 1) * M4) / ((n - 1) * (n - 2) * (n - 3) * (s2 * s2)) - (3 * (n - 1) * (n - 1)) / ((n - 2) * (n - 3));
-        //std::cerr << " s2= " << s2 << " skew= " << skewness << " kurtosis= " << kurtosis << std::endl;
-        icering = XMIPP_MIN(6., kurtosis);
+        icekurtosis = (n * (n + 1) * M4) / ((n - 1) * (n - 2) * (n - 3) * (s2 * s2)) - (3 * (n - 1) * (n - 1)) / ((n - 2) * (n - 3));
 
     }
     else
     {
-        // Get rlnIceRingDensity, as suggested by Rafael Leiro from the CNIO in Madrid
-        FileName fn_avrot = fn_root + "_avrot.txt";
-        std::ifstream av(fn_avrot.data(), std::ios_base::in);
-        icering = 0.;
-        if (!av.fail())
-        {
-            std::string s1, s2;
-            //skip 5 lines
-            for(int i = 0; i < 5; ++i)
-                std::getline(av, s1);
-
-            // Now get lines 6 and 7
-            std::getline(av,s1);
-            tokenize(s1, words);
-            int imin = -999;
-            int imax = -999;
-            for (int i = 0; i < words.size(); i++)
-                if (imin < 0 && textToFloat(words[i]) >= 0.25) {
-                    imin = i;
-                    break;
-                }
-            for (int i = imin; i < words.size(); i++)
-                if (imax < 0 && imin > 0 && textToFloat(words[i]) > 0.28) {
-                    imax = i;
-                    break;
-                }
-            std::getline(av,s2);
-            tokenize(s2, words);
-            for (int i = imin; i < imax; i++)
-            {
-                icering += fabs(textToFloat(words[i]));
-            }
-        }
     }
 
 	return Final_is_found;
