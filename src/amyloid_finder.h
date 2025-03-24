@@ -46,7 +46,7 @@ public:
     int verb;
 
     // Output rootname
-    FileName fn_in, fn_odir, fn_out;
+    FileName fn_in, fn_odir, fn_out, fn_other_args;
 
     // Psi sampling step
     RFLOAT psi_step;

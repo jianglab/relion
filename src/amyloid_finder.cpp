@@ -45,6 +45,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     do_plot = parser.checkOption("--plot", "Display images with intermediate tracing results for each micrograph");
     do_redo_tracing = parser.checkOption("--redo_all_tracing", "Ignore any autopick.star files already present and redo all tracing.");
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
+    fn_other_args = parser.getOption("--other_args", "Other arguments for the python script", "");
     fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing");
 	do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
     gpu_ids = parser.getOption("--gpu", "Device ids for each MPI-thread","default");
@@ -611,13 +612,15 @@ void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_psi, FileName 
         command += " -d cuda:" + integerToString(device_id);
     else
         command += " -d cpu";
-    command += " --o " + fn_star;
-    command += " --t " + floatToString(threshold);
-    command += " --r " + floatToString(trace_filament_width/2);
-    command += " --l " + floatToString(trace_filament_length);
-    command += " --s " + floatToString(down_angpix/angpix);
+    command += " -o " + fn_star;
+    command += " -t " + floatToString(threshold);
+    command += " -r " + floatToString(trace_filament_width/2);
+    command += " -l " + floatToString(trace_filament_length);
+    command += " -s " + floatToString(down_angpix/angpix);
     if (do_plot)
         command += " --plot ";
+
+    command += " " + fn_other_args;
 
     std::cerr << command << std::endl;
     int res = system(command.c_str());
@@ -768,7 +771,8 @@ void AmyloidFinder::finalise()
 
 			MDcoords.addObject();
 			MDcoords.setValue(EMDL_MICROGRAPH_NAME, fn_ori_micrographs[imic]);
-			MDcoords.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
+            MDcoords.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
+            MDcoords.setValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom);
 			nr_coord_files++;
 
 			MD.read(fn_pick);
