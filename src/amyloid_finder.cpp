@@ -666,16 +666,6 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         Ipsi.write(fn_psi);
         Izscore.write(fn_fom);
     }
-    else
-    {
-        Image<RFLOAT> Ipsi, Izscore;
-        Ipsi.read(fn_psi);
-        Izscore.read(fn_fom);
-        Mangle=Ipsi();
-        Mscore=Izscore();
-        Mangle.setXmippOrigin();
-        Mscore.setXmippOrigin();
-    }
 
     if (myverb)
     {

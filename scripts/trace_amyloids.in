@@ -19,6 +19,7 @@ from skimage.morphology import remove_small_objects, skeletonize
 from skimage.measure import regionprops, label as label_connected_component
 from skan import Skeleton, summarize
 
+import time
 
 ###############################################################################
 #                               U-Net Model
@@ -175,51 +176,6 @@ def load_mrc(mrc_fn: str, multiply_global_origin: bool = True):
     return grid, voxel_size, global_origin
 
 
-class InstanceConfig:
-    thres_foreground = 0.5
-    obj_min_size = 50
-
-
-def instance_from_layered_embedding(raw, config):
-    """
-    Build an instance segmentation from a 'layered_embedding' + 'foreground'.
-    Return:
-      - instances: list of binary masks
-      - layered_objects: multi-channel binary assignment
-    """
-    from skimage.measure import label as label_cc
-
-    embedding = np.copy(np.squeeze(raw['layered_embedding']))
-    embedding = np.transpose(embedding, (1, 2, 0))   # shape: (H, W, embedding_dim)
-    fg = np.copy(np.squeeze(raw['foreground'] > config.thres_foreground))
-
-    # Remove small objects
-    for r in regionprops(label_cc(fg)):
-        if r.area < config.obj_min_size:
-            fg[r.coords[:, 0], r.coords[:, 1]] = 0
-
-    # layering foreground
-    layered_objects = np.zeros(embedding.shape, bool)
-    rr, cc = np.nonzero(fg)
-    # threshold embedding => 
-    layered_objects[rr, cc, :] = embedding[rr, cc, :] > config.thres_foreground
-    # also pick the channel with max embedding => set True
-    idx = np.argmax(embedding[rr, cc, :], axis=-1)
-    layered_objects[rr, cc, idx] = 1
-
-    instances = []
-    for i_ch in range(layered_objects.shape[-1]):
-        L = label_cc(layered_objects[:, :, i_ch])
-        for r in regionprops(L):
-            if r.area < config.obj_min_size:
-                layered_objects[r.coords[:, 0], r.coords[:, 1], i_ch] = 0
-            else:
-                instances.append(L == r.label)
-
-    return instances, layered_objects
-
-
-
 ###############################################################################
 #        Sample coordinates from the final pruned label, including IDs
 ###############################################################################
@@ -309,13 +265,17 @@ def color_foreground(grey_image, threshold):
 #  Sjors go at pruning the raw skeleton image
 ###############################################################################
 
-def prune_skeleton(skeleton, min_length=10):
+def prune_skeleton(skeleton, min_length=100, step=50):
     """Prune skeleton branches that too short."""
+    #start_time= time.time()
     skel = Skeleton(skeleton)
+    #print(f"Time elapsed after step A: {time.time() - start_time:.2f} seconds")
     df = summarize(skel, separator='-')
+    #print(f"Time elapsed after step B: {time.time() - start_time:.2f} seconds")
 
     labeled_skel = np.zeros_like(skeleton, dtype=np.int32)
-    path_id = 1
+    filament_counter = 1
+    sampled_coords = []
     for idx, row in df.iterrows():
         branch_coords = skel.path_coordinates(idx)  # Get coordinates of the branch
         
@@ -324,18 +284,28 @@ def prune_skeleton(skeleton, min_length=10):
 
         if length >= min_length:
             for x, y in branch_coords:
-                labeled_skel[int(x), int(y)] = path_id  # Assign path label
-            path_id += 1  # Increment label for next path
+                labeled_skel[int(x), int(y)] = filament_counter  # Assign path label
 
-    return labeled_skel
+            for i in range(0, len(branch_coords), step):
+                r, c = branch_coords[i]
+                sampled_coords.append([c, r, filament_counter])
+            # ensure final coordinate is included
+            if (len(branch_coords) - 1) % step != 0:
+                r, c = branch_coords[-1]
+                sampled_coords.append([c, r, filament_counter])
 
+            filament_counter += 1  # Increment label for next path
+    #print(f"Time elapsed after step C: {time.time() - start_time:.2f} seconds")
 
+    return labeled_skel, np.array(sampled_coords, dtype=int)
 
 
 ###############################################################################
 #                              MAIN
 ###############################################################################
 def main():
+
+    #start_time = time.time()  
     parser = argparse.ArgumentParser("Skeleton-based filament picking with instance merging, branch pruning, and ID labeling")
     parser.add_argument("-if", "--input_fom", help="Input FOM MRC file")
     parser.add_argument("-ip", "--input_psi", help="Input PSI MRC file")
@@ -360,10 +330,12 @@ def main():
     psi_image, _, _ = load_mrc(args.input_psi)
     H, W = fom_image.shape
     device = torch.device(args.device)
+    #print(f"Time elapsed after step 2: {time.time() - start_time:.2f} seconds")
 
     # ------------------ Load Model + Run Inference ----------------
     model = UNet.load_from_checkpoint(args.model_path, n_channels=2, n_classes=1)
     model.eval().to(device)
+    #print(f"Time elapsed after step 3: {time.time() - start_time:.2f} seconds")
 
     in_tensor = np.stack((fom_image, psi_image), axis=0)  # shape (2,H,W)
     in_tensor = torch.from_numpy(in_tensor[None]).float().to(device)  # shape (1,2,H,W)
@@ -372,6 +344,7 @@ def main():
         seg_logits, embedding = model(in_tensor)
     seg_logits, embedding = seg_logits.float(), embedding.float()
     foreground = torch.sigmoid(seg_logits).squeeze().cpu().numpy()  # => (H,W)
+    #print(f"Time elapsed after step 5: {time.time() - start_time:.2f} seconds")
 
     # 2) Clean + threshold => remove small objects
     bin_foreground = (foreground > args.threshold)
@@ -388,36 +361,37 @@ def main():
 
     # 4) Skeletonize
     skeleton_img = skeletonize(clean_foreground)
-    if not skeleton_img.any():
-        print("No skeleton found. Creating empty star file.")
-        Path(args.output).touch()
-        return
+    #print(f"Time elapsed after step 8: {time.time() - start_time:.2f} seconds")
+    if skeleton_img.any():
 
-    # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
-    pruned_skeleton = prune_skeleton(skeleton_img, min_length=args.minimum_length / pixel_size)
-    
-    # 6) Sample coordinates every 'sample_step' from pruned skeleton, **including filament ID**.
-    sampled_points = sample_coordinates_with_ids(pruned_skeleton, step=int(args.sample_step / pixel_size))
-    # sampled_points shape: (N, 3) => [x, y, filament_id]
-    if sampled_points.size > 0:
-        # 7) Scale, round, write star
-        # scale only the x,y columns
-        sampled_points[:, 0:2] = np.round(sampled_points[:, 0:2] * args.scale).astype(int)
+        # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
+        pruned_skeleton, sampled_points = prune_skeleton(skeleton_img,
+                                                         min_length=args.minimum_length / pixel_size,
+                                                         step=int(args.sample_step / pixel_size))
+        #print(f"Time elapsed after step 9: {time.time() - start_time:.2f} seconds")
 
-        df = pd.DataFrame({
-            'rlnCoordinateX': sampled_points[:, 0],
-            'rlnCoordinateY': sampled_points[:, 1],
-            'rlnParticleSelectionType':  sampled_points[:, 2]
-        })
-        starfile.write(df, args.output, overwrite=True)
-        #print(f"Done. Wrote {len(df)} points to {args.output}")
+        # 6) Sample coordinates every 'sample_step' from pruned skeleton, **including filament ID**.
+        #sampled_points = sample_coordinates_with_ids(pruned_skeleton, step=int(args.sample_step / pixel_size))
+        # sampled_points shape: (N, 3) => [x, y, filament_id]
+        if sampled_points.size > 0:
+        
+            # 7) Scale, round, write star
+            # scale only the x,y columns
+            sampled_points[:, 0:2] = np.round(sampled_points[:, 0:2] * args.scale).astype(int)
+
+            df = pd.DataFrame({
+                'rlnCoordinateX': sampled_points[:, 0],
+                'rlnCoordinateY': sampled_points[:, 1],
+                'rlnParticleSelectionType':  sampled_points[:, 2]
+            })
+            starfile.write(df, args.output, overwrite=True)
+            #print(f"Done. Wrote {len(df)} points to {args.output}")
+    #print(f"Time elapsed after step 10: {time.time() - start_time:.2f} seconds")
 
     # ---------------------------------------------------
     # If plotting is requested, create a collage figure
     # ---------------------------------------------------
     if args.plot:
-        colored_pruned = color_nonrandom(pruned_skeleton)
-        colored_foreground = color_foreground(foreground, args.threshold)
 
         fig, ax = plt.subplots(2, 3, figsize=(32,20))
         ax = ax.ravel()
@@ -430,7 +404,7 @@ def main():
         ax[1].set_title("PSI Image")
         ax[1].axis('off')
 
-        ax[2].imshow(colored_foreground)
+        ax[2].imshow(color_foreground(foreground, args.threshold))
         ax[2].set_title("Foreground")
         ax[2].axis('off')
 
@@ -438,20 +412,24 @@ def main():
         ax[3].set_title("Raw Skeleton")
         ax[3].axis('off')
 
-        ax[4].imshow(colored_pruned)
-        ax[4].set_title("Pruned Skeleton")
-        ax[4].axis('off')
+        if skeleton_img.any():
+            ax[4].imshow(color_nonrandom(pruned_skeleton))
+            ax[4].set_title("Pruned Skeleton")
+            ax[4].axis('off')
 
-        ax[5].imshow(np.zeros_like(foreground), cmap='gray')  # blank background
-        ax[5].scatter(sampled_points[:,0]/args.scale, sampled_points[:,1]/args.scale, s=2, c='red')
-        ax[5].set_xlim([0, foreground.shape[1]])
-        ax[5].set_ylim([foreground.shape[0], 0])
-        ax[5].set_title("Final Sampled Picks (ID shown in STAR)")
-        ax[5].axis('off')
+            if sampled_points.size > 0:
+                ax[5].imshow(np.zeros_like(foreground), cmap='gray')  # blank background
+                ax[5].scatter(sampled_points[:,0]/args.scale, sampled_points[:,1]/args.scale, s=2, c='red')
+                ax[5].set_xlim([0, foreground.shape[1]])
+                ax[5].set_ylim([foreground.shape[0], 0])
+                ax[5].set_title("Final Sampled Picks (ID shown in STAR)")
+                ax[5].axis('off')
 
         plt.tight_layout()
         plt.show()
         plt.close()
+        #print(f"Time elapsed after step 11: {time.time() - start_time:.2f} seconds")
+
 
 
 if __name__ == "__main__":
