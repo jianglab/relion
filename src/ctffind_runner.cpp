@@ -66,6 +66,7 @@ void CtffindRunner::read(int argc, char **argv, int rank)
 	int ctffind4_section = parser.addSection("CTFFIND4 parameters");
 	is_ctffind4 = parser.checkOption("--is_ctffind4", "The provided CTFFIND executable is CTFFIND4 (version 4.1+)");
 	use_given_ps = parser.checkOption("--use_given_ps", "Use pre-calculated power spectra?");
+    do_extra_ice = parser.checkOption("--extra_ice_stats", "When using pre-calculated power spectra, one can calculate extra ice statistics, which may be useful for selection of icy data sets");
 	do_movie_thon_rings = parser.checkOption("--do_movie_thon_rings", "Calculate Thon rings from movie frames?");
 	avg_movie_frames = textToInteger(parser.getOption("--avg_movie_frames", "Average over how many movie frames (try to get 4 e-/A2)", "1"));
 	movie_rootname = parser.getOption("--movie_rootname", "Rootname plus extension for movies", "_movie.mrcs");
@@ -452,8 +453,11 @@ void CtffindRunner::joinCtffindResults()
 				MDctf.setValue(EMDL_CTF_VALIDATIONSCORE, valscore);
 
             MDctf.setValue(EMDL_CTF_ICERINGDENSITY, icering);
-            if (use_given_ps) MDctf.setValue(EMDL_CTF_ICERINGPOWERFRACTION, icepowerfrac);
-            if (use_given_ps) MDctf.setValue(EMDL_CTF_ICERINGKURTOSIS, icekurtosis);
+            if (use_given_ps && do_extra_ice)
+            {
+                MDctf.setValue(EMDL_CTF_ICERINGPOWERFRACTION, icepowerfrac);
+                MDctf.setValue(EMDL_CTF_ICERINGKURTOSIS, icekurtosis);
+            }
 
             if (is_tomo)
             {
@@ -1011,13 +1015,13 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
 
     // Be careful, because avgrot files from CTFFIND-4.1 are somehow normalized badly, so re-read power spectrum image
     // This only works if given the power spectrum from RELION's motioncorr. Otherwise, fall back on Rafa's approach below
-    FileName fn_ps = fn_root + ".mrc";
-    if (use_given_ps)
+    if (use_given_ps && do_extra_ice)
     {
         // Use standard deviation in the diagnostics image for ice ring density instead of Rafa's.
         // Calculate stddev of power, relative to stddev of power in a band with lower resolution than ice ring
         // Richard suggested using a higher band as well, but some strange ice artefacts extend well into the higher band...
         Image<RFLOAT> Ips;
+        FileName fn_ps = fn_root + ".mrc";
         Ips.read(fn_ps);
         Ips().setXmippOrigin();
         RFLOAT mysize = angpix*XSIZE(Ips());

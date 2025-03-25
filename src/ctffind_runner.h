@@ -88,6 +88,9 @@ public:
 	// Use pre-calculated power spectra
 	bool use_given_ps;
 
+    // Calculate extra ice statistics when using pre-calculated power spectra
+	bool do_extra_ice;
+
 	// Calculate Thon rings from movies?
 	bool do_movie_thon_rings;
 
