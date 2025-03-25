@@ -28,8 +28,11 @@ int main(int argc, char *argv[])
 		prm.read(argc, argv);
 
 		prm.initialise(prm.getRank());
-		if (prm.do_gpu) prm.deviceInitialise();
 
+#if defined _CUDA_ENABLED
+        if (prm.do_gpu) prm.deviceInitialise();
+#endif
+        
         prm.run();
 
 		MPI_Barrier(MPI_COMM_WORLD);
