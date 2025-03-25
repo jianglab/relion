@@ -114,7 +114,7 @@ void CtffindRunner::initialise(bool is_leader)
 	if (use_given_ps)
 		do_use_without_doseweighting = false;
 
-    if (do_extra_ce && !use_given_ps)
+    if (do_extra_ice && !use_given_ps)
         REPORT_ERROR("ERROR: You cannot use --extra_ice_stats without also using --use_given_ps")
 
 	// Make sure fn_out ends with a slash
