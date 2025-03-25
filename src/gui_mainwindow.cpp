@@ -1432,7 +1432,11 @@ void GuiMainWindow::cb_display_io_node_i()
 			command += " --black " + manualpickjob.joboptions["black_val"].getString();
 			command += " --white " + manualpickjob.joboptions["white_val"].getString();
 
-			if (manualpickjob.joboptions["do_startend"].getBoolean())
+            if (manualpickjob.joboptions["do_lines"].getBoolean())
+            {
+                command += " --pick_lines ";
+            }
+			else if (manualpickjob.joboptions["do_startend"].getBoolean())
 			{
 				command += " --pick_start_end ";
 			}
@@ -1466,7 +1470,6 @@ void GuiMainWindow::cb_display_io_node_i()
 				if (manualpickjob.joboptions["fn_color"].getString().length() > 0)
 					command += " --color_star " + manualpickjob.joboptions["fn_color"].getString();
 			}
-
 		}
 		else
 		{

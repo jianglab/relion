@@ -1069,6 +1069,8 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
     }
     else
     {
+        icepowerfrac = 0.;
+        icekurtosis =0.;
     }
 
 	return Final_is_found;

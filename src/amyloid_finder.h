@@ -46,7 +46,7 @@ public:
     int verb;
 
     // Output rootname
-    FileName fn_in, fn_odir, fn_out;
+    FileName fn_in, fn_odir, fn_out, fn_other_args;
 
     // Psi sampling step
     RFLOAT psi_step;
@@ -71,7 +71,19 @@ public:
 
     // Redo existing tracings?
     bool do_redo_tracing;
-    
+
+    // FileName for Jenny's model
+    FileName fn_model_path;
+
+    // Use GPU to execute the model?
+    bool do_gpu;
+
+    // Which GPU devices to use?
+    std::string gpu_ids;
+
+    // GPU Device ID
+    int device_id = -1;
+
     // Python executable name
     FileName fn_exe;
 
@@ -104,6 +116,9 @@ public:
     // Initialise some stuff after reading
     void initialise(bool is_leader = true);
 
+    // Which device to use?
+    void deviceInitialise();
+
     // Get the output coordinate filename given the micrograph filename
     FileName getOutputRootName(FileName fn_mic);
 
@@ -121,7 +136,7 @@ public:
                                   MultidimArray<RFLOAT> &Mangle, RFLOAT &skew, RFLOAT &kurt, bool myverb = false);
 
     // Trace individual segments in the images based on the scores and angles
-    void traceFilaments(FileName &fn_fom, FileName &fn_star);
+    void traceFilaments(FileName &fn_fom, FileName &fn_fpsi, FileName &fn_star);
 
     // Run on one micrograph
     void processOneMicrograph(FileName fn_mic, bool myverb = false);

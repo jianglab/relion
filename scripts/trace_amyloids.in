@@ -1,38 +1,43 @@
 #!@PYTHON_EXE_PATH@
 
-import numpy as np
-import mrcfile
-import starfile
-from skimage.filters import gaussian
-from skimage.transform import probabilistic_hough_line
-from skimage.morphology import skeletonize
-from pathlib import Path
-import math
-import pandas as pd
 import argparse
-""" Full assembly of the parts to form the complete network """
+import math
+import os
+from pathlib import Path
 
-""" Parts of the U-Net model """
-import lightning as L
+import numpy as np
+import pandas as pd
+import starfile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class DoubleConv(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
+import mrcfile
+import matplotlib.pyplot as plt
 
+from skimage.morphology import remove_small_objects, skeletonize
+from skimage.measure import regionprops, label as label_connected_component
+from skan import Skeleton, summarize
+from scipy.spatial.distance import cdist
+
+import time
+
+###############################################################################
+#                               U-Net Model
+###############################################################################
+class DoubleConv(nn.Module):
+    """(convolution => [InstanceNorm] => GELU) * 2"""
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
-
         if not mid_channels:
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            nn.InstanceNorm2d(mid_channels),
+            nn.GELU(),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+            nn.InstanceNorm2d(out_channels),
+            nn.GELU()
         )
 
     def forward(self, x):
@@ -40,8 +45,6 @@ class DoubleConv(nn.Module):
 
 
 class Down(nn.Module):
-    """Downscaling with maxpool then double conv"""
-
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
@@ -54,12 +57,8 @@ class Down(nn.Module):
 
 
 class Up(nn.Module):
-    """Upscaling then double conv"""
-
     def __init__(self, in_channels, out_channels, bilinear=True):
         super().__init__()
-
-        # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
             self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
@@ -69,48 +68,52 @@ class Up(nn.Module):
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
-        # input is CHW
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
 
-        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
-                        diffY // 2, diffY - diffY // 2])
-        # if you have padding issues, see
-        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
-        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
+        x1 = F.pad(
+            x1, 
+            [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2]
+        )
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
 
 class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(OutConv, self).__init__()
+        super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
         return self.conv(x)
 
 
-class UNet(L.LightningModule):
-    def __init__(self, n_channels, n_classes, bilinear=False):
-        super(UNet, self).__init__()
+class UNet(nn.Module):
+    def __init__(self, n_channels, n_classes, embedding_dim=32, bilinear=False):
+        super().__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
-        #self.accuracy = BinaryAccuracy()
-        
 
-        self.inc = (DoubleConv(n_channels, 64))
-        self.down1 = (Down(64, 128))
-        self.down2 = (Down(128, 256))
-        self.down3 = (Down(256, 512))
+        self.base_channel_sz = 128
+
+        self.inc = DoubleConv(n_channels, self.base_channel_sz)
+        self.down1 = Down(self.base_channel_sz, 2 * self.base_channel_sz)
+        self.down2 = Down(2 * self.base_channel_sz, 4 * self.base_channel_sz)
+        self.down3 = Down(4 * self.base_channel_sz, 8 * self.base_channel_sz)
         factor = 2 if bilinear else 1
-        self.down4 = (Down(512, 1024 // factor))
-        self.up1 = (Up(1024, 512 // factor, bilinear))
-        self.up2 = (Up(512, 256 // factor, bilinear))
-        self.up3 = (Up(256, 128 // factor, bilinear))
-        self.up4 = (Up(128, 64, bilinear))
-        self.outc = (OutConv(64, n_classes))
+        self.down4 = Down(8 * self.base_channel_sz, 16 * self.base_channel_sz // factor)
+
+        self.up1 = Up(16 * self.base_channel_sz, 8 * self.base_channel_sz // factor, bilinear)
+        self.up2 = Up(8 * self.base_channel_sz, 4 * self.base_channel_sz // factor, bilinear)
+        self.up3 = Up(4 * self.base_channel_sz, 2 * self.base_channel_sz // factor, bilinear)
+        self.up4 = Up(2 * self.base_channel_sz, self.base_channel_sz, bilinear)
+
+        self.outc = OutConv(self.base_channel_sz, n_classes)
+        self.embedding_head = nn.Sequential(
+            nn.Conv2d(self.base_channel_sz, embedding_dim, kernel_size=1),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
         x1 = self.inc(x)
@@ -118,310 +121,370 @@ class UNet(L.LightningModule):
         x3 = self.down2(x2)
         x4 = self.down3(x3)
         x5 = self.down4(x4)
+
         x = self.up1(x5, x4)
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        logits = self.outc(x)
-        return logits
 
-    def use_checkpointing(self):
-        self.inc = torch.utils.checkpoint(self.inc)
-        self.down1 = torch.utils.checkpoint(self.down1)
-        self.down2 = torch.utils.checkpoint(self.down2)
-        self.down3 = torch.utils.checkpoint(self.down3)
-        self.down4 = torch.utils.checkpoint(self.down4)
-        self.up1 = torch.utils.checkpoint(self.up1)
-        self.up2 = torch.utils.checkpoint(self.up2)
-        self.up3 = torch.utils.checkpoint(self.up3)
-        self.up4 = torch.utils.checkpoint(self.up4)
-        self.outc = torch.utils.checkpoint(self.outc)
+        seg_logits = self.outc(x)
+        embedding = self.embedding_head(x)
+        return seg_logits, embedding
 
-    def training_step(self, batch, batch_idx):
-        # training_step defines the train loop.
-        x, y = batch
-        pred = self(x)
-        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
-        self.log("train_loss", loss)
-        return loss
+    @staticmethod
+    def load_from_checkpoint(model_path: str, n_channels: int, n_classes: int):
+        model = UNet(n_channels=n_channels, n_classes=n_classes)
+        lightning_dict = torch.load(model_path, map_location="cpu")
+        state_dict = lightning_dict['state_dict']
+        try:
+            model.load_state_dict(state_dict, strict=False)
+        except:
+            model.load_state_dict(state_dict)
+        return model
 
-    def validation_step(self, batch, batch_idx):
-        # training_step defines the train loop.
-        x, y = batch
-        pred = self(x)
-        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
-        self.log("val_loss", loss)
-        return loss
-    
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        pred = self(x)
-        loss = F.binary_cross_entropy_with_logits(pred, y, pos_weight=torch.tensor(50))
-        self.log("test_loss", loss)
-        return loss
 
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        return optimizer
-    
-#------------------------------------------------------------------------------------------
-
+###############################################################################
+#                        MRC + instance segmentation
+###############################################################################
 def load_mrc(mrc_fn: str, multiply_global_origin: bool = True):
-    mrc_file_handle = mrcfile.open(mrc_fn, "r")
-    voxel_size = float(mrc_file_handle.voxel_size.x)
+    with mrcfile.open(mrc_fn, "r") as mrc_file_handle:
+        voxel_size = float(mrc_file_handle.voxel_size.x)
+        if voxel_size <= 0:
+            raise RuntimeError(f"MRC file {mrc_fn} does not have a valid header.")
 
-    if voxel_size <= 0:
-        raise RuntimeError(f"Seems like the MRC file: {mrc_fn} does not have a header.")
+        c = mrc_file_handle.header["mapc"]
+        r = mrc_file_handle.header["mapr"]
+        s = mrc_file_handle.header["maps"]
 
-    c = mrc_file_handle.header["mapc"]
-    r = mrc_file_handle.header["mapr"]
-    s = mrc_file_handle.header["maps"]
+        global_origin = mrc_file_handle.header["origin"]
+        global_origin = np.array([global_origin.x, global_origin.y, global_origin.z])
+        global_origin[0] += mrc_file_handle.header["nxstart"]
+        global_origin[1] += mrc_file_handle.header["nystart"]
+        global_origin[2] += mrc_file_handle.header["nzstart"]
 
-    global_origin = mrc_file_handle.header["origin"]
-    global_origin = np.array([global_origin.x, global_origin.y, global_origin.z])
-    global_origin[0] += mrc_file_handle.header["nxstart"]
-    global_origin[1] += mrc_file_handle.header["nystart"]
-    global_origin[2] += mrc_file_handle.header["nzstart"]
+        if multiply_global_origin:
+            global_origin *= mrc_file_handle.voxel_size.x
 
-    if multiply_global_origin:
-        global_origin *= mrc_file_handle.voxel_size.x
-
-    if c == 1 and r == 2 and s == 3:
-        grid = mrc_file_handle.data
-    elif c == 3 and r == 2 and s == 1:
-        grid = np.moveaxis(mrc_file_handle.data, [0, 1, 2], [2, 1, 0])
-    elif c == 2 and r == 1 and s == 3:
-        grid = np.moveaxis(mrc_file_handle.data, [1, 2, 0], [2, 1, 0])
-    else:
-        raise RuntimeError("MRC file axis arrangement not supported!")
-
+        raw_data = mrc_file_handle.data
+        if c == 1 and r == 2 and s == 3:
+            grid = raw_data
+        elif c == 3 and r == 2 and s == 1:
+            grid = np.moveaxis(raw_data, [0, 1, 2], [2, 1, 0])
+        elif c == 2 and r == 1 and s == 3:
+            grid = np.moveaxis(raw_data, [1, 2, 0], [2, 1, 0])
+        else:
+            raise RuntimeError("MRC file axis arrangement not supported!")
     return grid, voxel_size, global_origin
 
-def is_in_between(point, line):
-    dx = line[1][0] - line[0][0]
-    dy = line[1][1] - line[0][1]
-    dotp = (point[0] - line[0][0])*dx + (point[1] - line[0][1])*dy
-    return 0 <= dotp and dotp <= dx*dx + dy*dy
 
-def distance_point_line(point, line):
-    x1=line[0][0]
-    x2=line[1][0]
-    y1=line[0][1]
-    y2=line[1][1]
-    x0=point[0]
-    y0=point[1]
-    dd = abs( (x2-x1)*(y1-y0) - (x1-x0)*(y2-y1) ) / np.sqrt( (x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) )
-    if not is_in_between(point,line):
-        closest = min(distance_point_point(point,line[0]), distance_point_point(point,line[1]))
-        return max(closest, dd)
-    else:
-        return dd
+###############################################################################
+#        Sample coordinates from the final pruned label, including IDs
+###############################################################################
+def sample_coordinates_with_ids(label_image, step=50):
 
-def distance_point_point(point1, point2):
-    x1=point1[0]
-    y1=point1[1]
-    x2=point2[0]
-    y2=point2[1]
-    return np.sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2))
+    labels = np.unique(label_image)
+    labels = labels[labels != 0]
+    labels.sort()  # ensure ascending
+    results = []
 
-def angle_line_line(line1, line2):
-    a1 = np.arctan2(line1[1][1]-line1[0][1], line1[1][0]-line1[0][0])
-    a2 = np.arctan2(line2[1][1]-line2[0][1], line2[1][0]-line2[0][0])
-    return abs(a2-a1)
+    filament_counter = 1
+    for lbl in labels:
+        bin_mask = (label_image == lbl)
+        sk = Skeleton(bin_mask)
+        if sk.n_paths == 0:
+            continue
 
-def prune_lines(inlines, mind, min_ang, max_merge):
-    import math
-    lengths = []
-    merged = []
-    lines = np.asarray(inlines)
-    for line in lines:
-        lengths = np.append(lengths, np.linalg.norm(line[0]-line[1]))
-        merged = np.append(merged, 1)
-    sortidx = np.argsort(lengths)
+        # For each path in this label, sample coordinates
+        for p_idx in range(sk.n_paths):
+            coords = sk.path_coordinates(p_idx).astype(int)
+            if len(coords) == 0:
+                continue
+            for i in range(0, len(coords), step):
+                r, c = coords[i]
+                results.append([c, r, filament_counter])
+            # ensure final coordinate is included
+            if (len(coords) - 1) % step != 0:
+                r, c = coords[-1]
+                results.append([c, r, filament_counter])
 
-    min_ang_rad = math.radians(min_ang)
-    NN = len(sortidx)
-    idx = NN - 1
-    while idx >= 0:
-        i1 = sortidx[idx]
+        filament_counter += 1
 
-        for i2 in range(NN):
-            if (i1 != i2 and lengths[i2] > 0. and lengths[i1] > 0.):
-                
-                d11 = distance_point_line(lines[i1][0],lines[i2])
-                d12 = distance_point_line(lines[i1][1],lines[i2])
-                d21 = distance_point_line(lines[i2][0],lines[i1])
-                d22 = distance_point_line(lines[i2][1],lines[i1])
-                ang = angle_line_line(lines[i1], lines[i2])
-                sum = 0
-                if (d11 < mind):
-                    sum = sum + 1
-                if (d12 < mind):
-                    sum = sum + 1
-                if (d21 < mind):
-                    sum = sum + 1
-                if (d22 < mind):
-                    sum = sum + 1
-
-                # merge lines if they haven't been merged too often already, they overlap two or more points and are parallel
-                if ( (merged[i1] + merged[i2] < max_merge) and (sum >= 2) and (ang < min_ang_rad or abs(ang-math.pi) < min_ang_rad) ):
-
-                    # select the two points with the furthest distance
-                    maxd=0
-                    for i in range(2):
-                        for j in range(2):
-                            d = distance_point_point(lines[i1][i], lines[i2][j])
-                            if (d > maxd):
-                                maxd = d
-                                mymax0 = lines[i1][i]
-                                mymax1 = lines[i2][j]
-                    # perhaps original one was longer?
-                    if maxd > lengths[i1]:
-                        lines[i1][0] = mymax0
-                        lines[i1][1] = mymax1
-                        lengths[i1] = np.linalg.norm(lines[i1][0]-lines[i1][1])
-                        merged[i1] = merged[i1] + merged[i2]
-                    
-                    lines[i2][0][0] = -9999
-                    lines[i2][0][1] = -9999
-                    lines[i2][1][0] = -9999
-                    lines[i2][1][1] = -9999
-                    lengths[i2] = 0
-                    merged[i2] = 0
-                    idx = idx + 1
-                    break
-
-                # remove smaller lines with both points close to longer one
-                elif (d21 < 2*mind and d22 < 2*mind):
-                    lines[i2][0][0] = -9999
-                    lines[i2][0][1] = -9999
-                    lines[i2][1][0] = -9999
-                    lines[i2][1][1] = -9999
-                    lengths[i2] = 0
-
-        idx = idx - 1
-
-    return lines
+    return np.array(results, dtype=int)
 
 
-def pick_filaments(score, radius, threshold, filaments_length, filaments_plot):
+###############################################################################
+#                            Visualization Helpers
+###############################################################################
+import matplotlib.colors as mcolors
 
-    #Parameters
-    thr = round(0.1*filaments_length)
-    line_length = filaments_length
-    gap = radius
-    mind= 1.5*radius
-    min_angle = 10
-    max_merge = 10
+def color_nonrandom(label_image):
+    H, W = label_image.shape
+    colorized = np.full((H, W, 3), 127, dtype=np.uint8)
 
-    #bin_score = gaussian(score, 3) > threshold        
-    bin_score = score > threshold        
-    edges = skeletonize(bin_score) 
-    houghs = probabilistic_hough_line(edges, threshold=thr, line_length=line_length, line_gap=gap)
-    lines = prune_lines(houghs, mind=mind, min_ang=min_angle, max_merge=max_merge)
+    labels = np.unique(label_image)
+    labels = labels[labels != 0]
+    i = 0
+    for lbl in labels:
+        if i%6==0:
+            r= 255
+            g= 0
+            b =0
+        elif i%6==1:
+            r= 0
+            g= 255
+            b =0
+        elif i%6==2:
+            r= 0
+            g= 0
+            b =255
+        elif i%6==3:
+            r= 255
+            g= 255
+            b =0
+        elif i%6==4:
+            r= 0
+            g= 255
+            b =255
+        elif i%6==5:
+            r= 255
+            g= 0
+            b =255
+        mask = (label_image == lbl)
+        colorized[mask] = (r, g, b)
+        i=i+1
+    return colorized
 
-    if filaments_plot:
-        import matplotlib.pyplot as plt
-        from matplotlib import cm
-        fig, axes = plt.subplots(1, 4, figsize=(15, 5), sharex=True, sharey=True)
-        ax = axes.ravel()
+def color_foreground(grey_image, threshold):
+    grey_image_uint8 = (grey_image * 255).astype(np.uint8)
+    colorized = np.stack([grey_image_uint8] * 3, axis=-1)
+    mask = (grey_image > threshold)
+    colorized[mask] = (255, 0, 0)
+    return colorized
 
-        ax[0].imshow(score, cmap=cm.binary, vmin=-20, vmax=5)
-        ax[0].imshow(bin_score, alpha=0.5, cmap=cm.Reds)
-        ax[0].set_title('FOM [-20,5] thr= ' + str(threshold))
 
-        ax[1].imshow(edges, cmap=cm.gray)
-        ax[1].set_title('Skeletonize')
+###############################################################################
+#  Sjors go at pruning the raw skeleton image
+###############################################################################
 
-        ax[2].imshow(edges * 0)
-        for hough in houghs:
-            p0, p1 = hough
-            ax[2].plot((p0[0], p1[0]), (p0[1], p1[1]))
-        ax[2].set_xlim((0, score.shape[1]))
-        ax[2].set_ylim((score.shape[0], 0))
-        ax[2].set_title('Hough transform; len= ' + str(line_length) + ' gap= ' + str(gap))
+def trim_end(branch_coords, trim_length=10, trim_start=False):
+    """Trims the start or end of a branch by `trim_length` pixels."""
+    if len(branch_coords) > trim_length:
+        return branch_coords[trim_length:] if trim_start else branch_coords[:-trim_length]
+    return np.array([])  # Remove short branches completely
 
-        ax[3].imshow(edges * 0)
-        for line in lines:
-            p0, p1 = line
-            ax[3].plot((p0[0], p1[0]), (p0[1], p1[1]))
-        ax[3].set_xlim((0, score.shape[1]))
-        ax[3].set_ylim((score.shape[0], 0))
-        ax[3].set_title('Prune: mind= ' + str(mind))
+def prune_skeleton(skeleton, min_length=100, min_distance=25, step=50):
+    """Prune skeleton branches that too short."""
+    # Most of the compute goes into the Skeleton call; rest of function is cheap
+    skel = Skeleton(skeleton)
+    df = summarize(skel, separator='-')
 
-        for a in ax:
-            a.set_axis_off()
+    trim_length = int(min_distance / 2)
+    labeled_skeleton = np.zeros_like(skeleton, dtype=np.int32)
+    accepted_branches = []  # Stores (branch coordinates, start, end)
+
+    # Pass 1: Collect branches and compute pairwise distances
+    branch_data = []  # Store branch info for pass 2
+    endpoints = []  # Store (start, end) tuples
+    for idx, row in df.iterrows():
+        branch_coords = skel.path_coordinates(idx)
+
+        # Compute Euclidean length of the branch
+        length = np.sum(np.sqrt(np.sum(np.diff(branch_coords, axis=0) ** 2, axis=1)))
+        if length < min_length:
+            continue  # Skip short branches
+
+        start, end = tuple(branch_coords[0]), tuple(branch_coords[-1])
+        branch_data.append((branch_coords, start, end))
+        endpoints.append(start)
+        endpoints.append(end)
+
+    if not branch_data:
+        return labeled_skeleton  # No valid branches
+
+    # Compute all pairwise distances between endpoints
+    endpoints = np.array(endpoints)  # Convert to numpy array
+    dists = cdist(endpoints, endpoints)
+
+    # Mark close endpoint pairs for trimming
+    #close_pairs = np.where((dists < min_distance) & (dists > 0))  # Exclude self-distances
+    close_pairs = np.where((dists < min_distance) )  # Exclude self-distances
+    trim_flags = {}  # Dictionary to store which endpoints need trimming
+
+    for i in range(len(close_pairs[0])):
+        idx1, idx2 = close_pairs[0][i], close_pairs[1][i]
+        branch_idx1, endpoint_type1 = divmod(idx1, 2)  # Get branch index & endpoint type
+        branch_idx2, endpoint_type2 = divmod(idx2, 2)
+
+        if branch_idx1 == branch_idx2:
+            continue  # Ignore self-pairs
+
+        # Mark both endpoints for trimming
+        trim_flags.setdefault((branch_idx1, endpoint_type1), True)
+        trim_flags.setdefault((branch_idx2, endpoint_type2), True)
+
+    # **Pass 2: Trim branches based on identified close endpoints**
+    final_branches = []
+
+    for i, (branch_coords, start, end) in enumerate(branch_data):
+        # Trim start or end if flagged
+        if (i, 0) in trim_flags:
+            branch_coords = trim_end(branch_coords, trim_length, trim_start=True)
+        if (i, 1) in trim_flags:
+            branch_coords = trim_end(branch_coords, trim_length, trim_start=False)
+
+        # Ensure branch still exists after trimming
+        if len(branch_coords) > 0:
+            final_branches.append(branch_coords)
+
+    # Assign unique labels to final pruned branches
+    sampled_coords = []
+    for path_id, branch in enumerate(final_branches, start=1):
+        for x, y in branch:
+            labeled_skeleton[int(x), int(y)] = path_id
+            
+        for i in range(0, len(branch), step):
+            r, c = branch[i]
+            sampled_coords.append([c, r, path_id])
+            # ensure final coordinate is included
+        if (len(branch) - 1) % step != 0:
+            r, c = branch[-1]
+            sampled_coords.append([c, r, path_id])
+
+    return labeled_skeleton, np.array(sampled_coords, dtype=int)
+
+
+###############################################################################
+#                              MAIN
+###############################################################################
+def main():
+
+    #start_time = time.time()  
+    parser = argparse.ArgumentParser("Skeleton-based filament picking with instance merging, branch pruning, and ID labeling")
+    parser.add_argument("-if", "--input_fom", help="Input FOM MRC file")
+    parser.add_argument("-ip", "--input_psi", help="Input PSI MRC file")
+    parser.add_argument("-m", "--model_path", help="Path to PyTorch model checkpoint")
+    parser.add_argument("-o", "--output", help="Output star file with coordinates")
+    parser.add_argument("-r", "--radius", type=int, help="Radius of region to exclude near edges (in A)")
+    parser.add_argument("-l", "--minimum_length", type=int, default=250,
+                        help="Remove final segments smaller than this size in Angstroms (default=250)")
+    parser.add_argument("-t", "--threshold", default=0.5, type=float, help="Foreground threshold (default=0.5)")
+    parser.add_argument("-s", "--scale", type=float, default=1.0,
+                        help="Multiply output coordinates by this factor (default=1.0)")
+    parser.add_argument("-d", "--device", default="cuda:0", help="Which GPU device to use")
+
+    parser.add_argument("--sample_step", type=int, default=100,
+                        help="Sample a coordinate every 'sample_step' Angstroms along each path (default=50)")
+    parser.add_argument("--plot", action='store_true',
+                        help="If set, display/save a collage figure of the pipeline results.")
+    args = parser.parse_args()
+
+    # ------------------- Load MRCs ----------------------
+    fom_image, pixel_size, origin = load_mrc(args.input_fom)
+    psi_image, _, _ = load_mrc(args.input_psi)
+    H, W = fom_image.shape
+    device = torch.device(args.device)
+    #print(f"Time elapsed after step 2: {time.time() - start_time:.2f} seconds")
+
+    # ------------------ Load Model + Run Inference ----------------
+    model = UNet.load_from_checkpoint(args.model_path, n_channels=2, n_classes=1)
+    model.eval().to(device)
+    #print(f"Time elapsed after step 3: {time.time() - start_time:.2f} seconds")
+
+    in_tensor = np.stack((fom_image, psi_image), axis=0)  # shape (2,H,W)
+    in_tensor = torch.from_numpy(in_tensor[None]).float().to(device)  # shape (1,2,H,W)
+
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+        seg_logits, embedding = model(in_tensor)
+    seg_logits, embedding = seg_logits.float(), embedding.float()
+    foreground = torch.sigmoid(seg_logits).squeeze().cpu().numpy()  # => (H,W)
+    #print(f"Time elapsed after step 5: {time.time() - start_time:.2f} seconds")
+
+    # 2) Clean + threshold => remove small objects
+    bin_foreground = (foreground > args.threshold)
+    min_size = 100
+    clean_foreground = remove_small_objects(bin_foreground, min_size=min_size)
+
+    # 3) Crop edges if radius is given
+    if args.radius is not None:
+        d = round(args.radius / pixel_size)
+        clean_foreground[:d, :] = False
+        clean_foreground[-d:, :] = False
+        clean_foreground[:, :d] = False
+        clean_foreground[:, -d:] = False
+
+    # 4) Skeletonize
+    skeleton_img = skeletonize(clean_foreground)
+    #print(f"Time elapsed after step 8: {time.time() - start_time:.2f} seconds")
+    if skeleton_img.any():
+
+        # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
+        pruned_skeleton, sampled_points = prune_skeleton(skeleton_img,
+                                                         min_length=args.minimum_length / pixel_size,
+                                                         min_distance=2 * args.radius / pixel_size,
+                                                         step=int(args.sample_step / pixel_size))
+        #print(f"Time elapsed after step 9: {time.time() - start_time:.2f} seconds")
+
+        # 6) Sample coordinates every 'sample_step' from pruned skeleton, **including filament ID**.
+        #sampled_points = sample_coordinates_with_ids(pruned_skeleton, step=int(args.sample_step / pixel_size))
+        # sampled_points shape: (N, 3) => [x, y, filament_id]
+        if sampled_points.size > 0:
+        
+            # 7) Scale, round, write star
+            # scale only the x,y columns
+            sampled_points[:, 0:2] = np.round(sampled_points[:, 0:2] * args.scale).astype(int)
+
+            df = pd.DataFrame({
+                'rlnCoordinateX': sampled_points[:, 0],
+                'rlnCoordinateY': sampled_points[:, 1],
+                'rlnParticleSelectionType':  sampled_points[:, 2]
+            })
+            starfile.write(df, args.output, overwrite=True)
+            #print(f"Done. Wrote {len(df)} points to {args.output}")
+    #print(f"Time elapsed after step 10: {time.time() - start_time:.2f} seconds")
+
+    # ---------------------------------------------------
+    # If plotting is requested, create a collage figure
+    # ---------------------------------------------------
+    if args.plot:
+
+        fig, ax = plt.subplots(2, 3, figsize=(32,20))
+        ax = ax.ravel()
+
+        ax[0].imshow(fom_image, cmap='gray')
+        ax[0].set_title("FOM Image")
+        ax[0].axis('off')
+
+        ax[1].imshow(psi_image, cmap='gray')
+        ax[1].set_title("PSI Image")
+        ax[1].axis('off')
+
+        ax[2].imshow(color_foreground(foreground, args.threshold))
+        ax[2].set_title("Foreground")
+        ax[2].axis('off')
+
+        ax[3].imshow(skeleton_img)
+        ax[3].set_title("Raw Skeleton")
+        ax[3].axis('off')
+
+        if skeleton_img.any():
+            ax[4].imshow(color_nonrandom(pruned_skeleton))
+            ax[4].set_title("Pruned Skeleton")
+            ax[4].axis('off')
+
+            if sampled_points.size > 0:
+                ax[5].imshow(np.zeros_like(foreground), cmap='gray')  # blank background
+                ax[5].scatter(sampled_points[:,0]/args.scale, sampled_points[:,1]/args.scale, s=2, c='red')
+                ax[5].set_xlim([0, foreground.shape[1]])
+                ax[5].set_ylim([foreground.shape[0], 0])
+                ax[5].set_title("Final Sampled Picks (ID shown in STAR)")
+                ax[5].axis('off')
 
         plt.tight_layout()
         plt.show()
+        plt.close()
+        #print(f"Time elapsed after step 11: {time.time() - start_time:.2f} seconds")
 
-    oldlines=lines
-    # Flatten lines into 2D array, as rest of topaz
-    NN=len(lines)
-    if NN>0:
-        lines = lines.reshape(2*NN, 2)
-        # Remove -9999 coordinates
-        newlines = []
-        for i in range(2*NN):
-            if (lines[i,0] != -9999 and lines[i,1] != -9999):
-                newlines = np.append(newlines, lines[i])
 
-        NN=round(len(newlines)/2)
-        if (NN>0):
-            lines = newlines.reshape(NN, 2)
-        else:
-            lines = []
-
-    return lines
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser('Scripts for picking filaments in FOM maps')
-    parser.add_argument('-if', '--input_fom', help='input fom to pick filaments in')
-    parser.add_argument('-ip', '--input_psi', help='input psi to pick filaments in')
-    parser.add_argument('-m', '--model_path', help="path to model")
-    parser.add_argument('-o', '--output', help='output star file with coordinates')
-    parser.add_argument('-r', '--radius', type=int, help='radius of the regions to extract (in A)')
-    parser.add_argument('-t', '--threshold', default=0.5, type=float, help='FOM threshold at which to terminate region extraction (default: 0.5)')
-    parser.add_argument('-l', '--length', default=-1, type=int, help='minimum length of straight filament segments to be picked (in Angstrom) (default: twice --radius)')
-    parser.add_argument('-s', '--scale', type=float, default=1, help='Multiply outputcoordinates by this factor. (default: 1)')
-    parser.add_argument('-fp', '--plot', action='store_true', help='flag for filament start-end picking plus plotting of its intermediate stages (useful for tuning parameters).')
-    parser.add_argument('-d', '--device', help="Which GPU to use", default="cuda:0")
-
-    args = parser.parse_args()
-
-    fom_image, pixel_size, origin = load_mrc(args.input_fom)
-    psi_image, _, _ = load_mrc(args.input_psi)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # For Jenny, load network  add path to weights as an argument (can use the curreent one as default)
-    model = UNet.load_from_checkpoint(args.model_path, n_channels=2, n_classes=1)
-    model.eval()
-    # FOr Jenny, put on device
-    model = model.to(device)
-    # For Jenny, concatenate the two images and run network
-    fp = torch.from_numpy(np.stack((fom_image, psi_image), axis=0)).unsqueeze(0).to(device)
-    # Add GPU stuff to the arguments, look at model-angelo for help
-    with torch.no_grad():
-       output_segmentation = model(fp).cpu().numpy()
-    
-    # Use threshold as defined by arguments to binarize
-    binarized_output = (output_segmentation.reshape(*output_segmentation.shape[-2:]) > args.threshold)
-
-    # Set edges to zero to prevent picking too close to the edge
-    d = round(args.radius/pixel_size)
-    cropimage = binarized_output.copy()     # because image was readonly
-    cropimage[:d, :] = 0         # Top edge
-    cropimage[-d:, :] = 0        # Bottom edge
-    cropimage[:, :d] = 0         # Left edge
-    cropimage[:, -d:] = 0        # Right edge
-
-    coords = pick_filaments(cropimage, round(args.radius/pixel_size), args.threshold, round(args.length/pixel_size), args.plot)
-    coords = np.round(coords*args.scale).astype(int)
-    # now write out as starfile...
-
-    if len(coords) > 0:
-        xy = {'rlnCoordinateX': coords[:, 0], 'rlnCoordinateY': coords[:, 1]}
-        df = pd.DataFrame(xy)
-        starfile.write(df, args.output, overwrite=True)
-    else:
-        Path(args.output).touch()
+    main()

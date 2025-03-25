@@ -711,7 +711,6 @@ void ManualPicker::read(int argc, char **argv)
 	global_particle_diameter = textToFloat(parser.getOption("--particle_diameter", "Diameter of the circles that will be drawn around each picked particle (in Angstroms)"));
 	global_pick_startend = parser.checkOption("--pick_start_end", "Pick start-end coordinates of helices");
     global_pick_lines = parser.checkOption("--pick_lines", "Pick lines for curvy helices");
-
 	do_allow_save = parser.checkOption("--allow_save", "Allow saving of the selected micrographs");
 	do_fast_save = parser.checkOption("--fast_save", "Save a default selection of all micrographs immediately");
 	global_nr_simultaneous = textToInteger(parser.getOption("--open_simultaneous", "Open this many of the next micrographs simultaneously when pressing CTRL and a Pick button", "10"));

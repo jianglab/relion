@@ -2349,6 +2349,13 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 
             command += " --j " + joboptions["nr_threads"].getString();
 
+            // GPU-stuff
+            if (joboptions["use_gpu"].getBoolean())
+            {
+                // for the moment always use --shrink 0 with GPUs ...
+                command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";
+            }
+
 
         }
 		else if (joboptions["do_refs"].getBoolean())
