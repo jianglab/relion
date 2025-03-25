@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from skimage.morphology import remove_small_objects, skeletonize
 from skimage.measure import regionprops, label as label_connected_component
 from skan import Skeleton, summarize
+from scipy.spatial.distance import cdist
 
 import time
 
@@ -254,8 +255,8 @@ def color_nonrandom(label_image):
     return colorized
 
 def color_foreground(grey_image, threshold):
-    colorized = np.stack([grey_image] * 3, axis=-1)
-
+    grey_image_uint8 = (grey_image * 255).astype(np.uint8)
+    colorized = np.stack([grey_image_uint8] * 3, axis=-1)
     mask = (grey_image > threshold)
     colorized[mask] = (255, 0, 0)
     return colorized
@@ -265,39 +266,91 @@ def color_foreground(grey_image, threshold):
 #  Sjors go at pruning the raw skeleton image
 ###############################################################################
 
-def prune_skeleton(skeleton, min_length=100, step=50):
-    """Prune skeleton branches that too short."""
-    #start_time= time.time()
-    skel = Skeleton(skeleton)
-    #print(f"Time elapsed after step A: {time.time() - start_time:.2f} seconds")
-    df = summarize(skel, separator='-')
-    #print(f"Time elapsed after step B: {time.time() - start_time:.2f} seconds")
+def trim_end(branch_coords, trim_length=10, trim_start=False):
+    """Trims the start or end of a branch by `trim_length` pixels."""
+    if len(branch_coords) > trim_length:
+        return branch_coords[trim_length:] if trim_start else branch_coords[:-trim_length]
+    return np.array([])  # Remove short branches completely
 
-    labeled_skel = np.zeros_like(skeleton, dtype=np.int32)
-    filament_counter = 1
-    sampled_coords = []
+def prune_skeleton(skeleton, min_length=100, min_distance=25, step=50):
+    """Prune skeleton branches that too short."""
+    # Most of the compute goes into the Skeleton call; rest of function is cheap
+    skel = Skeleton(skeleton)
+    df = summarize(skel, separator='-')
+
+    trim_length = int(min_distance / 2)
+    labeled_skeleton = np.zeros_like(skeleton, dtype=np.int32)
+    accepted_branches = []  # Stores (branch coordinates, start, end)
+
+    # Pass 1: Collect branches and compute pairwise distances
+    branch_data = []  # Store branch info for pass 2
+    endpoints = []  # Store (start, end) tuples
     for idx, row in df.iterrows():
-        branch_coords = skel.path_coordinates(idx)  # Get coordinates of the branch
-        
+        branch_coords = skel.path_coordinates(idx)
+
         # Compute Euclidean length of the branch
         length = np.sum(np.sqrt(np.sum(np.diff(branch_coords, axis=0) ** 2, axis=1)))
+        if length < min_length:
+            continue  # Skip short branches
 
-        if length >= min_length:
-            for x, y in branch_coords:
-                labeled_skel[int(x), int(y)] = filament_counter  # Assign path label
+        start, end = tuple(branch_coords[0]), tuple(branch_coords[-1])
+        branch_data.append((branch_coords, start, end))
+        endpoints.append(start)
+        endpoints.append(end)
 
-            for i in range(0, len(branch_coords), step):
-                r, c = branch_coords[i]
-                sampled_coords.append([c, r, filament_counter])
+    if not branch_data:
+        return labeled_skeleton  # No valid branches
+
+    # Compute all pairwise distances between endpoints
+    endpoints = np.array(endpoints)  # Convert to numpy array
+    dists = cdist(endpoints, endpoints)
+
+    # Mark close endpoint pairs for trimming
+    #close_pairs = np.where((dists < min_distance) & (dists > 0))  # Exclude self-distances
+    close_pairs = np.where((dists < min_distance) )  # Exclude self-distances
+    trim_flags = {}  # Dictionary to store which endpoints need trimming
+
+    for i in range(len(close_pairs[0])):
+        idx1, idx2 = close_pairs[0][i], close_pairs[1][i]
+        branch_idx1, endpoint_type1 = divmod(idx1, 2)  # Get branch index & endpoint type
+        branch_idx2, endpoint_type2 = divmod(idx2, 2)
+
+        if branch_idx1 == branch_idx2:
+            continue  # Ignore self-pairs
+
+        # Mark both endpoints for trimming
+        trim_flags.setdefault((branch_idx1, endpoint_type1), True)
+        trim_flags.setdefault((branch_idx2, endpoint_type2), True)
+
+    # **Pass 2: Trim branches based on identified close endpoints**
+    final_branches = []
+
+    for i, (branch_coords, start, end) in enumerate(branch_data):
+        # Trim start or end if flagged
+        if (i, 0) in trim_flags:
+            branch_coords = trim_end(branch_coords, trim_length, trim_start=True)
+        if (i, 1) in trim_flags:
+            branch_coords = trim_end(branch_coords, trim_length, trim_start=False)
+
+        # Ensure branch still exists after trimming
+        if len(branch_coords) > 0:
+            final_branches.append(branch_coords)
+
+    # Assign unique labels to final pruned branches
+    sampled_coords = []
+    for path_id, branch in enumerate(final_branches, start=1):
+        for x, y in branch:
+            labeled_skeleton[int(x), int(y)] = path_id
+            
+        for i in range(0, len(branch), step):
+            r, c = branch[i]
+            sampled_coords.append([c, r, path_id])
             # ensure final coordinate is included
-            if (len(branch_coords) - 1) % step != 0:
-                r, c = branch_coords[-1]
-                sampled_coords.append([c, r, filament_counter])
+        if (len(branch) - 1) % step != 0:
+            r, c = branch[-1]
+            sampled_coords.append([c, r, path_id])
 
-            filament_counter += 1  # Increment label for next path
-    #print(f"Time elapsed after step C: {time.time() - start_time:.2f} seconds")
-
-    return labeled_skel, np.array(sampled_coords, dtype=int)
+    return labeled_skeleton, np.array(sampled_coords, dtype=int)
 
 
 ###############################################################################
@@ -367,6 +420,7 @@ def main():
         # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
         pruned_skeleton, sampled_points = prune_skeleton(skeleton_img,
                                                          min_length=args.minimum_length / pixel_size,
+                                                         min_distance=2 * args.radius / pixel_size,
                                                          step=int(args.sample_step / pixel_size))
         #print(f"Time elapsed after step 9: {time.time() - start_time:.2f} seconds")
 

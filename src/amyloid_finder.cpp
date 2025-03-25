@@ -622,7 +622,7 @@ void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_psi, FileName 
 
     command += " " + fn_other_args;
 
-    std::cerr << command << std::endl;
+    //std::cerr << command << std::endl;
     int res = system(command.c_str());
 
 
