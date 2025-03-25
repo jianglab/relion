@@ -43,6 +43,7 @@ void AmyloidFinderMpi::read(int argc, char **argv)
 	printMpiNodesMachineNames(*node);
 }
 
+#if defined _CUDA_ENABLED
 void AmyloidFinderMpi::deviceInitialise()
 {
 	int devCount;
@@ -67,6 +68,7 @@ void AmyloidFinderMpi::deviceInitialise()
 		node->barrierWait();
 	}
 }
+#endif
 
 void AmyloidFinderMpi::run()
 {
