@@ -177,6 +177,7 @@ void AmyloidFinder::initialise(bool is_leader)
 }
 
 
+#if defined _CUDA_ENABLED
 void AmyloidFinder::deviceInitialise()
 {
 	int devCount;
@@ -196,7 +197,7 @@ void AmyloidFinder::deviceInitialise()
 		std::cout << " + Using GPU device " << device_id << std::endl;
 	}
 }
-
+#endif
 
 FileName AmyloidFinder::getOutputRootName(FileName fn_mic)
 {
