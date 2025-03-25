@@ -121,6 +121,9 @@ void AmyloidFinder::initialise(bool is_leader)
 
     if (verb > 0) std::cout << " + Finding amyloids in the " << fn_micrographs.size() << " micrographs... " << std::endl;
 
+
+    if (verb > 0 && !do_gpu) std::cout << " + Skipping filament tracing, as no GPU usage defined... Continue an old run with GPU usage to trace filaments later! " << std::endl;
+
     // Read in header of first image
     Image<RFLOAT> Iin;
     Iin.read(fn_micrographs[0], false);
@@ -668,14 +671,17 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         Izscore.write(fn_fom);
     }
 
-    if (myverb)
+    if (do_gpu)
     {
-        std::cout << " - Tracing filaments ..." << std::endl;
-        init_progress_bar(1);
-    }
+        if (myverb)
+        {
+            std::cout << " - Tracing filaments ..." << std::endl;
+            init_progress_bar(1);
+        }
 
-    FileName fn_star = getOutputRootName(fn_mic) + "_" + fn_out + ".star";
-    traceFilaments(fn_fom, fn_psi, fn_star);
+        FileName fn_star = getOutputRootName(fn_mic) + "_" + fn_out + ".star";
+        traceFilaments(fn_fom, fn_psi, fn_star);
+    }
 
     if (myverb) std::cout << "done!" << std::endl;
 
