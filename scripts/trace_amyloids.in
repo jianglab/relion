@@ -440,6 +440,11 @@ def main():
             })
             starfile.write(df, args.output, overwrite=True)
             #print(f"Done. Wrote {len(df)} points to {args.output}")
+        else:
+            Path(args.output).touch()
+    else:
+        Path(args.output).touch()
+	    
     #print(f"Time elapsed after step 10: {time.time() - start_time:.2f} seconds")
 
     # ---------------------------------------------------
