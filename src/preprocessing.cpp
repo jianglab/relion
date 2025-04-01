@@ -697,7 +697,11 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
         MD_in.getValue(EMDL_PARTICLE_SELECTION_TYPE, my_type);
         if (my_type != my_prev_type)
         {
-            if (is_first) REPORT_ERROR("ERROR: encountered a filament with only a single point in " + fn_in);
+            if (is_first)
+            {
+                std::cerr << "WARNING: encountered a filament with only a single point in " << fn_in << std::endl;
+                continue;
+            }
 
             // start a new filament (initialise psi to zero!!)
             is_first = true;
