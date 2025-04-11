@@ -2130,7 +2130,7 @@ void MlOptimiser::initialiseGeneral(int rank)
     fn_local_symmetry_masks.clear();
     fn_local_symmetry_operators.clear();
     if (fn_local_symmetry != "None")
-        readRelionFormatMasksAndOperators(fn_local_symmetry, fn_local_symmetry_masks, fn_local_symmetry_operators, mymodel.pixel_size, false);
+        readRelionFormatMasksAndOperators(fn_local_symmetry, fn_local_symmetry_masks, fn_local_symmetry_operators, local_symmetry_weights, mymodel.pixel_size, false);
 
     // For multi-body refinement: Read in the masks in the input STAR file, add a soft-edge to them, and write them to disc with the standard name
     if (do_initialise_bodies)
@@ -4824,7 +4824,7 @@ void MlOptimiser::applyLocalSymmetryForEachRef()
         {
             // either ibody or iclass can be larger than 0, never 2 at the same time!
             int ith_recons = (mymodel.nr_bodies > 1) ? ibody : iclass;
-            applyLocalSymmetry(mymodel.Iref[ith_recons], fn_local_symmetry_masks, fn_local_symmetry_operators);
+            applyLocalSymmetry(mymodel.Iref[ith_recons], fn_local_symmetry_masks, fn_local_symmetry_operators, local_symmetry_weights);
         }
     }
 }

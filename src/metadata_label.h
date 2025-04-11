@@ -232,6 +232,8 @@ enum EMDLabel
 	EMDL_JOBOPTION_DIRECTORY,
 	EMDL_JOBOPTION_MENUOPTIONS,
 
+    EMDL_LOCSYM_WEIGHT,
+
 	EMDL_MATRIX_1_1,
 	EMDL_MATRIX_1_2,
 	EMDL_MATRIX_1_3,
@@ -968,8 +970,10 @@ private:
 		EMDL::addLabel(EMDL_JOBOPTION_DIRECTORY, EMDL_STRING, "rlnJobOptionDirectoryDefault", "Default directory for file browser of a joboption");
 		EMDL::addLabel(EMDL_JOBOPTION_MENUOPTIONS, EMDL_STRING, "rlnJobOptionMenuOptions", "Options for pull-down menu");
 
-		EMDL::addLabel(EMDL_MATRIX_1_1, EMDL_DOUBLE, "rlnMatrix_1_1", "Matrix element (1,1) of a 3x3 matrix");
-		EMDL::addLabel(EMDL_MATRIX_1_2, EMDL_DOUBLE, "rlnMatrix_1_2", "Matrix element (1,2) of a 3x3 matrix");
+        EMDL::addLabel(EMDL_LOCSYM_WEIGHT, EMDL_DOUBLE, "rlnLocalSymmetryWeight", "Relative weight for local symmetry operator (main one is 1)");
+
+        EMDL::addLabel(EMDL_MATRIX_1_1, EMDL_DOUBLE, "rlnMatrix_1_1", "Matrix element (1,1) of a 3x3 matrix");
+        EMDL::addLabel(EMDL_MATRIX_1_2, EMDL_DOUBLE, "rlnMatrix_1_2", "Matrix element (1,2) of a 3x3 matrix");
 		EMDL::addLabel(EMDL_MATRIX_1_3, EMDL_DOUBLE, "rlnMatrix_1_3", "Matrix element (1,3) of a 3x3 matrix");
 		EMDL::addLabel(EMDL_MATRIX_2_1, EMDL_DOUBLE, "rlnMatrix_2_1", "Matrix element (2,1) of a 3x3 matrix");
 		EMDL::addLabel(EMDL_MATRIX_2_2, EMDL_DOUBLE, "rlnMatrix_2_2", "Matrix element (2,1) of a 3x3 matrix");

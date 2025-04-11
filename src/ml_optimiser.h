@@ -734,6 +734,7 @@ public:
 
 	// Local symmetry - list of operators
 	std::vector<std::vector<Matrix1D<RFLOAT> > > fn_local_symmetry_operators;
+    std::vector<std::vector<RFLOAT> > local_symmetry_weights;
 
 	//Maximum number of particles permitted to be drop, due to zero sum of weights, before exiting with an error (GPU only).
 	int failsafe_threshold;

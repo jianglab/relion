@@ -146,8 +146,9 @@ public:
         {
             std::vector<FileName> fn_mask_list;
             std::vector<std::vector<Matrix1D<RFLOAT> > > op_list;
+            std::vector<std::vector<RFLOAT> > weights;
             // set angpix to 1, so translations keep being in Angstroms
-            readRelionFormatMasksAndOperators(fn_localsym, fn_mask_list, op_list, 1., false);
+            readRelionFormatMasksAndOperators(fn_localsym, fn_mask_list, op_list, weights, 1., false);
             for (int imask = 0; imask < fn_mask_list.size(); imask++)
             {
                 for (int iop = 0; iop < op_list[imask].size(); iop++)
