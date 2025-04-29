@@ -46,7 +46,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     do_redo_tracing = parser.checkOption("--redo_all_tracing", "Ignore any autopick.star files already present and redo all tracing.");
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
     fn_other_args = parser.getOption("--other_args", "Other arguments for the python script", "");
-    fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing");
+    fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","/public/EM/RELION/amypicker.ckpt");
 	do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
     gpu_ids = parser.getOption("--gpu", "Device ids for each MPI-thread","default");
 
@@ -763,6 +763,7 @@ void AmyloidFinder::finalise()
         FileName fn_pick = fn_root + "_" + fn_out + ".star";
 
 		MetaDataTable MD;
+        long nr_pick = 0;
 		if (exists(fn_pick))
 		{
 
@@ -773,7 +774,7 @@ void AmyloidFinder::finalise()
 			nr_coord_files++;
 
 			MD.read(fn_pick);
-			long nr_pick = MD.numberOfObjects();
+			nr_pick = MD.numberOfObjects();
 			total_nr_picked += nr_pick;
             // mis-use MetadataTable to conveniently make histograms and value-plots
             MDresult.addObject();
@@ -793,6 +794,7 @@ void AmyloidFinder::finalise()
 
             MDin.setValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom, imic);
             MDin.setValue(EMDL_MICROGRAPH_AUTOPICK_PSI, fn_psi, imic);
+            MDin.setValue(EMDL_MLMODEL_GROUP_NR_PARTICLES, nr_pick, imic);
         }
 
 		if (verb > 0 && imic % 60 == 0) progress_bar(imic);
