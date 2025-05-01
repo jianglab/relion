@@ -63,6 +63,9 @@ public:
     // Plot filament tracing results?
     bool do_plot;
 
+    // Skip tracing call
+    bool do_skip_tracing;
+
     // width and length of filaments (in A) for searching of 4.7A signal
     RFLOAT search_filament_length, search_filament_width;
 

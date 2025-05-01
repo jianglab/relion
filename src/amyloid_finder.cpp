@@ -49,6 +49,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","/public/EM/RELION/amypicker.ckpt");
 	do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
     gpu_ids = parser.getOption("--gpu", "Device ids for each MPI-thread","default");
+    do_skip_tracing = parser.checkOption("--skip_tracing", "Skip tracing, only do FOM calculation (useful to later run tracing on faster GPUs)");
 
     int expert_section = parser.addSection("Expert options (typically no need to change)");
     signal_minres = textToFloat(parser.getOption("--signal_minres", "Minimum resolution value for signal (in A)", "4.85"));
@@ -626,7 +627,7 @@ void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_psi, FileName 
 
     command += " " + fn_other_args;
 
-    //std::cerr << command << std::endl;
+    std::cerr << command << std::endl;
     int res = system(command.c_str());
 
 
@@ -671,7 +672,7 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         Izscore.write(fn_fom);
     }
 
-    if (do_gpu)
+    if (!do_skip_tracing)
     {
         if (myverb)
         {
