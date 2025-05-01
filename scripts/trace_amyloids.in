@@ -371,12 +371,15 @@ def main():
     parser.add_argument("-s", "--scale", type=float, default=1.0,
                         help="Multiply output coordinates by this factor (default=1.0)")
     parser.add_argument("-d", "--device", default="cuda:0", help="Which GPU device to use")
-
+    parser.add_argument("-j", "--threads", type=int, default=1)
     parser.add_argument("--sample_step", type=int, default=100,
                         help="Sample a coordinate every 'sample_step' Angstroms along each path (default=50)")
     parser.add_argument("--plot", action='store_true',
                         help="If set, display/save a collage figure of the pipeline results.")
     args = parser.parse_args()
+
+    # number of CPU threads allowed
+    torch.set_num_threads(args.threads)
 
     # ------------------- Load MRCs ----------------------
     fom_image, pixel_size, origin = load_mrc(args.input_fom)

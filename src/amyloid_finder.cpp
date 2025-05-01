@@ -622,6 +622,7 @@ void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_psi, FileName 
     command += " -r " + floatToString(trace_filament_width/2);
     command += " -l " + floatToString(trace_filament_length);
     command += " -s " + floatToString(down_angpix/angpix);
+    command += " -j " + integerToString(nr_threads);
     if (do_plot)
         command += " --plot ";
 
