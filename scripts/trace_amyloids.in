@@ -383,6 +383,7 @@ def main():
     psi_image, _, _ = load_mrc(args.input_psi)
     H, W = fom_image.shape
     device = torch.device(args.device)
+
     #print(f"Time elapsed after step 2: {time.time() - start_time:.2f} seconds")
 
     # ------------------ Load Model + Run Inference ----------------
@@ -393,10 +394,13 @@ def main():
     in_tensor = np.stack((fom_image, psi_image), axis=0)  # shape (2,H,W)
     in_tensor = torch.from_numpy(in_tensor[None]).float().to(device)  # shape (1,2,H,W)
 
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-        seg_logits, embedding = model(in_tensor)
-    seg_logits, embedding = seg_logits.float(), embedding.float()
-    foreground = torch.sigmoid(seg_logits).squeeze().cpu().numpy()  # => (H,W)
+    if device.type == "cuda":
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            seg_logits, embedding = model(in_tensor)
+    else:
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            seg_logits, embedding = model(in_tensor)
+    foreground = torch.sigmoid(seg_logits).squeeze().detach().to(dtype=torch.float32).cpu().numpy()
     #print(f"Time elapsed after step 5: {time.time() - start_time:.2f} seconds")
 
     # 2) Clean + threshold => remove small objects
