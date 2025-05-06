@@ -47,9 +47,9 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
     fn_other_args = parser.getOption("--other_args", "Other arguments for the python script", "");
     fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","/public/EM/RELION/amypicker.ckpt");
-	do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
+	do_skip_tracing = parser.checkOption("--skip_tracing", "Skip tracing.");
+    do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
     gpu_ids = parser.getOption("--gpu", "Device ids for each MPI-thread","default");
-    do_skip_tracing = parser.checkOption("--skip_tracing", "Skip tracing, only do FOM calculation (useful to later run tracing on faster GPUs)");
 
     int expert_section = parser.addSection("Expert options (typically no need to change)");
     signal_minres = textToFloat(parser.getOption("--signal_minres", "Minimum resolution value for signal (in A)", "4.85"));
@@ -137,7 +137,7 @@ void AmyloidFinder::initialise(bool is_leader)
         if (verb > 0) std::cout << " - Using pixel size from the header of : " << fn_in << " = " << angpix << std::endl;
     }
 
-    if (signal_maxres < 2*down_angpix) REPORT_ERROR("ERROR: the down_angpix is not enough to support the maximum resolution of the signal!");
+    if (nonsignal_maxres < 2*down_angpix) REPORT_ERROR("ERROR: the down_angpix is not enough to support the maximum resolution of the signal!");
     if (angpix > down_angpix) REPORT_ERROR("ERROR: this program requires input images with a pixel size of at least down_angpix (" + floatToString(down_angpix) + ")!");
 
     // Width and length in the downscaled pixels
@@ -295,7 +295,7 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
     }
 
 #pragma omp parallel for num_threads(nr_threads)
-    for (int ipsi = 0; ipsi < nr_psi; ipsi++)
+    for (int ipsi = 0; ipsi < nr_psi/2; ipsi++)
     {
         const int tid = omp_get_thread_num();
         RFLOAT psi = getPsiAngle(ipsi);
@@ -319,7 +319,28 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         transformer[tid].inverseFourierTransform(FT2, Mrot);
         Mrot.setXmippOrigin();
         rotated_imgs[ipsi] = Mrot;
-        // Just prepare the rotated_scores vector too
+
+    }
+    MultidimArray<RFLOAT> Mzero(crop_box, crop_box);
+    Mzero.setXmippOrigin();
+    for (int ipsi = nr_psi/2; ipsi < nr_psi; ipsi++)
+    {
+        rotated_imgs[ipsi] = Mzero;
+        // stay away from boundary to prevent many if-statements below. Images are cropped in larger box anyway, so boundaries should be zero
+        for (long int i=STARTINGY(Mzero)+1; i<=FINISHINGY(Mzero)-1; i++)
+        {
+            for (long int j=STARTINGX(Mzero)+1; j<=FINISHINGX(Mzero)-1; j++)
+            {
+                A2D_ELEM(rotated_imgs[ipsi], i, j) = A2D_ELEM(rotated_imgs[ipsi-nr_psi/2], -j, i);
+            }
+        }
+    }
+
+    if (myverb) progress_bar(nr_psi);
+
+    // Just prepare the rotated_scores vector too
+    for (int ipsi = 0; ipsi < nr_psi; ipsi++)
+    {
         rotated_scores_perline[ipsi].initZeros(crop_box, crop_box);
         rotated_scores_perline[ipsi].setXmippOrigin();
         rotated_nonscores_perline[ipsi].initZeros(crop_box, crop_box);
@@ -328,9 +349,7 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
         rotated_scores[ipsi].setXmippOrigin();
         rotated_nonscores[ipsi].initZeros(crop_box/shift_step, crop_box/shift_step);
         rotated_nonscores[ipsi].setXmippOrigin();
-
     }
-    if (myverb) progress_bar(nr_psi);
 
     // Prepare all the transformers for the 1D lines
     MultidimArray<RFLOAT> oneline_tmp(ilengthmax);
@@ -623,6 +642,7 @@ void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_psi, FileName 
     command += " -l " + floatToString(trace_filament_length);
     command += " -s " + floatToString(down_angpix/angpix);
     command += " -j " + integerToString(nr_threads);
+
     if (do_plot)
         command += " --plot ";
 
