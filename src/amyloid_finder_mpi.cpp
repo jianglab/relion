@@ -73,44 +73,18 @@ void AmyloidFinderMpi::deviceInitialise()
 void AmyloidFinderMpi::run()
 {
 	// Each node does part of the work
-	long int my_first_micrograph, my_last_micrograph, my_nr_micrographs;
-	divide_equally(fn_micrographs.size(), node->size, node->rank, my_first_micrograph, my_last_micrograph);
-	my_nr_micrographs = my_last_micrograph - my_first_micrograph + 1;
-
-	int barstep;
-	if (verb > 0)
-	{
-		std::cout << " Finding amyloids ..." << std::endl;
-		init_progress_bar(my_nr_micrographs);
-		barstep = XMIPP_MAX(1, my_nr_micrographs / 60);
-	}
-
-	FileName fn_olddir="";
-	for (long int imic = my_first_micrograph; imic <= my_last_micrograph; imic++)
-	{
-		// Abort through the pipeline_control system
-		if (pipeline_control_check_abort_job())
-			MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
-
-		// Check new-style outputdirectory exists and make it if not!
-		FileName fn_dir = getOutputRootName(fn_micrographs[imic]);
-		fn_dir = fn_dir.beforeLastOf("/");
-		if (fn_dir != fn_olddir)
-		{
-			// Make a Particles directory
-			mktree(fn_dir);
-			fn_olddir = fn_dir;
-		}
-
-        processOneMicrograph(fn_micrographs[imic], fn_micrographs.size()==1);
-
-        if (verb > 0 && ((imic-my_first_micrograph) % barstep == 0))
-        {
-            progress_bar(imic-my_first_micrograph);
-        }
-
+	if (todo_micrographs_fom.size() > 0)
+    {
+        long int my_first_fom, my_last_fom, my_nr_micrographs;
+        divide_equally(todo_micrographs_fom.size(), node->size, node->rank, my_first_fom, my_last_fom);
+        runFOMBatch(my_first_fom, my_last_fom);
     }
 
-	if (verb > 0)
-		progress_bar(my_nr_micrographs);
+    if (todo_micrographs_tracing.size() > 0)
+    {
+        long int my_first_tracing, my_last_tracing, my_nr_micrographs;
+        divide_equally(todo_micrographs_tracing.size(), node->size, node->rank, my_first_tracing, my_last_tracing);
+        runTracingBatch(my_first_tracing, my_last_tracing, node->rank);
+    }
+
 }

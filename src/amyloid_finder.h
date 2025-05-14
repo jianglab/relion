@@ -29,6 +29,7 @@
 #include <src/transformations.h>
 #include <src/jaz/single_particle/obs_model.h>
 #include <omp.h>
+#include <numeric> // for std::iota
 
 struct AmyloidCoordinate
 {
@@ -63,8 +64,8 @@ public:
     // Plot filament tracing results?
     bool do_plot;
 
-    // Skip tracing call
-    bool do_skip_tracing;
+    // Skip FOM calculation or tracing call
+    bool do_skip_fom, do_skip_tracing;
 
     // width and length of filaments (in A) for searching of 4.7A signal
     RFLOAT search_filament_length, search_filament_width;
@@ -104,7 +105,8 @@ public:
     std::vector<AmyloidCoordinate> circle;
 
     // All and selected micrographs to autopick from
-    std::vector<FileName> fn_ori_micrographs, fn_micrographs;
+    std::vector<FileName> fn_ori_micrographs, fn_ori_micrographs_fom, fn_ori_micrographs_psi, todo_micrographs_fom, todo_micrographs_tracing;
+    std::vector<long int> idx_todo_micrographs_tracing;
 
     // Continue an old run: only estimate CTF if logfile WITH Final Values line does not yet exist, otherwise skip the tomogram
     bool do_only_unfinished;
@@ -128,9 +130,6 @@ public:
     // Make sure all pieces of code use same psi angles from ipsi
     RFLOAT getPsiAngle(int ipsi);
 
-    // Difference between two psi angles that range from 0-180
-    RFLOAT getPsiDiff(RFLOAT psi1, RFLOAT psi2);
-
     // grow nonsignal mask
     MultidimArray<RFLOAT> growNonSignalMask(MultidimArray<RFLOAT> &inmask, int dist);
 
@@ -138,13 +137,15 @@ public:
     void getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &Mscore,
                                   MultidimArray<RFLOAT> &Mangle, RFLOAT &skew, RFLOAT &kurt, bool myverb = false);
 
-    // Trace individual segments in the images based on the scores and angles
-    void traceFilaments(FileName &fn_fom, FileName &fn_fpsi, FileName &fn_star);
-
     // Run on one micrograph
-    void processOneMicrograph(FileName fn_mic, bool myverb = false);
+    void calculateFOMOneMicrograph(FileName fn_mic, bool myverb = false);
 
-    // Execute all CTFFIND jobs to get CTF parameters
+    // Calculate FOM for all micrographs in the indicated batch
+    void runFOMBatch(long int my_first, long int my_last);
+
+    // Trace filaments for all micrographs  in the indicated batch
+    void runTracingBatch(long int my_first, long int my_last, int my_rank = 0);
+
     void run();
 
     // Write out combined star files, etc

@@ -2050,6 +2050,9 @@ Kappa = 0.3 means that the curvature of the picked helical tubes should not be l
 Kappa ~ 0.05 is recommended for long and straight tubes (e.g. TMV, VipA/VipB and AChR tubes) while 0.20 ~ 0.40 seems suitable for flexible ones (e.g. ParM and MAVS-CARD filaments).");
 	joboptions["helical_tube_length_min"] = JobOption("Minimum length (A): ", 400, 100, 1000, 10, "Minimum length (in Angstroms) of helical tubes for auto-picking. \
 Helical tubes with shorter lengths will not be picked. Note that a long helical tube seen by human eye might be treated as short broken pieces due to low FOM values or high picking threshold.");
+
+    joboptions["do_amyloid_fom"] = JobOption("Calculate amyloid FOM images? ", true, "Calculate FOM images with 4.7A Fourier signal for all input micrographs? Note this code runs only on the CPU, and best multi-threaded.");
+    joboptions["do_amyloid_tracing"] = JobOption("Trace amyloids in FOM images? ", true, "Trace amyloids (as lines) in the FOM images? Note this code runs only most efficiently on the GPU.");
     joboptions["amyloid_threshold"] = JobOption("Amyloid pick threshold (sigma): ", 0.25, 0.05, 1, 0.05, "How many sigma does the peaks need to be above the mean for the filament tracing to include a coordinate?");
     joboptions["do_amyloid_plot"] = JobOption("Plot results per micrograph?", false, "Set this option to Yes to visualise intermediate results for amyloid tracing, which may help with setting values for filament length, width and picking threshold. Don't use in parallel or in submission to the queue.");
     joboptions["redo_all_tracing"] = JobOption("Redo tracing for all micrographs?", false, "Set this option to Yes to redo the tracing for all micrographs (and overwrite any existing output coordinate star files that may exist). If set to No, then only micrographs for which the star files don't exist yet will be traced. This is useful for speeding up on-the-fly processing in continuation jobs.");
@@ -2325,27 +2328,44 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
             command += " --odir " + outputname;
             command += " --pickname autopick";
 
+            if (joboptions["do_amyloid_fom"].getBoolean())
+            {
+                // Also output micrographs.star file with kurtosis and skewness of the autopicking scores
+                Node node3c(outputname + "micrographs_autopick.star", joboptions["fn_input_autopick"].node_type);
+                outputNodes.push_back(node3c);
+
+            }
+            else
+            {
+                command += " --skip_fom ";
+            }
+
+
+            if (joboptions["do_amyloid_tracing"].getBoolean())
+            {
+                // Output new version: no longer save coords_suffix nodetype, but 2-column list of micrographs and coordinate files
+                Node node3(outputname + "autopick.star", LABEL_AUTOPICK_COORDS);
+                outputNodes.push_back(node3);
+
+                command += " --trace_filament_length " + joboptions["helical_tube_length_min"].getString();
+                command += " --trace_filament_width " + joboptions["helical_tube_outer_diameter"].getString();
+                command += " --threshold " + joboptions["amyloid_threshold"].getString();
+
+                if (joboptions["do_amyloid_plot"].getBoolean()) command += " --plot ";
+
+            }
+            else
+            {
+               command += " --skip_tracing ";
+            }
+
             command += " --i " + joboptions["fn_input_autopick"].getString();
             Node node(joboptions["fn_input_autopick"].getString(), joboptions["fn_input_autopick"].node_type);
             inputNodes.push_back(node);
 
-            // Output new version: no longer save coords_suffix nodetype, but 2-column list of micrographs and coordinate files
-            Node node3(outputname + "autopick.star", LABEL_AUTOPICK_COORDS);
-            outputNodes.push_back(node3);
-
             // PDF with histograms of the eigenvalues
             Node node3b(outputname + "logfile.pdf", LABEL_AUTOPICK_LOG);
             outputNodes.push_back(node3b);
-
-            // Also output micrographs.star file with kurtosis and skewness of the autopicking scores
-            Node node3c(outputname + "micrographs_autopick.star", joboptions["fn_input_autopick"].node_type);
-            outputNodes.push_back(node3c);
-
-            command += " --trace_filament_length " + joboptions["helical_tube_length_min"].getString();
-            command += " --trace_filament_width " + joboptions["helical_tube_outer_diameter"].getString();
-            command += " --threshold " + joboptions["amyloid_threshold"].getString();
-
-            if (joboptions["do_amyloid_plot"].getBoolean()) command += " --plot ";
 
             command += " --j " + joboptions["nr_threads"].getString();
 

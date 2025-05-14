@@ -940,9 +940,19 @@ void JobWindow::initialiseAutopickWindow()
 
 	current_y += STEPY/2;
 
+    place("do_amyloid_fom");
+
+    group5 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+    group5->end();
+    place("do_amyloid_tracing", TOGGLE_LEAVE_ACTIVE, group5);
+
+    group5->begin();
     place("amyloid_threshold");
     place("do_amyloid_plot");
     place("redo_all_tracing");
+
+    group5->end();
+    guientries["do_amyloid_tracing"].cb_menu_i();
 
 	group4->end();
 

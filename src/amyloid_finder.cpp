@@ -37,6 +37,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     shift_step = textToInteger(parser.getOption("--shift_step", "Step in shifts to search (in downscaled pixels)", "5"));
     search_filament_width = textToFloat(parser.getOption("--search_filament_width", "Width of searching image (in A)", "50"));
     search_filament_length = textToFloat(parser.getOption("--search_filament_length", "Length of searching image (in A)", "250"));
+    do_skip_fom = parser.checkOption("--skip_fom", "Skip FOM calculation.");
 
     int pick_section = parser.addSection("Filament tracing options ");
     threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "0.5"));
@@ -76,7 +77,12 @@ void AmyloidFinder::initialise(bool is_leader)
     if (fn_odir[fn_odir.length()-1] != '/')
         fn_odir += "/";
 
-    fn_micrographs.clear();
+    fn_ori_micrographs.clear();
+    fn_ori_micrographs_fom.clear();
+    fn_ori_micrographs_psi.clear();
+
+    todo_micrographs_fom.clear();
+    todo_micrographs_tracing.clear();
     if (fn_in.isStarFile())
     {
         MetaDataTable MDin;
@@ -85,98 +91,136 @@ void AmyloidFinder::initialise(bool is_leader)
         {
             FileName fn_mic;
             MDin.getValue(EMDL_MICROGRAPH_NAME, fn_mic);
-            fn_micrographs.push_back(fn_mic);
+            fn_ori_micrographs.push_back(fn_mic);
+            if (MDin.containsLabel(EMDL_MICROGRAPH_AUTOPICK_FOM) && MDin.containsLabel(EMDL_MICROGRAPH_AUTOPICK_PSI))
+            {
+                MDin.getValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_mic);
+                fn_ori_micrographs_fom.push_back(fn_mic);
+                MDin.getValue(EMDL_MICROGRAPH_AUTOPICK_PSI, fn_mic);
+                fn_ori_micrographs_psi.push_back(fn_mic);
+            }
         }
     }
     else
     {
         // Read a single micrograph
-        fn_micrographs.push_back(fn_in);
+        fn_ori_micrographs.push_back(fn_in);
     }
 
-    fn_ori_micrographs = fn_micrographs;
-    // If we're continuing an old run, see which micrographs have not been finished yet...
-    if (do_only_unfinished && !do_redo_tracing)
+    if (!do_only_unfinished)
     {
-        if (verb > 0)
+        if (!do_skip_fom) todo_micrographs_fom = fn_ori_micrographs;
+        if (!do_skip_tracing)
         {
-            std::cout << " + Skipping those micrographs for which coordinate file already exists" << std::endl;
+            todo_micrographs_tracing = fn_ori_micrographs;
+            idx_todo_micrographs_tracing.resize(todo_micrographs_tracing.size());
+            std::iota(idx_todo_micrographs_tracing.begin(), idx_todo_micrographs_tracing.end(), 0);
         }
-        std::vector<FileName> fns_todo;
-        for (long int imic = 0; imic < fn_micrographs.size(); imic++)
+    }
+    else
+    {
+        // If we're continuing an old run, see which micrographs have not been finished yet...
+        // A. for FOM/PSI calculation
+        if (!do_skip_fom)
         {
-            FileName fn_tmp = getOutputRootName(fn_micrographs[imic]) + "_" + fn_out + ".star";
-            if (!exists(fn_tmp))
-                fns_todo.push_back(fn_micrographs[imic]);
+            if (verb > 0)
+            {
+                std::cout << " + Skipping those micrographs for which FOM and PSI images already exist" << std::endl;
+            }
+            todo_micrographs_fom.clear();
+            for (long int imic = 0; imic < fn_ori_micrographs.size(); imic++)
+            {
+                FileName fn_fom = getOutputRootName(fn_ori_micrographs[imic]) + "_" + fn_out + "_fom.mrc";
+                FileName fn_psi = getOutputRootName(fn_ori_micrographs[imic]) + "_" + fn_out + "_psi.mrc";
+                if (!exists(fn_fom) || !exists(fn_psi))
+                    todo_micrographs_fom.push_back(fn_ori_micrographs[imic]);
+            }
         }
-        fn_micrographs = fns_todo;
+        // B. For tracing
+        if (!do_skip_tracing && !do_redo_tracing)
+        {
+            if (do_skip_fom && (fn_ori_micrographs_fom.size() == 0 || fn_ori_micrographs_psi.size() == 0))
+            {
+                REPORT_ERROR("ERROR: you cannot skip FOM calculation without providing autopick FOM and PSI images in the input STAR file!");
+            }
+
+            if (verb > 0)
+            {
+                std::cout << " + Skipping those micrographs for which coordinate file already exists" << std::endl;
+            }
+            for (long int imic = 0; imic < fn_ori_micrographs.size(); imic++)
+            {
+                FileName fn_tmp = getOutputRootName(fn_ori_micrographs[imic]) + "_" + fn_out + ".star";
+                if (!exists(fn_tmp))
+                {
+                    todo_micrographs_tracing.push_back(fn_ori_micrographs[imic]);
+                    idx_todo_micrographs_tracing.push_back(imic);
+                }
+            }
+
+        }
     }
 
-    // If there is nothing to do, then go out of initialise
-    if (fn_micrographs.size() == 0)
-    {
-        if (verb > 0)
-            std::cout << " + No new micrographs to do, so exiting finding amyloids ..." << std::endl;
-        return;
-    }
-
-    if (verb > 0) std::cout << " + Finding amyloids in the " << fn_micrographs.size() << " micrographs... " << std::endl;
-
-
-    if (verb > 0 && !do_gpu) std::cout << " + Skipping filament tracing, as no GPU usage defined... Continue an old run with GPU usage to trace filaments later! " << std::endl;
-
-    // Read in header of first image
-    Image<RFLOAT> Iin;
-    Iin.read(fn_micrographs[0], false);
-    ori_xsize = XSIZE(Iin());
-    ori_ysize = YSIZE(Iin());
-    Iin().setXmippOrigin();
-    if (angpix < 0.)
-    {
-        angpix = Iin.samplingRateX();
-        if (verb > 0) std::cout << " - Using pixel size from the header of : " << fn_in << " = " << angpix << std::endl;
-    }
-
-    if (nonsignal_maxres < 2*down_angpix) REPORT_ERROR("ERROR: the down_angpix is not enough to support the maximum resolution of the signal!");
-    if (angpix > down_angpix) REPORT_ERROR("ERROR: this program requires input images with a pixel size of at least down_angpix (" + floatToString(down_angpix) + ")!");
-
-    // Width and length in the downscaled pixels
-    iwidthmax = ROUND(search_filament_width / down_angpix );
-    ilengthmax = CEIL(search_filament_length / down_angpix );
-
-    down_xsize = FLOOR( (ori_xsize * angpix) / down_angpix );
-    down_ysize = FLOOR( (ori_ysize * angpix) / down_angpix );
-    if (ilengthmax %2 != 0) ilengthmax++;
-    nr_psi = ROUND(180./psi_step);
-    psi_step = 180./nr_psi;
-
-    // Calculate Fourier shells for amyloid signal
-    imin_signal = FLOOR(ilengthmax*down_angpix/signal_minres);
-    imax_signal = CEIL(ilengthmax*down_angpix/signal_maxres);
-    imin_nonsignal = FLOOR(ilengthmax*down_angpix/nonsignal_minres);
-    imax_nonsignal = CEIL(ilengthmax*down_angpix/nonsignal_maxres);
-
-    // Box size, orginal and cropped: set size of rectangular image to largest dimension
-    large_box = sqrt(2.)*XMIPP_MAX(ori_xsize, ori_ysize);
-    large_box += ROUND(XMIPP_MAX(search_filament_width, search_filament_length) / angpix);
-    if (large_box%2 != 0) large_box++;
-    // Also calculate size of cropped box:
-    crop_box = large_box * angpix/down_angpix;
-    if (crop_box%2 != 0) crop_box++;
-
-    // Output some information to the user
     if (verb > 0)
     {
-        std::cout << " + Number of 1D rows for filament width (in downscaled pixels): " << iwidthmax << std::endl;
-        std::cout << " + Length of 1D rows for filament (in downscaled pixels): " << ilengthmax << std::endl;
-        std::cout << " + Number of in-plane rotations to sample: " << nr_psi << " with step of " << psi_step << " degrees" << std::endl;
-        std::cout << " + Original size of the input micrographs: " << ori_xsize << " x " << ori_ysize << " pixels" << std::endl;
-        std::cout << " + Size of image to sample (in downscaled pixels): " <<  down_xsize << " x " << down_ysize << std::endl;
-        std::cout << " + Fourier shells for the amyloid signal (in downscaled pixels): " << imin_signal  << " - " << imax_signal << std::endl;
-        std::cout << " + Fourier shells for the non-signal control (in downscaled pixels): " << imin_nonsignal  << " - " << imax_nonsignal << std::endl;
-        std::cout << "  ========================== " << std::endl;
-   }
+        std::cout << " + Calculating FOM images for " << todo_micrographs_fom.size() << " micrographs... " << std::endl;
+        std::cout << " + Tracing filaments for " << todo_micrographs_tracing.size() << " micrographs... " << std::endl;
+    }
 
+    if (todo_micrographs_fom.size() > 0)
+    {
+        // Read in header of first image
+        Image<RFLOAT> Iin;
+        Iin.read(todo_micrographs_fom[0], false);
+        ori_xsize = XSIZE(Iin());
+        ori_ysize = YSIZE(Iin());
+        Iin().setXmippOrigin();
+        if (angpix < 0.)
+        {
+            angpix = Iin.samplingRateX();
+            if (verb > 0) std::cout << " - Using pixel size from the header of : " << fn_in << " = " << angpix << std::endl;
+        }
+
+        if (nonsignal_maxres < 2*down_angpix) REPORT_ERROR("ERROR: the down_angpix is not enough to support the maximum resolution of the signal!");
+        if (angpix > down_angpix) REPORT_ERROR("ERROR: this program requires input images with a pixel size of at least down_angpix (" + floatToString(down_angpix) + ")!");
+
+        // Width and length in the downscaled pixels
+        iwidthmax = ROUND(search_filament_width / down_angpix );
+        ilengthmax = CEIL(search_filament_length / down_angpix );
+
+        down_xsize = FLOOR( (ori_xsize * angpix) / down_angpix );
+        down_ysize = FLOOR( (ori_ysize * angpix) / down_angpix );
+        if (ilengthmax %2 != 0) ilengthmax++;
+        nr_psi = ROUND(180./psi_step);
+        psi_step = 180./nr_psi;
+
+        // Calculate Fourier shells for amyloid signal
+        imin_signal = FLOOR(ilengthmax*down_angpix/signal_minres);
+        imax_signal = CEIL(ilengthmax*down_angpix/signal_maxres);
+        imin_nonsignal = FLOOR(ilengthmax*down_angpix/nonsignal_minres);
+        imax_nonsignal = CEIL(ilengthmax*down_angpix/nonsignal_maxres);
+
+        // Box size, orginal and cropped: set size of rectangular image to largest dimension
+        large_box = sqrt(2.)*XMIPP_MAX(ori_xsize, ori_ysize);
+        large_box += ROUND(XMIPP_MAX(search_filament_width, search_filament_length) / angpix);
+        if (large_box%2 != 0) large_box++;
+        // Also calculate size of cropped box:
+        crop_box = large_box * angpix/down_angpix;
+        if (crop_box%2 != 0) crop_box++;
+
+        // Output some information to the user
+        if (verb > 0)
+        {
+            std::cout << " + Number of 1D rows for filament width (in downscaled pixels): " << iwidthmax << std::endl;
+            std::cout << " + Length of 1D rows for filament (in downscaled pixels): " << ilengthmax << std::endl;
+            std::cout << " + Number of in-plane rotations to sample: " << nr_psi << " with step of " << psi_step << " degrees" << std::endl;
+            std::cout << " + Original size of the input micrographs: " << ori_xsize << " x " << ori_ysize << " pixels" << std::endl;
+            std::cout << " + Size of image to sample (in downscaled pixels): " <<  down_xsize << " x " << down_ysize << std::endl;
+            std::cout << " + Fourier shells for the amyloid signal (in downscaled pixels): " << imin_signal  << " - " << imax_signal << std::endl;
+            std::cout << " + Fourier shells for the non-signal control (in downscaled pixels): " << imin_nonsignal  << " - " << imax_nonsignal << std::endl;
+            std::cout << "  ========================== " << std::endl;
+        }
+    }
 
 }
 
@@ -215,13 +259,6 @@ RFLOAT AmyloidFinder::getPsiAngle(int ipsi)
     return 2.3 + ipsi * psi_step;
 }
 
-RFLOAT AmyloidFinder::getPsiDiff(RFLOAT psi1, RFLOAT psi2)
-{
-    RFLOAT psidiff = fabs(psi1 - psi2);
-    if (psidiff > 90.) psidiff -= 180.;
-    return fabs(psidiff);
-
-}
 MultidimArray<RFLOAT> AmyloidFinder::growNonSignalMask(MultidimArray<RFLOAT> &inmask, int extend_size)
 {
 
@@ -623,46 +660,13 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
 }
 
 
-void AmyloidFinder::traceFilaments(FileName &fn_fom, FileName &fn_psi, FileName &fn_star)
-{
-
-    // hardcoded python script for now...
-    FileName command = fn_exe;
-
-    command += " -if " + fn_fom;
-    command += " -ip " + fn_psi;
-    command += " -m " + fn_model_path;
-    if (do_gpu)
-        command += " -d cuda:" + integerToString(device_id);
-    else
-        command += " -d cpu";
-    command += " -o " + fn_star;
-    command += " -t " + floatToString(threshold);
-    command += " -r " + floatToString(trace_filament_width/2);
-    command += " -l " + floatToString(trace_filament_length);
-    command += " -s " + floatToString(down_angpix/angpix);
-    command += " -j " + integerToString(nr_threads);
-
-    if (do_plot)
-        command += " --plot ";
-
-    command += " " + fn_other_args;
-
-    //std::cerr << command << std::endl;
-    int res = system(command.c_str());
-
-
-}
-
-
-
-void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
+void AmyloidFinder::calculateFOMOneMicrograph(FileName fn_mic, bool myverb)
 {
 
     FileName fn_root = getOutputRootName(fn_mic);
     FileName fn_fom = fn_root + "_" + fn_out + "_fom.mrc";
     FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
-    FileName fn_skew = fn_root + "_" + fn_out + "_skew.star";
+    FileName fn_skew = fn_root + "_" + fn_out + "_skew.txt";
     MultidimArray<RFLOAT> Mscore, Mangle;
 
     if (!exists(fn_fom) || !exists(fn_psi))
@@ -677,12 +681,10 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         RFLOAT skew, kurt;
         getScoreForOneMicrograph(Iin(), Mscore, Mangle, skew, kurt, myverb);
 
-        MetaDataTable MDskew;
-        MDskew.setIsList(true);
-        MDskew.addObject();
-        MDskew.setValue(EMDL_MICROGRAPH_SCORE_SKEWNESS, skew);
-        MDskew.setValue(EMDL_MICROGRAPH_SCORE_KURTOSIS, kurt);
-        MDskew.write(fn_skew);
+        std::ofstream  fh;
+        fh.open((fn_skew).c_str(), std::ios::out);
+        fh << skew << " " << kurt << std::endl;
+        fh.close();
 
         Image<RFLOAT> Ipsi, Izscore;
         Ipsi.setSamplingRateInHeader(down_angpix);
@@ -693,18 +695,6 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
         Izscore.write(fn_fom);
     }
 
-    if (!do_skip_tracing)
-    {
-        if (myverb)
-        {
-            std::cout << " - Tracing filaments ..." << std::endl;
-            init_progress_bar(1);
-        }
-
-        FileName fn_star = getOutputRootName(fn_mic) + "_" + fn_out + ".star";
-        traceFilaments(fn_fom, fn_psi, fn_star);
-    }
-
     if (myverb) std::cout << "done!" << std::endl;
 
 
@@ -712,50 +702,132 @@ void AmyloidFinder::processOneMicrograph(FileName fn_mic, bool myverb)
 }
 
 
-void AmyloidFinder::run()
+void AmyloidFinder::runFOMBatch(long int my_first, long int my_last)
 {
-	int barstep;
-	if (verb > 0)
-	{
-		std::cout << " Finding amyloids ..." << std::endl;
-		init_progress_bar(fn_micrographs.size());
-		barstep = XMIPP_MAX(1, fn_micrographs.size() / 60);
-	}
 
-	FileName fn_olddir="";
-	for (long int imic = 0; imic < fn_micrographs.size(); imic++)
-	{
+    long int my_nr = my_last - my_first + 1;
+    if (my_nr <= 0) return;
 
-		// Abort through the pipeline_control system
-		if (pipeline_control_check_abort_job())
-			exit(RELION_EXIT_ABORTED);
+    int barstep;
+    if (verb > 0)
+    {
+        std::cout << " Calculating FOMs ..." << std::endl;
+        init_progress_bar(my_nr);
+        barstep = XMIPP_MAX(1, my_nr / 60);
+    }
 
-		if (verb > 0 && imic % barstep == 0)
-			progress_bar(imic);
+    FileName fn_olddir="";
+    for (long int imic = my_first; imic <= my_last; imic++)
+    {
 
-		// Check new-style outputdirectory exists and make it if not!
-		FileName fn_oroot = getOutputRootName(fn_micrographs[imic]);
-		FileName fn_dir = fn_oroot.beforeLastOf("/");
-		if (fn_dir != fn_olddir)
-		{
-			// Make a Particles directory
-			mktree(fn_dir);
-			fn_olddir = fn_dir;
-		}
+        // Abort through the pipeline_control system
+        if (pipeline_control_check_abort_job())
+            exit(RELION_EXIT_ABORTED);
+
+        if (verb > 0 && imic % barstep == 0)
+            progress_bar(imic);
+
+        // Check new-style outputdirectory exists and make it if not!
+        FileName fn_oroot = getOutputRootName(todo_micrographs_fom[imic]);
+        FileName fn_dir = fn_oroot.beforeLastOf("/");
+        if (fn_dir != fn_olddir)
+        {
+            // Make a Particles directory
+            mktree(fn_dir);
+            fn_olddir = fn_dir;
+        }
 #ifdef TIMING
-		timer.tic(TIMING_A5);
+        timer.tic(TIMING_A5);
 #endif
-        processOneMicrograph(fn_micrographs[imic], fn_micrographs.size()==1);
-
+        calculateFOMOneMicrograph(todo_micrographs_fom[imic], todo_micrographs_fom.size() == 1);
+        if (verb > 0 && (imic-my_first+1)%barstep == 0) progress_bar(imic - my_first + 1);
 #ifdef TIMING
-		timer.toc(TIMING_A5);
+        timer.toc(TIMING_A5);
 #endif
-	}
+    }
 
-	if (verb > 0)
-		progress_bar(fn_micrographs.size());
+    if (verb > 0) progress_bar(my_nr);
 
 }
+
+void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_rank)
+{
+    long int my_nr = my_last - my_first + 1;
+    if (my_nr <= 0) return;
+
+    if (verb > 0) std::cout << " - Tracing filaments ..." << std::endl;
+
+    // TODO!!! Make a temp STAR file with mic, fom and psi names to pass to Jenny's program!!!!
+    // takes from my_first to my_last!
+    FileName fn_tracing_star = fn_odir + "input_trace_rank" + integerToString(my_rank) + ".star";
+    MetaDataTable MDtrace;
+    for (long int imic = my_first; imic <= my_last; imic++)
+    {
+        MDtrace.addObject();
+        FileName fn_root = getOutputRootName(todo_micrographs_tracing[imic]);
+        FileName fn_fom, fn_psi;
+        if (do_skip_fom)
+        {
+            long int imic_ori = idx_todo_micrographs_tracing[imic];
+            fn_fom = fn_ori_micrographs_fom[imic_ori];
+            fn_psi = fn_ori_micrographs_psi[imic_ori];
+        }
+        else
+        {
+            fn_fom = fn_root + "_" + fn_out + "_fom.mrc";
+            fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
+        }
+        // remove leading job number from fn_mic filename
+        FileName fn_pick = fn_root + "_" + fn_out + ".star";
+        MDtrace.setValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom);
+        MDtrace.setValue(EMDL_MICROGRAPH_AUTOPICK_PSI, fn_psi);
+        MDtrace.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
+    }
+    MDtrace.write(fn_tracing_star);
+
+    // hardcoded python script for now...
+    FileName command = fn_exe;
+
+    command += " -i " + fn_tracing_star;
+    command += " -m " + fn_model_path;
+    if (do_gpu)
+    {
+        command += " -d cuda:" + integerToString(device_id);
+    }
+    else
+    {
+        command += " -d cpu";
+        command += " -j " + integerToString(nr_threads);
+    }
+    command += " -t " + floatToString(threshold);
+    command += " -r " + floatToString(trace_filament_width/2);
+    command += " -l " + floatToString(trace_filament_length);
+    command += " -s " + floatToString(down_angpix/angpix);
+    command += " -a " + pipeline_control_outputname+RELION_JOB_ABORT_NOW;
+    command += " -v " + integerToString(verb);
+    if (do_plot)
+        command += " --plot ";
+
+    command += " " + fn_other_args;
+
+    //std::cerr << command << std::endl;
+    int res = system(command.c_str());
+
+    if (pipeline_control_check_abort_job())
+        exit(RELION_EXIT_ABORTED);
+    else if (res != 0) exit(RELION_EXIT_FAILURE);
+
+}
+
+
+void AmyloidFinder::run()
+{
+
+    runFOMBatch(0, todo_micrographs_fom.size() - 1);
+    runTracingBatch(0, todo_micrographs_tracing.size() - 1);
+
+}
+
 
 void AmyloidFinder::finalise()
 {
@@ -780,134 +852,92 @@ void AmyloidFinder::finalise()
 
         FileName fn_root = getOutputRootName(fn_ori_micrographs[imic]);
         FileName fn_fom = fn_root + "_" + fn_out + "_fom.mrc";
-        FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
-        FileName fn_skew = fn_root + "_" + fn_out + "_skew.star";
-        FileName fn_pick = fn_root + "_" + fn_out + ".star";
 
-		MetaDataTable MD;
-        long nr_pick = 0;
-		if (exists(fn_pick))
+        if (!do_skip_fom)
 		{
+            FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
+            FileName fn_skew = fn_root + "_" + fn_out + "_skew.txt";
 
-			MDcoords.addObject();
-			MDcoords.setValue(EMDL_MICROGRAPH_NAME, fn_ori_micrographs[imic]);
-            MDcoords.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
-            MDcoords.setValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom);
-			nr_coord_files++;
-
-			MD.read(fn_pick);
-			nr_pick = MD.numberOfObjects();
-			total_nr_picked += nr_pick;
-            // mis-use MetadataTable to conveniently make histograms and value-plots
-            MDresult.addObject();
-            MDresult.setValue(EMDL_MICROGRAPH_NAME, fn_micrographs[imic]);
-            MDresult.setValue(EMDL_MLMODEL_GROUP_NR_PARTICLES, nr_pick);
-		}
-
-        if (exists(fn_skew))
-		{
-            MetaDataTable MDskew;
             RFLOAT kurt, skew;
-            MDskew.read(fn_skew);
-            MDskew.getValue(EMDL_MICROGRAPH_SCORE_KURTOSIS, kurt);
-            MDskew.getValue(EMDL_MICROGRAPH_SCORE_SKEWNESS, skew);
+            std::ifstream fin(fn_skew);
+            if (!(fin >> skew >> kurt))  REPORT_ERROR("Error reading the numbers from the file: " + fn_skew);
+
             MDin.setValue(EMDL_MICROGRAPH_SCORE_KURTOSIS, kurt, imic);
             MDin.setValue(EMDL_MICROGRAPH_SCORE_SKEWNESS, skew, imic);
-
             MDin.setValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom, imic);
             MDin.setValue(EMDL_MICROGRAPH_AUTOPICK_PSI, fn_psi, imic);
-            MDin.setValue(EMDL_MLMODEL_GROUP_NR_PARTICLES, nr_pick, imic);
+        }
+
+        if (!do_skip_tracing)
+        {
+
+            FileName fn_pick = fn_root + "_" + fn_out + ".star";
+
+            MDcoords.addObject();
+            MDcoords.setValue(EMDL_MICROGRAPH_NAME, fn_ori_micrographs[imic]);
+            MDcoords.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
+            MDcoords.setValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom);
+            nr_coord_files++;
+
         }
 
 		if (verb > 0 && imic % 60 == 0) progress_bar(imic);
 
 	}
 
+    if (verb > 0) progress_bar(fn_ori_micrographs.size());
 
-	FileName fn_coords = fn_odir + fn_out + ".star";
-	MDcoords.setName("coordinate_files");
-	MDcoords.write(fn_coords);
 
-    FileName fn_mics = fn_odir + "micrographs_" + fn_out + ".star";
-    obsModel.save(MDin, fn_mics, "micrographs");
-
-	if (verb > 0 )
-	{
-		progress_bar(fn_ori_micrographs.size());
-		std::cout << " Saved list with " << nr_coord_files << " coordinate files in: " << fn_coords << std::endl;
-	}
-
-	if (verb > 0)
-	{
-		std::cout << " Total number of particles from " << fn_ori_micrographs.size() << " micrographs is " << total_nr_picked << std::endl;
-
-		long avg = 0;
-		if (fn_ori_micrographs.size() > 0) avg = ROUND((RFLOAT)total_nr_picked/fn_ori_micrographs.size());
-		std::cout << " i.e. on average there were " << avg << " particles per micrograph" << std::endl;
-
-		std::cout << " Now generating logfile.pdf ... " << std::endl;
-	}
-
-	// Values for all micrographs
-	FileName fn_eps;
-	std::vector<FileName> all_fn_eps;
-	std::vector<RFLOAT> histX, histY;
-
-	MDresult.write(fn_odir + "summary.star");
-	CPlot2D *plot2Db=new CPlot2D("Nr of picked particles for all micrographs");
-	MDresult.addToCPlot2D(plot2Db, EMDL_UNDEFINED, EMDL_MLMODEL_GROUP_NR_PARTICLES, 1.);
-	plot2Db->SetDrawLegend(false);
-	fn_eps = fn_odir + "all_nr_parts.eps";
-	plot2Db->OutputPostScriptPlot(fn_eps);
-	all_fn_eps.push_back(fn_eps);
-	delete plot2Db;
-	if (MDresult.numberOfObjects() > 3)
-	{
-		CPlot2D *plot2D=new CPlot2D("");
-		MDresult.columnHistogram(EMDL_MLMODEL_GROUP_NR_PARTICLES,histX,histY,0, plot2D);
-		fn_eps = fn_odir + "histogram_nrparts.eps";
-		plot2D->SetTitle("Histogram of nr of picked particles per micrograph");
-		plot2D->OutputPostScriptPlot(fn_eps);
-		all_fn_eps.push_back(fn_eps);
-		delete plot2D;
-	}
-
-    CPlot2D *plot2De=new CPlot2D("Skewness of FOM for all micrographs");
-    MDin.addToCPlot2D(plot2De, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_SKEWNESS, 1.);
-    plot2De->SetDrawLegend(false);
-    fn_eps = fn_odir + "all_FOM_skew.eps";
-    plot2De->OutputPostScriptPlot(fn_eps);
-    all_fn_eps.push_back(fn_eps);
-    delete plot2De;
-    if (MDin.numberOfObjects() > 3)
+    if (!do_skip_fom)
     {
-        CPlot2D *plot2Df=new CPlot2D("");
-        MDin.columnHistogram(EMDL_MICROGRAPH_SCORE_SKEWNESS,histX,histY,0, plot2Df);
-        fn_eps = fn_odir + "histogram_FOM_skew.eps";
-        plot2Df->SetTitle("Histogram of FOM skewness per micrograph");
-        plot2Df->OutputPostScriptPlot(fn_eps);
+
+        FileName fn_mics = fn_odir + "micrographs_" + fn_out + ".star";
+        obsModel.save(MDin, fn_mics, "micrographs");
+        if (verb > 0) std::cout << " Saved output micrograph STAR file with FOM images in: " << fn_mics << std::endl;
+
+        // Make histograms of skewness and kurtosis of FOM values for all micrographs
+        FileName fn_eps;
+        std::vector<FileName> all_fn_eps;
+        std::vector<RFLOAT> histX, histY;
+
+        CPlot2D *plot2De=new CPlot2D("Skewness of FOM for all micrographs");
+        MDin.addToCPlot2D(plot2De, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_SKEWNESS, 1.);
+        plot2De->SetDrawLegend(false);
+        fn_eps = fn_odir + "all_FOM_skew.eps";
+        plot2De->OutputPostScriptPlot(fn_eps);
         all_fn_eps.push_back(fn_eps);
-        delete plot2Df;
+        delete plot2De;
+        if (MDin.numberOfObjects() > 3)
+        {
+            CPlot2D *plot2Df=new CPlot2D("");
+            MDin.columnHistogram(EMDL_MICROGRAPH_SCORE_SKEWNESS,histX,histY,0, plot2Df);
+            fn_eps = fn_odir + "histogram_FOM_skew.eps";
+            plot2Df->SetTitle("Histogram of FOM skewness per micrograph");
+            plot2Df->OutputPostScriptPlot(fn_eps);
+            all_fn_eps.push_back(fn_eps);
+            delete plot2Df;
+        }
+
+        CPlot2D *plot2Dg=new CPlot2D("Kurtosis of FOM for all micrographs");
+        MDin.addToCPlot2D(plot2Dg, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_KURTOSIS, 1.);
+        plot2Dg->SetDrawLegend(false);
+        fn_eps = fn_odir + "all_FOM_kurt.eps";
+        plot2Dg->OutputPostScriptPlot(fn_eps);
+        all_fn_eps.push_back(fn_eps);
+        delete plot2Dg;
+        if (MDin.numberOfObjects() > 3)
+        {
+            CPlot2D *plot2Dh=new CPlot2D("");
+            MDin.columnHistogram(EMDL_MICROGRAPH_SCORE_KURTOSIS,histX,histY,0, plot2Dh);
+            fn_eps = fn_odir + "histogram_FOM_kurt.eps";
+            plot2Dh->SetTitle("Histogram of FOM kurtosis per micrograph");
+            plot2Dh->OutputPostScriptPlot(fn_eps);
+            all_fn_eps.push_back(fn_eps);
+            delete plot2Dh;
+        }
+
+        joinMultipleEPSIntoSinglePDF(fn_odir + "logfile.pdf", all_fn_eps);
     }
 
-    CPlot2D *plot2Dg=new CPlot2D("Kurtosis of FOM for all micrographs");
-    MDin.addToCPlot2D(plot2Dg, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_KURTOSIS, 1.);
-    plot2Dg->SetDrawLegend(false);
-    fn_eps = fn_odir + "all_FOM_kurt.eps";
-    plot2Dg->OutputPostScriptPlot(fn_eps);
-    all_fn_eps.push_back(fn_eps);
-    delete plot2Dg;
-    if (MDin.numberOfObjects() > 3)
-    {
-        CPlot2D *plot2Dh=new CPlot2D("");
-        MDin.columnHistogram(EMDL_MICROGRAPH_SCORE_KURTOSIS,histX,histY,0, plot2Dh);
-        fn_eps = fn_odir + "histogram_FOM_kurt.eps";
-        plot2Dh->SetTitle("Histogram of FOM kurtosis per micrograph");
-        plot2Dh->OutputPostScriptPlot(fn_eps);
-        all_fn_eps.push_back(fn_eps);
-        delete plot2Dh;
-    }
-
-	joinMultipleEPSIntoSinglePDF(fn_odir + "logfile.pdf", all_fn_eps);
 
 }

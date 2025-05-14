@@ -2,7 +2,7 @@
 
 import argparse
 import math
-import os
+import sys, os
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +20,7 @@ from skimage.measure import regionprops, label as label_connected_component
 from skan import Skeleton, summarize
 from scipy.spatial.distance import cdist
 
+from tqdm import tqdm
 import time
 
 ###############################################################################
@@ -360,8 +361,7 @@ def main():
 
     #start_time = time.time()  
     parser = argparse.ArgumentParser("Skeleton-based filament picking with instance merging, branch pruning, and ID labeling")
-    parser.add_argument("-if", "--input_fom", help="Input FOM MRC file")
-    parser.add_argument("-ip", "--input_psi", help="Input PSI MRC file")
+    parser.add_argument("-i", "--input", help="Input star file")
     parser.add_argument("-m", "--model_path", help="Path to PyTorch model checkpoint")
     parser.add_argument("-o", "--output", help="Output star file with coordinates")
     parser.add_argument("-r", "--radius", type=int, help="Radius of region to exclude near edges (in A)")
@@ -372,6 +372,8 @@ def main():
                         help="Multiply output coordinates by this factor (default=1.0)")
     parser.add_argument("-d", "--device", default="cuda:0", help="Which GPU device to use")
     parser.add_argument("-j", "--threads", type=int, default=1)
+    parser.add_argument("-a", "--abort", help="Abort if this file exists")
+    parser.add_argument("-v", "--verb", type=int, help="Verbosity")
     parser.add_argument("--sample_step", type=int, default=100,
                         help="Sample a coordinate every 'sample_step' Angstroms along each path (default=50)")
     parser.add_argument("--plot", action='store_true',
@@ -379,123 +381,129 @@ def main():
     args = parser.parse_args()
 
     # number of CPU threads allowed
-    torch.set_num_threads(args.threads)
+    #torch.set_num_threads(args.threads)
 
-    # ------------------- Load MRCs ----------------------
-    fom_image, pixel_size, origin = load_mrc(args.input_fom)
-    psi_image, _, _ = load_mrc(args.input_psi)
-    H, W = fom_image.shape
+    # ------------------- Load model ----------------------
     device = torch.device(args.device)
-
-    #print(f"Time elapsed after step 2: {time.time() - start_time:.2f} seconds")
-
-    # ------------------ Load Model + Run Inference ----------------
     model = UNet.load_from_checkpoint(args.model_path, n_channels=2, n_classes=1)
     model.eval().to(device)
-    #print(f"Time elapsed after step 3: {time.time() - start_time:.2f} seconds")
 
-    in_tensor = np.stack((fom_image, psi_image), axis=0)  # shape (2,H,W)
-    in_tensor = torch.from_numpy(in_tensor[None]).float().to(device)  # shape (1,2,H,W)
+    input_star = starfile.read(args.input)
 
-    if device.type == "cuda":
-        with torch.autocast(device_type=device.type, dtype=torch.float16):
-            seg_logits, embedding = model(in_tensor)
-    else:
-        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-            seg_logits, embedding = model(in_tensor)
-    foreground = torch.sigmoid(seg_logits).squeeze().detach().to(dtype=torch.float32).cpu().numpy()
-    #print(f"Time elapsed after step 5: {time.time() - start_time:.2f} seconds")
+    # ------------------ Run Inference ----------------    
+    iterator = tqdm(input_star.iterrows(), total=len(input_star), file=sys.stdout) if args.verb > 0 else input_star.iterrows()
+    for i, row in iterator:
 
-    # 2) Clean + threshold => remove small objects
-    bin_foreground = (foreground > args.threshold)
-    min_size = 100
-    clean_foreground = remove_small_objects(bin_foreground, min_size=min_size)
-
-    # 3) Crop edges if radius is given
-    if args.radius is not None:
-        d = round(args.radius / pixel_size)
-        clean_foreground[:d, :] = False
-        clean_foreground[-d:, :] = False
-        clean_foreground[:, :d] = False
-        clean_foreground[:, -d:] = False
-
-    # 4) Skeletonize
-    skeleton_img = skeletonize(clean_foreground)
-    #print(f"Time elapsed after step 8: {time.time() - start_time:.2f} seconds")
-    if skeleton_img.any():
-
-        # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
-        pruned_skeleton, sampled_points = prune_skeleton(skeleton_img,
-                                                         min_length=args.minimum_length / pixel_size,
-                                                         min_distance=2 * args.radius / pixel_size,
-                                                         step=int(args.sample_step / pixel_size))
-        #print(f"Time elapsed after step 9: {time.time() - start_time:.2f} seconds")
-
-        # 6) Sample coordinates every 'sample_step' from pruned skeleton, **including filament ID**.
-        #sampled_points = sample_coordinates_with_ids(pruned_skeleton, step=int(args.sample_step / pixel_size))
-        # sampled_points shape: (N, 3) => [x, y, filament_id]
-        if sampled_points.size > 0:
+        if Path(args.abort).exists():
+            print("Abort file exists. Aborting...")
+            sys.exit()
+            
+	# ------------------- Load MRCs ----------------------
+        fom_image, pixel_size, origin = load_mrc(row["rlnMicrographFomImage"])
+        psi_image, _, _ = load_mrc(row["rlnMicrographPsiImage"])
+        outfile = row["rlnMicrographCoordinates"]
+        directory = Path(outfile).parent
+        # Check if the directory exists, and create it if not
+        directory.mkdir(parents=True, exist_ok=True)
         
-            # 7) Scale, round, write star
-            # scale only the x,y columns
-            sampled_points[:, 0:2] = np.round(sampled_points[:, 0:2] * args.scale).astype(int)
+        H, W = fom_image.shape
 
-            df = pd.DataFrame({
-                'rlnCoordinateX': sampled_points[:, 0],
-                'rlnCoordinateY': sampled_points[:, 1],
-                'rlnParticleSelectionType':  sampled_points[:, 2]
-            })
-            starfile.write(df, args.output, overwrite=True)
-            #print(f"Done. Wrote {len(df)} points to {args.output}")
-        else:
-            Path(args.output).touch()
-    else:
-        Path(args.output).touch()
-	    
-    #print(f"Time elapsed after step 10: {time.time() - start_time:.2f} seconds")
+        in_tensor = np.stack((fom_image, psi_image), axis=0)  # shape (2,H,W)
+        in_tensor = torch.from_numpy(in_tensor[None]).float().to(device)  # shape (1,2,H,W)
 
-    # ---------------------------------------------------
-    # If plotting is requested, create a collage figure
-    # ---------------------------------------------------
-    if args.plot:
+        with torch.no_grad():
+            if device.type == "cuda":
+                with torch.autocast(device_type=device.type, dtype=torch.float16):
+                    seg_logits, embedding = model(in_tensor)
+            else:
+                with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+                    seg_logits, embedding = model(in_tensor)
+            foreground = torch.sigmoid(seg_logits).squeeze().detach().to(dtype=torch.float32).cpu().numpy()
+        
+        # 2) Clean + threshold => remove small objects
+        bin_foreground = (foreground > args.threshold)
+        min_size = 100
+        clean_foreground = remove_small_objects(bin_foreground, min_size=min_size)
 
-        fig, ax = plt.subplots(2, 3, figsize=(32,20))
-        ax = ax.ravel()
+        # 3) Crop edges if radius is given
+        if args.radius is not None:
+            d = round(args.radius / pixel_size)
+            clean_foreground[:d, :] = False
+            clean_foreground[-d:, :] = False
+            clean_foreground[:, :d] = False
+            clean_foreground[:, -d:] = False
 
-        ax[0].imshow(fom_image, cmap='gray')
-        ax[0].set_title("FOM Image")
-        ax[0].axis('off')
-
-        ax[1].imshow(psi_image, cmap='gray')
-        ax[1].set_title("PSI Image")
-        ax[1].axis('off')
-
-        ax[2].imshow(color_foreground(foreground, args.threshold))
-        ax[2].set_title("Foreground")
-        ax[2].axis('off')
-
-        ax[3].imshow(skeleton_img)
-        ax[3].set_title("Raw Skeleton")
-        ax[3].axis('off')
+        # 4) Skeletonize
+        skeleton_img = skeletonize(clean_foreground)
 
         if skeleton_img.any():
-            ax[4].imshow(color_nonrandom(pruned_skeleton))
-            ax[4].set_title("Pruned Skeleton")
-            ax[4].axis('off')
 
+            # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
+            pruned_skeleton, sampled_points = prune_skeleton(skeleton_img,
+                                                             min_length=args.minimum_length / pixel_size,
+                                                             min_distance=2 * args.radius / pixel_size,
+                                                             step=int(args.sample_step / pixel_size))
+
+            # 6) Sample coordinates every 'sample_step' from pruned skeleton, **including filament ID**.
+            #sampled_points = sample_coordinates_with_ids(pruned_skeleton, step=int(args.sample_step / pixel_size))
+            # sampled_points shape: (N, 3) => [x, y, filament_id]
             if sampled_points.size > 0:
-                ax[5].imshow(np.zeros_like(foreground), cmap='gray')  # blank background
-                ax[5].scatter(sampled_points[:,0]/args.scale, sampled_points[:,1]/args.scale, s=2, c='red')
-                ax[5].set_xlim([0, foreground.shape[1]])
-                ax[5].set_ylim([foreground.shape[0], 0])
-                ax[5].set_title("Final Sampled Picks (ID shown in STAR)")
-                ax[5].axis('off')
+        
+                # 7) Scale, round, write star
+                # scale only the x,y columns
+                sampled_points[:, 0:2] = np.round(sampled_points[:, 0:2] * args.scale).astype(int)
 
-        plt.tight_layout()
-        plt.show()
-        plt.close()
-        #print(f"Time elapsed after step 11: {time.time() - start_time:.2f} seconds")
+                df = pd.DataFrame({
+                    'rlnCoordinateX': sampled_points[:, 0],
+                    'rlnCoordinateY': sampled_points[:, 1],
+                    'rlnParticleSelectionType':  sampled_points[:, 2]
+                })
+                starfile.write(df, outfile, overwrite=True)
+            else:
+                Path(outfile).touch()
+        else:
+            Path(outfile).touch()
+	    
+        # ---------------------------------------------------
+        # If plotting is requested, create a collage figure
+        # ---------------------------------------------------
+        if args.plot:
 
+            fig, ax = plt.subplots(2, 3, figsize=(32,20))
+            ax = ax.ravel()
+
+            ax[0].imshow(fom_image, cmap='gray')
+            ax[0].set_title("FOM Image")
+            ax[0].axis('off')
+
+            ax[1].imshow(psi_image, cmap='gray')
+            ax[1].set_title("PSI Image")
+            ax[1].axis('off')
+
+            ax[2].imshow(color_foreground(foreground, args.threshold))
+            ax[2].set_title("Foreground")
+            ax[2].axis('off')
+
+            ax[3].imshow(skeleton_img)
+            ax[3].set_title("Raw Skeleton")
+            ax[3].axis('off')
+
+            if skeleton_img.any():
+                ax[4].imshow(color_nonrandom(pruned_skeleton))
+                ax[4].set_title("Pruned Skeleton")
+                ax[4].axis('off')
+
+                if sampled_points.size > 0:
+                    ax[5].imshow(np.zeros_like(foreground), cmap='gray')  # blank background
+                    ax[5].scatter(sampled_points[:,0]/args.scale, sampled_points[:,1]/args.scale, s=2, c='red')
+                    ax[5].set_xlim([0, foreground.shape[1]])
+                    ax[5].set_ylim([foreground.shape[0], 0])
+                    ax[5].set_title("Final Sampled Picks (ID shown in STAR)")
+                    ax[5].axis('off')
+
+            plt.tight_layout()
+            plt.show()
+            plt.close()
 
 
 if __name__ == "__main__":
