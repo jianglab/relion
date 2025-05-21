@@ -949,7 +949,6 @@ void JobWindow::initialiseAutopickWindow()
     group5->begin();
     place("amyloid_threshold");
     place("do_amyloid_plot");
-    place("redo_all_tracing");
 
     group5->end();
     guientries["do_amyloid_tracing"].cb_menu_i();
@@ -1069,21 +1068,8 @@ Pixels values higher than this many times the image stddev will be replaced with
 	current_y += STEPY/2;
 
 	place("helical_bimodal_angular_priors", TOGGLE_DEACTIVATE);
-
-	group6 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
-	group6->end();
-
-	current_y += STEPY/2;
-	place("do_extract_helical_tubes", TOGGLE_DEACTIVATE, group6);
-
-	group6->begin();
-    place("do_lines", TOGGLE_DEACTIVATE);
 	place("helical_nr_asu", TOGGLE_DEACTIVATE);
 	place("helical_rise", TOGGLE_DEACTIVATE);
-
-	group6->end();
-
-	guientries["do_extract_helical_tubes"].cb_menu_i();
 
 	group5->end();
 

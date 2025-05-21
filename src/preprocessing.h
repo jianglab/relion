@@ -167,7 +167,10 @@ public:
 	// Outer diameter of helical tubes in Angstroms (for masks of helical segments)
 	RFLOAT helical_tube_outer_diameter;
 
-	// Extract helical segments from tube coordinates
+	// Picking type
+    std::string picktype;
+
+    // Extract helical segments from tube coordinates
 	bool do_startend;
 
 	// Number of helical asymmetrical units

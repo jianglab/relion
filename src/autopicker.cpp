@@ -1083,7 +1083,18 @@ void AutoPicker::generatePDFLogfile()
 
 	FileName fn_coords = fn_odir + fn_out + ".star";
 	MDcoords.setName("coordinate_files");
-	MDcoords.write(fn_coords);
+
+    MetaDataTable MDhead;
+    MDhead.setName("general");
+    MDhead.setIsList(true);
+    MDhead.addObject();
+    std::string type = (autopick_helical_segments) ? "particles" : "startend";
+    MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, type);
+
+    std::vector<MetaDataTable> MDins;
+    MDins.push_back(MDhead);
+    MDins.push_back(MDcoords);
+    writeMultipleTablesToStar(MDins, fn_coords);
 
 	if (verb > 0 )
 	{

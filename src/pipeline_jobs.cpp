@@ -2055,7 +2055,6 @@ Helical tubes with shorter lengths will not be picked. Note that a long helical 
     joboptions["do_amyloid_tracing"] = JobOption("Trace amyloids in FOM images? ", true, "Trace amyloids (as lines) in the FOM images? Note this code runs only most efficiently on the GPU.");
     joboptions["amyloid_threshold"] = JobOption("Amyloid pick threshold (sigma): ", 0.25, 0.05, 1, 0.05, "How many sigma does the peaks need to be above the mean for the filament tracing to include a coordinate?");
     joboptions["do_amyloid_plot"] = JobOption("Plot results per micrograph?", false, "Set this option to Yes to visualise intermediate results for amyloid tracing, which may help with setting values for filament length, width and picking threshold. Don't use in parallel or in submission to the queue.");
-    joboptions["redo_all_tracing"] = JobOption("Redo tracing for all micrographs?", false, "Set this option to Yes to redo the tracing for all micrographs (and overwrite any existing output coordinate star files that may exist). If set to No, then only micrographs for which the star files don't exist yet will be traced. This is useful for speeding up on-the-fly processing in continuation jobs.");
 
 
 }
@@ -2323,7 +2322,6 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
                     return false;
                 }
             }
-            if (joboptions["redo_all_tracing"].getBoolean()) command += " --redo_all_tracing ";
 
             command += " --odir " + outputname;
             command += " --pickname autopick";
@@ -2367,13 +2365,15 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
             Node node3b(outputname + "logfile.pdf", LABEL_AUTOPICK_LOG);
             outputNodes.push_back(node3b);
 
-            command += " --j " + joboptions["nr_threads"].getString();
-
             // GPU-stuff
             if (joboptions["use_gpu"].getBoolean())
             {
                 // for the moment always use --shrink 0 with GPUs ...
                 command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";
+            }
+            else
+            {
+                command += " --j " + joboptions["nr_threads"].getString();
             }
 
 
@@ -2544,9 +2544,6 @@ Pixels values higher than this many times the image stddev will be replaced with
 This value should be slightly larger than the actual width of helical tubes.");
 	joboptions["helical_bimodal_angular_priors"] = JobOption("Use bimodal angular priors?", true, "Normally it should be set to Yes and bimodal angular priors will be applied in the following classification and refinement jobs. \
 Set to No if the 3D helix looks the same when rotated upside down.");
-	joboptions["do_extract_helical_tubes"] = JobOption("Coordinates are start-end or lines?", true, "Set to Yes if you want to extract helical segments from manually picked tube coordinates as start-end pairs or as lines (starting and end points of helical tubes in RELION, EMAN or XIMDISP format). \
-Set to No if segment coordinates (RELION auto-picked results or EMAN / XIMDISP segments) are provided.");
-    joboptions["do_lines"] = JobOption("Coordinates are lines?", false, "Set to Yes if you want to extract helical segments from manually picked lines.");
 	joboptions["helical_nr_asu"] = JobOption("Number of unique asymmetrical units:", 1, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box. This integer should not be less than 1. The inter-box distance (pixels) = helical rise (Angstroms) * number of asymmetrical units / pixel size (Angstroms). \
 The optimal inter-box distance might also depend on the box size, the helical rise and the flexibility of the structure. In general, an inter-box distance of ~10% * the box size seems appropriate.");
 	joboptions["helical_rise"] = JobOption("Helical rise (A):", 1, 0, 100, 0.01, "Helical rise in Angstroms. (Please click '?' next to the option above for details about how the inter-box distance is calculated.)");
@@ -2641,8 +2638,7 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 		command += " --pick_star " + fn_pickstar;
 	}
 
-	if (joboptions["do_extract_helix"].getBoolean() &&
-            joboptions["do_extract_helical_tubes"].getBoolean() )
+	if (joboptions["do_extract_helix"].getBoolean()  )
 	{
 		FileName fn_pickstar = outputname + "extractpick.star";
 		Node node(fn_pickstar, LABEL_EXTRACT_COORDS_HELIX);
@@ -2703,15 +2699,9 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 		command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
 		if (joboptions["helical_bimodal_angular_priors"].getBoolean())
 			command += " --helical_bimodal_angular_priors";
-		if (joboptions["do_extract_helical_tubes"].getBoolean())
-		{
-			if (joboptions["do_lines"].getBoolean()) command += " --from_lines";
-            else command += " --from_startend";
-
-            command += " --helical_cut_into_segments";
-            command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
-            command += " --helical_rise " + joboptions["helical_rise"].getString();
-		}
+        command += " --helical_cut_into_segments";
+        command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
+        command += " --helical_rise " + joboptions["helical_rise"].getString();
 	}
 	else
 	{

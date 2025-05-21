@@ -272,6 +272,7 @@ enum EMDLabel
 	EMDL_MICROGRAPH_SHIFT_Y,
     EMDL_MICROGRAPH_AUTOPICK_FOM,
     EMDL_MICROGRAPH_AUTOPICK_PSI,
+    EMDL_MICROGRAPH_PICKTYPE,
     EMDL_MICROGRAPH_SCORE_KURTOSIS,
     EMDL_MICROGRAPH_SCORE_SKEWNESS,
 	EMDL_MICROGRAPH_MOTION_COEFFS_IDX,
@@ -1010,6 +1011,7 @@ private:
 		EMDL::addLabel(EMDL_MICROGRAPH_SHIFT_Y, EMDL_DOUBLE, "rlnMicrographShiftY", "Y shift of a (patch of) micrograph");
         EMDL::addLabel(EMDL_MICROGRAPH_AUTOPICK_FOM, EMDL_STRING, "rlnMicrographFomImage", "Filename of the FOM image of micrograph autopicking ");
         EMDL::addLabel(EMDL_MICROGRAPH_AUTOPICK_PSI, EMDL_STRING, "rlnMicrographPsiImage", "Filename of the PSI image of micrograph autopicking");
+        EMDL::addLabel(EMDL_MICROGRAPH_PICKTYPE, EMDL_STRING, "rlnMicrographPickType", "Type of micrograph coordinates (particles, startend or lines)");
         EMDL::addLabel(EMDL_MICROGRAPH_SCORE_KURTOSIS, EMDL_DOUBLE, "rlnMicrographScoreKurtosis", "(Excess) kurtosis in micrograph autopick FOM scores");
         EMDL::addLabel(EMDL_MICROGRAPH_SCORE_SKEWNESS, EMDL_DOUBLE, "rlnMicrographScoreSkewness", "Skewness in micrograph autopick FOM scores");
         EMDL::addLabel(EMDL_MICROGRAPH_MOTION_COEFFS_IDX, EMDL_INT, "rlnMotionModelCoeffsIdx", "Index of a coefficient of a motion model");

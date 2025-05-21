@@ -475,7 +475,8 @@ void manualpickerGuiWindow::writeOutputStarfiles(bool verb)
 	if (!do_allow_save) return;
 
 	MDcoords.clear();
-	MetaDataTable MDmics, MDselect;
+    MDcoords.setName("coordinate_files");
+    MetaDataTable MDmics, MDselect;
 	int c = 0;
 	for (int imic = 0; imic < selected.size(); imic++)
 	{
@@ -513,10 +514,23 @@ void manualpickerGuiWindow::writeOutputStarfiles(bool verb)
     FileName fn_select = global_fn_odir + "local_selection.star";
     MDselect.write(fn_select);
 
-	FileName fn_coords = global_fn_odir + global_pickname + ".star";
-	MDcoords.setName("coordinate_files");
-	MDcoords.write(fn_coords);
-	if (verb) std::cout << " Saved list with " << c << " coordinate files in: " << fn_coords << std::endl;
+
+    std::string type = "particles";
+    if (global_pick_lines) type = "lines";
+    else if (global_pick_startend) type = "startend";
+    MetaDataTable MDhead;
+    MDhead.setName("general");
+    MDhead.setIsList(true);
+    MDhead.addObject();
+    MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, type);
+
+    std::vector<MetaDataTable> MDins;
+    MDins.push_back(MDhead);
+    MDins.push_back(MDcoords);
+    FileName fn_coords = global_fn_odir + global_pickname + ".star";
+    writeMultipleTablesToStar(MDins, fn_coords);
+
+    if (verb) std::cout << " Saved list with " << c << " coordinate files in: " << fn_coords << std::endl;
 
 }
 void manualpickerGuiWindow::cb_menubar_save(Fl_Widget* w, void* v)
@@ -746,7 +760,40 @@ void ManualPicker::initialise()
 {
 	if (fn_in.isStarFile())
 	{
-		// First try 2-column list of coordinate files as in relion-3.2+
+		MetaDataTable MDhead;
+        if (MDhead.read(fn_in, "general"))
+        {
+            std::string picktype;
+            MDhead.getValue(EMDL_MICROGRAPH_PICKTYPE, picktype);
+            if (picktype == "particles")
+            {
+                if (global_pick_startend || global_pick_lines)
+                    std::cerr << "WARNING: coordinate file states these are particles, ignoring --from_startend or --from_lines "<< std::endl;
+                global_pick_startend = global_pick_lines = false;
+            }
+            else if (picktype == "startend")
+            {
+                if (global_pick_lines)
+                    std::cerr << "WARNING: coordinate file states these are startend, ignoring --from_lines "<< std::endl;
+                global_pick_startend = true;
+                global_pick_lines = false;
+            }
+            else if (picktype == "lines")
+            {
+                if (global_pick_startend)
+                    std::cerr << "WARNING: coordinate file states these are lines, ignoring --from_startend "<< std::endl;
+                global_pick_startend = false;
+                global_pick_lines = true;
+            }
+            else
+            {
+                REPORT_ERROR("ERROR: unrecognised micrograph picktype from the general table of the coordinate file");
+            }
+
+        }
+
+
+        // First try 2-column list of coordinate files as in relion-3.2+
 		MDin.read(fn_in, "coordinate_files");
 		if (MDin.numberOfObjects() > 0)
 		{

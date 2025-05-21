@@ -44,7 +44,6 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     trace_filament_width = textToFloat(parser.getOption("--trace_filament_width", "Minimum width occupied by a traced filaments (in A)", "200"));
     trace_filament_length = textToFloat(parser.getOption("--trace_filament_length", "Minimum length of traced filaments (in A)", "300"));
     do_plot = parser.checkOption("--plot", "Display images with intermediate tracing results for each micrograph");
-    do_redo_tracing = parser.checkOption("--redo_all_tracing", "Ignore any autopick.star files already present and redo all tracing.");
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
     fn_other_args = parser.getOption("--other_args", "Other arguments for the python script", "");
     fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","/public/EM/RELION/amypicker.ckpt");
@@ -137,7 +136,7 @@ void AmyloidFinder::initialise(bool is_leader)
             }
         }
         // B. For tracing
-        if (!do_skip_tracing && !do_redo_tracing)
+        if (!do_skip_tracing)
         {
             if (do_skip_fom && (fn_ori_micrographs_fom.size() == 0 || fn_ori_micrographs_psi.size() == 0))
             {
@@ -167,22 +166,23 @@ void AmyloidFinder::initialise(bool is_leader)
         std::cout << " + Tracing filaments for " << todo_micrographs_tracing.size() << " micrographs... " << std::endl;
     }
 
+    // Read in header of first image
+    Image<RFLOAT> Iin;
+    Iin.read(fn_ori_micrographs[0], false);
+    ori_xsize = XSIZE(Iin());
+    ori_ysize = YSIZE(Iin());
+    Iin().setXmippOrigin();
+    if (angpix < 0.)
+    {
+        angpix = Iin.samplingRateX();
+        if (verb > 0) std::cout << " - Using pixel size from the header of : " << fn_in << " = " << angpix << std::endl;
+    }
+    if (nonsignal_maxres < 2*down_angpix) REPORT_ERROR("ERROR: the down_angpix is not enough to support the maximum resolution of the signal!");
+    if (angpix > down_angpix) REPORT_ERROR("ERROR: this program requires input images with a pixel size of at least down_angpix (" + floatToString(down_angpix) + ")!");
+
     if (todo_micrographs_fom.size() > 0)
     {
-        // Read in header of first image
-        Image<RFLOAT> Iin;
-        Iin.read(todo_micrographs_fom[0], false);
-        ori_xsize = XSIZE(Iin());
-        ori_ysize = YSIZE(Iin());
-        Iin().setXmippOrigin();
-        if (angpix < 0.)
-        {
-            angpix = Iin.samplingRateX();
-            if (verb > 0) std::cout << " - Using pixel size from the header of : " << fn_in << " = " << angpix << std::endl;
-        }
 
-        if (nonsignal_maxres < 2*down_angpix) REPORT_ERROR("ERROR: the down_angpix is not enough to support the maximum resolution of the signal!");
-        if (angpix > down_angpix) REPORT_ERROR("ERROR: this program requires input images with a pixel size of at least down_angpix (" + floatToString(down_angpix) + ")!");
 
         // Width and length in the downscaled pixels
         iwidthmax = ROUND(search_filament_width / down_angpix );
@@ -843,15 +843,16 @@ void AmyloidFinder::finalise()
     ObservationModel obsModel;
     ObservationModel::loadSafely(fn_in, obsModel, MDin, "micrographs", verb);
 
-	MetaDataTable MDcoords;
-	MetaDataTable MDresult;
+    MetaDataTable MDcoords;
+    MDcoords.setName("coordinate_files");
+    MetaDataTable MDresult;
 	long total_nr_picked = 0;
 	int nr_coord_files = 0;
 	for (long int imic = 0; imic < fn_ori_micrographs.size(); imic++)
 	{
 
         FileName fn_root = getOutputRootName(fn_ori_micrographs[imic]);
-        FileName fn_fom = fn_root + "_" + fn_out + "_fom.mrc";
+        FileName fn_fom = (do_skip_fom) ? fn_ori_micrographs_fom[imic] : fn_root + "_" + fn_out + "_fom.mrc";
 
         if (!do_skip_fom)
 		{
@@ -937,6 +938,24 @@ void AmyloidFinder::finalise()
         }
 
         joinMultipleEPSIntoSinglePDF(fn_odir + "logfile.pdf", all_fn_eps);
+    }
+
+    if (!do_skip_tracing)
+    {
+
+        FileName fn_coords = fn_odir + fn_out + ".star";
+
+        MetaDataTable MDhead;
+        MDhead.setName("general");
+        MDhead.setIsList(true);
+        MDhead.addObject();
+        MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, "lines");
+
+        std::vector<MetaDataTable> MDins;
+        MDins.push_back(MDhead);
+        MDins.push_back(MDcoords);
+        writeMultipleTablesToStar(MDins, fn_coords);
+
     }
 
 

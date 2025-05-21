@@ -210,8 +210,37 @@ void Preprocessing::initialise()
 			// Either get coordinate filenames from coord_list, or from the fn_coord_suffix
 			if (fn_coord_list != "")
 			{
-				MetaDataTable MDcoords;
-				MDcoords.read(fn_coord_list);
+				MetaDataTable MDhead;
+                if (MDhead.read(fn_coord_list, "general"))
+                {
+                    MDhead.getValue(EMDL_MICROGRAPH_PICKTYPE, picktype);
+                    if (picktype == "particles")
+                    {
+                        if (do_startend || do_lines)
+                            std::cerr << "WARNING: coordinate file states these are particles, ignoring --from_startend or --from_lines "<< std::endl;
+                        do_startend = do_lines = false;
+                    }
+                    else if (picktype == "startend")
+                    {
+                        if (do_lines)
+                            std::cerr << "WARNING: coordinate file states these are startend, ignoring --from_lines "<< std::endl;
+                        do_startend = true;
+                        do_lines = false;
+                    }
+                    else if (picktype == "lines")
+                    {
+                        if (do_startend)
+                            std::cerr << "WARNING: coordinate file states these are lines, ignoring --from_startend "<< std::endl;
+                        do_startend = false;
+                        do_lines = true;
+                    }
+                    else
+                    {
+                        REPORT_ERROR("ERROR: unrecognised micrograph picktype from the general table of the coordinate file");
+                    }
+                }
+                MetaDataTable MDcoords;
+				MDcoords.read(fn_coord_list, "coordinate_files");
 				FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDcoords)
 				{
 					FileName fn_mic, fn_coord;
@@ -651,7 +680,6 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
 		bool bimodal_angular_priors, bool cut_into_segments)
 {
 
-    std::cerr << "convertHelicalLineCoordsToMetaDataTable" << std::endl;
     // Check parameters and open files
     if ( (nr_asu < 1) || (rise_A < 0.001) || (pixel_size_A < 0.01) )
         REPORT_ERROR("Preprocessing::convertHelicalLineCoordsToMetaDataTable: Wrong parameters!");

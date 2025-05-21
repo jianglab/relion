@@ -436,9 +436,10 @@ def main():
         # 4) Skeletonize
         skeleton_img = skeletonize(clean_foreground)
 
-        if skeleton_img.any():
+        # if there is only a single non-zero pixel, Skeleton will give an error. Let's check for at least 10 non-zero pixels
+        if np.count_nonzero(skeleton_img) > 10:
 
-            # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
+	    # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
             pruned_skeleton, sampled_points = prune_skeleton(skeleton_img,
                                                              min_length=args.minimum_length / pixel_size,
                                                              min_distance=2 * args.radius / pixel_size,
