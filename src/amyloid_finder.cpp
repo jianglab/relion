@@ -724,9 +724,6 @@ void AmyloidFinder::runFOMBatch(long int my_first, long int my_last)
         if (pipeline_control_check_abort_job())
             exit(RELION_EXIT_ABORTED);
 
-        if (verb > 0 && imic % barstep == 0)
-            progress_bar(imic);
-
         // Check new-style outputdirectory exists and make it if not!
         FileName fn_oroot = getOutputRootName(todo_micrographs_fom[imic]);
         FileName fn_dir = fn_oroot.beforeLastOf("/");
@@ -845,7 +842,6 @@ void AmyloidFinder::finalise()
 
     MetaDataTable MDcoords;
     MDcoords.setName("coordinate_files");
-    MetaDataTable MDresult;
 	long total_nr_picked = 0;
 	int nr_coord_files = 0;
 	for (long int imic = 0; imic < fn_ori_micrographs.size(); imic++)
@@ -874,6 +870,12 @@ void AmyloidFinder::finalise()
 
             FileName fn_pick = fn_root + "_" + fn_out + ".star";
 
+            MetaDataTable MD;
+            MD.read(fn_pick);
+			long nr_pick = MD.numberOfObjects();
+			total_nr_picked += nr_pick;
+            MDin.setValue(EMDL_MLMODEL_GROUP_NR_PARTICLES, nr_pick, imic);
+
             MDcoords.addObject();
             MDcoords.setValue(EMDL_MICROGRAPH_NAME, fn_ori_micrographs[imic]);
             MDcoords.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
@@ -888,6 +890,10 @@ void AmyloidFinder::finalise()
 
     if (verb > 0) progress_bar(fn_ori_micrographs.size());
 
+    // Make histograms of skewness and kurtosis of FOM values for all micrographs
+    FileName fn_eps;
+    std::vector<FileName> all_fn_eps;
+    std::vector<RFLOAT> histX, histY;
 
     if (!do_skip_fom)
     {
@@ -895,11 +901,6 @@ void AmyloidFinder::finalise()
         FileName fn_mics = fn_odir + "micrographs_" + fn_out + ".star";
         obsModel.save(MDin, fn_mics, "micrographs");
         if (verb > 0) std::cout << " Saved output micrograph STAR file with FOM images in: " << fn_mics << std::endl;
-
-        // Make histograms of skewness and kurtosis of FOM values for all micrographs
-        FileName fn_eps;
-        std::vector<FileName> all_fn_eps;
-        std::vector<RFLOAT> histX, histY;
 
         CPlot2D *plot2De=new CPlot2D("Skewness of FOM for all micrographs");
         MDin.addToCPlot2D(plot2De, EMDL_UNDEFINED, EMDL_MICROGRAPH_SCORE_SKEWNESS, 1.);
@@ -937,19 +938,37 @@ void AmyloidFinder::finalise()
             delete plot2Dh;
         }
 
-        joinMultipleEPSIntoSinglePDF(fn_odir + "logfile.pdf", all_fn_eps);
     }
 
     if (!do_skip_tracing)
     {
 
+        CPlot2D *plot2De=new CPlot2D("Nr of picked particles for all micrographs");
+        MDin.addToCPlot2D(plot2De, EMDL_UNDEFINED, EMDL_MLMODEL_GROUP_NR_PARTICLES, 1.);
+        plot2De->SetDrawLegend(false);
+        fn_eps = fn_odir + "all_nrparts.eps";
+        plot2De->OutputPostScriptPlot(fn_eps);
+        all_fn_eps.push_back(fn_eps);
+        delete plot2De;
+        if (MDin.numberOfObjects() > 3)
+        {
+            CPlot2D *plot2Df=new CPlot2D("");
+            MDin.columnHistogram(EMDL_MLMODEL_GROUP_NR_PARTICLES,histX,histY,0, plot2Df);
+            fn_eps = fn_odir + "histogram_nrparts.eps";
+            plot2Df->SetTitle("Histogram of nr of picked particles per micrograph");
+            plot2Df->OutputPostScriptPlot(fn_eps);
+            all_fn_eps.push_back(fn_eps);
+            delete plot2Df;
+        }
+
         FileName fn_coords = fn_odir + fn_out + ".star";
 
         MetaDataTable MDhead;
-        MDhead.setName("general");
         MDhead.setIsList(true);
+        MDhead.setName("general");
         MDhead.addObject();
-        MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, "lines");
+        std::string picktype = "lines";
+        MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, picktype);
 
         std::vector<MetaDataTable> MDins;
         MDins.push_back(MDhead);
@@ -958,5 +977,6 @@ void AmyloidFinder::finalise()
 
     }
 
+    joinMultipleEPSIntoSinglePDF(fn_odir + "logfile.pdf", all_fn_eps);
 
 }

@@ -833,7 +833,8 @@ class star_handler_parameters
 		fnt0 = integerToString(nr_split);
 		for (int isplit = 0; isplit < nr_split; isplit ++)
 		{
-			FileName fnt = fn_out.insertBeforeExtension("_split"+integerToString(isplit+1));
+			FileName fnt;
+            fnt.compose(fn_out.withoutExtension() + "_split",isplit+1, "star", 5);
 			MDouts[isplit].setName(MD.getName());
             write_check_ignore_optics(MDouts[isplit], fnt, MD.getName());
 			std::cout << " Written: " <<fnt << " with " << MDouts[isplit].numberOfObjects() << " objects." << std::endl;

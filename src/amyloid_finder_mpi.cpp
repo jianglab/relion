@@ -75,14 +75,14 @@ void AmyloidFinderMpi::run()
 	// Each node does part of the work
 	if (todo_micrographs_fom.size() > 0)
     {
-        long int my_first_fom, my_last_fom, my_nr_micrographs;
+        long int my_first_fom, my_last_fom;
         divide_equally(todo_micrographs_fom.size(), node->size, node->rank, my_first_fom, my_last_fom);
         runFOMBatch(my_first_fom, my_last_fom);
     }
 
     if (todo_micrographs_tracing.size() > 0)
     {
-        long int my_first_tracing, my_last_tracing, my_nr_micrographs;
+        long int my_first_tracing, my_last_tracing;
         divide_equally(todo_micrographs_tracing.size(), node->size, node->rank, my_first_tracing, my_last_tracing);
         runTracingBatch(my_first_tracing, my_last_tracing, node->rank);
     }

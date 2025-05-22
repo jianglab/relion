@@ -1088,8 +1088,8 @@ void AutoPicker::generatePDFLogfile()
     MDhead.setName("general");
     MDhead.setIsList(true);
     MDhead.addObject();
-    std::string type = (autopick_helical_segments) ? "particles" : "startend";
-    MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, type);
+    std::string picktype = (autopick_helical_segments) ? "particles" : "startend";
+    MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, picktype);
 
     std::vector<MetaDataTable> MDins;
     MDins.push_back(MDhead);

@@ -1443,6 +1443,9 @@ bool RelionJob::getCommandsImportJob(std::string &outputname, std::vector<std::s
 	if (is_continue)
 		command += " --continue ";
 
+    // Other arguments
+	command += " " + joboptions["other_args"].getString();
+
 	commands.push_back(command);
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
@@ -2153,7 +2156,82 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 		}
 
 	}
-	else
+    else if (joboptions["do_amyloid"].getBoolean())
+    {
+        label += ".amypick";
+
+        // Run find_amyloid instead of autopick!!
+        if (joboptions["nr_mpi"].getNumber(error_message) > 1)
+            command="`which relion_find_amyloid_mpi`";
+        else
+            command="`which relion_find_amyloid`";
+        if (error_message != "") return false;
+
+        if (joboptions["do_amyloid_plot"].getBoolean())
+        {
+            if (joboptions["nr_mpi"].getNumber(error_message) > 1 || joboptions["do_queue"].getBoolean())
+            {
+                error_message = "You cannot use parallel execution or job submission when plotting intermediate results.";
+                return false;
+            }
+        }
+
+        command += " --odir " + outputname;
+        command += " --pickname autopick";
+
+        if (joboptions["do_amyloid_fom"].getBoolean())
+        {
+            // Also output micrographs.star file with kurtosis and skewness of the autopicking scores
+            Node node3c(outputname + "micrographs_autopick.star", joboptions["fn_input_autopick"].node_type);
+            outputNodes.push_back(node3c);
+
+        }
+        else
+        {
+            command += " --skip_fom ";
+        }
+
+
+        if (joboptions["do_amyloid_tracing"].getBoolean())
+        {
+            // Output new version: no longer save coords_suffix nodetype, but 2-column list of micrographs and coordinate files
+            Node node3(outputname + "autopick.star", LABEL_AUTOPICK_COORDS);
+            outputNodes.push_back(node3);
+
+            command += " --trace_filament_length " + joboptions["helical_tube_length_min"].getString();
+            command += " --trace_filament_width " + joboptions["helical_tube_outer_diameter"].getString();
+            command += " --threshold " + joboptions["amyloid_threshold"].getString();
+
+            if (joboptions["do_amyloid_plot"].getBoolean()) command += " --plot ";
+
+        }
+        else
+        {
+            command += " --skip_tracing ";
+        }
+
+        command += " --i " + joboptions["fn_input_autopick"].getString();
+        Node node(joboptions["fn_input_autopick"].getString(), joboptions["fn_input_autopick"].node_type);
+        inputNodes.push_back(node);
+
+        // PDF with histograms of the eigenvalues
+        Node node3b(outputname + "logfile.pdf", LABEL_AUTOPICK_LOG);
+        outputNodes.push_back(node3b);
+
+        // GPU-stuff
+        if (joboptions["use_gpu"].getBoolean())
+        {
+            // for the moment always use --shrink 0 with GPUs ...
+            command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";
+        }
+        else
+        {
+            command += " --j " + joboptions["nr_threads"].getString();
+        }
+
+
+    }
+    else
 	{
 
         // Run autopicking
@@ -2303,81 +2381,6 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 			if (joboptions["log_invert"].getBoolean())
 				command += " --Log_invert ";
 		}
-        else if (joboptions["do_amyloid"].getBoolean())
-        {
-            label += ".amypick";
-
-            // Run find_amyloid instead of autopick!!
-            if (joboptions["nr_mpi"].getNumber(error_message) > 1)
-                command="`which relion_find_amyloid_mpi`";
-            else
-                command="`which relion_find_amyloid`";
-            if (error_message != "") return false;
-
-            if (joboptions["do_amyloid_plot"].getBoolean())
-            {
-                if (joboptions["nr_mpi"].getNumber(error_message) > 1 || joboptions["do_queue"].getBoolean())
-                {
-                    error_message = "You cannot use parallel execution or job submission when plotting intermediate results.";
-                    return false;
-                }
-            }
-
-            command += " --odir " + outputname;
-            command += " --pickname autopick";
-
-            if (joboptions["do_amyloid_fom"].getBoolean())
-            {
-                // Also output micrographs.star file with kurtosis and skewness of the autopicking scores
-                Node node3c(outputname + "micrographs_autopick.star", joboptions["fn_input_autopick"].node_type);
-                outputNodes.push_back(node3c);
-
-            }
-            else
-            {
-                command += " --skip_fom ";
-            }
-
-
-            if (joboptions["do_amyloid_tracing"].getBoolean())
-            {
-                // Output new version: no longer save coords_suffix nodetype, but 2-column list of micrographs and coordinate files
-                Node node3(outputname + "autopick.star", LABEL_AUTOPICK_COORDS);
-                outputNodes.push_back(node3);
-
-                command += " --trace_filament_length " + joboptions["helical_tube_length_min"].getString();
-                command += " --trace_filament_width " + joboptions["helical_tube_outer_diameter"].getString();
-                command += " --threshold " + joboptions["amyloid_threshold"].getString();
-
-                if (joboptions["do_amyloid_plot"].getBoolean()) command += " --plot ";
-
-            }
-            else
-            {
-               command += " --skip_tracing ";
-            }
-
-            command += " --i " + joboptions["fn_input_autopick"].getString();
-            Node node(joboptions["fn_input_autopick"].getString(), joboptions["fn_input_autopick"].node_type);
-            inputNodes.push_back(node);
-
-            // PDF with histograms of the eigenvalues
-            Node node3b(outputname + "logfile.pdf", LABEL_AUTOPICK_LOG);
-            outputNodes.push_back(node3b);
-
-            // GPU-stuff
-            if (joboptions["use_gpu"].getBoolean())
-            {
-                // for the moment always use --shrink 0 with GPUs ...
-                command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";
-            }
-            else
-            {
-                command += " --j " + joboptions["nr_threads"].getString();
-            }
-
-
-        }
 		else if (joboptions["do_refs"].getBoolean())
 		{
 			if (joboptions["do_ref3d"].getBoolean())

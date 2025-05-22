@@ -515,14 +515,14 @@ void manualpickerGuiWindow::writeOutputStarfiles(bool verb)
     MDselect.write(fn_select);
 
 
-    std::string type = "particles";
-    if (global_pick_lines) type = "lines";
-    else if (global_pick_startend) type = "startend";
+    std::string picktype = "particles";
+    if (global_pick_lines) picktype = "lines";
+    else if (global_pick_startend) picktype = "startend";
     MetaDataTable MDhead;
     MDhead.setName("general");
     MDhead.setIsList(true);
     MDhead.addObject();
-    MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, type);
+    MDhead.setValue(EMDL_MICROGRAPH_PICKTYPE, picktype);
 
     std::vector<MetaDataTable> MDins;
     MDins.push_back(MDhead);
