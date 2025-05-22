@@ -390,6 +390,10 @@ def main():
 
     input_star = starfile.read(args.input)
 
+    @torch.compile
+    def run_compiled_model(data):
+        return model(data)
+
     # ------------------ Run Inference ----------------    
     iterator = tqdm(input_star.iterrows(), total=len(input_star), file=sys.stdout) if args.verb > 0 else input_star.iterrows()
     for i, row in iterator:
@@ -413,11 +417,11 @@ def main():
 
         with torch.no_grad():
             if device.type == "cuda":
-                with torch.autocast(device_type=device.type, dtype=torch.float16):
-                    seg_logits, embedding = model(in_tensor)
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                    seg_logits, embedding = run_compiled_model(in_tensor)
             else:
                 with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-                    seg_logits, embedding = model(in_tensor)
+                    seg_logits, embedding = run_compiled_model(in_tensor)
             foreground = torch.sigmoid(seg_logits).squeeze().detach().to(dtype=torch.float32).cpu().numpy()
         
         # 2) Clean + threshold => remove small objects
