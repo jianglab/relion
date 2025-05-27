@@ -515,7 +515,7 @@ void manualpickerGuiWindow::writeOutputStarfiles(bool verb)
     MDselect.write(fn_select);
 
 
-    std::string picktype = "particles";
+    std::string picktype("particles");
     if (global_pick_lines) picktype = "lines";
     else if (global_pick_startend) picktype = "startend";
     MetaDataTable MDhead;
