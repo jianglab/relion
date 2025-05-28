@@ -4142,15 +4142,24 @@ void updatePriorsForOneHelicalTube(
 	nr_wrong_polarity = nr_opposite_polarity - 1;
 
 	// Change the polarity of the entire helix if psi_flip_ratio is larger than 0.5
-	if (psi_flip_ratio > 0.5)
-	{
-		for (int id = sid; id <= eid; id++)
-		{
-			flipPsiTiltForHelicalSegment(list[id].psi_prior_deg, list[id].tilt_prior_deg,
-					list[id].psi_prior_deg, list[id].tilt_prior_deg);
-			list[id].psi_flip_ratio = (1. - psi_flip_ratio);
-		}
-	}
+        if (psi_flip_ratio > 0.5)
+        {
+            for (int id = sid; id <= eid; id++)
+            {
+                flipPsiTiltForHelicalSegment(list[id].psi_prior_deg, list[id].tilt_prior_deg,
+                                             list[id].psi_prior_deg, list[id].tilt_prior_deg);
+                flipPsiTiltForHelicalSegment(list[id].psi_deg, list[id].tilt_deg,
+                                             list[id].psi_deg, list[id].tilt_deg);
+                list[id].psi_flip_ratio = (1. - psi_flip_ratio);
+            }
+        }
+        else
+        {
+            for (int id = sid; id <= eid; id++)
+            {
+                list[id].psi_flip_ratio = psi_flip_ratio;
+            }
+        }
 
 	// Calculate new distance-averaged angular priors
 	// SHWS 27042020: do two passes: one normal and one with opposite distances and find out which one is the best
