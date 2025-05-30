@@ -1614,21 +1614,15 @@ void JobWindow::initialiseClass3DWindow()
 	group5->begin();
 	place2("helical_tube_inner_diameter", "helical_tube_outer_diameter", "Tube diameter - inner, outer (A):", TOGGLE_DEACTIVATE);
 	place3("range_rot", "range_tilt", "range_psi", "Angular search range - rot, tilt, psi (deg):", TOGGLE_DEACTIVATE);
-	place("helical_range_distance", TOGGLE_DEACTIVATE);
+    place2("helical_range_distance", "helical_nstart", "Local averaging - range (box), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
 	current_y += STEPY/2;
 
-	group8 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
-	group8->end();
-	place("do_apply_helical_symmetry", TOGGLE_DEACTIVATE, group8);
-	group8->begin();
 	place("helical_nr_asu", TOGGLE_DEACTIVATE);
 	place2("helical_twist_initial", "helical_rise_initial", "Initial twist (deg), rise (A):", TOGGLE_DEACTIVATE);
 	place("helical_z_percentage", TOGGLE_DEACTIVATE);
-	group8->end();
-	guientries["do_apply_helical_symmetry"].cb_menu_i(); // to make default effective
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -1776,21 +1770,15 @@ void JobWindow::initialiseAutorefineWindow()
 	group2->begin();
 	place2("helical_tube_inner_diameter", "helical_tube_outer_diameter", "Tube diameter - inner, outer (A):",TOGGLE_DEACTIVATE);
 	place3("range_rot", "range_tilt", "range_psi", "Angular search range - rot, tilt, psi (deg):", TOGGLE_DEACTIVATE);
-	place("helical_range_distance", TOGGLE_DEACTIVATE);
+    place2("helical_range_distance", "helical_nstart", "Local averaging - range (box), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
 	current_y += STEPY/2;
 
-	group5 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
-	group5->end();
-	place("do_apply_helical_symmetry", TOGGLE_DEACTIVATE, group5);
-	group5->begin();
 	place("helical_nr_asu", TOGGLE_DEACTIVATE);
 	place2("helical_twist_initial", "helical_rise_initial", "Initial twist (deg), rise (A):",TOGGLE_DEACTIVATE);
 	place("helical_z_percentage", TOGGLE_DEACTIVATE);
-	group5->end();
-	guientries["do_apply_helical_symmetry"].cb_menu_i(); // to make default effective
 
 	// Add a little spacer
 	current_y += STEPY/2;

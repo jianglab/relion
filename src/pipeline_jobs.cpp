@@ -3835,7 +3835,6 @@ in the previous iteration will get higher weights than those further away.\n\nTh
 rot, tilt and psi angles in the first few iterations (global searches for orientations) in 3D helical reconstruction. \
 Values of 9 or 15 degrees are commonly used. Higher values are recommended for more flexible structures and more memory and computation time will be used. \
 A range of 15 degrees means sigma = 5 degrees.\n\nThese options will be invalid if you choose to perform local angular searches or not to perform image alignment on 'Sampling' tab.");
-	joboptions["do_apply_helical_symmetry"] = JobOption("Apply helical symmetry?", true, "If set to Yes, helical symmetry will be applied in every iteration. Set to No if you have just started a project, helical symmetry is unknown or not yet estimated.");
 	joboptions["helical_nr_asu"] = JobOption("Number of unique asymmetrical units:", 1, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box. If the inter-box distance (set in segment picking step) \
 is 100 Angstroms and the estimated helical rise is ~20 Angstroms, then set this value to 100 / 20 = 5 (nearest integer). This integer should not be less than 1. The correct value is essential in measuring the \
 signal to noise ratio in helical reconstruction.");
@@ -3866,8 +3865,10 @@ does not guarantee convergence. The program cannot find a reasonable symmetry if
 	joboptions["helical_rise_inistep"] = JobOption("Helical rise search (A) - Step:", std::string("0"), "Minimum, maximum and initial step for helical rise search. Helical rise is a positive value in Angstroms. \
 Generally it is not necessary for the user to provide an initial step (less than 1% the initial helical rise, 5~1000 samplings as default). But it needs to be set manually if the default value \
 does not guarantee convergence. The program cannot find a reasonable symmetry if the true helical parameters fall out of the given ranges. Note that the final reconstruction can still converge if wrong helical and point group symmetry are provided.");
-	joboptions["helical_range_distance"] = JobOption("Range factor of local averaging:", -1., 1., 5., 0.1, "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. Polarities are also set to be the same for segments coming from the same tube during local refinement. \
-Values of ~ 2.0 are recommended for flexible structures such as MAVS-CARD filaments, ParM, MamK, etc. This option might not improve the reconstructions of helices formed from curled 2D lattices (TMV and VipA/VipB). Set to negative to disable this option.");
+	joboptions["helical_range_distance"] = JobOption("Local averaging - range (box)", std::string("-1"), "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
+Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
+    joboptions["helical_nstart"] = JobOption("Local averaging - N-start symmetry", std::string("1"), "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
+Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
 	joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
 
 	joboptions["do_parallel_discio"] = JobOption("Use parallel disc I/O?", true, "If set to Yes, all MPI followers will read their own images from disc. \
@@ -4109,38 +4110,33 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 			command += " --helical_inner_diameter " + joboptions["helical_tube_inner_diameter"].getString();
 
 		command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
-		if (joboptions["do_apply_helical_symmetry"].getBoolean())
-		{
-			command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
-			command += " --helical_twist_initial " + joboptions["helical_twist_initial"].getString();
-			command += " --helical_rise_initial " + joboptions["helical_rise_initial"].getString();
+        command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
+        command += " --helical_twist_initial " + joboptions["helical_twist_initial"].getString();
+        command += " --helical_rise_initial " + joboptions["helical_rise_initial"].getString();
 
-			float myz = joboptions["helical_z_percentage"].getNumber(error_message) / 100.;
-			if (error_message != "") return false;
-			command += " --helical_z_percentage " + floatToString(myz);
+        float myz = joboptions["helical_z_percentage"].getNumber(error_message) / 100.;
+        if (error_message != "") return false;
+        command += " --helical_z_percentage " + floatToString(myz);
 
-			if (joboptions["do_local_search_helical_symmetry"].getBoolean())
-			{
-				command += " --helical_symmetry_search";
-				command += " --helical_twist_min " + joboptions["helical_twist_min"].getString();
-				command += " --helical_twist_max " + joboptions["helical_twist_max"].getString();
+        if (joboptions["do_local_search_helical_symmetry"].getBoolean())
+        {
+            command += " --helical_symmetry_search";
+            command += " --helical_twist_min " + joboptions["helical_twist_min"].getString();
+            command += " --helical_twist_max " + joboptions["helical_twist_max"].getString();
 
-				float twist_inistep = joboptions["helical_twist_inistep"].getNumber(error_message);
-				if (error_message != "") return false;
-				if (twist_inistep > 0.)
-					command += " --helical_twist_inistep " + joboptions["helical_twist_inistep"].getString();
+            float twist_inistep = joboptions["helical_twist_inistep"].getNumber(error_message);
+            if (error_message != "") return false;
+            if (twist_inistep > 0.)
+                command += " --helical_twist_inistep " + joboptions["helical_twist_inistep"].getString();
 
-				command += " --helical_rise_min " + joboptions["helical_rise_min"].getString();
-				command += " --helical_rise_max " + joboptions["helical_rise_max"].getString();
+            command += " --helical_rise_min " + joboptions["helical_rise_min"].getString();
+            command += " --helical_rise_max " + joboptions["helical_rise_max"].getString();
 
-				float rise_inistep = joboptions["helical_rise_inistep"].getNumber(error_message);
-				if (error_message != "") return false;
-				if (rise_inistep > 0.)
-					command += " --helical_rise_inistep " + joboptions["helical_rise_inistep"].getString();
-			}
-		}
-		else
-			command += " --ignore_helical_symmetry";
+            float rise_inistep = joboptions["helical_rise_inistep"].getNumber(error_message);
+            if (error_message != "") return false;
+            if (rise_inistep > 0.)
+                command += " --helical_rise_inistep " + joboptions["helical_rise_inistep"].getString();
+        }
 		if (joboptions["keep_tilt_prior_fixed"].getBoolean())
 			command += " --helical_keep_tilt_prior_fixed";
 		if ( (joboptions["dont_skip_align"].getBoolean()) && (!joboptions["do_local_ang_searches"].getBoolean()) )
@@ -4166,7 +4162,11 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 			val = joboptions["helical_range_distance"].getNumber(error_message);
 			if (error_message != "") return false;
 			if (val > 0.)
+            {
 				command += " --helical_sigma_distance " + floatToString(val / 3.);
+                int nstart = joboptions["helical_nstart"].getNumber(error_message);
+                command += " --helical_nstart " + floatToString(nstart);
+            }
 		}
 	}
 
@@ -4323,7 +4323,6 @@ in the previous iteration will get higher weights than those further away.\n\nTh
 rot, tilt and psi angles in the first few iterations (global searches for orientations) in 3D helical reconstruction. \
 Values of 9 or 15 degrees are commonly used. Higher values are recommended for more flexible structures and more memory and computation time will be used. \
 A range of 15 degrees means sigma = 5 degrees.\n\nThese options will be invalid if you choose to perform local angular searches or not to perform image alignment on 'Sampling' tab.");
-	joboptions["do_apply_helical_symmetry"] = JobOption("Apply helical symmetry?", true, "If set to Yes, helical symmetry will be applied in every iteration. Set to No if you have just started a project, helical symmetry is unknown or not yet estimated.");
 	joboptions["helical_nr_asu"] = JobOption("Number of unique asymmetrical units:", 1, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box. If the inter-box distance (set in segment picking step) \
 is 100 Angstroms and the estimated helical rise is ~20 Angstroms, then set this value to 100 / 20 = 5 (nearest integer). This integer should not be less than 1. The correct value is essential in measuring the \
 signal to noise ratio in helical reconstruction.");
@@ -4354,8 +4353,10 @@ does not guarantee convergence. The program cannot find a reasonable symmetry if
 	joboptions["helical_rise_inistep"] = JobOption("Helical rise search (A) - Step:", std::string("0"), "Minimum, maximum and initial step for helical rise search. Helical rise is a positive value in Angstroms. \
 Generally it is not necessary for the user to provide an initial step (less than 1% the initial helical rise, 5~1000 samplings as default). But it needs to be set manually if the default value \
 does not guarantee convergence. The program cannot find a reasonable symmetry if the true helical parameters fall out of the given ranges. Note that the final reconstruction can still converge if wrong helical and point group symmetry are provided.");
-	joboptions["helical_range_distance"] = JobOption("Range factor of local averaging:", -1., 1., 5., 0.1, "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. Polarities are also set to be the same for segments coming from the same tube during local refinement. \
-Values of ~ 2.0 are recommended for flexible structures such as MAVS-CARD filaments, ParM, MamK, etc. This option might not improve the reconstructions of helices formed from curled 2D lattices (TMV and VipA/VipB). Set to negative to disable this option.");
+    joboptions["helical_range_distance"] = JobOption("Local averaging - range (box)", std::string("-1"), "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
+Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
+    joboptions["helical_nstart"] = JobOption("Local averaging - N-start symmetry", std::string("1"), "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
+Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
 	joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
 
 	joboptions["do_parallel_discio"] = JobOption("Use parallel disc I/O?", true, "If set to Yes, all MPI followers will read their own images from disc. \
@@ -4591,38 +4592,33 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 				command += " --helical_inner_diameter " + joboptions["helical_tube_inner_diameter"].getString();
 
 			command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
-			if (joboptions["do_apply_helical_symmetry"].getBoolean())
-			{
-				command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
-				command += " --helical_twist_initial " + joboptions["helical_twist_initial"].getString();
-				command += " --helical_rise_initial " + joboptions["helical_rise_initial"].getString();
+            command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
+            command += " --helical_twist_initial " + joboptions["helical_twist_initial"].getString();
+            command += " --helical_rise_initial " + joboptions["helical_rise_initial"].getString();
 
-				float myz = joboptions["helical_z_percentage"].getNumber(error_message) / 100.;
-				if (error_message != "") return false;
-				command += " --helical_z_percentage " + floatToString(myz);
+            float myz = joboptions["helical_z_percentage"].getNumber(error_message) / 100.;
+            if (error_message != "") return false;
+            command += " --helical_z_percentage " + floatToString(myz);
 
-				if (joboptions["do_local_search_helical_symmetry"].getBoolean())
-				{
-					command += " --helical_symmetry_search";
-					command += " --helical_twist_min " + joboptions["helical_twist_min"].getString();
-					command += " --helical_twist_max " + joboptions["helical_twist_max"].getString();
+            if (joboptions["do_local_search_helical_symmetry"].getBoolean())
+            {
+                command += " --helical_symmetry_search";
+                command += " --helical_twist_min " + joboptions["helical_twist_min"].getString();
+                command += " --helical_twist_max " + joboptions["helical_twist_max"].getString();
 
-					float twist_inistep = joboptions["helical_twist_inistep"].getNumber(error_message);
-					if (error_message != "") return false;
-					if (twist_inistep > 0.)
-						command += " --helical_twist_inistep " + joboptions["helical_twist_inistep"].getString();
+                float twist_inistep = joboptions["helical_twist_inistep"].getNumber(error_message);
+                if (error_message != "") return false;
+                if (twist_inistep > 0.)
+                    command += " --helical_twist_inistep " + joboptions["helical_twist_inistep"].getString();
 
-					command += " --helical_rise_min " + joboptions["helical_rise_min"].getString();
-					command += " --helical_rise_max " + joboptions["helical_rise_max"].getString();
+                command += " --helical_rise_min " + joboptions["helical_rise_min"].getString();
+                command += " --helical_rise_max " + joboptions["helical_rise_max"].getString();
 
-					float rise_inistep = joboptions["helical_rise_inistep"].getNumber(error_message);
-					if (error_message != "") return false;
-					if (rise_inistep > 0.)
-						command += " --helical_rise_inistep " + joboptions["helical_rise_inistep"].getString();
-				}
-			}
-			else
-				command += " --ignore_helical_symmetry";
+                float rise_inistep = joboptions["helical_rise_inistep"].getNumber(error_message);
+                if (error_message != "") return false;
+                if (rise_inistep > 0.)
+                    command += " --helical_rise_inistep " + joboptions["helical_rise_inistep"].getString();
+            }
 
 			float val;
 			if (sampling != auto_local_sampling)
@@ -4649,7 +4645,11 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 			val = joboptions["helical_range_distance"].getNumber(error_message);
 			if (error_message != "") return false;
 			if (val > 0.)
+            {
 				command += " --helical_sigma_distance " + floatToString(val / 3.);
+                int nstart = joboptions["helical_nstart"].getNumber(error_message);
+                command += " --helical_nstart " + floatToString(nstart);
+            }
 
 			if (joboptions["keep_tilt_prior_fixed"].getBoolean())
 				command += " --helical_keep_tilt_prior_fixed";
