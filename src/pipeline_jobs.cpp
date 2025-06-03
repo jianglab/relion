@@ -2229,6 +2229,10 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
             command += " --j " + joboptions["nr_threads"].getString();
         }
 
+        // If this is a continue job, then only process unfinished micrographs
+        if (is_continue)
+            command += " --only_do_unfinished ";
+
 
     }
     else
