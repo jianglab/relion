@@ -398,6 +398,7 @@ def main():
 
     # ------------------ Run Inference ----------------    
     iterator = tqdm(input_star.iterrows(), total=len(input_star), file=sys.stdout) if args.verb > 0 else input_star.iterrows()
+    half_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     for i, row in iterator:
 
         if Path(args.abort).exists():
@@ -415,14 +416,14 @@ def main():
         H, W = fom_image.shape
 
         in_tensor = np.stack((fom_image, psi_image), axis=0)  # shape (2,H,W)
-        in_tensor = torch.from_numpy(in_tensor[None]).to(device=device, dtype=torch.bfloat16)  # shape (1,2,H,W)
+        in_tensor = torch.from_numpy(in_tensor[None]).to(device=device, dtype=half_dtype)  # shape (1,2,H,W)
 
         with torch.no_grad():
             if device.type == "cuda":
-                with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device.type, dtype=half_dtype):
                     seg_prob = run_compiled_model(in_tensor)
             else:
-                with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+                with torch.autocast(device_type="cpu", dtype=half_dtype):
                     seg_prob = run_compiled_model(in_tensor)
             foreground = seg_prob.to(dtype=torch.float32, device="cpu").numpy()
         
