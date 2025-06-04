@@ -611,10 +611,13 @@ RFLOAT getHelicalSigma2Rot(
 		RFLOAT helical_twist_deg,
 		RFLOAT helical_offset_step_Angst,
 		RFLOAT rot_step_deg,
-		RFLOAT old_sigma2_rot)
+		RFLOAT old_sigma2_rot,
+        int helical_nstart)
 {
 	if ( (helical_offset_step_Angst < 0.) || (rot_step_deg < 0.) || (old_sigma2_rot < 0.) )
 		REPORT_ERROR("helix.cpp::getHelicalSigma2Rot: Helical offset step, rot step or sigma2_rot cannot be negative!");
+
+    getNstartHelicalTwistAndRise(helical_twist_deg, helical_rise_Angst, helical_nstart);
 
 	RFLOAT nr_samplings_along_helical_axis = (fabs(helical_rise_Angst)) / helical_offset_step_Angst;
 	RFLOAT rot_search_range = (fabs(helical_twist_deg)) / nr_samplings_along_helical_axis;
@@ -629,8 +632,25 @@ RFLOAT getHelicalSigma2Rot(
 		//	factor = factor_max;
 		new_sigma2_rot *= factor * factor;
 	}
+    //std::cerr <<" N-start twist= " << helical_twist_deg << " rise= " << helical_rise_Angst << " old sigma2rot= " << old_sigma2_rot << " new sigma2rot= " << new_sigma2_rot<< std::endl;
 	return new_sigma2_rot;
 };
+
+void getNstartHelicalTwistAndRise(RFLOAT &twist,
+                                  RFLOAT &rise,
+                                  int helical_nstart)
+{
+
+    // Shaoda's formula (which need to be inverted, as we want original N-start rise and twist back)
+    // rise_1-start = rise / N
+    // twist_1-start = (twist+360)/N if twist>0
+    // twist_1-start = (twist-360)/N if twist<0
+    rise *= helical_nstart;
+    twist *= helical_nstart;
+    while (twist > 180.) twist -= 360.;
+    while (twist < -180.) twist += 360.;
+
+}
 
 bool checkParametersFor3DHelicalReconstruction(
 		bool ignore_symmetry,
@@ -3567,7 +3587,7 @@ void sortHelicalTubeID(MetaDataTable& MD)
 	std::vector<RFLOAT> dummy;
 	updatePriorsForHelicalReconstruction(
 			MD, 1.,dummy, dummy, 1,
-			false, false,
+			false, false,false,
 			0., 0., 0., 1., false, 1);
 
 	list.clear();
@@ -4080,6 +4100,7 @@ void updatePriorsForOneHelicalTube(
 		RFLOAT sigma_segment_dist,
 		std::vector<RFLOAT> helical_rise,
 		std::vector<RFLOAT> helical_twist,
+        int helical_nstart,
 		bool is_3D_data,
 		bool do_auto_refine,
         RFLOAT sigma2_rot,       // KThurber
@@ -4198,8 +4219,8 @@ void updatePriorsForOneHelicalTube(
 			sum_ang_vec = this_ang_vec * this_w;
 
 			// rotation angle all new KThurber
-			this_rot = list[id].rot_deg;  // KThurber
-			this_rot_vec(0) = cos(DEG2RAD(this_rot));
+            this_rot = list[id].rot_deg;  // KThurber
+            this_rot_vec(0) = cos(DEG2RAD(this_rot));
 			this_rot_vec(1) = sin(DEG2RAD(this_rot));
 			sum_rot_vec = this_rot_vec * this_w;
 			// for adjusting rot angle by shift along helix
@@ -4254,10 +4275,12 @@ void updatePriorsForOneHelicalTube(
 
 						// In the second pass, check the direction from large to small distances
 						RFLOAT sign = (iflip == 1) ? 1. : -1.;
-						this_rot = list[idd].rot_deg + sign*(180./pitch)*(this_pos - center_pos - this_x_helix + center_x_helix);
+                        this_rot = list[idd].rot_deg + sign*(180./pitch)*(this_pos - center_pos - this_x_helix + center_x_helix);
 					}
 					else
-						this_rot = list[idd].rot_deg;
+                    {
+                        this_rot = list[idd].rot_deg;
+                    }
 
 					this_rot_vec(0) = cos(DEG2RAD(this_rot));
 					this_rot_vec(1) = sin(DEG2RAD(this_rot));
@@ -4387,9 +4410,10 @@ void updatePriorsForHelicalReconstruction(
 		RFLOAT sigma_segment_dist,
 		std::vector<RFLOAT> helical_rise,
 		std::vector<RFLOAT> helical_twist,
-		int helical_nstart,
+        int helical_nstart,
 		bool is_3D_data,
 		bool do_auto_refine,
+        bool update_rot_prior,
 		RFLOAT sigma2_rot,
 		RFLOAT sigma2_tilt,
 		RFLOAT sigma2_psi,
@@ -4436,16 +4460,9 @@ void updatePriorsForHelicalReconstruction(
 	if (helical_nstart > 1)
 	{
 		// Assume same N-start for all classes
-		// Shaoda's formula (which need to be inverted, as we want original N-start rise and twist back)
-		// rise_1-start = rise / N
-		// twist_1-start = (twist+360)/N if twist>0
-		// twist_1-start = (twist-360)/N if twist<0
-
 		for (int iclass=0; iclass < helical_rise.size(); iclass++)
 		{
-			helical_rise[iclass] *= helical_nstart;
-			RFLOAT aux = helical_twist[iclass] * helical_nstart;
-			helical_twist[iclass] = (aux > 360.) ? aux - 360. : aux + 360.;
+			getNstartHelicalTwistAndRise(helical_twist[iclass], helical_rise[iclass], helical_nstart);
 			if (verb > 0) std::cout << " + for rotational priors go back to " << helical_nstart
 					<< "-start helical twist= " << helical_twist[iclass] << " and rise= " << helical_rise[iclass] << std::endl;
 		}
@@ -4522,7 +4539,7 @@ void updatePriorsForHelicalReconstruction(
 
 		// Real work...
 		bool reverse_direction;
-		updatePriorsForOneHelicalTube(list, sid, eid, nr_opposite_polarity, reverse_direction, sigma_segment_dist, helical_rise, helical_twist,
+		updatePriorsForOneHelicalTube(list, sid, eid, nr_opposite_polarity, reverse_direction, sigma_segment_dist, helical_rise, helical_twist,helical_nstart,
 				is_3D_data, do_auto_refine, sigma2_rot, sigma2_tilt, sigma2_psi, sigma2_offset);
 		total_opposite_polarity += nr_opposite_polarity;
 		if (reverse_direction) total_opposite_rot += 1;
@@ -4537,7 +4554,17 @@ void updatePriorsForHelicalReconstruction(
 				MD.setValue(EMDL_ORIENT_TILT_PRIOR, list[id].tilt_prior_deg, list[id].MDobjectID);
 			MD.setValue(EMDL_ORIENT_PSI_PRIOR, list[id].psi_prior_deg, list[id].MDobjectID);
 			MD.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, list[id].psi_flip_ratio, list[id].MDobjectID);
-			MD.setValue(EMDL_ORIENT_ROT_PRIOR, list[id].rot_prior_deg, list[id].MDobjectID); // KThurber
+            if (update_rot_prior)
+            {
+                MD.setValue(EMDL_ORIENT_ROT_PRIOR, list[id].rot_prior_deg, list[id].MDobjectID); // KThurber
+            }
+            else
+            {
+                // Just set prior to the rot angle from the previous iteration
+                RFLOAT val;
+                MD.getValue(EMDL_ORIENT_ROT, val, list[id].MDobjectID);
+                MD.setValue(EMDL_ORIENT_ROT_PRIOR, val, list[id].MDobjectID);
+            }
 			MD.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, list[id].dx_prior_A, list[id].MDobjectID);
 			MD.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, list[id].dy_prior_A, list[id].MDobjectID);
 			if (is_3D_data)

@@ -2376,7 +2376,7 @@ void MlOptimiser::initialiseGeneral(int rank)
     {
         // Aug20,2015 - Shaoda, Helical refinement
         RFLOAT rottilt_step = sampling.getAngularSampling(adaptive_oversampling);
-        mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial, sampling.helical_offset_step, rottilt_step, mymodel.sigma2_rot);
+        mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial, sampling.helical_offset_step, rottilt_step, mymodel.sigma2_rot, helical_nstart);
     }
 
     if (particle_diameter < 0.)
@@ -3454,6 +3454,8 @@ void MlOptimiser::iterate()
 
             if ( (!do_skip_align) && (!do_skip_rotate) )
             {
+                // Only update rot priors for 1-start C1 filaments
+                bool update_rot_prior = (sampling.L_repository.size() == 1 && helical_nstart == 1);
                 updatePriorsForHelicalReconstruction(
                         mydata.MDimg,
                         helical_sigma_distance * ((RFLOAT)(mymodel.ori_size)),
@@ -3462,6 +3464,7 @@ void MlOptimiser::iterate()
                         helical_nstart,
                         (mymodel.data_dim == 3 || mydata.is_tomo),
                         (do_auto_refine || do_auto_sampling),
+                        update_rot_prior,
                         mymodel.sigma2_rot,
                         mymodel.sigma2_tilt,
                         mymodel.sigma2_psi,
@@ -9946,7 +9949,7 @@ void MlOptimiser::updateAngularSampling(bool myverb)
 
                     // Aug20,2015 - Shaoda, Helical refinement
                     if ( (do_helical_refine) && (!ignore_helical_symmetry) )
-                        mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial, sampling.helical_offset_step, new_rottilt_step, mymodel.sigma2_rot);
+                        mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial, sampling.helical_offset_step, new_rottilt_step, mymodel.sigma2_rot, helical_nstart);
                 }
             }
         }

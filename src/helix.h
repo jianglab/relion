@@ -106,7 +106,12 @@ RFLOAT getHelicalSigma2Rot(
 		RFLOAT helical_twist_deg,
 		RFLOAT helical_offset_step_Angst,
 		RFLOAT rot_step_deg,
-		RFLOAT old_sigma2_rot);
+		RFLOAT old_sigma2_rot,
+        int helical_nstart);
+
+void getNstartHelicalTwistAndRise(RFLOAT &twist,
+                                  RFLOAT &rise,
+                                  int helical_nstart);
 
 bool checkParametersFor3DHelicalReconstruction(
 		bool ignore_symmetry,
@@ -428,7 +433,7 @@ public:
 
 	~HelicalSegmentPriorInfoEntry() { clear(); };
 
-	void checkPsiPolarity();
+    void checkPsiPolarity();
 
 	bool operator<(const HelicalSegmentPriorInfoEntry &rhs) const;
 };
@@ -449,6 +454,7 @@ void updatePriorsForOneHelicalTube(
 		RFLOAT sigma_segment_dist,
 		std::vector<RFLOAT> helical_rise,
 		std::vector<RFLOAT> helical_twist,
+        int nfold_ambiguity,
 		bool is_3D_data,
 		bool do_auto_refine,
 		RFLOAT sigma2_rot,       // KThurber
@@ -465,6 +471,7 @@ void updatePriorsForHelicalReconstruction(
 		int helical_nstart,
 		bool is_3D,
 		bool do_auto_refine,
+        bool update_rot_prior,
 		RFLOAT sigma2_rot,
 		RFLOAT sigma2_tilt,
 		RFLOAT sigma2_psi,

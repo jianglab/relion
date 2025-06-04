@@ -3809,7 +3809,7 @@ void MlOptimiserMpi::updateAngularSamplingGrad(long int my_first_part_id, long i
 				if ((do_helical_refine) && (!ignore_helical_symmetry))
 					mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial,
 					                                         sampling.helical_offset_step, new_rottilt_step,
-					                                         mymodel.sigma2_rot);
+					                                         mymodel.sigma2_rot, helical_nstart);
 			}
 
 			// Reset iteration counter
@@ -4125,7 +4125,8 @@ void MlOptimiserMpi::iterate()
 		{
 			if ( (do_helical_refine) && (!do_skip_align) && (!do_skip_rotate) && mymodel.ref_dim == 3)
 			{
-					updatePriorsForHelicalReconstruction(
+                bool update_rot_prior = (sampling.L_repository.size() == 1 && helical_nstart == 1);
+                updatePriorsForHelicalReconstruction(
 							mydata.MDimg,
 							helical_sigma_distance * ((RFLOAT)(mymodel.ori_size)),
 							mymodel.helical_rise,
@@ -4133,6 +4134,7 @@ void MlOptimiserMpi::iterate()
 							helical_nstart,
 							(mymodel.data_dim == 3),
 							(do_auto_refine || do_auto_sampling),
+                            update_rot_prior,
 							mymodel.sigma2_rot,
 							mymodel.sigma2_tilt,
 							mymodel.sigma2_psi,
