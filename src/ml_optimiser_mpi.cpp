@@ -4125,7 +4125,8 @@ void MlOptimiserMpi::iterate()
 		{
 			if ( (do_helical_refine) && (!do_skip_align) && (!do_skip_rotate) && mymodel.ref_dim == 3)
 			{
-                bool update_rot_prior = (sampling.L_repository.size() == 1 && helical_nstart == 1);
+                // Only update rot priors in local averaging for 1-start filaments, otherwise centre around rot from previous iteration
+                bool update_rot_prior = (helical_nstart == 1);
                 updatePriorsForHelicalReconstruction(
 							mydata.MDimg,
 							helical_sigma_distance * ((RFLOAT)(mymodel.ori_size)),

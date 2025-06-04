@@ -617,7 +617,8 @@ RFLOAT getHelicalSigma2Rot(
 	if ( (helical_offset_step_Angst < 0.) || (rot_step_deg < 0.) || (old_sigma2_rot < 0.) )
 		REPORT_ERROR("helix.cpp::getHelicalSigma2Rot: Helical offset step, rot step or sigma2_rot cannot be negative!");
 
-    getNstartHelicalTwistAndRise(helical_twist_deg, helical_rise_Angst, helical_nstart);
+    // SHWS 04062025: this seemed like the correct thing to do, but difficult 2-start refinement go worse with this smaller sigma2rot...
+    //getNstartHelicalTwistAndRise(helical_twist_deg, helical_rise_Angst, helical_nstart);
 
 	RFLOAT nr_samplings_along_helical_axis = (fabs(helical_rise_Angst)) / helical_offset_step_Angst;
 	RFLOAT rot_search_range = (fabs(helical_twist_deg)) / nr_samplings_along_helical_axis;
