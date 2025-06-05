@@ -618,7 +618,7 @@ RFLOAT getHelicalSigma2Rot(
 		REPORT_ERROR("helix.cpp::getHelicalSigma2Rot: Helical offset step, rot step or sigma2_rot cannot be negative!");
 
     // SHWS 04062025: this seemed like the correct thing to do, but difficult 2-start refinement go worse with this smaller sigma2rot...
-    //getNstartHelicalTwistAndRise(helical_twist_deg, helical_rise_Angst, helical_nstart);
+    getNstartHelicalTwistAndRise(helical_twist_deg, helical_rise_Angst, helical_nstart);
 
 	RFLOAT nr_samplings_along_helical_axis = (fabs(helical_rise_Angst)) / helical_offset_step_Angst;
 	RFLOAT rot_search_range = (fabs(helical_twist_deg)) / nr_samplings_along_helical_axis;
@@ -3588,7 +3588,7 @@ void sortHelicalTubeID(MetaDataTable& MD)
 	std::vector<RFLOAT> dummy;
 	updatePriorsForHelicalReconstruction(
 			MD, 1.,dummy, dummy, 1,
-			false, false,false,
+			false, false,
 			0., 0., 0., 1., false, 1);
 
 	list.clear();
@@ -4221,8 +4221,8 @@ void updatePriorsForOneHelicalTube(
 
 			// rotation angle all new KThurber
             this_rot = list[id].rot_deg;  // KThurber
-            this_rot_vec(0) = cos(DEG2RAD(this_rot));
-			this_rot_vec(1) = sin(DEG2RAD(this_rot));
+            this_rot_vec(0) = cos(DEG2RAD(helical_nstart * this_rot));
+			this_rot_vec(1) = sin(DEG2RAD(helical_nstart * this_rot));
 			sum_rot_vec = this_rot_vec * this_w;
 			// for adjusting rot angle by shift along helix
 			center_x_helix = list[id].dx_A * cos(DEG2RAD(this_psi)) - list[id].dy_A * sin(DEG2RAD(this_psi));
@@ -4283,8 +4283,8 @@ void updatePriorsForOneHelicalTube(
                         this_rot = list[idd].rot_deg;
                     }
 
-					this_rot_vec(0) = cos(DEG2RAD(this_rot));
-					this_rot_vec(1) = sin(DEG2RAD(this_rot));
+					this_rot_vec(0) = cos(DEG2RAD(helical_nstart * this_rot));
+					this_rot_vec(1) = sin(DEG2RAD(helical_nstart * this_rot));
 					sum_rot_vec += this_rot_vec * this_w;
 
 					this_psi = list[idd].psi_deg;
@@ -4316,12 +4316,12 @@ void updatePriorsForOneHelicalTube(
 				{
 					sum_rot_vec(0) = sum_rot_vec(0) / length_rot_vec;
 					sum_rot_vec(1) = sum_rot_vec(1) / length_rot_vec;
-					this_rot = RAD2DEG(acos(sum_rot_vec(0)));
-					if (sum_rot_vec(1) < 0.)
-						this_rot = -1. * this_rot;	// if sign negative, angle is negative
+                    this_rot = RAD2DEG(atan2(sum_rot_vec(1), sum_rot_vec(0) )) / helical_nstart;
 				}
 				else
-					this_rot = list[id].rot_deg;  // don't change prior if average fails
+                {
+                    this_rot = list[id].rot_deg;  // don't change prior if average fails
+                }
 				// KThurber end new section
 
 				if (iflip == 0)
@@ -4414,7 +4414,6 @@ void updatePriorsForHelicalReconstruction(
         int helical_nstart,
 		bool is_3D_data,
 		bool do_auto_refine,
-        bool update_rot_prior,
 		RFLOAT sigma2_rot,
 		RFLOAT sigma2_tilt,
 		RFLOAT sigma2_psi,
@@ -4555,17 +4554,7 @@ void updatePriorsForHelicalReconstruction(
 				MD.setValue(EMDL_ORIENT_TILT_PRIOR, list[id].tilt_prior_deg, list[id].MDobjectID);
 			MD.setValue(EMDL_ORIENT_PSI_PRIOR, list[id].psi_prior_deg, list[id].MDobjectID);
 			MD.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, list[id].psi_flip_ratio, list[id].MDobjectID);
-            if (update_rot_prior)
-            {
-                MD.setValue(EMDL_ORIENT_ROT_PRIOR, list[id].rot_prior_deg, list[id].MDobjectID); // KThurber
-            }
-            else
-            {
-                // Just set prior to the rot angle from the previous iteration
-                RFLOAT val;
-                MD.getValue(EMDL_ORIENT_ROT, val, list[id].MDobjectID);
-                MD.setValue(EMDL_ORIENT_ROT_PRIOR, val, list[id].MDobjectID);
-            }
+            MD.setValue(EMDL_ORIENT_ROT_PRIOR, list[id].rot_prior_deg, list[id].MDobjectID); // KThurber
 			MD.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, list[id].dx_prior_A, list[id].MDobjectID);
 			MD.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, list[id].dy_prior_A, list[id].MDobjectID);
 			if (is_3D_data)

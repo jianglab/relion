@@ -3454,8 +3454,6 @@ void MlOptimiser::iterate()
 
             if ( (!do_skip_align) && (!do_skip_rotate) )
             {
-                // Only update rot priors in local averaging for 1-start filaments, otherwise centre around rot from previous iteration
-                bool update_rot_prior = (helical_nstart == 1);
                 updatePriorsForHelicalReconstruction(
                         mydata.MDimg,
                         helical_sigma_distance * ((RFLOAT)(mymodel.ori_size)),
@@ -3464,7 +3462,6 @@ void MlOptimiser::iterate()
                         helical_nstart,
                         (mymodel.data_dim == 3 || mydata.is_tomo),
                         (do_auto_refine || do_auto_sampling),
-                        update_rot_prior,
                         mymodel.sigma2_rot,
                         mymodel.sigma2_tilt,
                         mymodel.sigma2_psi,

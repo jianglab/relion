@@ -471,7 +471,6 @@ void updatePriorsForHelicalReconstruction(
 		int helical_nstart,
 		bool is_3D,
 		bool do_auto_refine,
-        bool update_rot_prior,
 		RFLOAT sigma2_rot,
 		RFLOAT sigma2_tilt,
 		RFLOAT sigma2_psi,
