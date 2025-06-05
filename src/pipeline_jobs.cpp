@@ -3384,6 +3384,7 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 		label += ".helical";
 
 		command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
+        command += " --no_init_blobs";
 
 		if (joboptions["dont_skip_align"].getBoolean())
 		{
