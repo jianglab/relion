@@ -3049,9 +3049,9 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 				Node node2(fn_parts, LABEL_SELECT_PARTS);
 				outputNodes.push_back(node2);
 
-				// Only save the 2D class averages for 2D jobs
+				// Only save the 2D class averages for 2D jobs (normal Class2D or from David's filament selection program)
 				FileName fnt = joboptions["fn_model"].getString();
-				if (fnt.contains("Class2D/"))
+				if (fnt.contains("Class2D/") || ( fnt.contains("Select/") && fnt.contains("run_optimiser.star") ) )
 				{
 					FileName fn_imgs = outputname+"class_averages.star";
 					command += " --fn_imgs " + fn_imgs;
