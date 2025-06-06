@@ -855,9 +855,12 @@ void AmyloidFinder::finalise()
             FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
             FileName fn_skew = fn_root + "_" + fn_out + "_skew.txt";
 
-            RFLOAT kurt, skew;
+            RFLOAT kurt = 0., skew = 0.;
             std::ifstream fin(fn_skew);
-            if (!(fin >> skew >> kurt))  REPORT_ERROR("Error reading the numbers from the file: " + fn_skew);
+            if (!(fin >> skew >> kurt))
+            {
+                std::cerr << "Error reading skew numbers for: " << fn_ori_micrographs[imic] << std::endl;
+            }
 
             MDin.setValue(EMDL_MICROGRAPH_SCORE_KURTOSIS, kurt, imic);
             MDin.setValue(EMDL_MICROGRAPH_SCORE_SKEWNESS, skew, imic);
