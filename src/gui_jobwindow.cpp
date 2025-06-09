@@ -754,7 +754,7 @@ void JobWindow::initialiseManualpickWindow()
 
 void JobWindow::initialiseAutopickWindow()
 {
-	setupTabs(6);
+	setupTabs(7);
 
 	tab1->begin();
 	tab1->label("I/O");
@@ -888,7 +888,7 @@ void JobWindow::initialiseAutopickWindow()
 
 	tab4->end();
 	tab5->begin();
-	tab5->label("autopicking");
+	tab5->label("Refs 2");
 	resetHeight();
 
 	place("threshold_autopick");
@@ -938,26 +938,40 @@ void JobWindow::initialiseAutopickWindow()
 	place("helical_nr_asu");
 	place("helical_rise");
 
+    group4->end();
+
+    guientries["do_pick_helical_segments"].cb_menu_i();
+
+    tab6->end();
+
+    tab7->begin();
+	tab7->label("Amyloid");
+	resetHeight();
+	current_y += STEPY/2;
+
+	place("amyloid_length");
+	place("amyloid_width");
+
 	current_y += STEPY/2;
 
     place("do_amyloid_fom");
 
+    current_y += STEPY/2;
+
     group5 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
     group5->end();
+
     place("do_amyloid_tracing", TOGGLE_LEAVE_ACTIVE, group5);
 
     group5->begin();
     place("amyloid_threshold");
+    place("amyloid_gpu_ids");
     place("do_amyloid_plot");
 
     group5->end();
     guientries["do_amyloid_tracing"].cb_menu_i();
 
-	group4->end();
-
-	guientries["do_pick_helical_segments"].cb_menu_i();
-
-	tab6->end();
+	tab7->end();
 }
 
 void JobWindow::initialiseExtractWindow()

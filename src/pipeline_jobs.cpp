@@ -2038,10 +2038,9 @@ The samplings are approximate numbers and vary slightly over the sphere.\n\n For
 	joboptions["shrink"] = JobOption("Shrink factor:", 0, 0, 1, 0.1, "This is useful to speed up the calculations, and to make them less memory-intensive. The micrographs will be downscaled (shrunk) to calculate the cross-correlations, and peak searching will be done in the downscaled FOM maps. When set to 0, the micrographs will de downscaled to the lowpass filter of the references, a value between 0 and 1 will downscale the micrographs by that factor. Note that the results will not be exactly the same when you shrink micrographs!\
 \n\nIn the Laplacian-of-Gaussian picker, this option is ignored and the shrink factor always becomes 0.");
 	joboptions["use_gpu"] = JobOption("Use GPU acceleration?", false, "If set to Yes, the job will try to use GPU acceleration. The Laplacian-of-Gaussian picker does not support GPU.");
-	joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string(""), "This argument is not necessary. If left empty, the job itself will try to allocate available GPU resources. You can override the default allocation by providing a list of which GPUs (0,1,2,3, etc) to use. MPI-processes are separated by ':'. For example: 0:1:0:1:0:1");
+    joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string(""), "This argument is not necessary. If left empty, the job itself will try to allocate available GPU resources. You can override the default allocation by providing a list of which GPUs (0,1,2,3, etc) to use. MPI-processes are separated by ':'. For example: 0:1:0:1:0:1");
 
 	joboptions["do_pick_helical_segments"] = JobOption("Pick 2D helical segments?", false, "Set to Yes if you want to pick 2D helical segments. Note this will run the old algorithms for reference-based helical segment picking, as described by He & Scheres, J Struct Biol, 2017. Often, we now run filament picking from the Topaz tab instead....");
-	joboptions["do_amyloid"] = JobOption("Pick amyloid segments?", false, "Set to Yes if you want to use the find_amyloid program that was developed specifically for picking amyloids. Note this is the only option that will use threads!");
 
 	joboptions["helical_tube_outer_diameter"] = JobOption("Tube diameter (A): ", 200, 100, 1000, 10, "Outer diameter (in Angstroms) of helical tubes. \
 This value should be slightly larger than the actual width of the tubes.");
@@ -2054,10 +2053,15 @@ Kappa ~ 0.05 is recommended for long and straight tubes (e.g. TMV, VipA/VipB and
 	joboptions["helical_tube_length_min"] = JobOption("Minimum length (A): ", 400, 100, 1000, 10, "Minimum length (in Angstroms) of helical tubes for auto-picking. \
 Helical tubes with shorter lengths will not be picked. Note that a long helical tube seen by human eye might be treated as short broken pieces due to low FOM values or high picking threshold.");
 
-    joboptions["do_amyloid_fom"] = JobOption("Calculate amyloid FOM images? ", true, "Calculate FOM images with 4.7A Fourier signal for all input micrographs? Note this code runs only on the CPU, and best multi-threaded.");
-    joboptions["do_amyloid_tracing"] = JobOption("Trace amyloids in FOM images? ", true, "Trace amyloids (as lines) in the FOM images? Note this code runs only most efficiently on the GPU.");
+    // find_amyloid
+    joboptions["do_amyloid"] = JobOption("Pick amyloid segments?", false, "Set to Yes if you want to use the find_amyloid program that was developed specifically for picking amyloids. Note that autopicking of amyloids needs to be split into two separate jobs: the first job calculates FOM/PSI maps for all filaments. This job needs to be run multi-threaded (any n, where 36/n is an integer is a good number) on the CPU. The job job uses a neural network to trace filaments. This job takes the micrographs_autopick.star output file from the first job as input (or a subset selection thereof, e.g. with rlnMicrographScoreSkewness>1). And this second job only runs on GPUs.");
+    joboptions["do_amyloid_fom"] = JobOption("Calculate amyloid FOM images (on CPU)? ", true, "Calculate FOM images with 4.7A Fourier signal for all input micrographs? Note this code runs only on the CPU, and best multi-threaded (18 threads is a good number).");
+    joboptions["do_amyloid_tracing"] = JobOption("Trace amyloids in FOM images (on GPU)? ", true, "Trace amyloids (as lines) in the FOM images? Note this code runs on the GPU. This job takes the micrographs_autopick.star output file from the first job as input (or a subset selection thereof, e.g. with rlnMicrographScoreSkewness>1).");
+    joboptions["amyloid_gpu_ids"] = JobOption("Which GPUs to use for tracing:", std::string(""), "This argument is not necessary. If left empty, the job itself will try to allocate available GPU resources. You can override the default allocation by providing a list of which GPUs (0,1,2,3, etc) to use. MPI-processes are separated by ':'. For example: 0:1:0:1:0:1. Note, only the amyloid tracing part of the job is run on the GPU; FOM calculation has only been implemented for the CPU.");
     joboptions["amyloid_threshold"] = JobOption("Amyloid pick threshold (sigma): ", 0.25, 0.05, 1, 0.05, "How many sigma does the peaks need to be above the mean for the filament tracing to include a coordinate?");
     joboptions["do_amyloid_plot"] = JobOption("Plot results per micrograph?", false, "Set this option to Yes to visualise intermediate results for amyloid tracing, which may help with setting values for filament length, width and picking threshold. Don't use in parallel or in submission to the queue.");
+    joboptions["amyloid_width"] = JobOption("Amyloid width (A): ", 200, 100, 1000, 10, "Width (in Angstroms) used for FOM calculation and/or tracing. ");
+    joboptions["amyloid_length"] = JobOption("Amyloid minimum length (A): ", 500, 100, 1000, 10, "Length (in Angstroms) used for FOM calculation, and minimum length of filaments for tracing.");
 
 
 }
@@ -2179,8 +2183,20 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
         command += " --odir " + outputname;
         command += " --pickname autopick";
 
+
         if (joboptions["do_amyloid_fom"].getBoolean())
         {
+
+            if (joboptions["do_amyloid_tracing"].getBoolean())
+            {
+                error_message = "ERROR: you need to run a separate FOM calculation job, followed by a tracing job. FOM is CPU-only; tracing is GPU-only!";
+                return false;
+            }
+
+            command += " --search_filament_length " + joboptions["amyloid_length"].getString();
+            command += " --search_filament_width " + joboptions["amyloid_width"].getString();
+            command += " --j " + joboptions["nr_threads"].getString();
+
             // Also output micrographs.star file with kurtosis and skewness of the autopicking scores
             Node node3c(outputname + "micrographs_autopick.star", joboptions["fn_input_autopick"].node_type);
             outputNodes.push_back(node3c);
@@ -2198,9 +2214,10 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
             Node node3(outputname + "autopick.star", LABEL_AUTOPICK_COORDS);
             outputNodes.push_back(node3);
 
-            command += " --trace_filament_length " + joboptions["helical_tube_length_min"].getString();
-            command += " --trace_filament_width " + joboptions["helical_tube_outer_diameter"].getString();
+            command += " --trace_filament_length " + joboptions["amyloid_length"].getString();
+            command += " --trace_filament_width " + joboptions["amyloid_width"].getString();
             command += " --threshold " + joboptions["amyloid_threshold"].getString();
+            command += " --gpu \"" + joboptions["amyloid_gpu_ids"].getString() + "\"";
 
             if (joboptions["do_amyloid_plot"].getBoolean()) command += " --plot ";
 
@@ -2217,17 +2234,6 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
         // PDF with histograms of the eigenvalues
         Node node3b(outputname + "logfile.pdf", LABEL_AUTOPICK_LOG);
         outputNodes.push_back(node3b);
-
-        // GPU-stuff
-        if (joboptions["use_gpu"].getBoolean())
-        {
-            // for the moment always use --shrink 0 with GPUs ...
-            command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";
-        }
-        else
-        {
-            command += " --j " + joboptions["nr_threads"].getString();
-        }
 
         // If this is a continue job, then only process unfinished micrographs
         if (is_continue)
