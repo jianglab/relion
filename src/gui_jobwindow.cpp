@@ -947,12 +947,6 @@ void JobWindow::initialiseAutopickWindow()
     tab7->begin();
 	tab7->label("Amyloid");
 	resetHeight();
-	current_y += STEPY/2;
-
-	place("amyloid_length");
-	place("amyloid_width");
-
-	current_y += STEPY/2;
 
     place("do_amyloid_fom");
 
@@ -965,6 +959,8 @@ void JobWindow::initialiseAutopickWindow()
 
     group5->begin();
     place("amyloid_threshold");
+    place("amyloid_length");
+    place("amyloid_width");
     place("amyloid_gpu_ids");
     place("do_amyloid_plot");
 

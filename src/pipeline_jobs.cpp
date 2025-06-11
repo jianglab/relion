@@ -2193,8 +2193,6 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
                 return false;
             }
 
-            command += " --search_filament_length " + joboptions["amyloid_length"].getString();
-            command += " --search_filament_width " + joboptions["amyloid_width"].getString();
             command += " --j " + joboptions["nr_threads"].getString();
 
             // Also output micrographs.star file with kurtosis and skewness of the autopicking scores

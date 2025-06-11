@@ -512,7 +512,7 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
 
 
 
-    Mangle.resize(down_ysize, down_xsize);
+    Mangle.resize(down_ysize/shift_step, down_xsize/shift_step);
     Mangle.setXmippOrigin();
     Mscore.resize(Mangle);
     MultidimArray<RFLOAT> Msum, Mnonsum, Mnonscore, Mneighbour, Mneighbour2;
@@ -524,18 +524,20 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
 
     // This can't be parallelised efficiently because need to protect Msums, Mscore and Mangle from simultaneous writing...
     // Calculate Z-scores over psi: (max_psi - avg_psi) /stddev_psi
+    int xsize = XSIZE(Mscore);
+    int ysize = YSIZE(Mscore);
     for (int ipsi = 0; ipsi < nr_psi; ipsi++)
     {
         RFLOAT mypsi = getPsiAngle(ipsi);
-        for (int ypos = 0; ypos < down_ysize; ypos ++)
+        for (int ypos = 0; ypos < ysize; ypos ++)
         {
-            int cen_ypos = ypos - down_ysize/2;
-            for (int xpos = 0; xpos < down_xsize; xpos ++)
+            int cen_ypos = ypos - ysize/2;
+            for (int xpos = 0; xpos < xsize; xpos ++)
             {
-                int cen_xpos = xpos - down_xsize/2;
+                int cen_xpos = xpos - xsize/2;
 
-                RFLOAT myscore = A2D_ELEM(rotated_scores[ipsi], cen_ypos/shift_step, cen_xpos/shift_step);
-                RFLOAT mynonscore = A2D_ELEM(rotated_nonscores[ipsi], cen_ypos/shift_step, cen_xpos/shift_step);
+                RFLOAT myscore = A2D_ELEM(rotated_scores[ipsi], cen_ypos, cen_xpos);
+                RFLOAT mynonscore = A2D_ELEM(rotated_nonscores[ipsi], cen_ypos, cen_xpos);
                 A2D_ELEM(Msum, cen_ypos, cen_xpos) += myscore;
                 A2D_ELEM(Mnonsum, cen_ypos, cen_xpos) += mynonscore;
 
@@ -544,18 +546,18 @@ void AmyloidFinder::getScoreForOneMicrograph(MultidimArray<RFLOAT> &image, Multi
                     A2D_ELEM(Mscore, cen_ypos, cen_xpos) = myscore;
                     A2D_ELEM(Mangle, cen_ypos, cen_xpos) = mypsi;
                     int ipsi_nb = (ipsi == 0) ? nr_psi - 1 : ipsi - 1;
-                    A2D_ELEM(Mneighbour, cen_ypos, cen_xpos) = A2D_ELEM(rotated_scores[ipsi_nb], cen_ypos/shift_step, cen_xpos/shift_step);
+                    A2D_ELEM(Mneighbour, cen_ypos, cen_xpos) = A2D_ELEM(rotated_scores[ipsi_nb], cen_ypos, cen_xpos);
                     ipsi_nb = (ipsi == nr_psi - 1) ? 0 : ipsi + 1;
-                    A2D_ELEM(Mneighbour, cen_ypos, cen_xpos) += A2D_ELEM(rotated_scores[ipsi_nb], cen_ypos/shift_step, cen_xpos/shift_step);
+                    A2D_ELEM(Mneighbour, cen_ypos, cen_xpos) += A2D_ELEM(rotated_scores[ipsi_nb], cen_ypos, cen_xpos);
                 }
 
                 if (mynonscore > A2D_ELEM(Mnonscore, cen_ypos, cen_xpos))
                 {
                     A2D_ELEM(Mnonscore, cen_ypos, cen_xpos) = mynonscore;
                     int ipsi_nb = (ipsi == 0) ? nr_psi - 1 : ipsi - 1;
-                    A2D_ELEM(Mneighbour2, cen_ypos, cen_xpos) = A2D_ELEM(rotated_nonscores[ipsi_nb], cen_ypos/shift_step, cen_xpos/shift_step);
+                    A2D_ELEM(Mneighbour2, cen_ypos, cen_xpos) = A2D_ELEM(rotated_nonscores[ipsi_nb], cen_ypos, cen_xpos);
                     ipsi_nb = (ipsi == nr_psi - 1) ? 0 : ipsi + 1;
-                    A2D_ELEM(Mneighbour2, cen_ypos, cen_xpos) += A2D_ELEM(rotated_nonscores[ipsi_nb], cen_ypos/shift_step, cen_xpos/shift_step);
+                    A2D_ELEM(Mneighbour2, cen_ypos, cen_xpos) += A2D_ELEM(rotated_nonscores[ipsi_nb], cen_ypos, cen_xpos);
                 }
 
             }
@@ -681,16 +683,14 @@ void AmyloidFinder::calculateFOMOneMicrograph(FileName fn_mic, bool myverb)
         RFLOAT skew, kurt;
         getScoreForOneMicrograph(Iin(), Mscore, Mangle, skew, kurt, myverb);
 
-        std::ofstream  fh;
-        fh.open((fn_skew).c_str(), std::ios::out);
-        fh << skew << " " << kurt << std::endl;
-        fh.close();
-
         Image<RFLOAT> Ipsi, Izscore;
-        Ipsi.setSamplingRateInHeader(down_angpix);
-        Izscore.setSamplingRateInHeader(down_angpix);
+        Ipsi.setSamplingRateInHeader(down_angpix*shift_step);
+        Izscore.setSamplingRateInHeader(down_angpix*shift_step);
         Ipsi()=Mangle;
         Izscore()=Mscore;
+        // Set the skewness and kurtosis in the header of the FOM image
+        Izscore.MDMainHeader.setValue(EMDL_IMAGE_STATS_AVG, skew);
+        Izscore.MDMainHeader.setValue(EMDL_IMAGE_STATS_STDDEV, kurt);
         Ipsi.write(fn_psi);
         Izscore.write(fn_fom);
     }
@@ -853,14 +853,14 @@ void AmyloidFinder::finalise()
         if (!do_skip_fom)
 		{
             FileName fn_psi = fn_root + "_" + fn_out + "_psi.mrc";
-            FileName fn_skew = fn_root + "_" + fn_out + "_skew.txt";
 
+            Image<RFLOAT> Ifom;
+            Ifom.read(fn_fom, false);
             RFLOAT kurt = 0., skew = 0.;
-            std::ifstream fin(fn_skew);
-            if (!(fin >> skew >> kurt))
-            {
-                std::cerr << "Error reading skew numbers for: " << fn_ori_micrographs[imic] << std::endl;
-            }
+            Ifom.MDMainHeader.getValue(EMDL_IMAGE_STATS_AVG, skew);
+            Ifom.MDMainHeader.getValue(EMDL_IMAGE_STATS_STDDEV, kurt);
+            if (isnan(skew)) skew = 0.;
+            if (isnan(kurt)) kurt = 0.;
 
             MDin.setValue(EMDL_MICROGRAPH_SCORE_KURTOSIS, kurt, imic);
             MDin.setValue(EMDL_MICROGRAPH_SCORE_SKEWNESS, skew, imic);
