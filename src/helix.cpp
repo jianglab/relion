@@ -611,14 +611,10 @@ RFLOAT getHelicalSigma2Rot(
 		RFLOAT helical_twist_deg,
 		RFLOAT helical_offset_step_Angst,
 		RFLOAT rot_step_deg,
-		RFLOAT old_sigma2_rot,
-        int helical_nstart)
+		RFLOAT old_sigma2_rot)
 {
 	if ( (helical_offset_step_Angst < 0.) || (rot_step_deg < 0.) || (old_sigma2_rot < 0.) )
 		REPORT_ERROR("helix.cpp::getHelicalSigma2Rot: Helical offset step, rot step or sigma2_rot cannot be negative!");
-
-    // SHWS 04062025: this seemed like the correct thing to do, but difficult 2-start refinement go worse with this smaller sigma2rot...
-    getNstartHelicalTwistAndRise(helical_twist_deg, helical_rise_Angst, helical_nstart);
 
 	RFLOAT nr_samplings_along_helical_axis = (fabs(helical_rise_Angst)) / helical_offset_step_Angst;
 	RFLOAT rot_search_range = (fabs(helical_twist_deg)) / nr_samplings_along_helical_axis;
@@ -633,25 +629,8 @@ RFLOAT getHelicalSigma2Rot(
 		//	factor = factor_max;
 		new_sigma2_rot *= factor * factor;
 	}
-    //std::cerr <<" N-start twist= " << helical_twist_deg << " rise= " << helical_rise_Angst << " old sigma2rot= " << old_sigma2_rot << " new sigma2rot= " << new_sigma2_rot<< std::endl;
 	return new_sigma2_rot;
 };
-
-void getNstartHelicalTwistAndRise(RFLOAT &twist,
-                                  RFLOAT &rise,
-                                  int helical_nstart)
-{
-
-    // Shaoda's formula (which need to be inverted, as we want original N-start rise and twist back)
-    // rise_1-start = rise / N
-    // twist_1-start = (twist+360)/N if twist>0
-    // twist_1-start = (twist-360)/N if twist<0
-    rise *= helical_nstart;
-    twist *= helical_nstart;
-    while (twist > 180.) twist -= 360.;
-    while (twist < -180.) twist += 360.;
-
-}
 
 bool checkParametersFor3DHelicalReconstruction(
 		bool ignore_symmetry,
@@ -4089,6 +4068,22 @@ void flipPsiTiltForHelicalSegment(
 {
 	new_psi = (old_psi < 0.) ? (old_psi + 180.) : (old_psi - 180.);
 	new_tilt = 180. - old_tilt;
+}
+
+void getNstartHelicalTwistAndRise(RFLOAT &twist,
+                                  RFLOAT &rise,
+                                  int helical_nstart)
+{
+
+    // Shaoda's formula (which need to be inverted, as we want original N-start rise and twist back)
+    // rise_1-start = rise / N
+    // twist_1-start = (twist+360)/N if twist>0
+    // twist_1-start = (twist-360)/N if twist<0
+    rise *= helical_nstart;
+    twist *= helical_nstart;
+    while (twist > 180.) twist -= 360.;
+    while (twist < -180.) twist += 360.;
+
 }
 
 //#define DEBUG_HELICAL_UPDATE_ANGULAR_PRIORS

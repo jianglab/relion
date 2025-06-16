@@ -106,12 +106,7 @@ RFLOAT getHelicalSigma2Rot(
 		RFLOAT helical_twist_deg,
 		RFLOAT helical_offset_step_Angst,
 		RFLOAT rot_step_deg,
-		RFLOAT old_sigma2_rot,
-        int helical_nstart);
-
-void getNstartHelicalTwistAndRise(RFLOAT &twist,
-                                  RFLOAT &rise,
-                                  int helical_nstart);
+		RFLOAT old_sigma2_rot);
 
 bool checkParametersFor3DHelicalReconstruction(
 		bool ignore_symmetry,
@@ -433,7 +428,7 @@ public:
 
 	~HelicalSegmentPriorInfoEntry() { clear(); };
 
-    void checkPsiPolarity();
+        void checkPsiPolarity();
 
 	bool operator<(const HelicalSegmentPriorInfoEntry &rhs) const;
 };
@@ -444,6 +439,11 @@ void flipPsiTiltForHelicalSegment(
 		RFLOAT old_tilt,
 		RFLOAT& new_psi,
 		RFLOAT& new_tilt);
+
+void getNstartHelicalTwistAndRise(RFLOAT &twist,
+                                  RFLOAT &rise,
+                                  int helical_nstart);
+
 
 void updatePriorsForOneHelicalTube(
 		std::vector<HelicalSegmentPriorInfoEntry>& list,

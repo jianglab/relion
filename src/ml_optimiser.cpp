@@ -2376,7 +2376,7 @@ void MlOptimiser::initialiseGeneral(int rank)
     {
         // Aug20,2015 - Shaoda, Helical refinement
         RFLOAT rottilt_step = sampling.getAngularSampling(adaptive_oversampling);
-        mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial, sampling.helical_offset_step, rottilt_step, mymodel.sigma2_rot, helical_nstart);
+        mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial, sampling.helical_offset_step, rottilt_step, mymodel.sigma2_rot);
     }
 
     if (particle_diameter < 0.)
@@ -9946,7 +9946,7 @@ void MlOptimiser::updateAngularSampling(bool myverb)
 
                     // Aug20,2015 - Shaoda, Helical refinement
                     if ( (do_helical_refine) && (!ignore_helical_symmetry) )
-                        mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial, sampling.helical_offset_step, new_rottilt_step, mymodel.sigma2_rot, helical_nstart);
+                        mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial, sampling.helical_offset_step, new_rottilt_step, mymodel.sigma2_rot);
                 }
             }
         }
