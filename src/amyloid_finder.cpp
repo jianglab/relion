@@ -86,6 +86,11 @@ void AmyloidFinder::initialise(bool is_leader)
     {
         MetaDataTable MDin;
         MDin.read(fn_in, "micrographs");
+
+        if (do_skip_fom && !(MDin.containsLabel(EMDL_MICROGRAPH_AUTOPICK_FOM) && MDin.containsLabel(EMDL_MICROGRAPH_AUTOPICK_PSI)))
+        {
+            REPORT_ERROR("ERROR: You are skipping FOM calculation, but the input STAR file does not contain the FOM/PSI images.");
+        }
         FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDin)
         {
             FileName fn_mic;
