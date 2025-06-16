@@ -3809,7 +3809,7 @@ void MlOptimiserMpi::updateAngularSamplingGrad(long int my_first_part_id, long i
 				if ((do_helical_refine) && (!ignore_helical_symmetry))
 					mymodel.sigma2_rot = getHelicalSigma2Rot(helical_rise_initial, helical_twist_initial,
 					                                         sampling.helical_offset_step, new_rottilt_step,
-					                                         mymodel.sigma2_rot, helical_nstart);
+					                                         mymodel.sigma2_rot);
 			}
 
 			// Reset iteration counter
