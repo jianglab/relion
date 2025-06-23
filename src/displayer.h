@@ -118,6 +118,8 @@ public:
     void setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_img, MetaDataContainer *MDCin, int ipos,
                  RFLOAT minval, RFLOAT maxval, RFLOAT _fom_min, RFLOAT _fom_max,
                  RFLOAT _scale, bool do_relion_scale = false);
+    void setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &mask_img, int _ipos,
+                         RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale, bool do_relion_scale);
 
 	// Destructor
 	~DisplayBox()
@@ -158,6 +160,9 @@ public:
 	                           int _particle_radius, bool do_startend = false, bool do_lines = false, FileName _fn_coords = "",
 	                           FileName _fn_color = "", FileName _fn_mic= "", FileName _color_label = "", RFLOAT _color_blue_value = 0., RFLOAT _color_red_value = 1.,
 							   RFLOAT _minimum_pick_fom = -999., RFLOAT _min_fom = 0., RFLOAT _max_fom = 0.);
+    int fillMaskerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> mask_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
+                               RFLOAT _scale, int _pencil_radius, FileName _fn_mask);
+
 };
 
 class basisViewerCanvas : public Fl_Widget
@@ -198,6 +203,8 @@ public:
 	          RFLOAT lowpass = -1.0, RFLOAT highpass = -1.0);
     void fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale = 1.);
     void fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _fom_min, RFLOAT _fom_max, RFLOAT _sigma_contrast, RFLOAT _scale = 1.);
+    void fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &mask_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale);
+
 	void setSelectionType();
 	void setFOMThreshold();
 };
@@ -442,6 +449,40 @@ private:
 	void viewExtractedParticles();
 };
 
+
+class maskerViewerCanvas : public basisViewerCanvas
+{
+protected:
+    int handle(int ev);
+    void draw() {};
+
+public:
+
+    int pencil_radius;
+
+    // Scale for pencil_radius
+	RFLOAT mask_scale;
+
+    // Filename of the mask
+    FileName fn_mask;
+
+    // Image with the mask
+    Image<RFLOAT> Imask;
+
+    // Constructor with w x h size of the window and a title
+    maskerViewerCanvas(int X, int Y, int W, int H, const char* title=0): basisViewerCanvas(X,Y,W, H, title) { }
+
+private:
+
+    // Functionalities for  popup menu
+    void saveMask();
+    void setPencilRadius();
+    void clearMask();
+    void printHelp();
+
+};
+
+
 // This class only puts scrollbars around the resizable canvas
 class displayerGuiWindow : public Fl_Window
 {
@@ -668,6 +709,13 @@ public:
 
 	// Shell for calling Topaz
 	FileName fn_shell;
+
+    // Flag to design mask
+    bool do_mask;
+
+    // Filename for coordinates star file
+	FileName fn_mask;
+
 
 public:
 	// Read command line arguments

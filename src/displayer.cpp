@@ -420,6 +420,95 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
 }
 
 
+void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &mask_img, int _ipos,
+                         RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale, bool do_relion_scale)
+{
+	scale = _scale;
+	minval = _minval;
+	maxval = _maxval;
+	ipos = _ipos;
+	selected = NOTSELECTED;
+    fom_is_grey_instead = false;
+
+	// For volumes only show the central slice
+	if (ZSIZE(img) > 1)
+	{
+		MultidimArray<RFLOAT> slice;
+		img.getSlice(ZSIZE(img)/2, slice);
+		img=slice;
+	}
+
+	// create array for the scaled image data
+	xsize_data = CEIL(XSIZE(img) * scale);
+	ysize_data = CEIL(YSIZE(img) * scale);
+	xoff = (xsize_data < w() ) ? (w() - xsize_data) / 2 : 0;
+	yoff = (ysize_data < h() ) ? (h() - ysize_data) / 2 : 0;
+    img_data = new unsigned char [3 * xsize_data * ysize_data];
+	RFLOAT range = maxval - minval;
+	RFLOAT step = range / 255; // 8-bit scaling range from 0 to 255
+	RFLOAT* old_ptr=NULL;
+	long int n;
+
+	// For micrographs use relion-scaling to avoid bias in down-sampled positions
+	// For multi-image viewers, do not use this scaling as it is slower...
+	if (do_relion_scale && ABS(scale - 1.0) > 0.01)
+    {
+        selfScaleToSize(img, xsize_data, ysize_data);
+        selfScaleToSize(mask_img, xsize_data, ysize_data);
+    }
+
+	// Use the same nearest-neighbor algorithm as in the copy function of Fl_Image...
+	if (ABS(scale - 1.0) > 0.01 && !do_relion_scale)
+	{
+		int xmod   = XSIZE(img) % xsize_data;
+		int xstep  = XSIZE(img) / xsize_data;
+		int ymod   = YSIZE(img) % ysize_data;
+		int ystep  = YSIZE(img) / ysize_data;
+		int line_d = XSIZE(img);
+		int dx, dy, sy, xerr, yerr;
+
+        for (dy = ysize_data, sy = 0, yerr = ysize_data, n = 0; dy > 0; dy --)
+        {
+            for (dx = xsize_data, xerr = xsize_data, old_ptr = img.data + sy * line_d; dx > 0; dx --, n++)
+            {
+                RFLOAT val = (DIRECT_MULTIDIM_ELEM(img, n) - minval) / range;
+                img_data[3*n] = FLOOR(127*val);
+                img_data[3*n+1] = FLOOR(127*val);
+                img_data[3*n+2] = FLOOR(127*val);
+                if (DIRECT_MULTIDIM_ELEM(mask_img, n) > 0.5) img_data[3*n] += 127;
+
+                old_ptr += xstep;
+                xerr    -= xmod;
+                if (xerr <= 0)
+                {
+                    xerr    += xsize_data;
+                    old_ptr += 1;
+                }
+            }
+
+            sy   += ystep;
+            yerr -= ymod;
+            if (yerr <= 0)
+            {
+                yerr += ysize_data;
+                sy ++;
+            }
+        }
+    }
+	else
+	{
+        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(img)
+        {
+            RFLOAT val = (DIRECT_MULTIDIM_ELEM(img, n) - minval) / range;
+            img_data[3*n] = FLOOR(127*val);
+            img_data[3*n+1] = FLOOR(127*val);
+            img_data[3*n+2] = FLOOR(127*val);
+            if (DIRECT_MULTIDIM_ELEM(mask_img, n) > 0.5) img_data[3*n] += 127;
+        }
+    }
+}
+
+
 
 
 
@@ -580,6 +669,28 @@ int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, Multi
 	resizable(*this);
 	show();
 	return Fl::run();
+}
+
+
+int basisViewerWindow::fillMaskerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> mask_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
+                                              RFLOAT _scale, int _pencil_radius, FileName _fn_mask)
+{
+    // Scroll bars
+    Fl_Scroll scroll(0, 0, w(), h());
+    int xsize_canvas = CEIL(XSIZE(image)*_scale);
+    int ysize_canvas = CEIL(YSIZE(image)*_scale);
+    maskerViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
+    canvas.pencil_radius = _pencil_radius;
+    canvas.mask_scale = _scale;
+    canvas.SetScroll(&scroll);
+    if (mask_image.xdim > 0) canvas.Imask() = mask_image;
+    else canvas.Imask().resize(image);
+    canvas.fill(image, canvas.Imask(), _minval, _maxval, _sigma_contrast, _scale);
+
+    canvas.fn_mask = _fn_mask;
+    resizable(*this);
+    show();
+    return Fl::run();
 }
 
 int basisViewerWindow::fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale)
@@ -825,6 +936,20 @@ void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT>
 	//MDtmp.setValue(EMDL_IMAGE_NAME, fn_tmp);
 	my_box->setData(image, fom_image, MDtmp.getObject(), 0,
                     _minval, _maxval, _fom_min, _fom_max, _scale, true);
+	my_box->redraw();
+	boxes.push_back(my_box);
+}
+
+void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &mask_image,
+                             RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale)
+{
+	xoff = yoff = 0;
+	nrow = ncol = 1;
+	getImageContrast(image, _minval, _maxval, _sigma_contrast);
+	xsize_box = CEIL(_scale * XSIZE(image));
+	ysize_box = CEIL(_scale * YSIZE(image));
+	DisplayBox* my_box = new DisplayBox(0, 0, xsize_box, ysize_box, "dummy");
+	my_box->setData(image, mask_image,  0, _minval, _maxval,  _scale, true);
 	my_box->redraw();
 	boxes.push_back(my_box);
 }
@@ -1783,6 +1908,7 @@ void basisViewerCanvas::setFOMThreshold()
 
 }
 
+
 int popupSelectionTypeWindow::fill()
 {
 	color(GUI_BACKGROUND_COLOR);
@@ -2419,6 +2545,151 @@ void pickerViewerCanvas::printHelp()
 	std::cout <<" + Refresh picked particles by moving out of the window and back in again ..." << std::endl;
 }
 
+int maskerViewerCanvas::handle(int ev)
+{
+    const int button = Fl::event_button() ;
+    const bool with_shift = (Fl::event_shift() != 0);
+    const bool with_control = (Fl::event_ctrl() != 0);
+    const int key = Fl::event_key();
+    has_dragged = false;
+
+    int xc = (int)Fl::event_x() - scroll->x() + scroll->hscrollbar.value();
+    int yc = (int)Fl::event_y() - scroll->y() + scroll->scrollbar.value();
+    if ((ev==FL_PUSH || ev==FL_DRAG) && (button == FL_LEFT_MOUSE || button == FL_MIDDLE_MOUSE))
+    {
+        RFLOAT myval = (button == FL_LEFT_MOUSE) ? 1. : 0.;
+        int xstart = xc - pencil_radius;
+        xstart = std::max(0, xstart);
+        int xstop = xc + pencil_radius;
+        xstop = std::min((int)(Imask().xdim), xstop);
+        int ystart = yc - pencil_radius;
+        ystart = std::max(0, ystart);
+        int ystop = yc + pencil_radius;
+        ystop = std::min((int)(Imask().ydim), ystop);
+        for (int y=ystart; y < ystop; y++)
+        {
+            int dy2 = (y-yc)*(y-yc);
+            for (int x=xstart; x < xstop; x++)
+            {
+                int d2 = dy2 + (x-xc)*(x-xc);
+                if (d2 < pencil_radius*pencil_radius)
+                {
+                    if (button == FL_LEFT_MOUSE && DIRECT_A2D_ELEM(Imask(), y, x) < 0.5 )
+                    {
+                        long n = Imask().xdim * y + x;
+                        boxes[0]->img_data[3*n] += 127;
+                        DIRECT_A2D_ELEM(Imask(), y, x) = 1.;
+                    }
+                    else if (button == FL_MIDDLE_MOUSE && DIRECT_A2D_ELEM(Imask(), y, x) > 0.5 )
+                    {
+                        long n = Imask().xdim * y + x;
+                        boxes[0]->img_data[3*n] -= 127;
+                        DIRECT_A2D_ELEM(Imask(), y, x) = 0.;
+                    }
+                }
+            }
+        }
+        boxes[0]->redraw();
+        return 1;
+    }
+    else if ((button == FL_RIGHT_MOUSE) || (button == FL_LEFT_MOUSE && with_control))
+    {
+        redraw();
+        Fl_Menu_Item rclick_menu[] = {
+                { "Save image with mask (CTRL-s)" },
+                { "Set pencil radius" },
+                { "Help" },
+                { "Quit (CTRL-q)" },
+                { 0 }
+        };
+        const Fl_Menu_Item *m = rclick_menu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
+        if ( !m )
+            return 0;
+        else if ( strcmp(m->label(), "Save image with mask (CTRL-s)") == 0 )
+            saveMask();
+        else if ( strcmp(m->label(), "Set pencil radius") == 0 )
+            setPencilRadius();
+        else if ( strcmp(m->label(), "Help") == 0 )
+            printHelp();
+        else if ( strcmp(m->label(), "Quit (CTRL-q)") == 0 )
+            exit(0);
+        redraw();
+        return 1; // (tells caller we handled this event)
+    }
+    // Update the drawing every time something happens ....
+    else if (ev==FL_RELEASE || ev==FL_LEAVE || ev==FL_ENTER || ev==FL_MOVE || ev == FL_FOCUS || ev == FL_UNFOCUS)
+    {
+        redraw();
+        return 1;
+    }
+    // CTRL-s will save the coordinates in a picker window
+    else if (with_control)
+    {
+        if (key == 's')
+        {
+            saveMask();
+            sleep(1); // to prevent multiple saves... dirty but don't know how to do this otherwise...
+            return 1; // (tells caller we handled this event)
+        }
+        else if (key == 'q')
+        {
+            sleep(1);
+            exit(0);
+            return 1; // (tells caller we handled this event)
+        }
+        else if (key >= '1' && key <= '6')
+        {
+            std::cout << "debug key = " << key << std::endl;
+            current_selection_type = key - '0';
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+void maskerViewerCanvas::saveMask()
+{
+    if (fn_mask == "")
+    {
+        char *newfile;
+        newfile = fl_file_chooser("Save mask image as?", "*.mrc", "");
+        if (newfile == NULL)
+            return;
+        FileName fn_tmp(newfile);
+        fn_mask = fn_tmp;
+    }
+
+    FileName fn_dirs = fn_mask.beforeLastOf("/");
+    if (!(exists(fn_dirs)))
+    {
+        std::string command = "mkdir -p " + fn_dirs;
+        int res = system(command.c_str());
+    }
+    Imask.write(fn_mask);
+
+    std::cout << "Saved mask as "<< fn_mask << std::endl;
+
+}
+
+void maskerViewerCanvas::setPencilRadius()
+{
+    const char *rad;
+    std::string currentval = floatToString(pencil_radius/mask_scale);
+    rad =  fl_input("Pencil radius (pixel): ", currentval.c_str());
+    if (rad == NULL)
+        return;
+    std::string newval(rad);
+    pencil_radius = mask_scale * textToFloat(rad);
+
+}
+
+void maskerViewerCanvas::printHelp()
+{
+	std::cout <<" + Left-mouse   click: add to mask " << std::endl;
+	std::cout <<" + Middle-mouse click: delete from mask " << std::endl;
+}
+
 void singleViewerCanvas::printMetaData()
 {
 	boxes[0]->MDimg.write(std::cout);
@@ -2913,6 +3184,10 @@ void Displayer::read(int argc, char **argv)
     fom_min = textToFloat(parser.getOption("--fom_min", "Pixel value for lowest FOM value (black)", "0"));
     fom_max = textToFloat(parser.getOption("--fom_max", "Pixel value for highest FOM value (yellow)", "0"));
 
+	int mask_section  = parser.addSection("Mask design options");
+	do_mask = parser.checkOption("--paint_mask", "Paint mask in input image");
+    fn_mask = parser.getOption("--fn_mask", "Name for MRC file of the designed mask", "");
+
 	verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 
 	// Check for errors in the command-line option
@@ -3206,6 +3481,20 @@ void Displayer::run()
 		win.fillPickerViewerCanvas(img(), fom_img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, do_pick_lines, fn_coords,
     		fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom, fom_min, fom_max);
 	}
+    else if (do_mask)
+    {
+        colour_scheme = BLACKGREYREDSCALE;
+
+        Image<RFLOAT> img, Imask;
+        img.read(fn_in);
+        if (fn_mask != "")
+        {
+            Imask.read(fn_mask);
+        }
+        basisViewerWindow win(CEIL(scale*XSIZE(img())), CEIL(scale*YSIZE(img())), fn_in.c_str());
+        win.fillMaskerViewerCanvas(img(), Imask(), minval, maxval, sigma_contrast, scale, ROUND(scale*particle_radius), fn_mask);
+
+    }
 	else if (fn_in.isStarFile())
 	{
 		if (fn_in.contains("_optimiser.star"))
