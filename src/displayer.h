@@ -716,6 +716,8 @@ public:
     // Filename for coordinates star file
 	FileName fn_mask;
 
+	// pencil radius for drawing masks
+	int pencil_radius;
 
 public:
 	// Read command line arguments

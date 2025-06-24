@@ -3187,6 +3187,7 @@ void Displayer::read(int argc, char **argv)
 	int mask_section  = parser.addSection("Mask design options");
 	do_mask = parser.checkOption("--paint_mask", "Paint mask in input image");
     fn_mask = parser.getOption("--fn_mask", "Name for MRC file of the designed mask", "");
+	pencil_radius = textToFloat(parser.getOption("--pencil_radius", "Pencil radius to draw masks (in original pixels)", "10"));
 
 	verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 
@@ -3492,7 +3493,7 @@ void Displayer::run()
             Imask.read(fn_mask);
         }
         basisViewerWindow win(CEIL(scale*XSIZE(img())), CEIL(scale*YSIZE(img())), fn_in.c_str());
-        win.fillMaskerViewerCanvas(img(), Imask(), minval, maxval, sigma_contrast, scale, ROUND(scale*particle_radius), fn_mask);
+        win.fillMaskerViewerCanvas(img(), Imask(), minval, maxval, sigma_contrast, scale, ROUND(scale*pencil_radius), fn_mask);
 
     }
 	else if (fn_in.isStarFile())
