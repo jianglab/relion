@@ -46,7 +46,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     do_plot = parser.checkOption("--plot", "Display images with intermediate tracing results for each micrograph");
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
     fn_other_args = parser.getOption("--other_args", "Other arguments for the python script", "");
-    fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","/public/EM/RELION/amypicker.ckpt");
+    fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","/public/EM/RELION/amypicker2.ckpt");
 	do_skip_tracing = parser.checkOption("--skip_tracing", "Skip tracing.");
     do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
     gpu_ids = parser.getOption("--gpu", "Device ids for each MPI-thread","default");
@@ -763,11 +763,11 @@ void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_
     // takes from my_first to my_last!
     FileName fn_tracing_star = fn_odir + "input_trace_rank" + integerToString(my_rank) + ".star";
     MetaDataTable MDtrace;
+    FileName fn_fom, fn_psi;
     for (long int imic = my_first; imic <= my_last; imic++)
     {
         MDtrace.addObject();
         FileName fn_root = getOutputRootName(todo_micrographs_tracing[imic]);
-        FileName fn_fom, fn_psi;
         if (do_skip_fom)
         {
             long int imic_ori = idx_todo_micrographs_tracing[imic];
@@ -786,6 +786,10 @@ void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_
         MDtrace.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
     }
     MDtrace.write(fn_tracing_star);
+
+    Image<RFLOAT> It;
+    It.read(fn_fom, false);
+    down_angpix = It.samplingRateX();
 
     // hardcoded python script for now...
     FileName command = fn_exe;
