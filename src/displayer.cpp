@@ -673,7 +673,7 @@ int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, Multi
 
 
 int basisViewerWindow::fillMaskerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> mask_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
-                                              RFLOAT _scale, int _pencil_radius, FileName _fn_mask)
+                                              RFLOAT _scale, int _pencil_radius, FileName _fn_mask, RFLOAT _angpix)
 {
     // Scroll bars
     Fl_Scroll scroll(0, 0, w(), h());
@@ -682,10 +682,14 @@ int basisViewerWindow::fillMaskerViewerCanvas(MultidimArray<RFLOAT> image, Multi
     maskerViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
     canvas.pencil_radius = _pencil_radius;
     canvas.mask_scale = _scale;
+    canvas.angpix = _angpix;
     canvas.SetScroll(&scroll);
     if (mask_image.xdim > 0) canvas.Imask() = mask_image;
     else canvas.Imask().resize(image);
     canvas.fill(image, canvas.Imask(), _minval, _maxval, _sigma_contrast, _scale);
+
+    int xsize_data = CEIL(image.xdim * _scale);
+    canvas.Imask.setSamplingRateInHeader(_angpix * image.xdim / xsize_data);
 
     canvas.fn_mask = _fn_mask;
     resizable(*this);
@@ -2555,67 +2559,72 @@ int maskerViewerCanvas::handle(int ev)
 
     int xc = (int)Fl::event_x() - scroll->x() + scroll->hscrollbar.value();
     int yc = (int)Fl::event_y() - scroll->y() + scroll->scrollbar.value();
-    if ((ev==FL_PUSH || ev==FL_DRAG) && (button == FL_LEFT_MOUSE || button == FL_MIDDLE_MOUSE))
+    if (ev==FL_PUSH || ev==FL_DRAG)
     {
-        RFLOAT myval = (button == FL_LEFT_MOUSE) ? 1. : 0.;
-        int xstart = xc - pencil_radius;
-        xstart = std::max(0, xstart);
-        int xstop = xc + pencil_radius;
-        xstop = std::min((int)(Imask().xdim), xstop);
-        int ystart = yc - pencil_radius;
-        ystart = std::max(0, ystart);
-        int ystop = yc + pencil_radius;
-        ystop = std::min((int)(Imask().ydim), ystop);
-        for (int y=ystart; y < ystop; y++)
+
+        if ((ev==FL_PUSH || ev==FL_DRAG) && (button == FL_LEFT_MOUSE || button == FL_MIDDLE_MOUSE))
         {
-            int dy2 = (y-yc)*(y-yc);
-            for (int x=xstart; x < xstop; x++)
+            RFLOAT myval = (button == FL_LEFT_MOUSE) ? 1. : 0.;
+            int xstart = xc - pencil_radius;
+            xstart = std::max(0, xstart);
+            int xstop = xc + pencil_radius;
+            xstop = std::min((int)(Imask().xdim), xstop);
+            int ystart = yc - pencil_radius;
+            ystart = std::max(0, ystart);
+            int ystop = yc + pencil_radius;
+            ystop = std::min((int)(Imask().ydim), ystop);
+            for (int y=ystart; y < ystop; y++)
             {
-                int d2 = dy2 + (x-xc)*(x-xc);
-                if (d2 < pencil_radius*pencil_radius)
+                int dy2 = (y-yc)*(y-yc);
+                for (int x=xstart; x < xstop; x++)
                 {
-                    if (button == FL_LEFT_MOUSE && DIRECT_A2D_ELEM(Imask(), y, x) < 0.5 )
+                    int d2 = dy2 + (x-xc)*(x-xc);
+                    if (d2 < pencil_radius*pencil_radius)
                     {
-                        long n = Imask().xdim * y + x;
-                        boxes[0]->img_data[3*n] += 127;
-                        DIRECT_A2D_ELEM(Imask(), y, x) = 1.;
-                    }
-                    else if (button == FL_MIDDLE_MOUSE && DIRECT_A2D_ELEM(Imask(), y, x) > 0.5 )
-                    {
-                        long n = Imask().xdim * y + x;
-                        boxes[0]->img_data[3*n] -= 127;
-                        DIRECT_A2D_ELEM(Imask(), y, x) = 0.;
+                        if (button == FL_LEFT_MOUSE && DIRECT_A2D_ELEM(Imask(), y, x) < 0.5 )
+                        {
+                            long n = Imask().xdim * y + x;
+                            boxes[0]->img_data[3*n] += 127;
+                            DIRECT_A2D_ELEM(Imask(), y, x) = 1.;
+                        }
+                        else if (button == FL_MIDDLE_MOUSE && DIRECT_A2D_ELEM(Imask(), y, x) > 0.5 )
+                        {
+                            long n = Imask().xdim * y + x;
+                            boxes[0]->img_data[3*n] -= 127;
+                            DIRECT_A2D_ELEM(Imask(), y, x) = 0.;
+                        }
                     }
                 }
             }
+            boxes[0]->redraw();
+            return 1;
         }
-        boxes[0]->redraw();
-        return 1;
-    }
-    else if ((button == FL_RIGHT_MOUSE) || (button == FL_LEFT_MOUSE && with_control))
-    {
-        redraw();
-        Fl_Menu_Item rclick_menu[] = {
-                { "Save image with mask (CTRL-s)" },
-                { "Set pencil radius" },
-                { "Help" },
-                { "Quit (CTRL-q)" },
-                { 0 }
-        };
-        const Fl_Menu_Item *m = rclick_menu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
-        if ( !m )
-            return 0;
-        else if ( strcmp(m->label(), "Save image with mask (CTRL-s)") == 0 )
-            saveMask();
-        else if ( strcmp(m->label(), "Set pencil radius") == 0 )
-            setPencilRadius();
-        else if ( strcmp(m->label(), "Help") == 0 )
-            printHelp();
-        else if ( strcmp(m->label(), "Quit (CTRL-q)") == 0 )
-            exit(0);
-        redraw();
-        return 1; // (tells caller we handled this event)
-    }
+        else if ((button == FL_RIGHT_MOUSE) || (button == FL_LEFT_MOUSE && with_control))
+        {
+            redraw();
+            Fl_Menu_Item rclick_menu[] = {
+                    { "Save image with mask (CTRL-s)" },
+                    { "Set pencil radius" },
+                    { "Help" },
+                    { "Quit (CTRL-q)" },
+                    { 0 }
+            };
+            const Fl_Menu_Item *m = rclick_menu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
+            if ( !m )
+                return 0;
+            else if ( strcmp(m->label(), "Save image with mask (CTRL-s)") == 0 )
+                saveMask();
+            else if ( strcmp(m->label(), "Set pencil radius") == 0 )
+                setPencilRadius();
+            else if ( strcmp(m->label(), "Help") == 0 )
+                printHelp();
+            else if ( strcmp(m->label(), "Quit (CTRL-q)") == 0 )
+                exit(0);
+            redraw();
+            return 1; // (tells caller we handled this event)
+        }
+ 		return 0;
+	}
     // Update the drawing every time something happens ....
     else if (ev==FL_RELEASE || ev==FL_LEAVE || ev==FL_ENTER || ev==FL_MOVE || ev == FL_FOCUS || ev == FL_UNFOCUS)
     {
@@ -2666,6 +2675,7 @@ void maskerViewerCanvas::saveMask()
         std::string command = "mkdir -p " + fn_dirs;
         int res = system(command.c_str());
     }
+
     Imask.write(fn_mask);
 
     std::cout << "Saved mask as "<< fn_mask << std::endl;
@@ -3187,7 +3197,7 @@ void Displayer::read(int argc, char **argv)
 	int mask_section  = parser.addSection("Mask design options");
 	do_mask = parser.checkOption("--paint_mask", "Paint mask in input image");
     fn_mask = parser.getOption("--fn_mask", "Name for MRC file of the designed mask", "");
-	pencil_radius = textToFloat(parser.getOption("--pencil_radius", "Pencil radius to draw masks (in original pixels)", "10"));
+	pencil_radius = textToFloat(parser.getOption("--pencil_radius", "Pencil radius to draw masks (in original pixels)", "25"));
 
 	verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 
@@ -3452,7 +3462,7 @@ void Displayer::run()
 		basisViewerWindow win(CEIL(scale*XSIZE(img())), CEIL(scale*YSIZE(img())), fnt.c_str());
 		win.fillSingleViewerCanvas(img(), 0., 255., 0., scale);
 	}
-	else if (do_pick || do_pick_startend || do_pick_lines)
+	else if (do_pick || do_pick_startend || do_pick_lines || do_mask)
 	{
 		Image<RFLOAT> img, fom_img;
 
@@ -3479,23 +3489,21 @@ void Displayer::run()
 		basisViewerWindow win(CEIL(scale*XSIZE(img())), CEIL(scale*YSIZE(img())), fn_in.c_str());
 		if (fn_coords=="")
 			fn_coords = fn_in.withoutExtension()+"_coords.star";
-		win.fillPickerViewerCanvas(img(), fom_img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, do_pick_lines, fn_coords,
-    		fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom, fom_min, fom_max);
-	}
-    else if (do_mask)
-    {
-        colour_scheme = BLACKGREYREDSCALE;
 
-        Image<RFLOAT> img, Imask;
-        img.read(fn_in);
-        if (fn_mask != "")
+        if (do_mask)
         {
-            Imask.read(fn_mask);
+            colour_scheme = BLACKGREYREDSCALE;
+            RFLOAT angpix = img.samplingRateX();
+            Image<RFLOAT> Imask;
+            if (fn_mask != "" && exists(fn_mask)) Imask.read(fn_mask);
+            win.fillMaskerViewerCanvas(img(), Imask(), minval, maxval, sigma_contrast, scale, ROUND(scale*pencil_radius), fn_mask, angpix);
         }
-        basisViewerWindow win(CEIL(scale*XSIZE(img())), CEIL(scale*YSIZE(img())), fn_in.c_str());
-        win.fillMaskerViewerCanvas(img(), Imask(), minval, maxval, sigma_contrast, scale, ROUND(scale*pencil_radius), fn_mask);
-
-    }
+        else
+        {
+            win.fillPickerViewerCanvas(img(), fom_img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, do_pick_lines, fn_coords,
+                                       fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom, fom_min, fom_max);
+        }
+	}
 	else if (fn_in.isStarFile())
 	{
 		if (fn_in.contains("_optimiser.star"))

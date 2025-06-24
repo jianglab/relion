@@ -161,7 +161,7 @@ public:
 	                           FileName _fn_color = "", FileName _fn_mic= "", FileName _color_label = "", RFLOAT _color_blue_value = 0., RFLOAT _color_red_value = 1.,
 							   RFLOAT _minimum_pick_fom = -999., RFLOAT _min_fom = 0., RFLOAT _max_fom = 0.);
     int fillMaskerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> mask_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
-                               RFLOAT _scale, int _pencil_radius, FileName _fn_mask);
+                               RFLOAT _scale, int _pencil_radius, FileName _fn_mask, RFLOAT angpix);
 
 };
 
@@ -462,6 +462,9 @@ public:
 
     // Scale for pencil_radius
 	RFLOAT mask_scale;
+
+    // Original angpix
+    RFLOAT angpix;
 
     // Filename of the mask
     FileName fn_mask;
