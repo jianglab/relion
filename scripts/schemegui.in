@@ -92,6 +92,17 @@ def load_star(filename):
 
     return datasets
 
+def copy_scheme(schemename):
+  
+    ## Only copy the Scheme directory structure from the RELION installation directory if it doesn't exist yet
+    if not os.path.isdir('Schemes/'+schemename):
+        try:
+            mydir = os.environ['RELION_SCRIPT_DIRECTORY']
+        except KeyError:
+            raise KeyError("Environment variable $RELION_SCRIPT_DIRECTORY has not been set. This is required to copy RELION-distributed schemes from.")
+        print(' Copying Schemes/' + schemename + ' from: ' + mydir)
+        copytree(mydir+'/Schemes/'+schemename, 'Schemes/'+schemename)
+
 class SchemeGui(object):
 
     def __init__(self, main_window, schemename):
@@ -407,7 +418,11 @@ def main():
     else:
        schemename = sys.argv[1] 
 
-    print(' RELION_IT: launching GUI...')
+    schemestar = 'Schemes/' + schemename + '/scheme.star'
+    if not path.exists(schemestar):
+        print(' Scheme does not yet exist, try copying from RELION scripts directory... ')
+        copy_scheme(schemename)
+    print(' Launching GUI...')
     tk_root = tk.Tk()
     titlegui = "Scheme: " + schemename
     tk_root.title(titlegui)
