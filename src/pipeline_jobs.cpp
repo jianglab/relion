@@ -2062,7 +2062,8 @@ Helical tubes with shorter lengths will not be picked. Note that a long helical 
     joboptions["do_amyloid_plot"] = JobOption("Plot results per micrograph?", false, "Set this option to Yes to visualise intermediate results for amyloid tracing, which may help with setting values for filament length, width and picking threshold. Don't use in parallel or in submission to the queue.");
     joboptions["amyloid_width"] = JobOption("Amyloid width (A): ", 200, 100, 1000, 10, "Width (in Angstroms) used for FOM calculation and/or tracing. ");
     joboptions["amyloid_length"] = JobOption("Amyloid minimum length (A): ", 500, 100, 1000, 10, "Length (in Angstroms) used for FOM calculation, and minimum length of filaments for tracing.");
-
+    joboptions["do_amyloid_carbon"] = JobOption("Ignore filaments on carbon?", false, "Set to Yes if you want to use automated carbon detection to avoid picking filaments on carbon.");
+    joboptions["amyloid_carbon_threshold"] = JobOption("Carbon threshold: ", 0.9, 0.05, 1, 0.05, "At what probability should pixels in the micrographs be deemed carbon? Use lower values to have more areas exclude from the picking.");
 
 }
 
@@ -2216,6 +2217,11 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
             command += " --trace_filament_width " + joboptions["amyloid_width"].getString();
             command += " --threshold " + joboptions["amyloid_threshold"].getString();
             command += " --gpu \"" + joboptions["amyloid_gpu_ids"].getString() + "\"";
+
+            if (joboptions["do_amyloid_carbon"].getBoolean())
+            {
+                command += " --detect_carbon --carbon_threshold " + joboptions["amyloid_carbon_threshold"].getString();
+            }
 
             if (joboptions["do_amyloid_plot"].getBoolean()) command += " --plot ";
 

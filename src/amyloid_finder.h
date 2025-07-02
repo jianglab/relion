@@ -76,6 +76,15 @@ public:
     // Redo existing tracings?
     bool do_redo_tracing;
 
+    // Detect carbon in filament tracing to ignore filaments on carbon
+    bool do_carbon;
+
+    // threshold for carbon detection
+    RFLOAT carbon_threshold;
+
+    // FileName for carbon detection model
+    FileName fn_carbon_model_path;
+
     // FileName for Jenny's model
     FileName fn_model_path;
 

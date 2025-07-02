@@ -47,6 +47,9 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
     fn_other_args = parser.getOption("--other_args", "Other arguments for the python script", "");
     fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","/public/EM/RELION/amypicker2.ckpt");
+    do_carbon = parser.checkOption("--detect_carbon", "Detect carbon and ignore filaments on there.");
+    fn_carbon_model_path = parser.getOption("--carbon_model_path", "Name of the model to execute for carbon detection","/public/EM/RELION/carbon.ckpt");
+    carbon_threshold = textToFloat(parser.getOption("--carbon_threshold", "Threshold for carbon detection", "0.9"));
 	do_skip_tracing = parser.checkOption("--skip_tracing", "Skip tracing.");
     do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
     gpu_ids = parser.getOption("--gpu", "Device ids for each MPI-thread","default");
@@ -781,6 +784,7 @@ void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_
         }
         // remove leading job number from fn_mic filename
         FileName fn_pick = fn_root + "_" + fn_out + ".star";
+        MDtrace.setValue(EMDL_MICROGRAPH_NAME, todo_micrographs_tracing[imic]);
         MDtrace.setValue(EMDL_MICROGRAPH_AUTOPICK_FOM, fn_fom);
         MDtrace.setValue(EMDL_MICROGRAPH_AUTOPICK_PSI, fn_psi);
         MDtrace.setValue(EMDL_MICROGRAPH_COORDINATES, fn_pick);
@@ -811,6 +815,11 @@ void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_
     command += " -s " + floatToString(down_angpix/angpix);
     command += " -a " + pipeline_control_outputname+RELION_JOB_ABORT_NOW;
     command += " -v " + integerToString(verb);
+    if (do_carbon)
+    {
+        command += " -c " + fn_carbon_model_path;
+        command +=  " --carbon_threshold " + floatToString(carbon_threshold);
+    }
     if (do_plot)
         command += " --plot ";
 

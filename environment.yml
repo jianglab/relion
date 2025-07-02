@@ -28,6 +28,7 @@ dependencies:
       - numpy==1.26.1
       - scipy==1.11.2
       - skan==0.12.2
+      - opencv-python-headless
       - git+https://github.com/3dem/relion-classranker
       - git+https://github.com/3dem/relion-blush
       - git+https://github.com/3dem/DynaMight

@@ -964,8 +964,23 @@ void JobWindow::initialiseAutopickWindow()
     place("amyloid_gpu_ids");
     place("do_amyloid_plot");
 
+    current_y += STEPY/2;
+
+    group6 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+    group6->end();
+
+    place("do_amyloid_carbon", TOGGLE_DEACTIVATE, group6);
+
+    group6->begin();
+    place("amyloid_carbon_threshold", TOGGLE_DEACTIVATE);
+
+    group6->end();
+    guientries["do_amyloid_carbon"].cb_menu_i();
+
     group5->end();
     guientries["do_amyloid_tracing"].cb_menu_i();
+
+
 
 	tab7->end();
 }
