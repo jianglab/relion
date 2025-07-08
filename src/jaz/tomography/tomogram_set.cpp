@@ -151,7 +151,7 @@ void TomogramSet::removeTomogram(std::string tomogramName)
 }
 
 Tomogram TomogramSet::loadTomogram(int index, bool loadImageData, bool loadEvenFramesOnly, bool loadOddFramesOnly,
-                                   int _w0, int _h0, int _d0) const //Set loadEven/OddFramesOnly to True to loadImageData from rlnTomoMicrographNameEven/Odd rather than rlnMicrographName
+                                   int _w0, int _h0, int _d0, bool ignore_tomo_size) const //Set loadEven/OddFramesOnly to True to loadImageData from rlnTomoMicrographNameEven/Odd rather than rlnMicrographName
 {
 	Tomogram out;
 
@@ -175,7 +175,7 @@ Tomogram TomogramSet::loadTomogram(int index, bool loadImageData, bool loadEvenF
         globalTable.getValueSafely(EMDL_TOMO_SIZE_Y, out.h0, index);
         globalTable.getValueSafely(EMDL_TOMO_SIZE_Z, out.d0, index);
     }
-    else
+    else if (!ignore_tomo_size)
     {
         REPORT_ERROR("ERROR loadTomogram: tomogram sizes have not been set for tomogram " + tomoName);
     }
