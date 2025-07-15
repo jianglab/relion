@@ -217,9 +217,9 @@ class star_handler_parameters
 
 		compareMetaDataTable(MD1, MD2, MDboth, MDonly1, MDonly2, label1, eps, label2, label3);
 
-		std::cout << MDboth.numberOfObjects()  << " entries occur in both input STAR files." << std::endl;
-		std::cout << MDonly1.numberOfObjects() << " entries occur only in the 1st input STAR file." << std::endl;
-		std::cout << MDonly2.numberOfObjects() << " entries occur only in the 2nd input STAR file." << std::endl;
+		std::cout << MDboth.numberOfObjects()  << " entries from the 1st input STAR file also have an entry in the 2nd STAR file." << std::endl;
+		std::cout << MDonly1.numberOfObjects() << " entries from the 1st input STAR file do NOT have an entry in the 2nd STAR file." << std::endl;
+		std::cout << MDonly2.numberOfObjects() << " entries from the 2nd Sinput STAR file do NOT have an entry in the 1st STAR file." << std::endl;
 
 		write_check_ignore_optics(MDboth, fn_out.insertBeforeExtension("_both"), MD1.getName());
 		std::cout << " Written: " << fn_out.insertBeforeExtension("_both") << std::endl;
