@@ -948,21 +948,21 @@ void JobWindow::initialiseAutopickWindow()
 	tab7->label("Amyloid");
 	resetHeight();
 
-    place("do_amyloid_fom");
+    place("do_amyloid_fom", TOGGLE_LEAVE_ACTIVE);
 
     current_y += STEPY/2;
 
     group5 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
     group5->end();
 
-    place("do_amyloid_tracing", TOGGLE_LEAVE_ACTIVE, group5);
+    place("do_amyloid_tracing", TOGGLE_DEACTIVATE, group5);
 
     group5->begin();
-    place("amyloid_threshold");
-    place("amyloid_length");
-    place("amyloid_width");
-    place("amyloid_gpu_ids");
-    place("do_amyloid_plot");
+    place("amyloid_threshold", TOGGLE_DEACTIVATE);
+    place("amyloid_length", TOGGLE_DEACTIVATE);
+    place("amyloid_width", TOGGLE_DEACTIVATE);
+    place("amyloid_gpu_ids", TOGGLE_DEACTIVATE);
+    place("do_amyloid_plot", TOGGLE_DEACTIVATE);
 
     current_y += STEPY/2;
 

@@ -365,7 +365,60 @@ def trim_end(branch_coords, trim_length=10, trim_start=False):
         return branch_coords[trim_length:] if trim_start else branch_coords[:-trim_length]
     return np.array([])  # Remove short branches completely
 
-def prune_skeleton(skeleton, min_length=100, min_distance=25, step=50):
+def angular_diff(a, b, period=180):
+    """Minimal circular difference between angles a and b on [0, period)."""
+    raw = abs(a - b)
+    return min(raw, period - raw)
+
+def segment_orientation(p0, p1):
+    """
+    Compute the orientation (in degrees) and fold it into [0, 180).
+    p0, p1 are (row, col) integer tuples or arrays.
+    """
+    # Note: row = y, col = x
+    dy = p1[0] - p0[0]
+    dx = p1[1] - p0[1]
+    # conventions of y-axis is reversed in RELION, so use -dy!
+    ang = np.degrees(np.arctan2(-dy, dx))  # gives [-180, 180)
+
+    # fold into [0, 180):
+    if ang < 0:
+        ang += 180
+    elif ang >= 180:
+        ang -= 180
+
+    return ang
+
+def split_branch_on_psi_mismatch(branch_coords, psi_image, threshold=20):
+    
+    segments = []
+    current_seg = [tuple(branch_coords[0])]
+    prev_pt = branch_coords[0]
+
+    # step through each next point
+    for i in range(1, len(branch_coords)):
+        pt = branch_coords[i]
+        psi_ang = psi_image[pt[0], pt[1]]
+
+        # compute seg_ang between i-3 and i, fallback to 0-i for i<3
+        if i >= 3:
+            p0 = branch_coords[i - 3]
+            seg_ang = segment_orientation(p0, pt)
+
+            # split if mismatch > threshold
+            if angular_diff(seg_ang, psi_ang) > threshold:
+                segments.append(np.array(current_seg))
+                current_seg = []
+
+        current_seg.append(tuple(pt))
+    
+    # append last segment
+    if current_seg:
+        segments.append(np.array(current_seg))
+
+    return segments   
+
+def prune_skeleton(skeleton, psi_image, min_length=100, min_distance=25, step=50, psi_threshold=20):
     """Prune skeleton branches that too short."""
     # Most of the compute goes into the Skeleton call; rest of function is cheap
     skel = Skeleton(skeleton)
@@ -376,11 +429,17 @@ def prune_skeleton(skeleton, min_length=100, min_distance=25, step=50):
     accepted_branches = []  # Stores (branch coordinates, start, end)
     sampled_coords = []
 
+    # Pass 0: split branches with jumps in psi-angle values
+    all_splits = []
+    for idx, row in df.iterrows():
+        coords = skel.path_coordinates(idx)
+        pieces = split_branch_on_psi_mismatch(coords, psi_image, threshold=psi_threshold)
+        all_splits.extend(pieces)
+
     # Pass 1: Collect branches and compute pairwise distances
     branch_data = []  # Store branch info for pass 2
     endpoints = []  # Store (start, end) tuples
-    for idx, row in df.iterrows():
-        branch_coords = skel.path_coordinates(idx)
+    for branch_coords in all_splits:
 
         # Compute Euclidean length of the branch
         length = np.sum(np.sqrt(np.sum(np.diff(branch_coords, axis=0) ** 2, axis=1)))
@@ -400,7 +459,6 @@ def prune_skeleton(skeleton, min_length=100, min_distance=25, step=50):
     dists = cdist(endpoints, endpoints)
 
     # Mark close endpoint pairs for trimming
-    #close_pairs = np.where((dists < min_distance) & (dists > 0))  # Exclude self-distances
     close_pairs = np.where((dists < min_distance) )  # Exclude self-distances
     trim_flags = {}  # Dictionary to store which endpoints need trimming
 
@@ -478,6 +536,7 @@ def main():
     parser.add_argument("-r", "--radius", type=int, help="Radius of region to exclude near edges (in A)")
     parser.add_argument("-l", "--minimum_length", type=int, default=250,
                         help="Remove final segments smaller than this size in Angstroms (default=250)")
+    parser.add_argument("-p", "--psi_jump_threshold", default=45, type=float, help="Maximum difference in degrees of psi angles for consecutive points in skeletons (default=20)")
     parser.add_argument("-t", "--threshold", default=0.5, type=float, help="Foreground threshold (default=0.5)")
     parser.add_argument("-ct", "--carbon_threshold", default=0.9, type=float, help="Carbon detection threshold (default=0.9)")
     parser.add_argument("-s", "--scale", type=float, default=1.0,
@@ -596,15 +655,17 @@ def main():
 
         # 4) Skeletonize
         skeleton_img = skeletonize(clean_foreground)
-
+        
         # if there is only a single non-zero pixel, Skeleton will give an error. Let's check for at least 10 non-zero pixels
         if np.count_nonzero(skeleton_img) > 10:
 
-	    # 5) Prune skeleton based on Skan's branches: remove any branch with length below args.final_min_size
+	    # 5) Prune skeleton based on Skan's branches: splits branches with jumps in psi-angles, remove any branch with length below args.final_min_size, and enforce minimal distance between end points
             pruned_skeleton, sampled_points = prune_skeleton(skeleton_img,
+                                                             psi_image,
                                                              min_length=args.minimum_length / pixel_size,
                                                              min_distance=2 * args.radius / pixel_size,
-                                                             step=int(args.sample_step / pixel_size))
+                                                             step=int(args.sample_step / pixel_size),
+                                                             psi_threshold=args.psi_jump_threshold)
 
             # 6) Sample coordinates every 'sample_step' from pruned skeleton, **including filament ID**.
             #sampled_points = sample_coordinates_with_ids(pruned_skeleton, step=int(args.sample_step / pixel_size))

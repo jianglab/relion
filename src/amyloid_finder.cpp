@@ -43,6 +43,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "0.5"));
     trace_filament_width = textToFloat(parser.getOption("--trace_filament_width", "Minimum width occupied by a traced filaments (in A)", "200"));
     trace_filament_length = textToFloat(parser.getOption("--trace_filament_length", "Minimum length of traced filaments (in A)", "300"));
+    psi_jump_threshold = textToFloat(parser.getOption("--psi_jump_threshold", "Maximum difference in PSI values between consecutive elements of a skeletonised branch (in degrees)", "45"));
     do_plot = parser.checkOption("--plot", "Display images with intermediate tracing results for each micrograph");
     fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
     fn_other_args = parser.getOption("--other_args", "Other arguments for the python script", "");
@@ -812,6 +813,7 @@ void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_
     command += " -t " + floatToString(threshold);
     command += " -r " + floatToString(trace_filament_width/2);
     command += " -l " + floatToString(trace_filament_length);
+    command += " -p " + floatToString(psi_jump_threshold);
     command += " -s " + floatToString(down_angpix/angpix);
     command += " -a " + pipeline_control_outputname+RELION_JOB_ABORT_NOW;
     command += " -v " + integerToString(verb);
@@ -825,7 +827,7 @@ void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_
 
     command += " " + fn_other_args;
 
-    //std::cerr << command << std::endl;
+    std::cerr << command << std::endl;
     int res = system(command.c_str());
 
     if (pipeline_control_check_abort_job())

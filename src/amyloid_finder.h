@@ -82,6 +82,9 @@ public:
     // threshold for carbon detection
     RFLOAT carbon_threshold;
 
+    // threshold for psi-jumps in tracing skeletons
+    RFLOAT psi_jump_threshold;
+
     // FileName for carbon detection model
     FileName fn_carbon_model_path;
 
