@@ -394,31 +394,39 @@ def split_branch_on_psi_mismatch(branch_coords, psi_image, threshold=20):
     segments = []
     current_seg = [tuple(branch_coords[0])]
     prev_pt = branch_coords[0]
-
+    prev_ang = psi_image[prev_pt[0], prev_pt[1]]
+    
     # step through each next point
     for i in range(1, len(branch_coords)):
         pt = branch_coords[i]
         psi_ang = psi_image[pt[0], pt[1]]
 
-        # compute seg_ang between i-3 and i, fallback to 0-i for i<3
-        if i >= 3:
+        # split if jump in neighbour psi image values > threshold
+        do_split = False
+        if angular_diff(prev_ang, psi_ang) > threshold:
+            do_split = True
+        # compute seg_ang between i-3 and i
+        elif i >= 3:
             p0 = branch_coords[i - 3]
             seg_ang = segment_orientation(p0, pt)
-
             # split if mismatch > threshold
             if angular_diff(seg_ang, psi_ang) > threshold:
-                segments.append(np.array(current_seg))
-                current_seg = []
+                do_split = True
 
+        if do_split:
+            segments.append(np.array(current_seg))
+            current_seg = []
+        
         current_seg.append(tuple(pt))
-    
+        prev_ang = psi_ang
+        
     # append last segment
     if current_seg:
         segments.append(np.array(current_seg))
 
     return segments   
 
-def prune_skeleton(skeleton, psi_image, min_length=100, min_distance=25, step=50, psi_threshold=20):
+def prune_skeleton(skeleton, psi_image, min_length=100, min_distance=25, step=50, psi_threshold=45):
     """Prune skeleton branches that too short."""
     # Most of the compute goes into the Skeleton call; rest of function is cheap
     skel = Skeleton(skeleton)
@@ -533,10 +541,10 @@ def main():
     parser.add_argument("-m", "--model_path", help="Path to PyTorch model checkpoint")
     parser.add_argument("-c", "--carbon_model_path", help="Path to PyTorch model checkpoint for carbon detection", default="")
     parser.add_argument("-o", "--output", help="Output star file with coordinates")
-    parser.add_argument("-r", "--radius", type=int, help="Radius of region to exclude near edges (in A)")
+    parser.add_argument("-r", "--radius", type=int, help="Minimum distance between ends of filaments (in A)")
     parser.add_argument("-l", "--minimum_length", type=int, default=250,
                         help="Remove final segments smaller than this size in Angstroms (default=250)")
-    parser.add_argument("-p", "--psi_jump_threshold", default=45, type=float, help="Maximum difference in degrees of psi angles for consecutive points in skeletons (default=20)")
+    parser.add_argument("-p", "--psi_jump_threshold", default=45, type=float, help="Maximum difference in degrees of psi angles for consecutive points in skeletons (default=45)")
     parser.add_argument("-t", "--threshold", default=0.5, type=float, help="Foreground threshold (default=0.5)")
     parser.add_argument("-ct", "--carbon_threshold", default=0.9, type=float, help="Carbon detection threshold (default=0.9)")
     parser.add_argument("-s", "--scale", type=float, default=1.0,

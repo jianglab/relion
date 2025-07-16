@@ -41,7 +41,7 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
 
     int pick_section = parser.addSection("Filament tracing options ");
     threshold = textToFloat(parser.getOption("--threshold", "Threshold in Z-scores for coordinate picking", "0.5"));
-    trace_filament_width = textToFloat(parser.getOption("--trace_filament_width", "Minimum width occupied by a traced filaments (in A)", "200"));
+    trace_filament_width = textToFloat(parser.getOption("--trace_filament_width", "Minimum width occupied by a traced filaments (in A)", "100"));
     trace_filament_length = textToFloat(parser.getOption("--trace_filament_length", "Minimum length of traced filaments (in A)", "300"));
     psi_jump_threshold = textToFloat(parser.getOption("--psi_jump_threshold", "Maximum difference in PSI values between consecutive elements of a skeletonised branch (in degrees)", "45"));
     do_plot = parser.checkOption("--plot", "Display images with intermediate tracing results for each micrograph");
