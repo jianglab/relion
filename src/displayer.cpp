@@ -2254,6 +2254,7 @@ int pickerViewerCanvas::handle(int ev)
 			MDcoords.setValue(EMDL_PARTICLE_SELECTION_TYPE, iaux);
 			MDcoords.setValue(EMDL_ORIENT_PSI, aux);
 			MDcoords.setValue(EMDL_PARTICLE_AUTOPICK_FOM, zero);
+
 			redraw();
             return 1;
 		}
