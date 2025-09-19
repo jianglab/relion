@@ -44,17 +44,19 @@
 #include "src/error.h"
 #include "src/ml_optimiser.h"
 #ifdef _CUDA_ENABLED
-#include "src/acc/cuda/cuda_ml_optimiser.h"
-#include <nvtx3/nvToolsExt.h>
-#include <cuda_profiler_api.h>
+    #include "src/acc/cuda/cuda_ml_optimiser.h"
+    #ifdef CUDA_PROFILING
+        #include <nvtx3/nvToolsExt.h>
+        #include <cuda_profiler_api.h>
+    #endif
 #elif _HIP_ENABLED
-#include "src/acc/hip/hip_ml_optimiser.h"
-#include <roctracer/roctx.h>
+    #include "src/acc/hip/hip_ml_optimiser.h"
+    #include <roctracer/roctx.h>
 #elif _SYCL_ENABLED
-	#include <cstdlib>
-	#include <cstring>
-	#include <tuple>
-	#include <algorithm>
+    #include <cstdlib>
+    #include <cstring>
+    #include <tuple>
+    #include <algorithm>
     #include "src/acc/sycl/sycl_ml_optimiser.h"
 #elif ALTCPU
     #include <atomic>
