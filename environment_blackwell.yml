@@ -6,8 +6,9 @@ dependencies:
   - python=3.10
   - setuptools=59.5.0
   - pip:
-      - torch==2.0.1
-      - torchvision==0.15.2
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.7.1+cu128
+      - torchvision==0.22.1+cu128
       - tqdm==4.65.0
       - mrcfile==1.4.3
       - starfile>=0.5.6
@@ -33,4 +34,3 @@ dependencies:
       - git+https://github.com/3dem/DynaMight
       - git+https://github.com/3dem/topaz
       - git+https://github.com/3dem/model-angelo
-      - ".[vis]"

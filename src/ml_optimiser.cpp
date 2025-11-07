@@ -45,8 +45,10 @@
 #include "src/ml_optimiser.h"
 #ifdef _CUDA_ENABLED
 #include "src/acc/cuda/cuda_ml_optimiser.h"
-#include <nvToolsExt.h>
+#ifdef CUDA_PROFILING
+#include <nvtx3/nvToolsExt.h>
 #include <cuda_profiler_api.h>
+#endif
 #elif _HIP_ENABLED
 #include "src/acc/hip/hip_ml_optimiser.h"
 #include <roctracer/roctx.h>
@@ -448,6 +450,10 @@ void MlOptimiser::parseContinue(int argc, char **argv)
         do_norm_correction = true;
     if (parser.checkOption("--no_norm", "Switch off normalisation-error correction","OLD"))
         do_norm_correction = false;
+
+    //Check for relax_symmetry option
+    std::string sym_relax_ =  parser.getOption("--relax_sym", "Symmetry to be relaxed", "");
+    sampling.fn_sym_relax = sym_relax_;
 
     int subtomogram_section = parser.addSection("Subtomogram averaging");
     normalised_subtomos = parser.checkOption("--normalised_subtomo", "Have subtomograms been multiplicity normalised? (Default=False)");
@@ -6785,7 +6791,8 @@ void MlOptimiser::precalculateShiftedImagesCtfsAndInvSigma2s(bool do_also_unmask
     exp_local_Fctf.resize(exp_nr_images);
     exp_local_sqrtXi2.resize(exp_nr_images);
 
-    bool do_subtomo_correction = NZYXSIZE(exp_STMulti) > 0;
+    // This used to be NZYXSIZE(exp_STMulti) > 0, but the GPU resizes this array to non-zero xsize, where ysize=zsize=1!
+    bool do_subtomo_correction = YSIZE(exp_STMulti) > 1;
 
     int group_id = mydata.getGroupId(part_id);
     int optics_group = mydata.getOpticsGroup(part_id);
@@ -8277,7 +8284,7 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
     bool ctf_premultiplied = mydata.obsModel.getCtfPremultiplied(optics_group);
 
     MultidimArray<RFLOAT> exp_local_STMulti;
-    bool do_subtomo_correction = NZYXSIZE(exp_STMulti) > 0;
+    bool do_subtomo_correction = YSIZE(exp_STMulti) > 1;
 
     // Re-do below because now also want unmasked images AND if (stricht_highres_exp >0.) then may need to resize
     precalculateShiftedImagesCtfsAndInvSigma2s(true, true, part_id, exp_current_oversampling, metadata_offset,
