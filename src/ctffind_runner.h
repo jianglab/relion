@@ -139,6 +139,9 @@ public:
 
 	RFLOAT angpix;
 
+    // Resolution band for Rafa's ice ring statistics
+    RFLOAT ice_min, ice_max;
+
 	// Flag to only join results into a star file
 	bool do_only_join_results;
 
