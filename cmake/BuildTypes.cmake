@@ -1,11 +1,9 @@
 # Extra flags defined on each build type (this file is all optional to include)
 #
-# Because gcc is compliant with a float128 type, fftw has become as well. nvcc is NOT.
-# So -D__INTEL_COMPILER just manages to avoid compiling float128-targets (see fftw3.h, for instance).
 # Add -G to allow cuda-gdb to break inside kernels.
 
 if(CUDA)
-    set(RELION_NVCC_FLAGS "-D__INTEL_COMPILER --default-stream per-thread -Xcompiler ${OpenMP_CXX_FLAGS} " CACHE STRING "" FORCE)
+    set(RELION_NVCC_FLAGS "--default-stream per-thread -Xcompiler ${OpenMP_CXX_FLAGS} " CACHE STRING "" FORCE)
 elseif (HIP)
     if (${HIP_VERSION} VERSION_LESS "5.3" )
         set(EXTRA_HIPCC_FLAGS "-fgpu-default-stream=legacy -fno-gpu-rdc -munsafe-fp-atomics")
