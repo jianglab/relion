@@ -66,6 +66,8 @@ void CtffindRunner::read(int argc, char **argv, int rank)
 	int ctffind4_section = parser.addSection("CTFFIND4 parameters");
 	is_ctffind4 = parser.checkOption("--is_ctffind4", "The provided CTFFIND executable is CTFFIND4 (version 4.1+)");
 	use_given_ps = parser.checkOption("--use_given_ps", "Use pre-calculated power spectra?");
+    ice_min = textToFloat(parser.getOption("--ice_min", "Minimum frequency for ice ring density (in 1/A)", "0.25"));
+    ice_max = textToFloat(parser.getOption("--ice_max", "Maximum frequency for ice ring density (in 1/A)", "0.28"));
     do_extra_ice = parser.checkOption("--extra_ice_stats", "When using pre-calculated power spectra, one can calculate extra ice statistics, which may be useful for selection of icy data sets");
 	do_movie_thon_rings = parser.checkOption("--do_movie_thon_rings", "Calculate Thon rings from movie frames?");
 	avg_movie_frames = textToInteger(parser.getOption("--avg_movie_frames", "Average over how many movie frames (try to get 4 e-/A2)", "1"));
@@ -1001,12 +1003,12 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
         int imin = -999;
         int imax = -999;
         for (int i = 0; i < words.size(); i++)
-            if (imin < 0 && textToFloat(words[i]) >= 0.25) {
+            if (imin < 0 && textToFloat(words[i]) >= ice_min) {
                 imin = i;
                 break;
             }
         for (int i = imin; i < words.size(); i++)
-            if (imax < 0 && imin > 0 && textToFloat(words[i]) > 0.28) {
+            if (imax < 0 && imin > 0 && textToFloat(words[i]) > ice_max) {
                 imax = i;
                 break;
             }
