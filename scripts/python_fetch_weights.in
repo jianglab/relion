@@ -39,6 +39,8 @@ if [ -x "$target_path" ]; then
     # Unsuccessful, trap the EXIT signal to call the custom exit function
     trap 'exit_with_error' EXIT
   fi
+  # Execute the target binary for amy-v1.0
+  "$target_path" -m amy-v1.0
 else
   echo "Error: $target_binary not found or not executable in $script_dir."
   exit 1
