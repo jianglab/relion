@@ -166,8 +166,8 @@ static const std::vector<std::string> job_subtomo_format_options{
 };
 
 static const std::vector<std::string> job_blush_version_options{
-        "ver1.0",
-        "amy-ver1.0"
+        "v1.0",
+        "amy-v1.0"
 };
 
 // To have a line on the GUI to change the minimum number of dedicated in a job
