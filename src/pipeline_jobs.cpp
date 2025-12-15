@@ -3790,7 +3790,8 @@ High-resolution refinements (e.g. ribosomes or other large complexes in 3D auto-
 	joboptions["highres_limit"] = JobOption("Limit resolution E-step to (A): ", -1, -1, 20, 1, "If set to a positive number, then the expectation step (i.e. the alignment) will be done only including the Fourier components up to this resolution (in Angstroms). \
 This is useful to prevent overfitting, as the classification runs in RELION are not to be guaranteed to be 100% overfitting-free (unlike the 3D auto-refine with its gold-standard FSC). In particular for very difficult data sets, e.g. of very small or featureless particles, this has been shown to give much better class averages. \
 In such cases, values in the range of 7-12 Angstroms have proven useful.");
-	joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
+    joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
+    joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
 
 	joboptions["dont_skip_align"] = JobOption("Perform image alignment?", true, "If set to No, then rather than \
 performing both alignment and classification, only classification will be performed. This allows the use of very focused masks.\
@@ -4057,7 +4058,10 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	}
 
 	if (joboptions["do_blush"].getBoolean())
-		command += " --blush ";
+    {
+        command += " --blush ";
+        command += " --blush_model " + joboptions["blush_version"].getString();
+    }
 
 	if (joboptions["fn_mask"].getString().length() > 0)
 	{
@@ -4285,6 +4289,7 @@ High-resolution refinements (e.g. ribosomes or other large complexes in 3D auto-
 masked half-maps are used and a post-processing-like correction of the FSC curves (with phase-randomisation) is performed every iteration. This only works when a reference mask is provided on the I/O tab. \
 This may yield higher-resolution maps, especially when the mask contains only a relatively small volume inside the box.");
 	joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
+    joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
 
 	joboptions["sampling"] = JobOption("Initial angular sampling:", job_sampling_options, 2, "There are only a few discrete \
 angular samplings possible because we use the HealPix library to generate the sampling of the first two Euler angles on the sphere. \
@@ -4506,6 +4511,7 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
     if (joboptions["do_blush"].getBoolean())
     {
         command += " --blush ";
+        command += " --blush_model " + joboptions["blush_version"].getString();
     }
 
     // Always do compute stuff
@@ -4730,6 +4736,7 @@ Also note that larger bodies should be above smaller bodies in the STAR file. Fo
 	joboptions["do_subtracted_bodies"] = JobOption("Reconstruct subtracted bodies?", true, "If set to Yes, then the reconstruction of each of the bodies will use the subtracted images. This may give \
 useful insights about how well the subtraction worked. If set to No, the original particles are used for reconstruction (while the subtracted ones are still used for alignment). This will result in fuzzy densities for bodies outside the one used for refinement.");
 	joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
+    joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
 
 	joboptions["sampling"] = JobOption("Initial angular sampling:", job_sampling_options, 4, "There are only a few discrete \
 angular samplings possible because we use the HealPix library to generate the sampling of the first two Euler angles on the sphere. \
@@ -4854,7 +4861,10 @@ bool RelionJob::getCommandsMultiBodyJob(std::string &outputname, std::vector<std
 		}
 
         if (joboptions["do_blush"].getBoolean())
+        {
             command += " --blush ";
+            command += " --blush_model " + joboptions["blush_version"].getString();
+        }
 
 		if (joboptions["do_subtracted_bodies"].getBoolean())
 			command += " --reconstruct_subtracted_bodies ";
@@ -5782,7 +5792,7 @@ void RelionJob::initialiseModelAngeloJob()
 
 	joboptions["do_hhmer"] = JobOption("Perform HMMer search?", false ,"If set to Yes, model-angelo will perform a HMM search using HHMer in the output directory of the model-angelo run (without sequence). You can continue an old run with this option switched on, and the model building step will be skipped if the output .cif exists. This way, you can try multiple HHMer runs.");
 	joboptions["fn_lib"] = JobOption("Library with sequences for HMMer search:", LABEL_SEQUENCE_CPIPE, 1, "", "FASTA sequence files (*.{fasta,txt})", "FASTA file with library with all sequences for HMMer search. This is often an entire proteome.");
-	joboptions["alphabet"] = JobOption("Alphabet for the HMMer search:", job_modelangelo_alphabet_options, 0, "Type of Alphabet for HMM searches.");
+    joboptions["alphabet"] = JobOption("Alphabet for the HMMer search:", job_modelangelo_alphabet_options, 0, "Type of Alphabet for HMM searches.");
 	joboptions["F1"] = JobOption("HMMSearch F1: ", 0.02, 1., 10., 0.1, "F1 parameter for HMMSearch, see their documentation at http://eddylab.org/software/hmmer/Userguide.pdf");
 	joboptions["F2"] = JobOption("HMMSearch F2: ", 0.001, 1., 10., 0.1, "F2 parameter for HMMSearch, see their documentation at http://eddylab.org/software/hmmer/Userguide.pdf");
 	joboptions["F3"] = JobOption("HMMSearch F3: ", 0.00001, 0., 10., 0.1, "F3 parameter for HMMSearch, see their documentation at http://eddylab.org/software/hmmer/Userguide.pdf");
@@ -7181,10 +7191,7 @@ void RelionJob::initialiseTomoSubtomoJob()
     joboptions["max_dose"] = JobOption("Maximum dose (e/A^2):", -1, -1, 200, 1, "Tilt series frames with a dose higher than this maximum dose (in electrons per squared Angstroms) will not be included in the 3D pseudo-subtomogram, or in the 2D stack. For the latter, this will disc I/O operations and increase speed.");
     joboptions["min_frames"] = JobOption("Minimum nr. frames:", 1, 1, 40, 1, "Each selected pseudo-subtomogram need to be visible in at least this number of tilt series frames with doses below the maximum dose");
 
-    joboptions["do_stack2d"] = JobOption("Output 2D stacks?", true ,"If set to Yes, this program will write output subtomograms as 2D substacks. This is new in relion-5, and the preferred way of generating subtomograms.");
-    joboptions["do_pseudo3d"] = JobOption("OR: output 3D pseudo-subtomograms?", false ,"If set to Yes, this program will write output 3D pseudo-subtomograms as were defined in relion-4.");
-    joboptions["do_real_subtomo"] = JobOption("OR: output real 3D subtomograms?", false, "If set to Yes, this program will box out real subtomograms from the input tomogram and write those out as 3D subvolumes. Information about the 3D CTFs and missing wedge will be stored in ctf volumes, which can be used as they were in relion-3. Note that the binning cannot be changed anymore, so particles will be extracted at the pixel size of the tomogram, using the cropped box size in Angstrom to define the box size.");
-
+    joboptions["subtomo_format"] = JobOption("Subtomogram format:", job_subtomo_format_options, 0, "Format of the extracted subtomograms. Relion-5 type 2D stacks, relion-4 type 3D pseudo-subtomograms, or relion-3 type real-space subtomograms. Some people have reported that real-space 3D subtomograms are better for initial alignments than 2D stacks or 3D pseudo-subtomograms. You may want to use AreTomo2 reconstructions for extracting real-space subtomograms. They can be made as part of the Align tilt-series job.");
 	joboptions["do_float16"] = JobOption("Write output in float16?", true ,"If set to Yes, this program will write output images in float16 MRC format. This will save a factor of two in disk space compared to the default of writing in float32. Note that RELION and CCPEM will read float16 images, but other programs may not (yet) do so.");
 
 }
@@ -7195,16 +7202,6 @@ bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<s
 	commands.clear();
 	initialisePipeline(outputname, job_counter);
 	std::string command;
-
-    int c = 0;
-    if (joboptions["do_stack2d"].getBoolean()) c++;
-    if (joboptions["do_pseudo3d"].getBoolean()) c++;
-    if (joboptions["do_real_subtomo"].getBoolean()) c++;
-    if (c == 0 || c > 1)
-    {
-        error_message = "You have to choose either to write output as 2D stacks, 3D pseudo-subtomos, or to extract real subtomograms from the tomographic reconstruction.";
-        return false;
-    }
 
 	if (joboptions["nr_mpi"].getNumber(error_message) > 1)
 		command="`which relion_tomo_subtomo_mpi`";
@@ -7236,25 +7233,24 @@ bool RelionJob::getCommandsTomoSubtomoJob(std::string &outputname, std::vector<s
     if (error_message != "") return false;
     if (min_frames > 0.) command += " --min_frames " + joboptions["min_frames"].getString();
 
-	if (joboptions["do_float16"].getBoolean())
-	{
-		command += " --float16 ";
-	}
+    if (strcmp((joboptions["subtomo_format"].getString()).c_str(), job_subtomo_format_options[0].c_str()) == 0)
+    {
+        command += " --stack2d ";
+    }
+    else if (strcmp((joboptions["subtomo_format"].getString()).c_str(), job_subtomo_format_options[2].c_str()) == 0)
+    {
+        command += " --real_subtomo ";
 
-	if (joboptions["do_stack2d"].getBoolean())
-	{
-		command += " --stack2d ";
-	}
+        Node node2(outputname+"particles_for_class2d.star", LABEL_CLASS2D_PARTS);
+        outputNodes.push_back(node2);
+    }
 
-        if (joboptions["do_real_subtomo"].getBoolean())
-        {
-            command += " --real_subtomo ";
+    if (joboptions["do_float16"].getBoolean())
+    {
+        command += " --float16 ";
+    }
 
-            Node node2(outputname+"particles_for_class2d.star", LABEL_CLASS2D_PARTS);
-            outputNodes.push_back(node2);
-        }
-
-	if (is_continue)
+    if (is_continue)
 	{
 		command += " --only_do_unfinished ";
 	}
