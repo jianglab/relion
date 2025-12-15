@@ -80,17 +80,6 @@ endif()
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ------------------OPTIONS WHICH ARE NEEDED TO SET BUILD-TYPES (COMPILATION FLAGS)--
-# ----------------------------------------------------------CUDA-ARCH--
-
-set(CUDA_ARCH "" CACHE STRING "CUDA architecture to use")
-if (CUDA_ARCH STREQUAL "")
-	message(STATUS "Setting fallback CUDA_ARCH=50")
-	set(CUDARCH "-arch=sm_50")
-else ()
-	message(STATUS "Using provided CUDA_ARCH=${CUDA_ARCH}")
-	set(CUDARCH "-arch=sm_${CUDA_ARCH}")
-endif ()
-
 # -------------------------------------------------------------------FURTHER OPTIONS--
 
 # CUDA on by default, so check for other GPU/CPU-accelration request and possible conflicting dual-requests
@@ -188,8 +177,24 @@ endif()
 if(CUDA)
     # -----------------------------------------------------------------------------CUDA--
     # DOC: http://www.cmake.org/cmake/help/v3.0/module/FindCUDA.html
-    include(${CMAKE_SOURCE_DIR}/cmake/BuildTypes.cmake)
     FIND_PACKAGE(CUDA)
+
+    # "-arch=sm_XX" alone is equal to "-arch=compute_XX -code=compute_XX,sm_XX"
+    # compute_XX generates PTX; thus GPUs newer than XX can also use the binary.
+    # See https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/#gpu-architecture-arch.
+    set(CUDA_ARCH "" CACHE STRING "CUDA architecture to use")
+    if (CUDA_ARCH STREQUAL "")
+        if (${CUDA_VERSION} VERSION_LESS "13.0") # Pascal (e.g. 1080)
+            message(STATUS "Setting fallback CUDA_ARCH=50 (Pascal)")
+            set(CUDARCH "-arch=sm_50")
+        else() # CUDA >= 13.0 no longer supports Pascal. 75 = Turing (e.g. 2080) 
+            message(STATUS "Setting fallback CUDA_ARCH=75 (Turing)")
+            set(CUDARCH "-arch=sm_75")
+        endif()
+    else ()
+        message(STATUS "Using provided CUDA_ARCH=${CUDA_ARCH}")
+        set(CUDARCH "-arch=sm_${CUDA_ARCH}")
+    endif ()
 
     if(CUDA_FOUND)
       message(STATUS "Using cuda wrapper to compile....")
@@ -241,7 +246,7 @@ elseif(HIP)
     endif(HIP_FOUND)
 elseif(SYCL)
 	add_definitions(-D_SYCL_ENABLED=1 -DUSE_MPI_COLLECTIVE)
-	if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "IntelLLVM" OR "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" OR "${CMAKE_CXX_COMPILER}" MATCHES "mpiicpx")
+	if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "IntelLLVM" OR "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" OR "${CMAKE_CXX_COMPILER}" MATCHES "icpx")
 		add_definitions(-D_DPCPP_ENABLED=1)
 		SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fhonor-infinities -fhonor-nans -fsigned-zeros")
 	endif()
@@ -253,11 +258,10 @@ elseif(ALTCPU)
 endif()
  
 # ----------------------------------------------------------INCLUDE ALL BUILD TYPES---
-# This has to be AFTER project() and find_package(HIP) but BEFORE find_package(CUDA).
-# This is ugly but otherwise causes the GitHub issue #1032.
-if (NOT CUDA)
-    include(${CMAKE_SOURCE_DIR}/cmake/BuildTypes.cmake)
-endif()
+# This has to be AFTER project() and find_package(HIP).
+# Up to RELION 5.0.0, this must come BEFORE find_package(CUDA) as discussed in issue #1032.
+# Takanori fixed this in 5.0.1.
+include(${CMAKE_SOURCE_DIR}/cmake/BuildTypes.cmake)
 
 # ------------------------------------------------------------------ALLOCATOR CHOICE--
 option(CachedAlloc "CachedAlloc" ON)
@@ -388,7 +392,7 @@ else()
 	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
 
 	set(CMAKE_C_FLAGS "-std=c99 ${CMAKE_C_FLAGS}")
-	set(CMAKE_CXX_FLAGS "-fPIC -std=c++14 ${CMAKE_CXX_FLAGS}")
+	set(CMAKE_CXX_FLAGS "-fPIC -std=c++17 ${CMAKE_CXX_FLAGS}")
 endif()
 
 # ----------------------------------------------------------Intel Compiler support --
@@ -410,7 +414,7 @@ endif(MKLFFT)
 # and -Xcompiler is not passed. Thus, even with -diag-disable=10441,10412,
 # the deprecation warning cannot be completely silenced.
 # https://github.com/3dem/relion/issues/1038#issuecomment-1831312535
-if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Intel" OR "${CMAKE_CXX_COMPILER}" MATCHES "mpiicpx")
+if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Intel" OR "${CMAKE_CXX_COMPILER}" MATCHES "icpx")
 # "Intel" is for classic Intel compiler and "IntelLLVM" is for oneAPI compiler which is supported from CMake 3.20
 	if(ALTCPU OR SYCL)
 		add_definitions(-DFAST_CENTERFFT)
@@ -426,15 +430,21 @@ if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Intel" OR "${CMAKE_CXX_COMPILER}" MATCHES
 	endif(MKLFFT)
 
 	if(INTEL_IPP OR DEFINED ENV{IPPROOT})
-		if(EXISTS "$ENV{IPPROOT}/include/ipp.h" AND EXISTS "$ENV{IPPROOT}/lib/intel64/libipps.a")
-			if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "IntelLLVM")
-				SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -qipp")
-				SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -qipp -qipp-link=static")
+		if(EXISTS "$ENV{IPPROOT}/include/ipp.h" AND (EXISTS "$ENV{IPPROOT}/lib/libipps.a" OR EXISTS "$ENV{IPPROOT}/lib/intel64/libipps.a"))
+			SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I$ENV{IPPROOT}/include")
+			if(EXISTS "$ENV{IPPROOT}/lib/libipps.a")
+				SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L$ENV{IPPROOT}/lib -lipps")
 			else()
-				SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -diag-disable=10441,10412")
-				SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ipp -diag-disable=10441,10412")
-				SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -ipp -ipp-link=static")
+				SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L$ENV{IPPROOT}/lib/intel64 -lipps")
 			endif()
+#			if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "IntelLLVM")
+#				SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -qipp")
+#				SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -qipp -qipp-link=static")
+#			else()
+#				SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -diag-disable=10441,10412")
+#				SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ipp -diag-disable=10441,10412")
+#				SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -ipp -ipp-link=static")
+#			endif()
 			add_definitions(-DUSE_IPP)
 			message(STATUS "Using Intel IPP library: $ENV{IPPROOT}")
 		endif()
