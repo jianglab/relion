@@ -7,22 +7,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import starfile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import mrcfile
-import matplotlib.pyplot as plt
-
-from skimage.morphology import remove_small_objects, skeletonize
-from skimage.measure import regionprops, label as label_connected_component
-from skan import Skeleton, summarize
-from scipy.spatial.distance import cdist
-import cv2
-
-from tqdm import tqdm
-import time
 
 ###############################################################################
 #                               U-Net Model
@@ -541,7 +528,7 @@ def install_model(
             "d83777816d899d64aef593c97888e88f56d49e2b652cdc460de554f59d6f94ed"
         ],
         "amytracer-v2.0": [
-            "https://zenodo.org/records/17949642/files/amytracer-v1.0.ckpt.gz",
+            "https://zenodo.org/records/17949642/files/amytracer-v2.0.ckpt.gz",
             "57f0cd566ca1779641691f7daf4a6147ccdb4f509f01c7472861e32bb7dbe14c"
         ],
         "carbonpicker-v1.0": [
@@ -628,7 +615,20 @@ def main():
         my_model_path = install_model(args.model_path, verbose=True)
         my_carbon_model_path = install_model(args.carbon_model_path, verbose=True)
         sys.exit(0)
-        
+
+    import starfile
+    import mrcfile
+    import matplotlib.pyplot as plt
+
+    from skimage.morphology import remove_small_objects, skeletonize
+    from skimage.measure import regionprops, label as label_connected_component
+    from skan import Skeleton, summarize
+    from scipy.spatial.distance import cdist
+    import cv2
+    
+    from tqdm import tqdm
+    import time
+    
     # Load checkpoint file
     my_model_path = install_model(args.model_path)
     model = UNet.load_from_checkpoint(my_model_path, n_channels=3, n_classes=1)
