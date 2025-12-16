@@ -541,7 +541,7 @@ def install_model(
             "d83777816d899d64aef593c97888e88f56d49e2b652cdc460de554f59d6f94ed"
         ],
         "amytracer-v2.0": [
-            "https://zenodo.org/records/17949642/files/amytracer-v1.0.ckpt.gz",
+            "https://zenodo.org/records/17949642/files/amytracer-v2.0.ckpt.gz",
             "57f0cd566ca1779641691f7daf4a6147ccdb4f509f01c7472861e32bb7dbe14c"
         ],
         "carbonpicker-v1.0": [

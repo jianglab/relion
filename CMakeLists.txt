@@ -559,7 +559,7 @@ list(APPEND RELION_PYTHON_WRAPPERS
 	python_tomo_get_particle_poses
 	python_tomo_denoise
 	filament_selection
-	trace_amyloids
+	python_trace_amyloids
 	schemegui
 )
 
