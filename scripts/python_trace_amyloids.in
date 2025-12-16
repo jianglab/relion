@@ -7,9 +7,22 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import starfile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+import mrcfile
+import matplotlib.pyplot as plt
+
+from skimage.morphology import remove_small_objects, skeletonize
+from skimage.measure import regionprops, label as label_connected_component
+from skan import Skeleton, summarize
+from scipy.spatial.distance import cdist
+import cv2
+
+from tqdm import tqdm
+import time
 
 ###############################################################################
 #                               U-Net Model
@@ -227,7 +240,6 @@ class UNetCarbon(nn.Module):
 #                        MRC + instance segmentation
 ###############################################################################
 def load_mrc(mrc_fn: str, multiply_global_origin: bool = True):
-    import mrcfile
     with mrcfile.open(mrc_fn, "r") as mrc_file_handle:
         voxel_size = float(mrc_file_handle.voxel_size.x)
         if voxel_size <= 0:
@@ -500,7 +512,6 @@ def prune_skeleton(skeleton, psi_image, min_length=100, min_distance=25, step=50
     return labeled_skeleton, np.array(sampled_coords, dtype=int)
 
 def resize_and_norm(image, mysize, angpix, do_norm=True):
-    import cv2
     ys, xs = image.shape
     if (xs > ys):
         scale = ys/mysize
@@ -616,16 +627,7 @@ def main():
         my_model_path = install_model(args.model_path, verbose=True)
         my_carbon_model_path = install_model(args.carbon_model_path, verbose=True)
         sys.exit(0)
-
-    import starfile
-
-    from skimage.morphology import remove_small_objects, skeletonize
-    from skimage.measure import regionprops, label as label_connected_component
-    from skan import Skeleton, summarize
-    from scipy.spatial.distance import cdist
-    
-    from tqdm import tqdm
-    
+   
     # Load checkpoint file
     my_model_path = install_model(args.model_path)
     model = UNet.load_from_checkpoint(my_model_path, n_channels=3, n_classes=1)
@@ -686,7 +688,6 @@ def main():
                 carbon_prob = carbon_prob.to(dtype=torch.float32, device="cpu").numpy()
                 xsf, ysf= fom_image.shape
                 if carbon_prob.shape != fom_image.shape:
-                    import cv2
                     carbon_prob  = cv2.resize(carbon_prob.astype(np.float32), (ysf, xsf), interpolation=cv2.INTER_AREA)
                 carbon_mask = (carbon_prob>args.carbon_threshold)
                 
@@ -765,8 +766,6 @@ def main():
         # If plotting is requested, create a collage figure
         # ---------------------------------------------------
         if args.plot:
-
-            import matplotlib.pyplot as plt
 
             fig, ax = plt.subplots(2, 4, figsize=(20,15))
             ax = ax.ravel()
