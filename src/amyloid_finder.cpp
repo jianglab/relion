@@ -819,7 +819,8 @@ void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_
     command += " -v " + integerToString(verb);
     if (do_carbon)
     {
-        command += " -c " + fn_carbon_model_path;
+        command += " -c ";
+        command += " -cm " + fn_carbon_model_path;
         command +=  " --carbon_threshold " + floatToString(carbon_threshold);
     }
     if (do_plot)

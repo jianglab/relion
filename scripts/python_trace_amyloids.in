@@ -595,19 +595,20 @@ def main():
 
     parser = argparse.ArgumentParser("Skeleton-based filament picking with instance merging, branch pruning, and ID labeling")
     parser.add_argument("-i", "--input", help="Input star file", default="None")
-    parser.add_argument("-m", "--model_path", help="Path to PyTorch model checkpoint", default="amytracer-v2.0")
-    parser.add_argument("-c", "--carbon_model_path", help="Path to PyTorch model checkpoint for carbon detection", default="carbonpicker-v1.0")
     parser.add_argument("-o", "--output", help="Output star file with coordinates", default="out")
     parser.add_argument("-r", "--radius", type=int, help="Minimum distance between ends of filaments (in A)", default=25)
     parser.add_argument("-l", "--minimum_length", type=int, default=250,
                         help="Remove final segments smaller than this size in Angstroms (default=250)")
     parser.add_argument("-p", "--psi_jump_threshold", default=45, type=float, help="Maximum difference in degrees of psi angles for consecutive points in skeletons (default=45)")
     parser.add_argument("-t", "--threshold", default=0.5, type=float, help="Foreground threshold (default=0.5)")
+    parser.add_argument("-c", "--carbon", default=False, type=bool, help="Ignore filaments on carbon")
     parser.add_argument("-ct", "--carbon_threshold", default=0.9, type=float, help="Carbon detection threshold (default=0.9)")
     parser.add_argument("-s", "--scale", type=float, default=1.0,
                         help="Multiply output coordinates by this factor (default=1.0)")
     parser.add_argument("-d", "--device", default="cuda:0", help="Which GPU device to use")
     parser.add_argument("-j", "--threads", type=int, default=1)
+    parser.add_argument("-m", "--model_path", help="Path to PyTorch model checkpoint", default="amytracer-v2.0")
+    parser.add_argument("-cm", "--carbon_model_path", help="Path to PyTorch model checkpoint for carbon detection", default="carbonpicker-v1.0")
     parser.add_argument("-a", "--abort", help="Abort if this file exists")
     parser.add_argument("-v", "--verb", type=int, help="Verbosity")
     parser.add_argument("--sample_step", type=int, default=100,
@@ -632,7 +633,7 @@ def main():
     my_model_path = install_model(args.model_path)
     model = UNet.load_from_checkpoint(my_model_path, n_channels=3, n_classes=1)
     model.eval().to(device)
-    if args.carbon_model_path == "":
+    if not args.carbon:
         if args.verb > 0:
             print("  + Not doing carbon detection")
         do_carbon = False
