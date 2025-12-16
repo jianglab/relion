@@ -566,8 +566,8 @@ def install_model(
             with open(completed_check_path, "w") as f:
                 f.write("Successfully downloaded model")
 
-            if verbose:
-                print(f"Amyloid picker model ({name}) successfully installed in {dest_dir}")
+        if verbose:
+            print(f"Amyloid picker model ({name}) successfully installed in {dest_dir}")
 
     else:
         model_path = name
