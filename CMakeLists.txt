@@ -615,6 +615,7 @@ list(APPEND RELION_SCRIPT_FILES
         star_datablock_ctfdat
         qsub.csh
         it.py
+	trace_amyloids.py
 )
 
 add_custom_target(copy_scripts ALL)
