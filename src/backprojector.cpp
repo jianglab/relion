@@ -1287,6 +1287,9 @@ void BackProjector::externalReconstruct(MultidimArray<RFLOAT> &vol_out,
 
 		cmd += " " + blush_args;
 
+        // The typical command will look something like this:
+        // relion_python_blush Refine3D/job024/run_it006_half2_class001_external_reconstruct.star  -m v1.0 --gpu 1
+        
 		FILE* pipe = popen(cmd.c_str(), "r");
 		if (!pipe)
 			throw std::runtime_error("Failed to dispatch command: " + cmd);
