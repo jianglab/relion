@@ -1088,15 +1088,15 @@ Pixels values higher than this many times the image stddev will be replaced with
 
 	group5->begin();
 
-    //place("helical_tube_outer_diameter", TOGGLE_DEACTIVATE);
-	//current_y += STEPY/2;
+    place("helical_tube_outer_diameter", TOGGLE_DEACTIVATE);
+	current_y += STEPY/2;
 
 	place("helical_bimodal_angular_priors", TOGGLE_DEACTIVATE);
 	place("helical_nr_asu", TOGGLE_DEACTIVATE);
 	place("helical_rise", TOGGLE_DEACTIVATE);
-	current_y += STEPY/2;
 
-	place("helical_tilt_prior", TOGGLE_DEACTIVATE);
+    //current_y += STEPY/2;
+	//place("helical_tilt_prior", TOGGLE_DEACTIVATE);
 
 	group5->end();
 
