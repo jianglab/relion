@@ -1156,6 +1156,13 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 	pointer_dir_nonzeroprior.clear();
 	directions_prior.clear();
 
+    // If prior_tilt is not 90, then these are tilted images: DON'T perform direction2 angular searches
+    bool skip_direction2 = false;
+    if ((prior_tilt > 0. && prior_tilt < 90.) || (prior_tilt > 90. && prior_tilt < 180.) )
+    {
+        skip_direction2 = true;
+    }
+
 	if (is_3D)
 	{
 		// If tilt prior is less than 20 or larger than 160 degrees, print a warning message
@@ -1197,7 +1204,7 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 					}
 				}
 
-				if (!do_auto_refine_local_searches)
+				if (!do_auto_refine_local_searches && !skip_direction2)
 				{
 					// Assume tilt = (0, +180)
 					// TODO: Check if "(tilt_angles[idir] > 0.01) && (tilt_angles[idir] < 179.99)" is needed
@@ -1319,7 +1326,7 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 					}
 				}
 
-				if (!do_auto_refine_local_searches)
+				if (!do_auto_refine_local_searches && !skip_direction2)
 				{
 					// Assume tilt = (0, +180)
 					// TODO: Check if "(tilt_angles[idir] > 0.01) && (tilt_angles[idir] < 179.99)" is needed

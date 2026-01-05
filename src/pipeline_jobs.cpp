@@ -2563,7 +2563,8 @@ This value should be slightly larger than the actual width of helical tubes.");
 Set to No if the 3D helix looks the same when rotated upside down.");
 	joboptions["helical_nr_asu"] = JobOption("Number of unique asymmetrical units:", 1, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box. This integer should not be less than 1. The inter-box distance (pixels) = helical rise (Angstroms) * number of asymmetrical units / pixel size (Angstroms). \
 The optimal inter-box distance might also depend on the box size, the helical rise and the flexibility of the structure. In general, an inter-box distance of ~10% * the box size seems appropriate.");
-	joboptions["helical_rise"] = JobOption("Helical rise (A):", 1, 0, 100, 0.01, "Helical rise in Angstroms. (Please click '?' next to the option above for details about how the inter-box distance is calculated.)");
+    joboptions["helical_rise"] = JobOption("Helical rise (A):", 1, 0, 100, 0.01, "Helical rise in Angstroms. (Please click '?' next to the option above for details about how the inter-box distance is calculated.)");
+    //joboptions["helical_tilt_prior"] = JobOption("Tilt prior (deg):", 90, 0, 180, 5, "Use this option to set a prior value for the tilt angle. This will typically be 90 degrees, but this value will need to be changed if you tilted your images during data collection. If you tilted the stage 20 degrees, then you could try 70 and 110 degrees as a tilt prior. If you know the handedness of your camera/stage, then you can just use either 70 or 110.");
 
 }
 
@@ -2719,6 +2720,7 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
         command += " --helical_cut_into_segments";
         command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
         command += " --helical_rise " + joboptions["helical_rise"].getString();
+        //command += " --helical_tilt_prior " + joboptions["helical_tilt_prior"].getString();
 	}
 	else
 	{

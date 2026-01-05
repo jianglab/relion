@@ -179,6 +179,9 @@ public:
 	// Helical rise in Angstroms
 	RFLOAT helical_rise;
 
+    // Overall helical tilt prior
+    RFLOAT helical_tilt_prior;
+
 	// Add bimodal angular priors for helical segments
 	bool helical_bimodal_angular_priors;
 
@@ -215,7 +218,7 @@ public:
 	void readCoordinates(FileName fn_coord, MetaDataTable &MD);
 
     void addOneHelicalSegment(MetaDataTable &MD, RFLOAT xcoord, RFLOAT ycoord, int tube_id,
-                       RFLOAT psi_prior, RFLOAT helix_length, RFLOAT psi_prior_flip_ratio);
+                       RFLOAT psi_prior, RFLOAT helix_length, RFLOAT psi_prior_flip_ratio, RFLOAT tilt_prior = 90.);
 
     void convertHelicalLineCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -229,10 +232,11 @@ public:
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
-		bool cut_into_segments = true);
+		bool cut_into_segments = true,
+        RFLOAT tilt_prior = 90.);
 
 	// Read helical coordinates from text files
-	void readHelicalCoordinates(FileName fn_mic, FileName fn_coord, MetaDataTable &MD);
+	void readHelicalCoordinates(FileName fn_mic, FileName fn_coord, MetaDataTable &MD, RFLOAT tilt_prior = 90.);
 
 	// For the given coordinate file, read the micrograph and/or movie and extract all particles
 	bool extractParticlesFromFieldOfView(FileName fn_mic, long int imic);
