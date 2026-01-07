@@ -541,7 +541,7 @@ endif(JPEG_FOUND)
 # -----------------------------------------------------------------PYTHON DEPENDENCIES--
 
 
-set(CONDA_ENV_NAME "relion-5.0" CACHE STRING "The Conda environment name")
+set(CONDA_ENV_NAME "relion-5.1" CACHE STRING "The Conda environment name")
 include(${CMAKE_SOURCE_DIR}/cmake/FindCondaPython.cmake)
 
 list(APPEND RELION_PYTHON_WRAPPERS
