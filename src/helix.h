@@ -226,7 +226,8 @@ void convertHelicalTubeCoordsToMetaDataTable(
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
 		bool cut_into_segments = true,
-        RFLOAT tilt_prior = 90.);
+        RFLOAT tilt_angle = 0.,
+        RFLOAT tilt_axis = 90.);
 
 void combineParticlePriorsWithKaiLocalCTF(
 		FileName& fn_priors,
@@ -254,6 +255,8 @@ void removeBadPsiHelicalSegmentsFromDataStar(
 		FileName& fn_out,
 		RFLOAT max_dev_deg = 15.);
 
+RFLOAT calculateTiltPriorFromPsi(RFLOAT psi, RFLOAT tilt_angle, RFLOAT tilt_axis);
+
 void convertHelicalSegmentCoordsToStarFile_Multiple(
 		FileName& suffix_coords,
 		FileName& suffix_out,
@@ -263,7 +266,8 @@ void convertHelicalSegmentCoordsToStarFile_Multiple(
 		RFLOAT Ydim,
 		RFLOAT boxsize,
 		bool bimodal_angular_priors = true,
-        RFLOAT tilt_prior = 90.);
+        RFLOAT tilt_angle = 0.,
+        RFLOAT tilt_axis = 90.);
 
 void convertHelicalSegmentCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -286,7 +290,8 @@ void convertXimdispHelicalSegmentCoordsToMetaDataTable(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
-        RFLOAT tilt_prior = 90.);
+        RFLOAT tilt_angle = 0.,
+        RFLOAT tilt_axis = 90.);
 
 void convertXimdispHelicalTubeCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -301,7 +306,8 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
 		bool cut_into_segments = true,
-        RFLOAT tilt_prior = 90.);
+        RFLOAT tilt_angle = 0.,
+        RFLOAT tilt_axis = 90.);
 
 void convertEmanHelicalSegmentCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -313,7 +319,8 @@ void convertEmanHelicalSegmentCoordsToMetaDataTable(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
-        RFLOAT tilt_prior = 90.);
+        RFLOAT tilt_angle = 0.,
+        RFLOAT tilt_axis = 90.);
 
 void convertEmanHelicalTubeCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -328,7 +335,8 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
 		bool cut_into_segments = true,
-        RFLOAT tilt_prior = 90.);
+        RFLOAT tilt_angle = 0.,
+        RFLOAT tilt_axis = 90.);
 
 void makeHelicalReference2D(
 		MultidimArray<RFLOAT>& out,
