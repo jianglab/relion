@@ -100,7 +100,7 @@ void Preprocessing::read(int argc, char **argv, int rank)
 	helical_rise = textToFloat(parser.getOption("--helical_rise", "Helical rise (in Angstroms)", "0."));
 	helical_bimodal_angular_priors = parser.checkOption("--helical_bimodal_angular_priors", "Add bimodal angular priors for helical segments");
 	helical_cut_into_segments = parser.checkOption("--helical_cut_into_segments", "Cut helical tubes into segments");
-    helical_tilt_angle = textToFloat(parser.getOption("--helical_tilt_angle", "Tilt angle to set the tilt prior of helices (in degrees)", "9."));
+    helical_tilt_angle = textToFloat(parser.getOption("--helical_tilt_angle", "Tilt angle to set the tilt prior of helices (in degrees)", "0."));
     helical_tilt_axis = textToFloat(parser.getOption("--helical_tilt_axis", "Tilt axis direction (inplane angle in deg; 0 = X-axis)", "90."));
 	// Initialise verb for non-parallel execution
 	verb = 1;
