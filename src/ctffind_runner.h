@@ -154,6 +154,9 @@ public:
 	// Disable "Slower, more exhaustive search?" in CTFFIND 4.1.5-
 	bool do_fast_search;
 
+    // As of CTFFINF-4.1.15 one can search for the tilt angle and axis too. This will be written to the logfile, but for now relion doesn't do anything with it.
+    bool do_tilt_search;
+
 	// Which GPU devices to use?
 	std::string gpu_ids;
 	std::vector < std::vector < std::string > > allThreadIDs;

@@ -78,7 +78,7 @@ void CtffindRunner::read(int argc, char **argv, int rank)
 	phase_step = textToFloat(parser.getOption("--phase_step", "Step in phase shift (in degrees)", "10."));
 	nr_threads = textToInteger(parser.getOption("--j", "Number of threads (for CTFIND4 only)", "1"));
 	do_fast_search = parser.checkOption("--fast_search", "Disable \"Slower, more exhaustive search\" in CTFFIND4.1 (faster but less accurate)");
-
+    do_tilt_search = parser.checkOption("--tilt_search", "Run CTFFIND-4.1.15+ tilt search algorithm");
 	// Initialise verb for non-parallel execution
 	verb = 1;
 
@@ -784,8 +784,11 @@ void CtffindRunner::executeCtffind4(long int imic)
 	}
 	else
 		fh << "no" << std::endl;
-	// Set determine sample tilt? (as of ctffind-4.1.15)
-	fh << "no" << std::endl;
+    // Set determine sample tilt? (as of ctffind-4.1.15)
+	if (do_tilt_search)
+        fh << "yes" << std::endl;
+    else
+        fh << "no" << std::endl;
 	// Set expert options?
 	fh << "no" << std::endl;
 
