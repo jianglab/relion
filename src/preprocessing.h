@@ -179,12 +179,6 @@ public:
 	// Helical rise in Angstroms
 	RFLOAT helical_rise;
 
-    // Overall tilt angle (for helical tilt prior)
-    RFLOAT helical_tilt_angle;
-
-    // Direction of the tilt axis (in degrees: 0-deg = X-axis; 90-deg = Y-axis)
-    RFLOAT helical_tilt_axis;
-
 	// Add bimodal angular priors for helical segments
 	bool helical_bimodal_angular_priors;
 
@@ -221,7 +215,7 @@ public:
 	void readCoordinates(FileName fn_coord, MetaDataTable &MD);
 
     void addOneHelicalSegment(MetaDataTable &MD, RFLOAT xcoord, RFLOAT ycoord, int tube_id,
-                       RFLOAT psi_prior, RFLOAT helix_length, RFLOAT psi_prior_flip_ratio, RFLOAT tilt_prior = 90.);
+                       RFLOAT psi_prior, RFLOAT helix_length, RFLOAT psi_prior_flip_ratio);
 
     void convertHelicalLineCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -235,9 +229,7 @@ public:
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
-		bool cut_into_segments = true,
-        RFLOAT tilt_angle = 0.,
-        RFLOAT tilt_axis = 90.);
+		bool cut_into_segments = true);
 
 	// Read helical coordinates from text files
 	void readHelicalCoordinates(FileName fn_mic, FileName fn_coord, MetaDataTable &MD);

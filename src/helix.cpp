@@ -1792,11 +1792,11 @@ void extractHelicalSegmentsFromTubes_Multiple(
 		FileName fn_out;
 		fn_out = fn_in_list[ii].beforeFirstOf(suffix_in) + suffix_out;
 		if (format_tag == RELION_STAR_FORMAT)
-			convertHelicalTubeCoordsToMetaDataTable(fn_in_list[ii], MD_out, nr_segments, nr_tubes, nr_asu, rise_A, pixel_size_A, Xdim, Ydim, box_size_pix, bimodal_angular_priors, cut_into_segments, tilt_prior);
+			convertHelicalTubeCoordsToMetaDataTable(fn_in_list[ii], MD_out, nr_segments, nr_tubes, nr_asu, rise_A, pixel_size_A, Xdim, Ydim, box_size_pix, bimodal_angular_priors, cut_into_segments);
 		else if (format_tag == XIMDISP_COORDS_FORMAT)
-			convertXimdispHelicalTubeCoordsToMetaDataTable(fn_in_list[ii], MD_out, nr_segments, nr_tubes, nr_asu, rise_A, pixel_size_A, Xdim, Ydim, box_size_pix, bimodal_angular_priors, cut_into_segments, tilt_prior);
+			convertXimdispHelicalTubeCoordsToMetaDataTable(fn_in_list[ii], MD_out, nr_segments, nr_tubes, nr_asu, rise_A, pixel_size_A, Xdim, Ydim, box_size_pix, bimodal_angular_priors, cut_into_segments);
 		else if (format_tag == EMAN2_FORMAT)
-			convertEmanHelicalTubeCoordsToMetaDataTable(fn_in_list[ii], MD_out, nr_segments, nr_tubes, nr_asu, rise_A, pixel_size_A, Xdim, Ydim, box_size_pix, bimodal_angular_priors, cut_into_segments, tilt_prior);
+			convertEmanHelicalTubeCoordsToMetaDataTable(fn_in_list[ii], MD_out, nr_segments, nr_tubes, nr_asu, rise_A, pixel_size_A, Xdim, Ydim, box_size_pix, bimodal_angular_priors, cut_into_segments);
 		else
 			REPORT_ERROR("helix.cpp::extractHelicalSegmentsFromTubes_Multiple(): BUG Invalid format tag!");
 		total_segments += nr_segments;
@@ -1820,9 +1820,7 @@ void convertHelicalTubeCoordsToMetaDataTable(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors,
-		bool cut_into_segments,
-        RFLOAT tilt_angle,
-        RFLOAT tilt_axis)
+		bool cut_into_segments)
 {
 	int nr_segments, MDobj_id;
 	RFLOAT psi_deg, psi_rad, x1, y1, x2, y2, dx, dy, xp, yp, step_pix, half_box_size_pix, len_pix, psi_prior_flip_ratio, pitch;
@@ -1941,12 +1939,11 @@ void convertHelicalTubeCoordsToMetaDataTable(
 
     	if (!cut_into_segments)
     	{
-            RFLOAT tilt_prior = calculateTiltPriorFromPsi(-psi_deg, tilt_angle, tilt_axis);
             MD_out.addObject();
 	    	MD_out.setValue(EMDL_IMAGE_COORD_X, ((x1 + x2) * 0.5));
 	    	MD_out.setValue(EMDL_IMAGE_COORD_Y, ((y1 + y2) * 0.5));
 	    	MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, (tube_id + 1));
-	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
 	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
 	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, 0.);
 	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
@@ -1987,12 +1984,11 @@ void convertHelicalTubeCoordsToMetaDataTable(
     			}
 #endif
 
-                RFLOAT tilt_prior = calculateTiltPriorFromPsi(-psi_deg, tilt_angle, tilt_axis);
     			MD_out.addObject();
     	    	MD_out.setValue(EMDL_IMAGE_COORD_X, xp);
     	    	MD_out.setValue(EMDL_IMAGE_COORD_Y, yp);
     	    	MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, (tube_id + 1));
-    	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+    	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
     	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
     	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, pixel_size_A * len_pix);
     	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
@@ -2294,9 +2290,7 @@ void convertHelicalSegmentCoordsToStarFile_Multiple(
 		RFLOAT Xdim,
 		RFLOAT Ydim,
 		RFLOAT boxsize,
-		bool bimodal_angular_priors,
-        RFLOAT tilt_angle,
-        RFLOAT tilt_axis)
+		bool bimodal_angular_priors)
 {
 	int total_segments, nr_segments, total_tubes, nr_tubes;
 	FileName fns_coords;
@@ -2314,9 +2308,9 @@ void convertHelicalSegmentCoordsToStarFile_Multiple(
 		FileName fn_out;
 		fn_out = fn_coords_list[ii].beforeFirstOf(suffix_coords) + suffix_out;
 		if (format_tag == XIMDISP_COORDS_FORMAT)
-			convertXimdispHelicalSegmentCoordsToMetaDataTable(fn_coords_list[ii], MD_out, nr_segments, nr_tubes, pixel_size_A, Xdim, Ydim, boxsize, bimodal_angular_priors, tilt_angle, tilt_axis);
+			convertXimdispHelicalSegmentCoordsToMetaDataTable(fn_coords_list[ii], MD_out, nr_segments, nr_tubes, pixel_size_A, Xdim, Ydim, boxsize, bimodal_angular_priors);
 		else if (format_tag == EMAN2_FORMAT)
-			convertEmanHelicalSegmentCoordsToMetaDataTable(fn_coords_list[ii], MD_out, nr_segments, nr_tubes, pixel_size_A, Xdim, Ydim, boxsize, bimodal_angular_priors, tilt_angle, tilt_axis);
+			convertEmanHelicalSegmentCoordsToMetaDataTable(fn_coords_list[ii], MD_out, nr_segments, nr_tubes, pixel_size_A, Xdim, Ydim, boxsize, bimodal_angular_priors);
 		else
 			REPORT_ERROR("helix.cpp::convertHelicalCoordsToStarFile_Multiple(): BUG Invalid format tag!");
 		total_segments += nr_segments;
@@ -2408,9 +2402,7 @@ void convertXimdispHelicalSegmentCoordsToMetaDataTable(
 		RFLOAT Xdim,
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
-		bool bimodal_angular_priors,
-        RFLOAT tilt_angle,
-        RFLOAT tilt_axis)
+		bool bimodal_angular_priors)
 {
 	int nr_segments_on_edges, nr_segments, nr_tubes;
 	RFLOAT x, y, x_old, y_old, psi_deg_old, psi_deg, half_box_size_pix, len_pix, psi_prior_flip_ratio;
@@ -2486,13 +2478,12 @@ void convertXimdispHelicalSegmentCoordsToMetaDataTable(
 		}
 #endif
 
-        RFLOAT tilt_prior = calculateTiltPriorFromPsi(-psi_deg, tilt_angle, tilt_axis);
 		nr_segments++;
 		MD_out.addObject();
 		MD_out.setValue(EMDL_IMAGE_COORD_X, x);
 		MD_out.setValue(EMDL_IMAGE_COORD_Y, y);
 		MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, nr_tubes);
-		MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+		MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
 		MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
 	    MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, pixel_size_A * len_pix);
 	    MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
@@ -2518,9 +2509,7 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors,
-		bool cut_into_segments,
-        RFLOAT tilt_angle,
-        RFLOAT tilt_axis)
+		bool cut_into_segments)
 {
 	int nr_segments, nr_tubes;
 	RFLOAT xp, yp, dx, dy, x1, y1, x2, y2, psi_deg, psi_rad, half_box_size_pix, len_pix, psi_prior_flip_ratio;
@@ -2598,12 +2587,11 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
 
 		if (!cut_into_segments)
 		{
-            RFLOAT tilt_prior = calculateTiltPriorFromPsi(-psi_deg, tilt_angle, tilt_axis);
 			MD_out.addObject();
 	    	MD_out.setValue(EMDL_IMAGE_COORD_X, ((x1 + x2) * 0.5));
 	    	MD_out.setValue(EMDL_IMAGE_COORD_Y, ((y1 + y2) * 0.5));
 	    	MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, nr_tubes);
-	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
 	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
 	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, 0.);
 	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
@@ -2639,12 +2627,11 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
     			}
 #endif
 
-                RFLOAT tilt_prior = calculateTiltPriorFromPsi(-psi_deg, tilt_angle, tilt_axis);
     			MD_out.addObject();
     	    	MD_out.setValue(EMDL_IMAGE_COORD_X, xp);
     	    	MD_out.setValue(EMDL_IMAGE_COORD_Y, yp);
     	    	MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, nr_tubes);
-    	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+    	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
     	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
     	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, pixel_size_A * len_pix);
     	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
@@ -2671,9 +2658,7 @@ void convertEmanHelicalSegmentCoordsToMetaDataTable(
 		RFLOAT Xdim,
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
-		bool bimodal_angular_priors,
-        RFLOAT tilt_angle,
-        RFLOAT tilt_axis)
+		bool bimodal_angular_priors)
 {
 	int nr_segments_on_edges, nr_segments, nr_tubes;
 	RFLOAT x, y, x_old, y_old, psi_deg, half_box_size_pix, len_pix, width, psi_prior_flip_ratio;
@@ -2760,13 +2745,12 @@ void convertEmanHelicalSegmentCoordsToMetaDataTable(
 		}
 #endif
 
-        RFLOAT tilt_prior = calculateTiltPriorFromPsi(-psi_deg, tilt_angle, tilt_axis);
 		nr_segments++;
 		MD_out.addObject();
 		MD_out.setValue(EMDL_IMAGE_COORD_X, x);
 		MD_out.setValue(EMDL_IMAGE_COORD_Y, y);
 		MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, nr_tubes);
-		MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+		MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
 		MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
 	    MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, pixel_size_A * len_pix);
 	    MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
@@ -2793,9 +2777,7 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors,
-		bool cut_into_segments,
-        RFLOAT tilt_angle,
-        RFLOAT tilt_axis)
+		bool cut_into_segments)
 {
 	int nr_segments, nr_tubes;
 	RFLOAT xp, yp, dx, dy, x1, y1, x2, y2, psi_deg, psi_rad, half_box_size_pix, len_pix, psi_prior_flip_ratio;
@@ -2890,12 +2872,11 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
 
 		if (!cut_into_segments)
 		{
-            RFLOAT tilt_prior = calculateTiltPriorFromPsi(-psi_deg, tilt_angle, tilt_axis);
 			MD_out.addObject();
 	    	MD_out.setValue(EMDL_IMAGE_COORD_X, ((x1 + x2) * 0.5));
 	    	MD_out.setValue(EMDL_IMAGE_COORD_Y, ((y1 + y2) * 0.5));
 	    	MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, nr_tubes);
-	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
 	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
 	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, 0.);
 	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
@@ -2931,12 +2912,11 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
     			}
 #endif
 
-                RFLOAT tilt_prior = calculateTiltPriorFromPsi(-psi_deg, tilt_angle, tilt_axis);
     			MD_out.addObject();
     	    	MD_out.setValue(EMDL_IMAGE_COORD_X, xp);
     	    	MD_out.setValue(EMDL_IMAGE_COORD_Y, yp);
     	    	MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, nr_tubes);
-    	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+    	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
     	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
     	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, pixel_size_A * len_pix);
     	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);

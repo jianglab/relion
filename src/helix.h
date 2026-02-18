@@ -225,9 +225,7 @@ void convertHelicalTubeCoordsToMetaDataTable(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
-		bool cut_into_segments = true,
-        RFLOAT tilt_angle = 0.,
-        RFLOAT tilt_axis = 90.);
+		bool cut_into_segments = true);
 
 void combineParticlePriorsWithKaiLocalCTF(
 		FileName& fn_priors,
@@ -265,9 +263,7 @@ void convertHelicalSegmentCoordsToStarFile_Multiple(
 		RFLOAT Xdim,
 		RFLOAT Ydim,
 		RFLOAT boxsize,
-		bool bimodal_angular_priors = true,
-        RFLOAT tilt_angle = 0.,
-        RFLOAT tilt_axis = 90.);
+		bool bimodal_angular_priors = true);
 
 void convertHelicalSegmentCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -289,9 +285,7 @@ void convertXimdispHelicalSegmentCoordsToMetaDataTable(
 		RFLOAT Xdim,
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
-		bool bimodal_angular_priors = true,
-        RFLOAT tilt_angle = 0.,
-        RFLOAT tilt_axis = 90.);
+		bool bimodal_angular_priors = true);
 
 void convertXimdispHelicalTubeCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -305,9 +299,7 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
-		bool cut_into_segments = true,
-        RFLOAT tilt_angle = 0.,
-        RFLOAT tilt_axis = 90.);
+		bool cut_into_segments = true);
 
 void convertEmanHelicalSegmentCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -318,9 +310,7 @@ void convertEmanHelicalSegmentCoordsToMetaDataTable(
 		RFLOAT Xdim,
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
-		bool bimodal_angular_priors = true,
-        RFLOAT tilt_angle = 0.,
-        RFLOAT tilt_axis = 90.);
+		bool bimodal_angular_priors = true);
 
 void convertEmanHelicalTubeCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -334,9 +324,7 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
-		bool cut_into_segments = true,
-        RFLOAT tilt_angle = 0.,
-        RFLOAT tilt_axis = 90.);
+		bool cut_into_segments = true);
 
 void makeHelicalReference2D(
 		MultidimArray<RFLOAT>& out,

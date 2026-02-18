@@ -100,8 +100,6 @@ void Preprocessing::read(int argc, char **argv, int rank)
 	helical_rise = textToFloat(parser.getOption("--helical_rise", "Helical rise (in Angstroms)", "0."));
 	helical_bimodal_angular_priors = parser.checkOption("--helical_bimodal_angular_priors", "Add bimodal angular priors for helical segments");
 	helical_cut_into_segments = parser.checkOption("--helical_cut_into_segments", "Cut helical tubes into segments");
-    helical_tilt_angle = textToFloat(parser.getOption("--helical_tilt_angle", "Tilt angle to set the tilt prior of helices (in degrees)", "0."));
-    helical_tilt_axis = textToFloat(parser.getOption("--helical_tilt_axis", "Tilt axis direction (inplane angle in deg; 0 = X-axis)", "90."));
 	// Initialise verb for non-parallel execution
 	verb = 1;
 }
@@ -663,13 +661,13 @@ void Preprocessing::readCoordinates(FileName fn_coord, MetaDataTable &MD)
 }
 
 void Preprocessing::addOneHelicalSegment(MetaDataTable &MD, RFLOAT xcoord, RFLOAT ycoord, int tube_id,
-                                  RFLOAT psi_prior, RFLOAT helix_length, RFLOAT psi_prior_flip_ratio, RFLOAT tilt_prior)
+                                  RFLOAT psi_prior, RFLOAT helix_length, RFLOAT psi_prior_flip_ratio)
 {
     MD.addObject();
     MD.setValue(EMDL_IMAGE_COORD_X, xcoord);
     MD.setValue(EMDL_IMAGE_COORD_Y, ycoord);
     MD.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube_id);
-    MD.setValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior);
+    MD.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
     MD.setValue(EMDL_ORIENT_PSI_PRIOR, psi_prior);
     MD.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, helix_length);
     MD.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
@@ -679,7 +677,7 @@ void Preprocessing::addOneHelicalSegment(MetaDataTable &MD, RFLOAT xcoord, RFLOA
 void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
 		FileName& fn_in, MetaDataTable& MD_out, int& total_segments, int& total_tubes,
 		int nr_asu, RFLOAT rise_A, RFLOAT pixel_size_A, RFLOAT Xdim, RFLOAT Ydim, RFLOAT box_size_pix,
-		bool bimodal_angular_priors, bool cut_into_segments, RFLOAT tilt_angle, RFLOAT tilt_axis)
+		bool bimodal_angular_priors, bool cut_into_segments)
 {
 
     // Check parameters and open files
@@ -742,7 +740,7 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
             total_segments++;
             //std::cerr << "is_first= "<<is_first << " x,y= " << my_xcoord << " , " << my_ycoord<< " id= " << filament_id<< " l= "<<filament_length<< std::endl;
             addOneHelicalSegment(MD_out, my_xcoord, my_ycoord,
-                                 filament_id, 0., filament_length, psi_prior_flip_ratio, 90.); // this is wrong tilt prior for tilted data!!! (we might never use this anyway...)
+                                 filament_id, 0., filament_length, psi_prior_flip_ratio); // this is wrong tilt prior for tilted data!!! (we might never use this anyway...)
         }
         else
         {
@@ -760,9 +758,8 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
                 // for second segment in a filament: set psi-prior of the first one equal to this one's psi-prior
                 if (is_first) MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, psi_prior, MD_out.numberOfObjects()-1);
                 //std::cerr << "added="<<added << " newx,y= " << new_x << " , " << new_y<< " psi= " << psi_prior << " id= " << filament_id<< " l= "<<filament_length<< std::endl;
-                RFLOAT tilt_prior = ::calculateTiltPriorFromPsi(psi_prior, helical_tilt_angle, helical_tilt_axis);
                 addOneHelicalSegment(MD_out, new_x, new_y,filament_id,
-                                     psi_prior, filament_length, psi_prior_flip_ratio, tilt_prior);
+                                     psi_prior, filament_length, psi_prior_flip_ratio);
             }
             remaining_step = added - dist;
             is_first = false;
@@ -815,8 +812,8 @@ void Preprocessing::readHelicalCoordinates(FileName fn_mic, FileName fn_coord, M
 		{
 			if (is_3D)
 				REPORT_ERROR("Preprocessing::readCoordinates ERROR: Cannot extract 3D helical subtomograms from start-end coordinates!");
-			if (do_lines) convertHelicalLineCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments, helical_tilt_angle, helical_tilt_axis);
-            else convertHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments, helical_tilt_angle, helical_tilt_axis);
+			if (do_lines) convertHelicalLineCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
+            else convertHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
 		}
 		else
 			convertHelicalSegmentCoordsToMetaDataTable(fn_coord, MD, total_segments, is_3D, xdim, ydim, zdim, extract_size, helical_bimodal_angular_priors);
@@ -824,7 +821,7 @@ void Preprocessing::readHelicalCoordinates(FileName fn_mic, FileName fn_coord, M
 	else if (is_box)
 	{
 		if (do_startend)
-			convertEmanHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments,  helical_tilt_angle, helical_tilt_axis);
+			convertEmanHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
 		else if (do_lines)
             REPORT_ERROR("ERROR: extracting lines for EMAN box files is not possible");
         else
@@ -833,7 +830,7 @@ void Preprocessing::readHelicalCoordinates(FileName fn_mic, FileName fn_coord, M
 	else if (is_coords)
 	{
 		if (do_startend)
-			convertXimdispHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments, helical_tilt_angle, helical_tilt_axis);
+			convertXimdispHelicalTubeCoordsToMetaDataTable(fn_coord, MD, total_segments, total_tubes, helical_nr_asu, helical_rise, angpix, xdim, ydim, extract_size, helical_bimodal_angular_priors, helical_cut_into_segments);
         else if (do_lines)
             REPORT_ERROR("ERROR: extracting lines for Ximdisp coordinate files is not possible");
 		else
