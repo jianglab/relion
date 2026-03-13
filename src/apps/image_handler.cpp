@@ -932,7 +932,7 @@ class image_handler_parameters
 					avg_ampl = Iop();
 				}
 
-				if (fn_mult != "" || fn_div != "" || fn_add != "" || fn_subtract != "" || fn_fsc != "" || fn_adjust_power != "" ||fn_fourfilter != "")
+				if (fn_mult != "" || fn_div != "" || fn_add != "" || fn_subtract != "" || fn_fsc != "" || fn_adjust_power != "")
 					if (XSIZE(Iop()) != xdim || YSIZE(Iop()) != ydim || ZSIZE(Iop()) != zdim)
 						REPORT_ERROR("Error: operate-image is not of the correct size");
 

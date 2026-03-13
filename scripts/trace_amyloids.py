@@ -1,4 +1,4 @@
-#!@PYTHON_EXE_PATH@
+#!/public/EM/anaconda3/envs/relion-5.0/bin/python
 
 import argparse
 import math
@@ -13,6 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import mrcfile
+import matplotlib
+matplotlib.use("Agg")  # non-GUI backend, no Qt/X11 needed
 import matplotlib.pyplot as plt
 
 from skimage.morphology import remove_small_objects, skeletonize
@@ -530,27 +532,85 @@ def resize_and_norm(image, mysize, angpix, do_norm=True):
 
     return resized, resized_angpix
 
+
+def install_model(
+        name: str,
+        verbose: bool = False,
+):
+    model_list = {
+        "amytracer-v1.0": [
+            "https://zenodo.org/records/17949642/files/amytracer-v1.0.ckpt.gz",
+            "d83777816d899d64aef593c97888e88f56d49e2b652cdc460de554f59d6f94ed"
+        ],
+        "amytracer-v2.0": [
+            "https://zenodo.org/records/17949642/files/amytracer-v2.0.ckpt.gz",
+            "57f0cd566ca1779641691f7daf4a6147ccdb4f509f01c7472861e32bb7dbe14c"
+        ],
+        "carbonpicker-v1.0": [
+            "https://zenodo.org/records/17949642/files/carbonpicker-v1.0.ckpt.gz",
+            "e25702cc84850339b46ac5b7d8e19ebdd55ad420c15bda8c9f9a584f59e7fd6b"
+        ]
+    }
+
+    if name in model_list.keys():
+        dest_dir = os.path.join(torch.hub.get_dir(), "checkpoints", "relion_trace_amyloids")
+        model_path = os.path.join(dest_dir, f"{name}.ckpt")
+        model_path_gz = model_path + ".gz"
+        completed_check_path = os.path.join(dest_dir, f"{name}_installed.txt")
+
+        # Download file and install it if not already done
+        if not os.path.isfile(completed_check_path):
+            if verbose:
+                print(f"Installing amyloid picker model ({name})...")
+                os.makedirs(dest_dir, exist_ok=True)
+
+            source_url = model_list[name][0]
+
+            if verbose:
+                print(f"Downloading model weights from:\n   {source_url}")
+
+            import gzip, shutil
+            torch.hub.download_url_to_file(source_url, model_path_gz, hash_prefix=model_list[name][1])
+            with gzip.open(model_path_gz, 'rb') as f_in:
+                with open(model_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+                    os.remove(model_path_gz)
+
+            with open(completed_check_path, "w") as f:
+                f.write("Successfully downloaded model")
+
+        if verbose:
+            print(f"Amyloid picker model ({name}) successfully installed in {dest_dir}")
+
+    else:
+        model_path = name
+
+    return model_path
+
+
+
+
 ###############################################################################
 #                              MAIN
 ###############################################################################
 def main():
 
-    #start_time = time.time()  
     parser = argparse.ArgumentParser("Skeleton-based filament picking with instance merging, branch pruning, and ID labeling")
-    parser.add_argument("-i", "--input", help="Input star file")
-    parser.add_argument("-m", "--model_path", help="Path to PyTorch model checkpoint")
-    parser.add_argument("-c", "--carbon_model_path", help="Path to PyTorch model checkpoint for carbon detection", default="")
-    parser.add_argument("-o", "--output", help="Output star file with coordinates")
-    parser.add_argument("-r", "--radius", type=int, help="Minimum distance between ends of filaments (in A)")
+    parser.add_argument("-i", "--input", help="Input star file", default="None")
+    parser.add_argument("-o", "--output", help="Output star file with coordinates", default="out")
+    parser.add_argument("-r", "--radius", type=int, help="Minimum distance between ends of filaments (in A)", default=25)
     parser.add_argument("-l", "--minimum_length", type=int, default=250,
                         help="Remove final segments smaller than this size in Angstroms (default=250)")
     parser.add_argument("-p", "--psi_jump_threshold", default=45, type=float, help="Maximum difference in degrees of psi angles for consecutive points in skeletons (default=45)")
     parser.add_argument("-t", "--threshold", default=0.5, type=float, help="Foreground threshold (default=0.5)")
+    parser.add_argument("-c", "--carbon", action='store_true', help="Ignore filaments on carbon")
     parser.add_argument("-ct", "--carbon_threshold", default=0.9, type=float, help="Carbon detection threshold (default=0.9)")
     parser.add_argument("-s", "--scale", type=float, default=1.0,
                         help="Multiply output coordinates by this factor (default=1.0)")
     parser.add_argument("-d", "--device", default="cuda:0", help="Which GPU device to use")
     parser.add_argument("-j", "--threads", type=int, default=1)
+    parser.add_argument("-m", "--model_path", help="Path to PyTorch model checkpoint", default="amytracer-v2.0")
+    parser.add_argument("-cm", "--carbon_model_path", help="Path to PyTorch model checkpoint for carbon detection", default="carbonpicker-v1.0")
     parser.add_argument("-a", "--abort", help="Abort if this file exists")
     parser.add_argument("-v", "--verb", type=int, help="Verbosity")
     parser.add_argument("--sample_step", type=int, default=100,
@@ -564,9 +624,18 @@ def main():
 
     # ------------------- Load model ----------------------
     device = torch.device(args.device)
-    model = UNet.load_from_checkpoint(args.model_path, n_channels=3, n_classes=1)
+
+    # This is for when we call this program without any arguments upon installation of the relion package (in scripts/python_fetch_weights.in)
+    if (args.input == "None"):
+        my_model_path = install_model(args.model_path, verbose=True)
+        my_carbon_model_path = install_model(args.carbon_model_path, verbose=True)
+        sys.exit(0)
+   
+    # Load checkpoint file
+    my_model_path = install_model(args.model_path)
+    model = UNet.load_from_checkpoint(my_model_path, n_channels=3, n_classes=1)
     model.eval().to(device)
-    if args.carbon_model_path == "":
+    if not args.carbon:
         if args.verb > 0:
             print("  + Not doing carbon detection")
         do_carbon = False
@@ -574,9 +643,12 @@ def main():
         do_carbon = True
         if args.verb > 0:
             print("  + Doing carbon detection")
-        carbon_model = UNetCarbon.load_from_checkpoint(args.carbon_model_path, n_channels=1, n_classes=1)
+        my_carbon_model_path = install_model(args.carbon_model_path)
+        carbon_model = UNetCarbon.load_from_checkpoint(my_carbon_model_path, n_channels=1, n_classes=1)
         carbon_model.eval().to(device)
 
+    if args.plot:
+        print("  + Writing PNG file with intermediate results for every micrograph")
     input_star = starfile.read(args.input)
 
     @torch.compile
@@ -728,7 +800,7 @@ def main():
                 ax[5].set_title("carbon detection")
                 ax[5].axis('off')
 
-            if skeleton_img.any():
+            if skeleton_img.any() and np.count_nonzero(skeleton_img) > 10:
                 ax[6].imshow(color_nonrandom(pruned_skeleton))
                 ax[6].set_title("Pruned Skeleton")
                 ax[6].axis('off')
@@ -742,7 +814,8 @@ def main():
                     ax[7].axis('off')
 
             plt.tight_layout()
-            plt.show()
+            out_png = os.path.splitext(outfile)[0] + ".png"
+            plt.savefig(out_png, dpi=200, bbox_inches="tight")
             plt.close()
 
 

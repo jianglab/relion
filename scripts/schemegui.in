@@ -33,10 +33,10 @@ IS_RUNNING = False
 # Colour definitions
 # Yellowish background for entries
 entry_bg = '#ffffe6'
-# reddish colour for Browse buttons
-button_bg = '#c8506e'
-# Darker red for run buttons
-runbutton_bg = '#a01e3c'
+# relion-5.1: tealish  colour for Browse buttons
+button_bg = '#66b2b2'
+# Darker teal for run buttons
+runbutton_bg = '#008080'
 
 def load_star(filename):
     from collections import OrderedDict

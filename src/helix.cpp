@@ -1773,7 +1773,8 @@ void extractHelicalSegmentsFromTubes_Multiple(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors,
-		bool cut_into_segments)
+		bool cut_into_segments,
+        RFLOAT tilt_prior)
 {
 	int total_segments, total_tubes, nr_segments, nr_tubes;
 	FileName fns_in;
@@ -1938,7 +1939,7 @@ void convertHelicalTubeCoordsToMetaDataTable(
 
     	if (!cut_into_segments)
     	{
-			MD_out.addObject();
+            MD_out.addObject();
 	    	MD_out.setValue(EMDL_IMAGE_COORD_X, ((x1 + x2) * 0.5));
 	    	MD_out.setValue(EMDL_IMAGE_COORD_Y, ((y1 + y2) * 0.5));
 	    	MD_out.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, (tube_id + 1));
@@ -2273,6 +2274,12 @@ void removeBadPsiHelicalSegmentsFromDataStar(
 	MD_out.write(fn_out);
 	std::cout << " Number of segments (input / output) = " << nr_segments_old << " / " << nr_segments_new << std::endl;
 	return;
+}
+
+RFLOAT calculateTiltPriorFromPsi(RFLOAT psi, RFLOAT tilt_angle, RFLOAT tilt_axis)
+{
+    if (fabs(tilt_angle) < 0.01) return 90.;
+    else return ACOSD(SIND(tilt_angle) * SIND(psi - tilt_axis));
 }
 
 void convertHelicalSegmentCoordsToStarFile_Multiple(

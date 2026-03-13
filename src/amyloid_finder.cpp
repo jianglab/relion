@@ -45,11 +45,11 @@ void AmyloidFinder::read(int argc, char **argv, int rank)
     trace_filament_length = textToFloat(parser.getOption("--trace_filament_length", "Minimum length of traced filaments (in A)", "300"));
     psi_jump_threshold = textToFloat(parser.getOption("--psi_jump_threshold", "Maximum difference in PSI values between consecutive elements of a skeletonised branch (in degrees)", "45"));
     do_plot = parser.checkOption("--plot", "Display images with intermediate tracing results for each micrograph");
-    fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_trace_amyloids");
+    fn_exe =  parser.getOption("--exe", "Name of python script for filament tracing", "relion_python_trace_amyloids");
     fn_other_args = parser.getOption("--other_args", "Other arguments for the python script", "");
-    fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","/public/EM/RELION/amypicker2.ckpt");
+    fn_model_path = parser.getOption("--model_path", "Name of the model to execute for filament tracing","amytracer-v2.0");
     do_carbon = parser.checkOption("--detect_carbon", "Detect carbon and ignore filaments on there.");
-    fn_carbon_model_path = parser.getOption("--carbon_model_path", "Name of the model to execute for carbon detection","/public/EM/RELION/carbon.ckpt");
+    fn_carbon_model_path = parser.getOption("--carbon_model_path", "Name of the model to execute for carbon detection","carbonpicker-v1.0");
     carbon_threshold = textToFloat(parser.getOption("--carbon_threshold", "Threshold for carbon detection", "0.9"));
 	do_skip_tracing = parser.checkOption("--skip_tracing", "Skip tracing.");
     do_gpu = parser.checkOption("--gpu", "Use GPU acceleration when availiable");
@@ -819,7 +819,8 @@ void AmyloidFinder::runTracingBatch(long int my_first, long int my_last, int my_
     command += " -v " + integerToString(verb);
     if (do_carbon)
     {
-        command += " -c " + fn_carbon_model_path;
+        command += " -c ";
+        command += " -cm " + fn_carbon_model_path;
         command +=  " --carbon_threshold " + floatToString(carbon_threshold);
     }
     if (do_plot)

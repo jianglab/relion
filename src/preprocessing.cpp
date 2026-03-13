@@ -740,7 +740,7 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
             total_segments++;
             //std::cerr << "is_first= "<<is_first << " x,y= " << my_xcoord << " , " << my_ycoord<< " id= " << filament_id<< " l= "<<filament_length<< std::endl;
             addOneHelicalSegment(MD_out, my_xcoord, my_ycoord,
-                                 filament_id, 0., filament_length, psi_prior_flip_ratio);
+                                 filament_id, 0., filament_length, psi_prior_flip_ratio); // this is wrong tilt prior for tilted data!!! (we might never use this anyway...)
         }
         else
         {

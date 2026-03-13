@@ -541,7 +541,7 @@ endif(JPEG_FOUND)
 # -----------------------------------------------------------------PYTHON DEPENDENCIES--
 
 
-set(CONDA_ENV_NAME "relion-5.0" CACHE STRING "The Conda environment name")
+set(CONDA_ENV_NAME "relion-5.1" CACHE STRING "The Conda environment name")
 include(${CMAKE_SOURCE_DIR}/cmake/FindCondaPython.cmake)
 
 list(APPEND RELION_PYTHON_WRAPPERS
@@ -559,7 +559,7 @@ list(APPEND RELION_PYTHON_WRAPPERS
 	python_tomo_get_particle_poses
 	python_tomo_denoise
 	filament_selection
-	trace_amyloids
+	python_trace_amyloids
 	schemegui
 )
 
@@ -615,6 +615,7 @@ list(APPEND RELION_SCRIPT_FILES
         star_datablock_ctfdat
         qsub.csh
         it.py
+	trace_amyloids.py
 )
 
 add_custom_target(copy_scripts ALL)

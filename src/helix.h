@@ -210,7 +210,8 @@ void extractHelicalSegmentsFromTubes_Multiple(
 		RFLOAT Ydim,
 		RFLOAT box_size_pix,
 		bool bimodal_angular_priors = true,
-		bool cut_into_segments = true);
+		bool cut_into_segments = true,
+        RFLOAT tilt_prior = 90.);
 
 void convertHelicalTubeCoordsToMetaDataTable(
 		FileName& fn_in,
@@ -251,6 +252,8 @@ void removeBadPsiHelicalSegmentsFromDataStar(
 		FileName& fn_in,
 		FileName& fn_out,
 		RFLOAT max_dev_deg = 15.);
+
+RFLOAT calculateTiltPriorFromPsi(RFLOAT psi, RFLOAT tilt_angle, RFLOAT tilt_axis);
 
 void convertHelicalSegmentCoordsToStarFile_Multiple(
 		FileName& suffix_coords,

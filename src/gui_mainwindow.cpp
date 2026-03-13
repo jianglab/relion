@@ -2569,9 +2569,9 @@ Please also cite relevant papers when you used external programs or their algori
 * Postscript plots are made using CPlot2D from http://www.amzsaki.com\n\n\
 \
 About the start up screen:\n\n\
-The map shown is the cryo-EM map of a fungal pheromone receptor STE2 dimer\n\
-without G proteins. Application of Blush algorithm improved the map\n\
-from the left to the middle panel and allowed automatic chain tracing by ModelAngelo (right panel).\n\
+The image shown is a cryo-EM model of the dynein-dynactin complex on a microtubule resolved by \
+the Carter lab (MRC-LMB) using signal subtraction and local refinements in RELION: \
+Chaaban & Carter, 2022 (PMID: 36071160), Singh et al., 2024 (PMID: 38547289).\
 ")
 
 	ShowHelpText *help = new ShowHelpText(HELPTEXT);

@@ -1088,8 +1088,7 @@ Pixels values higher than this many times the image stddev will be replaced with
 
 	group5->begin();
 
-	place("helical_tube_outer_diameter", TOGGLE_DEACTIVATE);
-
+    place("helical_tube_outer_diameter", TOGGLE_DEACTIVATE);
 	current_y += STEPY/2;
 
 	place("helical_bimodal_angular_priors", TOGGLE_DEACTIVATE);
@@ -1581,7 +1580,14 @@ void JobWindow::initialiseClass3DWindow()
 	// Add a little spacer
 	current_y += STEPY/2;
 
-	place("do_blush", TOGGLE_DEACTIVATE);
+	// Blush group
+	group9 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group9->end();
+	place("do_blush", TOGGLE_DEACTIVATE, group9);
+	group9->begin();
+	place("blush_version");
+	group9->end();
+	guientries["do_blush"].cb_menu_i(); // This is to make the default effective
 
 	tab4->end();
 
@@ -1760,7 +1766,14 @@ void JobWindow::initialiseAutorefineWindow()
 	// Add a little spacer
 	current_y += STEPY/2;
 
-	place("do_blush", TOGGLE_DEACTIVATE);
+    // Blush group
+    group9 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+    group9->end();
+    place("do_blush", TOGGLE_DEACTIVATE, group9);
+    group9->begin();
+    place("blush_version");
+    group9->end();
+    guientries["do_blush"].cb_menu_i(); // This is to make the default effective
 
 	tab4->end();
 	tab5->begin();
@@ -1870,7 +1883,14 @@ void JobWindow::initialiseMultiBodyWindow()
 	// Add a little spacer
 	current_y += STEPY/2;
 
-	place("do_blush", TOGGLE_DEACTIVATE);
+    // Blush group
+    group9 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+    group9->end();
+    place("do_blush", TOGGLE_DEACTIVATE, group9);
+    group9->begin();
+    place("blush_version");
+    group9->end();
+    guientries["do_blush"].cb_menu_i(); // This is to make the default effective
 
 	tab1->end();
 	tab2->begin();
@@ -2909,12 +2929,7 @@ void JobWindow::initialiseTomoSubtomoWindow()
 
     current_y += STEPY /2 ;
 
-    place("do_stack2d", TOGGLE_DEACTIVATE);
-    place("do_pseudo3d", TOGGLE_DEACTIVATE);
-    place("do_real_subtomo", TOGGLE_DEACTIVATE);
-
-    current_y += STEPY /2 ;
-
+    place("subtomo_format", TOGGLE_DEACTIVATE);
     place("do_float16", TOGGLE_DEACTIVATE);
 
 	tab2->end();
