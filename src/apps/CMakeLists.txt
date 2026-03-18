@@ -115,10 +115,6 @@ file(GLOB RELION_JAZ_TOMO_TARGETS "${CMAKE_SOURCE_DIR}/src/jaz/tomography/apps/*
 file(GLOB RELION_MPI_TARGETS RELATIVE "${CMAKE_SOURCE_DIR}/src/apps" "${CMAKE_SOURCE_DIR}/src/apps/*_mpi.cpp")
 list(APPEND RELION_MPI_TARGETS "postprocess.cpp;flex_analyse.cpp;autopick.cpp")
 
-if(RELION_TEST)
-	file(GLOB RELION_JAZ_EXPERIMENTAL_TARGETS "${CMAKE_SOURCE_DIR}/src/jaz/scripts/*.cpp")
-endif(RELION_TEST)
-
 set(GUI_TARGETS maingui display manualpick)
 
 #--Remove apps using X11 if no GUI--
@@ -484,29 +480,6 @@ foreach (_target ${RELION_JAZ_TOMO_TARGETS})
 	if(SYCL)
 	    target_link_libraries(${_target} PUBLIC sycl OpenCL relion_lib)
 	endif(SYCL)
-
-	install (TARGETS ${_target} RUNTIME DESTINATION bin)
-endforeach()
-
-foreach (_target ${RELION_JAZ_EXPERIMENTAL_TARGETS})
-	GET_FILENAME_COMPONENT(_target "relion_exp_${_target}" NAME_WE)
-	add_executable(${_target} ${CMAKE_SOURCE_DIR}/src/jaz/scripts/${_target}.cpp)
- 	add_dependencies(${_target} relion_lib)
-	set_target_properties(${_target} PROPERTIES PREFIX "relion_exp_")
-	target_link_libraries(${_target} relion_lib ${EXTRA_LIBS} ${MPI_LIBRARIES} ${CMAKE_DL_LIBS})
-	set_target_properties(${_target} PROPERTIES CXX_EXTENSIONS OFF	)
-
-	if(TIFF_FOUND)
-		target_link_libraries(${_target} ${TIFF_LIBRARIES})
-	endif()
-
-    if(SYCL)
-        target_link_libraries(${_target} sycl OpenCL relion_lib)
-    endif(SYCL)
-
-	if (ALTCPU)
-		target_link_libraries(${_target} ${TBB_LIBRARIES})
-	endif(ALTCPU)
 
 	install (TARGETS ${_target} RUNTIME DESTINATION bin)
 endforeach()
