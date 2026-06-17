@@ -104,6 +104,8 @@ static PipeLine pipeline;
 
 // Which is the current job being displayed?
 static int current_job;
+// Previous browser item, used to restore selection after non-job tabs like cache management
+static int prevBrowserValue;
 static FileName global_outputname;
 
 // Order jobs in finished window alphabetically?
@@ -348,6 +350,9 @@ private:
 
     static void cb_toggle_expand_stdout(Fl_Widget*, void*);
     inline void cb_toggle_expand_stdout_i();
+
+    static void cb_cache_management(Fl_Widget*, void*);
+    inline void cb_cache_management_i();
 
     static void cb_about(Fl_Widget*, void*);
     inline void cb_about_i();

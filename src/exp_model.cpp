@@ -19,6 +19,10 @@
  ***************************************************************************/
 
 #include <random>
+#include <set>
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include "src/exp_model.h"
 #include <sys/statvfs.h>
 using namespace gravis;
@@ -500,6 +504,12 @@ void Experiment::initialiseBodies(int _nr_bodies)
 
 bool Experiment::getImageNameOnScratch(long int part_id, FileName &fn_img, bool is_ctf_image)
 {
+	// Cache mode: particle names have already been rewritten to point directly to cache paths
+	if (cacheMode)
+	{
+		return false;
+	}
+
 	int optics_group = getOpticsGroup(part_id);
     //TODO: move optics_group_id to particle, not image!!!!
 	long int my_id = particles[part_id].optics_group_id;
@@ -541,16 +551,22 @@ bool Experiment::getImageNameOnScratch(long int part_id, FileName &fn_img, bool 
 	}
 }
 
-void Experiment::setScratchDirectory(FileName _fn_scratch, bool do_reuse_scratch, int verb)
+void Experiment::setScratchDirectory(FileName _fn_scratch, bool do_reuse_scratch, int verb, bool add_relion_volatile)
 {
 	// Make sure fn_scratch ends with a slash
 	if (_fn_scratch[_fn_scratch.length()-1] != '/')
 		_fn_scratch += '/';
-	fn_scratch = _fn_scratch + "relion_volatile/";
+	if (add_relion_volatile)
+		fn_scratch = _fn_scratch + "relion_volatile/";
+	else
+		fn_scratch = _fn_scratch;
 
 	if (do_reuse_scratch)
 	{
 		nr_parts_on_scratch.resize(numberOfOpticsGroups(), 0);
+		// In cache mode, per-OG counts are maintained by copyParticlesToScratch
+		if (cacheMode)
+			return;
 		for (int optics_group = 0; optics_group < numberOfOpticsGroups(); optics_group++)
 		{
 			if (is_3D)
@@ -594,8 +610,11 @@ FileName Experiment::initialiseScratchLock(FileName _fn_scratch, FileName _fn_ou
 	return fn_lock;
 }
 
-bool Experiment::prepareScratchDirectory(FileName _fn_scratch, FileName fn_lock)
+bool Experiment::prepareScratchDirectory(FileName _fn_scratch, FileName fn_lock, bool add_relion_volatile)
 {
+	// Ensure fn_scratch (class member) is up to date before cleanup/creation
+	setScratchDirectory(_fn_scratch, false, 0, add_relion_volatile);
+
 	if (fn_lock != "" && exists(fn_lock))
 	{
 		// Still measure how much free space there is
@@ -652,16 +671,34 @@ void Experiment::deleteDataOnScratch()
 	}
 }
 
-void Experiment::copyParticlesToScratch(int verb, bool do_copy, bool also_do_ctf_image, RFLOAT keep_free_scratch_Gb)
+void Experiment::copyParticlesToScratch(int verb, bool do_copy, bool also_do_ctf_image, RFLOAT keep_free_scratch_Gb, const std::string &label)
 {
 
     // This function relies on prepareScratchDirectory() being called before!
+
+	// Cache mode: particle stacks are already cached by CacheManager::populateCache,
+	// and particle names have been rewritten to point to cache paths.
+	// Just count particles per optics group.
+	if (cacheMode)
+	{
+		nr_parts_on_scratch.clear();
+		nr_parts_on_scratch.resize(numberOfOpticsGroups(), 0);
+		for (long int part_id = 0; part_id < particles.size(); part_id++)
+		{
+			int og = particles[part_id].optics_group;
+			if (og >= 0 && og < (int)nr_parts_on_scratch.size())
+				nr_parts_on_scratch[og]++;
+		}
+		if (verb > 0 && do_copy)
+			std::cout << " Using cached particle stacks." << std::endl;
+		return;
+	}
 
 	long int nr_part = particles.size();
 	int barstep;
 	if (verb > 0 && do_copy)
 	{
-		std::cout << " Copying particles to scratch directory: " << fn_scratch << std::endl;
+		std::cout << " Copying particles to " << label << " directory: " << fn_scratch << std::endl;
 		init_progress_bar(nr_part);
 		barstep = XMIPP_MAX(1, nr_part / 60);
 	}
@@ -680,6 +717,9 @@ void Experiment::copyParticlesToScratch(int verb, bool do_copy, bool also_do_ctf
 
 	const int check_abort_frequency=100;
 
+	time_t copyStartTime = (verb > 0 && do_copy) ? time(NULL) : 0;
+
+	{
 	FileName prev_img_name = "/Unlikely$filename$?*!";
 	int prev_optics_group = -999;
     for (long int part_id = 0; part_id < particles.size(); part_id++)
@@ -794,13 +834,38 @@ void Experiment::copyParticlesToScratch(int verb, bool do_copy, bool also_do_ctf
         prev_optics_group = optics_group;
 
         if (verb > 0 && total_nr_parts_on_scratch % barstep == 0)
+        {
             progress_bar(total_nr_parts_on_scratch);
+            if (do_copy && used_space > 0)
+            {
+                double elapsed = difftime(time(NULL), copyStartTime);
+                if (elapsed >= 1.0)
+                {
+                    double mb_s = (double)used_space / elapsed / (1024.0 * 1024.0);
+                    fprintf(stdout, "  [%6.1f MB/s]  \r", mb_s);
+                }
+            }
+            fflush(stdout);
+        }
 
+	} // end loop part_id
 	} // end loop part_id
 
 	if (verb)
 	{
 		progress_bar(nr_part);
+		fflush(stdout);
+		if (do_copy && copyStartTime > 0)
+		{
+		    double elapsed = difftime(time(NULL), copyStartTime);
+		    double totalMb = (double)used_space / (1024.0 * 1024.0);
+		    if (elapsed >= 1.0)
+		    {
+		        double mb_s = totalMb / elapsed;
+		        fprintf(stdout, "  [%6.1f MB/s]\n", mb_s);
+		    }
+		    fprintf(stdout, " Copied %.0f MB in %.0f s\n", totalMb, elapsed);
+		}
 		for (int i = 0; i < nr_parts_on_scratch.size(); i++)
 		{
 			std::cout << " For optics_group " << (i + 1) << ", there are " << nr_parts_on_scratch[i] << " particles on the scratch disk." << std::endl;
@@ -1066,6 +1131,17 @@ bool Experiment::read(FileName fn_exp, FileName fn_tomo, FileName fn_motion,
 			nr_read++;
 #endif
 		} // end loop over all objects in MDimg (part_id)
+
+		// Sanity check: verify the first image file exists and is readable
+		if (particles.size() > 0 && verb > 0)
+		{
+			FileName fn_first = particles[0].name;
+			FileName fn_stack;
+			long int imgno_dummy;
+			fn_first.decompose(imgno_dummy, fn_stack);
+			if (!exists(fn_stack))
+				REPORT_ERROR("First image stack not found: " + fn_stack);
+		}
 
 #ifdef DEBUG_READ
 		timer.toc(tfill);

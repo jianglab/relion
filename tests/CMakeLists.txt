@@ -1,16 +1,27 @@
-add_executable(tests
+add_executable(tests EXCLUDE_FROM_ALL
 		tests.cpp
 	)
 
+add_executable(cache_tests
+		cache.cpp
+	)
+
 add_dependencies(tests relion_lib)
+add_dependencies(cache_tests relion_lib)
+
 target_link_libraries(tests relion_lib)
 target_link_libraries(tests ${FFTW_LIBRARIES})
 target_link_libraries(tests ${TIFF_LIBRARIES})
+
+target_link_libraries(cache_tests relion_lib)
+target_link_libraries(cache_tests ${FFTW_LIBRARIES})
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
 
 include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/tests)
 include_directories(tests PRIVATE ${FFTW_INCLUDES})
+
+add_test(NAME cache_unit_tests COMMAND cache_tests)
 
 find_package(OpenMP)
 if (OPENMP_FOUND)

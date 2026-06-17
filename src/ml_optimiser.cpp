@@ -23,6 +23,7 @@
 //#define PRINT_GPU_MEM_INFO
 //#define DEBUG_BODIES
 
+//#define TIMING
 #ifdef TIMING
         #define RCTIC(timer,label) (timer.tic(label))
         #define RCTOC(timer,label) (timer.toc(label))
@@ -39,10 +40,16 @@
 #include <iostream>
 #include <string>
 #include <fstream>
+#include <unistd.h>
 #include <omp.h>
 #include "src/macros.h"
 #include "src/error.h"
 #include "src/ml_optimiser.h"
+#include "src/cache_init.h"
+#include "src/cache_manager.h"
+#include <map>
+#include <set>
+#include <iomanip>
 #ifdef _CUDA_ENABLED
     #include "src/acc/cuda/cuda_ml_optimiser.h"
     #ifdef CUDA_PROFILING
@@ -478,6 +485,9 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     keep_free_scratch_Gb = textToFloat(parser.getOption("--keep_free_scratch", "Space available for copying particle stacks (in Gb)", "10"));
     do_reuse_scratch = parser.checkOption("--reuse_scratch", "Re-use data on scratchdir, instead of wiping it and re-copying all data. This works only when ALL particles have already been cached.");
     keep_scratch = parser.checkOption("--keep_scratch", "Don't remove scratch after convergence. Following jobs that use EXACTLY the same particles should use --reuse_scratch.");
+    fn_cache = parser.getOption("--cache_dir", "Local SSD cache directory for persistent particle stack caching", "");
+    cache_copy_threads = textToInteger(parser.getOption("--cache_copy_threads", "Number of parallel threads for cache file copy (default 4)", "4"));
+    do_prefetch = !parser.checkOption("--no_prefetch", "Disable background prefetching of the next pool's particle images");
 
 #ifdef ALTCPU
 	do_cpu = parser.checkOption("--cpu", "Use intel vectorisation implementation for CPU");
@@ -915,6 +925,9 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     keep_free_scratch_Gb = textToFloat(parser.getOption("--keep_free_scratch", "Space available for copying particle stacks (in Gb)", "10"));
     do_reuse_scratch = parser.checkOption("--reuse_scratch", "Re-use data on scratchdir, instead of wiping it and re-copying all data.");
     keep_scratch = parser.checkOption("--keep_scratch", "Don't remove scratch after convergence. Following jobs that use EXACTLY the same particles should use --reuse_scratch.");
+    fn_cache = parser.getOption("--cache_dir", "Local SSD cache directory for persistent particle stack caching", "");
+    cache_copy_threads = textToInteger(parser.getOption("--cache_copy_threads", "Number of parallel threads for cache file copy (default 4)", "4"));
+    do_prefetch = !parser.checkOption("--no_prefetch", "Disable background prefetching of the next pool's particle images");
     do_fast_subsets = parser.checkOption("--fast_subsets", "Use faster optimisation by using subsets of the data in the first 15 iterations");
 #ifdef ALTCPU
     do_cpu = parser.checkOption("--cpu", "Use intel vectorisation implementation for CPU");
@@ -1941,6 +1954,14 @@ void MlOptimiser::initialiseGeneral(int rank)
     TIMING_ESP_ONEPARTN =  timer.setNew("expectationOneParticle (thrN)");
     TIMING_ESP_INI=        timer.setNew(" - EOP: initialise memory");
     TIMING_ESP_FT =        timer.setNew(" - EOP: getFourierTransforms");
+    TIMING_ESP_READ_ORIGINAL = timer.setNew(" - ESP: read original");
+    TIMING_ESP_READ_SCRATCH  = timer.setNew(" - ESP: read scratch");
+    TIMING_ESP_READ_CACHE    = timer.setNew(" - ESP: read cache");
+    TIMING_ESP_READ_PREREAD  = timer.setNew(" - ESP: read preread");
+    TIMING_ESP_PREFETCH_WAIT = timer.setNew(" - ESP: wait for prefetch");
+    TIMING_PREFETCH_ORIGINAL = timer.setNew(" - PREFETCH: read original");
+    TIMING_PREFETCH_SCRATCH  = timer.setNew(" - PREFETCH: read scratch");
+    TIMING_PREFETCH_CACHE    = timer.setNew(" - PREFETCH: read cache");
     TIMING_ESP_PREC1 =     timer.setNew(" - EOP: precalcShifts1");
     TIMING_ESP_PREC2 =     timer.setNew(" - EOP: precalcShifts2");
     TIMING_ESP_DIFF1 =     timer.setNew(" - EOP: getAllSquaredDifferences1");
@@ -3763,6 +3784,30 @@ void MlOptimiser::expectation()
 
     // SHWS10052021: reduce frequency of abort check 10-fold
     long int icheck= 0;
+
+    // Background prefetching: read next pool's images while computing current pool
+    bool use_prefetch = do_prefetch && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3;
+    if (verb > 0 && nr_particles_done == 0)
+    {
+        if (do_preread_images)
+            std::cout << " Reading particles: pre-read all into memory." << std::endl;
+        else if (fn_cache != "")
+            std::cout << " Reading particles: from cache (prefetch=" << (use_prefetch ? "on" : "off") << ")." << std::endl;
+        else if (fn_scratch != "")
+            std::cout << " Reading particles: from scratch (prefetch=" << (use_prefetch ? "on" : "off") << ")." << std::endl;
+        else
+            std::cout << " Reading particles: from original locations (prefetch=" << (use_prefetch ? "on" : "off") << ")." << std::endl;
+    }
+    if (use_prefetch)
+    {
+        prefetch_global_last_ = my_last_part_id;
+        prefetcher_ = new AsyncImagePrefetcher(&mydata);
+        long int first = my_first_part_id + nr_particles_done;
+        long int last = XMIPP_MIN(my_last_part_id, first + nr_pool - 1);
+        getMetaAndImageDataSubset(first, last, false);
+        prefetcher_->startPrefetch(first, last);
+    }
+
     while (nr_particles_done < my_nr_particles)
     {
 
@@ -3773,8 +3818,11 @@ void MlOptimiser::expectation()
         long int my_pool_first_part_id = my_first_part_id + nr_particles_done;
         long int my_pool_last_part_id = XMIPP_MIN(my_last_part_id, my_pool_first_part_id + nr_pool - 1);
 
-        // Get the metadata for these particles
-        getMetaAndImageDataSubset(my_pool_first_part_id, my_pool_last_part_id, !do_parallel_disc_io);
+        if (!use_prefetch)
+        {
+            // Get the metadata for these particles
+            getMetaAndImageDataSubset(my_pool_first_part_id, my_pool_last_part_id, !do_parallel_disc_io);
+        }
 
 #ifdef TIMING
         timer.toc(TIMING_EXP_METADATA);
@@ -3810,12 +3858,27 @@ void MlOptimiser::expectation()
 #endif
 
         nr_particles_done += my_pool_last_part_id - my_pool_first_part_id + 1;
+
+        // In prefetch mode, set up metadata for the next pool now (it was skipped at loop top)
+        if (use_prefetch && nr_particles_done < my_nr_particles)
+        {
+            long int next_first = my_first_part_id + nr_particles_done;
+            long int next_last = XMIPP_MIN(my_last_part_id, next_first + nr_pool - 1);
+            getMetaAndImageDataSubset(next_first, next_last, false);
+        }
+
         if (verb > 0 && nr_particles_done - prev_barstep > barstep)
         {
             prev_barstep = nr_particles_done;
             progress_bar(nr_particles_done);
         }
 
+    }
+
+    if (use_prefetch)
+    {
+        delete prefetcher_;
+        prefetcher_ = NULL;
     }
 
     if (verb > 0)
@@ -4187,7 +4250,8 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
     FileName fn_img, fn_stack, fn_open_stack="";
 
     // Store total number of particle images in this bunch of SomeParticles, and set translations and orientations for skip_align/rotate
-    exp_imgs.clear();
+    if (prefetcher_ == NULL)
+        exp_imgs.clear();
     int metadata_offset = 0;
     for (long int part_id_sorted = my_first_part_id; part_id_sorted <= my_last_part_id; part_id_sorted++, metadata_offset++)
     {
@@ -4254,12 +4318,14 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
 
         // Sjors 7 March 2016 to prevent too high disk access... Read in all pooled images simultaneously
         // Don't do this for sub-tomograms to save RAM!
-        if (do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3)
+        // With prefetch: images are loaded in background by AsyncImagePrefetcher
+        if (prefetcher_ == NULL && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3)
         {
             // Read in the actual image from disc, only open/close common stacks once
 
-            // Get the filename
-            if (!mydata.getImageNameOnScratch(part_id, fn_img))
+            // Get the filename and determine its source
+            bool on_scratch = mydata.getImageNameOnScratch(part_id, fn_img);
+            if (!on_scratch)
             {
                 std::istringstream split(exp_fn_img);
                 for (int i = 0; i <= metadata_offset; i++)
@@ -4279,7 +4345,20 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
 #ifdef DEBUG_BODIES
             std::cerr << " fn_img= " << fn_img << " part_id= " << part_id << std::endl;
 #endif
+#ifdef TIMING
+            int read_timer;
+            if (mydata.cacheMode)
+                read_timer = TIMING_ESP_READ_CACHE;
+            else if (!on_scratch)
+                read_timer = TIMING_ESP_READ_ORIGINAL;
+            else
+                read_timer = TIMING_ESP_READ_SCRATCH;
+            timer.tic(read_timer);
+#endif
             img.readFromOpenFile(fn_img, hFile, -1, false);
+#ifdef TIMING
+            timer.toc(read_timer);
+#endif
             img().setXmippOrigin();
             exp_imgs.push_back(img());
 
@@ -4287,6 +4366,25 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
 
     } //end loop over part_id
 
+    // If prefetching, swap the background-loaded images into exp_imgs
+    // and start reading the next pool in the background
+    if (prefetcher_ != NULL && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3)
+    {
+#ifdef TIMING
+        timer.tic(TIMING_ESP_PREFETCH_WAIT);
+#endif
+        prefetcher_->waitAndSwap(exp_imgs);
+#ifdef TIMING
+        timer.toc(TIMING_ESP_PREFETCH_WAIT);
+#endif
+
+        long int next_first = my_last_part_id + 1;
+        if (next_first <= prefetch_global_last_)
+        {
+            long int next_last = XMIPP_MIN(prefetch_global_last_, next_first + nr_pool - 1);
+            prefetcher_->startPrefetch(next_first, next_last);
+        }
+    }
 
 #ifdef DEBUG_EXPSOME
     std::cerr << " exp_my_first_part_id= " << exp_my_first_part_id << " exp_my_last_part_id= " << exp_my_last_part_id << std::endl;
@@ -10352,7 +10450,8 @@ void MlOptimiser::getMetaAndImageDataSubset(long int first_part_id, long int las
 
         // Get the image names from the MDimg table
         FileName fn_img="", fn_rec_img="", fn_ctf="";
-        if (!mydata.getImageNameOnScratch(part_id, fn_img))
+        bool on_scratch = mydata.getImageNameOnScratch(part_id, fn_img);
+        if (!on_scratch)
             fn_img = mydata.particles[part_id].name;
 
         if (mymodel.data_dim == 3 && do_ctf_correction)
@@ -10378,22 +10477,40 @@ void MlOptimiser::getMetaAndImageDataSubset(long int first_part_id, long int las
             Image<RFLOAT> img, rec_img;
             if (do_preread_images)
             {
+#ifdef TIMING
+                timer.tic(TIMING_ESP_READ_PREREAD);
+#endif
                 img().reshape(mydata.particles[part_id].img);
                 FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(mydata.particles[part_id].img)
                 {
                     DIRECT_MULTIDIM_ELEM(img(), n) = (RFLOAT)DIRECT_MULTIDIM_ELEM(mydata.particles[part_id].img, n);
                 }
+#ifdef TIMING
+                timer.toc(TIMING_ESP_READ_PREREAD);
+#endif
             }
             else
             {
-                // only open new stacks
                 fn_img.decompose(dump, fn_stack);
                 if (fn_stack != fn_open_stack)
                 {
                     hFile.openFile(fn_stack, WRITE_READONLY);
                     fn_open_stack = fn_stack;
                 }
+#ifdef TIMING
+                int read_timer;
+                if (mydata.cacheMode)
+                    read_timer = TIMING_ESP_READ_CACHE;
+                else if (!on_scratch)
+                    read_timer = TIMING_ESP_READ_ORIGINAL;
+                else
+                    read_timer = TIMING_ESP_READ_SCRATCH;
+                timer.tic(read_timer);
+#endif
                 img.readFromOpenFile(fn_img, hFile, -1, false);
+#ifdef TIMING
+                timer.toc(read_timer);
+#endif
                 img().setXmippOrigin();
             }
 

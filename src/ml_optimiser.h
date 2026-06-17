@@ -44,6 +44,7 @@
 #include "src/local_symmetry.h"
 #include "src/acc/settings.h"
 #include <src/jaz/tomography/optimisation_set.h>
+#include "src/prefetch.h"
 
 #define ML_SIGNIFICANT_WEIGHT 1.e-8
 #define METADATA_LINE_LENGTH METADATA_LINE_LENGTH_ALL
@@ -494,6 +495,21 @@ public:
 	// Don't delete scratch after finishing
 	bool keep_scratch;
 
+	// Prefetch next pool's images while computing current pool
+	bool do_prefetch;
+
+	// Last particle ID for prefetching
+	long int prefetch_global_last_;
+
+	// Local SSD cache directory for persistent particle stack caching
+	FileName fn_cache;
+
+	// Number of parallel threads for cache file copy
+	int cache_copy_threads;
+
+	// Cache init has already been done during read; skip in initialiseWorkLoad
+	bool skip_cache_init_in_read_;
+
 	// Print the symmetry transformation matrices
 	bool do_print_symmetry_ops;
 
@@ -704,6 +720,7 @@ public:
 	std::string exp_fn_img, exp_fn_ctf, exp_fn_recimg;
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;
+	AsyncImagePrefetcher *prefetcher_;
 
 	// Calculate translated images on-the-fly
 	bool do_shifts_onthefly;
@@ -756,6 +773,8 @@ public:
 	int TIMING_EXP_1,TIMING_EXP_1a,TIMING_EXP_2,TIMING_EXP_3,TIMING_EXP_4,TIMING_EXP_4a,TIMING_EXP_4b,TIMING_EXP_4c,TIMING_EXP_4d,TIMING_EXP_5,TIMING_EXP_6,TIMING_EXP_7,TIMING_EXP_8,TIMING_EXP_9;
 	int TIMING_ESP, TIMING_ESP_THR, TIMING_ESP_ONEPART, TIMING_ESP_ONEPARTN, TIMING_EXP_METADATA, TIMING_EXP_CHANGES;
 	int TIMING_ESP_FT, TIMING_ESP_INI, TIMING_ESP_DIFF1, TIMING_ESP_DIFF2;
+	int TIMING_ESP_READ_ORIGINAL, TIMING_ESP_READ_SCRATCH, TIMING_ESP_READ_CACHE, TIMING_ESP_READ_PREREAD;
+	int TIMING_ESP_PREFETCH_WAIT, TIMING_PREFETCH_ORIGINAL, TIMING_PREFETCH_SCRATCH, TIMING_PREFETCH_CACHE;
 	int TIMING_ESP_DIFF2_A, TIMING_ESP_DIFF2_B, TIMING_ESP_DIFF2_C, TIMING_ESP_DIFF2_D, TIMING_ESP_DIFF2_E;
 	int TIMING_ESP_PREC1, TIMING_ESP_PREC2, TIMING_ESP_PRECW, TIMING_WSUM_GETSHIFT, TIMING_DIFF2_GETSHIFT, TIMING_WSUM_SCALE, TIMING_WSUM_LOCALSUMS;
 	int TIMING_ESP_WEIGHT1, TIMING_ESP_WEIGHT2, TIMING_WEIGHT_EXP, TIMING_WEIGHT_SORT, TIMING_ESP_WSUM;
@@ -926,7 +945,9 @@ public:
 #endif
             failsafe_threshold(40),
             do_trust_ref_size(0),
-            minimum_nr_particles_sigma2_noise(1000)
+            minimum_nr_particles_sigma2_noise(1000),
+            skip_cache_init_in_read_(false),
+            prefetch_global_last_(-1)
 	{
 #ifdef ALTCPU
 		tbbCpuOptimiser = CpuOptimiserType((void*)NULL);

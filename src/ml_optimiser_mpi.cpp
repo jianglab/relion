@@ -35,6 +35,11 @@
 #endif
 #include <stdio.h>
 #include <stdlib.h>
+#include "src/cache_manager.h"
+#include "src/cache_init.h"
+#include <map>
+#include <set>
+#include <iomanip>
 
 //#define PRINT_GPU_MEM_INFO
 //#define DEBUG
@@ -63,6 +68,7 @@ void MlOptimiserMpi::read(int argc, char **argv)
     	PRINT_VERSION_INFO();
 
     // First read in non-parallelisation-dependent variables
+    skip_cache_init_in_read_ = true;
     MlOptimiser::read(argc, argv, node->rank);
 
     int mpi_section = parser.addSection("MPI options");
@@ -72,7 +78,16 @@ void MlOptimiserMpi::read(int argc, char **argv)
     // Don't put any output to screen for mpi followers
     ori_verb = verb;
     if (verb != 0)
-    	verb = (node->isLeader()) ? ori_verb : 0;
+        verb = (node->isLeader()) ? ori_verb : 0;
+
+    // MPI-guarded cache init: leader copies, barrier, then followers register
+    if (fn_cache != "" && !do_preread_images)
+    {
+        CacheInitializer::initializeCacheMpi(fn_cache, cache_copy_threads, mydata.MDimg, verb, &mydata.obsModel, node->isLeader(), (intptr_t)MPI_COMM_WORLD);
+        mydata.cacheMode = true;
+        mydata.cacheCopyThreads = cache_copy_threads;
+        keep_scratch = true;
+    }
 
 //#define DEBUG_BODIES
 #ifdef DEBUG_BODIES
@@ -905,7 +920,179 @@ void MlOptimiserMpi::initialiseWorkLoad()
 	}
 
 	// Now copy particle stacks to scratch if needed
-	if (fn_scratch != "" && !do_preread_images)
+	// --cache_dir takes priority over --scratch_dir
+	if (fn_cache != "" && !do_preread_images)
+	{
+		char cwdBuf[4096];
+		std::string projectRoot;
+		if (node->isLeader())
+		{
+			if (::getcwd(cwdBuf, sizeof(cwdBuf)) != NULL)
+				projectRoot = cwdBuf;
+			else
+				projectRoot = fn_out;
+		}
+
+		// Broadcast project root
+		char projectRootBuf[4096];
+		memset(projectRootBuf, 0, sizeof(projectRootBuf));
+		if (node->isLeader())
+			strncpy(projectRootBuf, projectRoot.c_str(), sizeof(projectRootBuf) - 1);
+		MPI_Bcast(projectRootBuf, sizeof(projectRootBuf), MPI_CHAR, 0, MPI_COMM_WORLD);
+		projectRoot = projectRootBuf;
+
+		if (verb > 0 && node->isLeader())
+			std::cout << " Using cache directory: " << fn_cache << std::endl;
+
+		// Leader discovers source jobs and broadcasts
+		int nrSources = 0;
+		char sourceJobsBuf[4096];
+		memset(sourceJobsBuf, 0, sizeof(sourceJobsBuf));
+		if (node->isLeader())
+		{
+			std::vector<FileName> srcJobs = CacheManager::findSourceJobs(mydata);
+			nrSources = (int)srcJobs.size();
+			size_t pos = 0;
+			for (int i = 0; i < nrSources && pos < sizeof(sourceJobsBuf) - 1; i++)
+			{
+				if (i > 0) sourceJobsBuf[pos++] = '\n';
+				for (size_t c = 0; c < srcJobs[i].length() && pos < sizeof(sourceJobsBuf) - 1; c++)
+					sourceJobsBuf[pos++] = srcJobs[i][c];
+			}
+			sourceJobsBuf[pos] = '\0';
+		}
+		MPI_Bcast(&nrSources, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		MPI_Bcast(sourceJobsBuf, sizeof(sourceJobsBuf), MPI_CHAR, 0, MPI_COMM_WORLD);
+
+		// Deserialize source jobs on all ranks
+		std::vector<FileName> sourceJobs;
+		{
+			std::string buf(sourceJobsBuf);
+			size_t start = 0, end;
+			while ((end = buf.find('\n', start)) != std::string::npos)
+			{
+				sourceJobs.push_back(buf.substr(start, end - start));
+				start = end + 1;
+			}
+			if (start < buf.length())
+				sourceJobs.push_back(buf.substr(start));
+		}
+
+		CacheManager cm;
+		cm.setCacheDir(fn_cache);
+		cm.setRegistryDir(projectRoot);
+
+		if (!sourceJobs.empty())
+		{
+			if (verb > 0 && node->isLeader())
+			{
+				std::cout << " Found " << sourceJobs.size() << " source job(s):";
+				for (size_t si = 0; si < sourceJobs.size(); si++)
+					std::cout << " " << sourceJobs[si];
+				std::cout << std::endl;
+			}
+
+			// Group stacks by source job directory
+			std::map<FileName, std::vector<FileName> > stacksBySource;
+			for (long int p = 0; p < mydata.numberOfParticles(); p++)
+			{
+				long int imgno;
+				FileName fn_stack;
+				mydata.particles[p].name.decompose(imgno, fn_stack);
+				FileName dirPart = fn_stack.beforeLastOf("/");
+				if (dirPart == fn_stack)
+					dirPart = ".";
+				stacksBySource[dirPart].push_back(fn_stack);
+			}
+
+			std::map<FileName, std::vector<FileName> > uniqueStacksBySource;
+			for (std::map<FileName, std::vector<FileName> >::const_iterator it = stacksBySource.begin();
+			     it != stacksBySource.end(); ++it)
+			{
+				std::set<FileName> uniq(it->second.begin(), it->second.end());
+				uniqueStacksBySource[it->first] = std::vector<FileName>(uniq.begin(), uniq.end());
+			}
+
+			// Process each source job
+			std::map<FileName, std::string> keyForSource;
+			for (size_t si = 0; si < sourceJobs.size(); si++)
+			{
+				const FileName &srcDir = sourceJobs[si];
+				std::string cacheKey = cm.computeKey(projectRoot, srcDir);
+				keyForSource[srcDir] = cacheKey;
+				std::vector<FileName> &relPaths = uniqueStacksBySource[srcDir];
+
+				if (verb > 0 && node->isLeader())
+					std::cout << " Source job: " << srcDir << "  key=" << cacheKey << std::endl;
+
+				if (!cm.isCached(cacheKey, relPaths))
+				{
+					if (node->isLeader())
+						cm.acquireLock(cacheKey);
+					MPI_Barrier(MPI_COMM_WORLD);
+
+					if (!cm.isCached(cacheKey, relPaths))
+					{
+					int copyVerb = (node->rank == 1) ? ori_verb : 0;
+						// Rank 1 does the copy; all others wait
+						if (node->rank == 1)
+						{
+							cm.populateCache(cacheKey, relPaths, projectRoot, copyVerb, cache_copy_threads);
+						}
+						MPI_Barrier(MPI_COMM_WORLD);
+					}
+					else
+					{
+						if (verb > 0 && node->isLeader())
+							std::cout << "  Reusing cache " << cacheKey
+								  << " (" << cm.getCacheDirForKey(cacheKey)
+								  << ") — cached by another process" << std::endl;
+					}
+
+					MPI_Barrier(MPI_COMM_WORLD);
+					if (node->isLeader())
+					{
+						cm.touchRegistry(cacheKey, srcDir, (int)mydata.numberOfParticles(),
+								 mydata.numberOfOpticsGroups(), projectRoot);
+						cm.evictIfFull();
+						cm.releaseLock(cacheKey);
+					}
+				}
+				else
+				{
+					if (verb > 0 && node->isLeader())
+						std::cout << "  Reusing cache " << cacheKey
+							  << " (" << cm.getCacheDirForKey(cacheKey) << ")" << std::endl;
+					if (node->isLeader())
+						cm.touchRegistry(cacheKey, srcDir, -1, -1, projectRoot);
+				}
+				MPI_Barrier(MPI_COMM_WORLD);
+			}
+
+			// All ranks rewrite particle names to point to cache
+			mydata.cacheMode = true;
+			mydata.cacheCopyThreads = cache_copy_threads;
+			for (long int p = 0; p < mydata.numberOfParticles(); p++)
+			{
+				long int imgno;
+				FileName fn_stack;
+				mydata.particles[p].name.decompose(imgno, fn_stack);
+				FileName dirPart = fn_stack.beforeLastOf("/");
+				if (dirPart == fn_stack)
+					dirPart = ".";
+				std::string cacheKey = keyForSource[dirPart];
+				FileName cachePath = cm.getCachePathForKey(cacheKey, fn_stack);
+				mydata.particles[p].name.compose(imgno, cachePath);
+			}
+
+			if (verb > 0 && node->isLeader())
+				std::cout << " Rewrote " << mydata.numberOfParticles()
+					  << " particle names to point to cache." << std::endl;
+		}
+
+		keep_scratch = true;
+	}
+	else if (fn_scratch != "" && !do_preread_images)
 	{
 		mydata.setScratchDirectory(fn_scratch, do_reuse_scratch, verb);
 
@@ -915,38 +1102,29 @@ void MlOptimiserMpi::initialiseWorkLoad()
 			if (do_parallel_disc_io)
 			{
 				FileName fn_lock = mydata.initialiseScratchLock(fn_scratch, fn_out);
-				// One rank after the other, all followers pass through mydata.prepareScratchDirectory()
-				// This way, only the first rank on each hostname will actually copy the particle stacks
-				// The rest will just update the filenames in exp_model
 				bool need_to_copy = false;
 				for (int inode = 0; inode < node->size; inode++)
 				{
 					if (inode == 0)
-					{
 						need_to_copy = false;
-					}
 					if (inode > 0 && inode == node->rank)
-					{
-						// The leader removes the lock if it existed
 						need_to_copy = mydata.prepareScratchDirectory(fn_scratch, fn_lock);
-					}
 					MPI_Barrier(MPI_COMM_WORLD);
 				}
 
-				int myverb = (node->rank == 1) ? ori_verb : 0; // Only the first follower
+				int myverb = (node->rank == 1) ? ori_verb : 0;
 				if (need_to_copy)
 					mydata.copyParticlesToScratch(myverb, true, also_do_ctfimage, keep_free_scratch_Gb);
 
 				MPI_Barrier(MPI_COMM_WORLD);
-				if (!need_to_copy) // This initialises nr_parts_on_scratch on non-first ranks by pretending --reuse_scratch
+				if (!need_to_copy)
 				{
 					mydata.setScratchDirectory(fn_scratch, true, verb);
-					keep_scratch=true; // Setting keep_scratch for non-first ranks, to ensure that only first rank on each node deletes scratch during cleanup
+					keep_scratch=true;
 				}
 			}
 			else
 			{
-				// Only the leader needs to copy the data, as only the leader will be reading in images
 				if (node->isLeader())
 				{
 					mydata.prepareScratchDirectory(fn_scratch);

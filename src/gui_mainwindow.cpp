@@ -20,6 +20,7 @@
 
 
 #include "src/gui_mainwindow.h"
+#include "src/gui_cache.h"
 #include "src/gui_background.xpm"
 
 /*
@@ -379,6 +380,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	menubar->add("File/_Show initial screen",  FL_ALT+'z', cb_show_initial_screen, this);
 	if (!maingui_do_read_only)
 		menubar->add("File/_Empty trash",  FL_ALT+'t', cb_empty_trash, this);
+	menubar->add("File/Cache management", 0, cb_cache_management, this);
 	menubar->add("File/About", 0, cb_about, this);
 	menubar->add("File/Quit", FL_ALT+'q', cb_quit, this);
 	if (!maingui_do_read_only)
@@ -403,6 +405,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	browser = new Fl_Hold_Browser(10,MENUHEIGHT+5,WCOL0-20,h-MENUHEIGHT-60);
 	browser->textsize(RLN_FONTSIZE-1);
 	current_job = -1;
+	prevBrowserValue = 0;
 
 	nr_browse_tabs = 0;
 	if (_do_tomo)
@@ -658,6 +661,12 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	browser->add("External");
 	gui_jobwindows[nr_browse_tabs] = new JobWindow();
 	gui_jobwindows[nr_browse_tabs]->initialise(PROC_EXTERNAL);
+	browse_grp[nr_browse_tabs]->end();
+	nr_browse_tabs++;
+
+	browse_grp[nr_browse_tabs] = new Fl_Group(WCOL0, 2, 550, 615-MENUHEIGHT);
+	browser->add("Cache management");
+	gui_jobwindows[nr_browse_tabs] = NULL;
 	browse_grp[nr_browse_tabs]->end();
 	nr_browse_tabs++;
 
@@ -1225,6 +1234,22 @@ void GuiMainWindow::cb_select_browsegroup(Fl_Widget* o, void* v)
 
 	// When clicking the job browser on the left: reset current_job to -1 (i.e. a new job, not yet in the pipeline)
 	current_job = -1;
+
+	// If Cache management is selected (has no JobWindow), open the dialog and restore the previous tab
+	int iwin = (browser->value() - 1);
+	if (iwin >= 0 && iwin < T->nr_browse_tabs && gui_jobwindows[iwin] == NULL)
+	{
+		int restore = prevBrowserValue;
+		T->cb_cache_management_i();
+		if (restore > 0)
+			browser->value(restore);
+		else
+			browser->value(1);
+		T->cb_select_browsegroup_i();
+		run_button->activate();
+		return;
+	}
+
 	T->cb_select_browsegroup_i();
 	run_button->activate();
 }
@@ -1242,6 +1267,7 @@ void GuiMainWindow::cb_select_browsegroup_i(bool show_initial_screen)
 
 	int iwin = (browser->value() - 1);
 	if (iwin < 0 || iwin >= nr_browse_tabs) return;
+	prevBrowserValue = browser->value();
 	// Show the 'selected' group, hide the others
 	for ( int t=0; t<nr_browse_tabs; t++ )
 	{
@@ -1263,7 +1289,8 @@ void GuiMainWindow::cb_select_browsegroup_i(bool show_initial_screen)
 	do_overwrite_continue = false;
 
 	// If the GUI got changed, put that change into the joboption now
-	gui_jobwindows[iwin]->updateMyJob();
+	if (gui_jobwindows[iwin])
+		gui_jobwindows[iwin]->updateMyJob();
 
 	// toggle the continue status of this job
 	cb_toggle_continue_i();
@@ -1608,7 +1635,8 @@ void GuiMainWindow::cb_toggle_continue_i()
 	}
 
 	int my_window = (browser->value() - 1);
-	gui_jobwindows[my_window]->toggle_new_continue(is_main_continue && !do_overwrite_continue);
+	if (my_window >= 0 && my_window < nr_browse_tabs && gui_jobwindows[my_window])
+		gui_jobwindows[my_window]->toggle_new_continue(is_main_continue && !do_overwrite_continue);
 }
 
 void GuiMainWindow::cb_print_cl(Fl_Widget* o, void* v)
@@ -1620,6 +1648,7 @@ void GuiMainWindow::cb_print_cl(Fl_Widget* o, void* v)
 void GuiMainWindow::cb_print_cl_i()
 {
 	int iwin = browser->value() - 1;
+	if (iwin < 0 || iwin >= nr_browse_tabs || gui_jobwindows[iwin] == NULL) return;
 	// And update the job inside it
 	gui_jobwindows[iwin]->updateMyJob();
 
@@ -2502,6 +2531,19 @@ void GuiMainWindow::cb_toggle_expand_stdout_i()
 		expand_stdout_button->label("Job view");
 		show_expand_stdout = true;
 	}
+}
+
+void GuiMainWindow::cb_cache_management(Fl_Widget* o, void* v)
+{
+	GuiMainWindow* T=(GuiMainWindow*)v;
+	T->cb_cache_management_i();
+}
+
+void GuiMainWindow::cb_cache_management_i()
+{
+	CacheManagementWindow *w = new CacheManagementWindow(1050, 400);
+	w->set_modal();
+	w->show();
 }
 
 void GuiMainWindow::cb_about(Fl_Widget* o, void* v)

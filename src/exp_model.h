@@ -247,6 +247,12 @@ public:
 	// Is this sub-tomograms?
 	bool is_tomo, is_3D;
 
+	// When true, copyParticlesToScratch copies whole .mrcs stacks (not per-particle decode/encode)
+	bool cacheMode;
+
+	// Number of parallel threads for cache file copy (default 4)
+	int cacheCopyThreads;
+
 	// Empty Constructor
 	Experiment()
 	{
@@ -272,6 +278,8 @@ public:
 		free_space_Gb = 10;
 		is_3D = false;
         is_tomo = false;
+		cacheMode = false;
+		cacheCopyThreads = 4;
 		MDimg.clear();
 		MDimg.setIsList(false);
 		MDbodies.clear();
@@ -366,9 +374,9 @@ public:
 	// Returns true if particles need to be copied, and creates a lock file.
 	// Returns false if the particles do not need to be copied. In that case, only the number of particles on the scratch disk needs to be counted
 	// Also checks how much free space there is on the scratch dir
-	bool prepareScratchDirectory(FileName _fn_scratch, FileName fn_lock = "");
+	bool prepareScratchDirectory(FileName _fn_scratch, FileName fn_lock = "", bool add_relion_volatile = true);
 
-	void setScratchDirectory(FileName _fn_scratch, bool do_reuse_scratch, int verb=0);
+	void setScratchDirectory(FileName _fn_scratch, bool do_reuse_scratch, int verb=0, bool add_relion_volatile = true);
 
 	// Wipe the generic scratch directory clean
 	void deleteDataOnScratch();
@@ -376,7 +384,7 @@ public:
 	// Copy particles from their original position to a scratch directory
 	// Monitor when the scratch disk gets to have fewer than free_scratch_Gb space,
 	// in that case, stop copying, and keep reading particles from where they were...
-	void copyParticlesToScratch(int verb, bool do_copy = true, bool also_do_ctf_image = false, RFLOAT free_scratch_Gb = 10);
+	void copyParticlesToScratch(int verb, bool do_copy = true, bool also_do_ctf_image = false, RFLOAT free_scratch_Gb = 10, const std::string &label = "scratch");
 
     // Read from file
 	bool read(

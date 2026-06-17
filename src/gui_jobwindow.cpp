@@ -1392,6 +1392,8 @@ void JobWindow::initialiseClass2DWindow()
 	place("do_preread_images", TOGGLE_LEAVE_ACTIVE, group5, true);
 	group5->begin();
 	place("scratch_dir");
+	place("cache_dir");
+	place("cache_copy_threads");
 	group5->end();
 	place("do_combine_thru_disc");
 
@@ -1486,6 +1488,8 @@ void JobWindow::initialiseInimodelWindow()
 	place("do_preread_images", TOGGLE_LEAVE_ACTIVE, group5, true);
 	group5->begin();
 	place("scratch_dir");
+	place("cache_dir");
+	place("cache_copy_threads");
 	group5->end();
 	place("do_combine_thru_disc");
 
@@ -1696,6 +1700,8 @@ void JobWindow::initialiseClass3DWindow()
 	place("do_preread_images", TOGGLE_LEAVE_ACTIVE, group7, true);
 	group7->begin();
 	place("scratch_dir");
+	place("cache_dir");
+	place("cache_copy_threads");
 	group7->end();
 	place("do_combine_thru_disc");
 	// Add a little spacer
@@ -1860,6 +1866,8 @@ void JobWindow::initialiseAutorefineWindow()
 	place("do_preread_images", TOGGLE_LEAVE_ACTIVE, group4, true);
 	group4->begin();
 	place("scratch_dir");
+	place("cache_dir");
+	place("cache_copy_threads");
 	group4->end();
 	place("do_combine_thru_disc");
 
@@ -1957,6 +1965,8 @@ void JobWindow::initialiseMultiBodyWindow()
 	place("do_preread_images", TOGGLE_LEAVE_ACTIVE, group7, true);
 	group7->begin();
 	place("scratch_dir");
+	place("cache_dir");
+	place("cache_copy_threads");
 	group7->end();
 	place("do_combine_thru_disc");
 

@@ -127,6 +127,7 @@ void progress_bar(long rlen)
 	{
 		totlen = -rlen;
 		prevt = startt = currt;
+		fflush(stdout);
 		fprintf(stdout, "000/??? sec ");
 		fprintf(stdout, "~~(,_,\">");
 		for (i = 1; i < 10; i++)
