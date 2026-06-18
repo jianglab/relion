@@ -22,6 +22,9 @@
 #include "src/gui_mainwindow.h"
 #include "src/gui_cache.h"
 #include "src/gui_background.xpm"
+#include <fstream>
+#include <FL/Fl_Text_Buffer.H>
+#include <FL/Fl_Text_Display.H>
 
 /*
  gui_background.xpm is the header image.
@@ -683,7 +686,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 
 	// Add run buttons on the menubar as well
 
-	print_CL_button = new Fl_Button(GUIWIDTH - 215, h-90, 100, 32, "Check command");
+	print_CL_button = new Fl_Button(GUIWIDTH - 215, h-60, 100, 32, "Check command");
 	print_CL_button->color(GUI_RUNBUTTON_COLOR);
 	print_CL_button->labelsize(11);
 	print_CL_button->callback(cb_print_cl, this);
@@ -697,7 +700,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	pipeliner_grp = new Fl_Group(0, 0, 2*w, 2*h);
 	pipeliner_grp->begin();
 
-	run_button = new Fl_Button(GUIWIDTH - 110 , h-90, 100, 32, "Run!");
+	run_button = new Fl_Button(GUIWIDTH - 110 , h-60, 100, 32, "Run!");
 	run_button->color(GUI_RUNBUTTON_COLOR);
 	run_button->labelfont(FL_ITALIC);
 	run_button->labelsize(14);
@@ -705,7 +708,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	if (maingui_do_read_only)
 		run_button->deactivate();
 
-	schedule_button = new Fl_Button(GUIWIDTH - 320 , h-90, 100, 32, "Schedule");
+	schedule_button = new Fl_Button(GUIWIDTH - 320 , h-60, 100, 32, "Schedule");
 	schedule_button->color(GUI_RUNBUTTON_COLOR);
 	schedule_button->labelfont(FL_ITALIC);
 	schedule_button->labelsize(14);
@@ -1012,6 +1015,35 @@ void GuiMainWindow::fillRunningJobLists()
 	running_job_browser->hposition(myhpos_running);
 	scheduled_job_browser->hposition(myhpos_scheduled);
 	finished_job_browser->hposition(myhpos_finished);
+
+	// Re-select the currently loaded job in the appropriate browser
+	if (current_job >= 0)
+	{
+		for (int i = 0; i < finished_processes.size(); i++)
+		{
+			if (finished_processes[i] == current_job)
+			{
+				finished_job_browser->select(i + 1);
+				break;
+			}
+		}
+		for (int i = 0; i < running_processes.size(); i++)
+		{
+			if (running_processes[i] == current_job)
+			{
+				running_job_browser->select(i + 1);
+				break;
+			}
+		}
+		for (int i = 0; i < scheduled_processes.size(); i++)
+		{
+			if (scheduled_processes[i] == current_job)
+			{
+				scheduled_job_browser->select(i + 1);
+				break;
+			}
+		}
+	}
 }
 
 void GuiMainWindow::fillToAndFromJobLists()
@@ -1671,15 +1703,80 @@ void GuiMainWindow::cb_print_cl_i()
 		}
 		else
 		{
-			std::string command= "", mesg = " The command is: ";
-			for (int icom = 0; icom < commands.size(); icom++)
+			// Determine what to show: submit script content (queue) or assembled command (local)
+			std::string display_content;
+			std::string title;
+			bool use_queue = gui_jobwindows[iwin]->myjob.joboptions.count("do_queue") &&
+			                 gui_jobwindows[iwin]->myjob.joboptions["do_queue"].getBoolean();
+
+			if (use_queue)
 			{
-				if (icom > 0) command += " && ";
-				command += commands[icom];
+				// The submit script path is always <outputName>run_submit.script.
+				// Try to read an already-existing one (post-run); if absent, generate it now.
+				std::string script_path = gui_jobwindows[iwin]->myjob.outputName + "run_submit.script";
+
+				std::ifstream ifs(script_path.c_str());
+				if (!ifs.good())
+				{
+					// Generate the script by re-running getCommandLineJob with do_makedir=true
+					std::string err2;
+					std::vector<std::string> cmds2;
+					std::string fc2;
+					pipeline.getCommandLineJob(gui_jobwindows[iwin]->myjob, current_job,
+					                           is_main_continue, false, true /*do_makedir*/,
+					                           cmds2, fc2, err2);
+					ifs.open(script_path.c_str());
+				}
+
+				if (ifs.good())
+				{
+					display_content = std::string((std::istreambuf_iterator<char>(ifs)),
+					                               std::istreambuf_iterator<char>());
+					title = "Submit script: " + script_path;
+				}
+				else
+				{
+					display_content = "Submit script not yet generated.\nRun the job first, or switch to local execution to preview the command.\n\nFinal queue command:\n" + final_command;
+					title = "Queue submission command";
+				}
 			}
-			fl_input("%s", command.c_str(), mesg.c_str());
-			// Don't free the returned string! It comes from Fl_Input::value(), which returns
-			// "pointer to an internal buffer - do not free() this".
+			else
+			{
+				display_content = final_command;
+				title = "Command to be executed";
+			}
+
+			// Build a resizable multi-line popup window
+			{
+				const int W = 900, H = 500;
+				int sx = (Fl::w() - W) / 2, sy = (Fl::h() - H) / 2;
+				if (sx < 0) sx = 0;
+				if (sy < 0) sy = 0;
+
+				Fl_Window *win = new Fl_Window(sx, sy, W, H, title.c_str());
+				win->resizable(win);
+
+				Fl_Text_Buffer *buf = new Fl_Text_Buffer();
+				buf->text(display_content.c_str());
+
+				Fl_Text_Display *disp = new Fl_Text_Display(10, 10, W - 20, H - 50);
+				disp->buffer(buf);
+				disp->textfont(FL_COURIER);
+				disp->textsize(12);
+				disp->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
+				win->resizable(disp);
+
+				Fl_Button *close_btn = new Fl_Button(W/2 - 40, H - 35, 80, 25, "Close");
+				close_btn->callback([](Fl_Widget *w, void*) { w->window()->hide(); }, NULL);
+
+				win->end();
+				win->set_modal();
+				win->show();
+				while (win->shown()) Fl::wait();
+				disp->buffer(NULL);
+				delete win;
+				delete buf;
+			}
 		}
 	}
 }

@@ -21,6 +21,12 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
 include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/tests)
 include_directories(tests PRIVATE ${FFTW_INCLUDES})
 
+# When CUDA is enabled, test targets transitively include CUDA headers
+# through exp_model.h -> obs_model.h -> projector.h -> cuda_mem_utils.h
+if (CUDA_FOUND)
+    target_include_directories(cache_tests PRIVATE ${CUDA_TOOLKIT_INCLUDE})
+endif()
+
 add_test(NAME cache_unit_tests COMMAND cache_tests)
 
 find_package(OpenMP)

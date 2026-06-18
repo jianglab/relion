@@ -3378,7 +3378,8 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 	}
 
 	command += " --tau2_fudge " + joboptions["tau_fudge"].getString();
-	 command += " --particle_diameter " + joboptions["particle_diameter"].getString();
+	command += " --low_resol_join_halves " + joboptions["low_resol_join_halves"].getString();
+	command += " --particle_diameter " + joboptions["particle_diameter"].getString();
 	if (!is_continue)
 	{
 
@@ -4352,6 +4353,15 @@ This may yield higher-resolution maps, especially when the mask contains only a 
 	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
 	joboptions["reverse_curvature"] = JobOption("Reverse Ewald curvature?", false, "Try curvature the other way around.");
 
+	float default_T = (is_tomo) ? 1 : 4;
+	joboptions["tau_fudge"] = JobOption("Regularisation parameter T:", default_T , 0.1, 10, 0.1, "Bayes law strictly determines the relative weight between \
+the contribution of the experimental data and the prior. However, in practice one may need to adjust this weight to put slightly more weight on \
+the experimental data to allow optimal results. Values greater than 1 for this regularisation parameter (T in the JMB2011 paper) put more \
+weight on the experimental data. Values around 2-4 have been observed to be useful for 3D refinements, values of 1-2 for 2D refinements. \
+Too small values yield too-low resolution structures; too high values result in over-estimated resolutions, mostly notable by the apparition of high-frequency noise in the references.");
+	joboptions["low_resol_join_halves"] = JobOption("Lowres join halves (A):", 40, 0, 100, 1, "Resolution (in Angstrom) up to which the two random \
+half-reconstructions will not be independent, to prevent diverging orientations. Set to 0 to disable joining of low-resolution data.");
+
 	joboptions["sampling"] = JobOption("Initial angular sampling:", job_sampling_options, 2, "There are only a few discrete \
 angular samplings possible because we use the HealPix library to generate the sampling of the first two Euler angles on the sphere. \
 The samplings are approximate numbers and vary slightly over the sphere.\n\n \
@@ -4488,22 +4498,23 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 	{
 		if (joboptions["fn_cont"].getString() == "")
 		{
-			error_message = "ERROR: empty field for continuation STAR file...";
-			return false;
+			is_continue = false;
 		}
-		int pos_it = joboptions["fn_cont"].getString().rfind("_it");
-		int pos_op = joboptions["fn_cont"].getString().rfind("_optimiser");
-		if (pos_it < 0 || pos_op < 0)
+		else
 		{
-			error_message = "Invalid optimiser.star filename provided for auto-refine continuation run: " + joboptions["fn_cont"].getString();
-			return false;
+			int pos_it = joboptions["fn_cont"].getString().rfind("_it");
+			int pos_op = joboptions["fn_cont"].getString().rfind("_optimiser");
+			if (pos_it < 0 || pos_op < 0)
+			{
+				error_message = "Invalid optimiser.star filename provided for auto-refine continuation run: " + joboptions["fn_cont"].getString();
+				return false;
+			}
+
+			// SHWS 10dec2020: switch off using run_ctXX output for continue jobs, as this will affect Schedulers
+			//int it = (int)textToFloat((joboptions["fn_cont"].getString().substr(pos_it+3, 6)).c_str());
+			//fn_run += "_ct" + floatToString(it);
+			command += " --continue " + joboptions["fn_cont"].getString();
 		}
-
-		// SHWS 10dec2020: switch off using run_ctXX output for continue jobs, as this will affect Schedulers
-		//int it = (int)textToFloat((joboptions["fn_cont"].getString().substr(pos_it+3, 6)).c_str());
-		//fn_run += "_ct" + floatToString(it);
-		command += " --continue " + joboptions["fn_cont"].getString();
-
 	}
 
 	command += " --o " + outputname + fn_run;
@@ -4622,6 +4633,8 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 	}
 
 	// Optimisation
+	command += " --tau2_fudge " + joboptions["tau_fudge"].getString();
+	command += " --low_resol_join_halves " + joboptions["low_resol_join_halves"].getString();
 	command += " --particle_diameter " + joboptions["particle_diameter"].getString();
 	if (!is_continue)
 	{
@@ -4673,8 +4686,6 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 		if (error_message != "") return false;
 
 		command += " --sym " + joboptions["sym_name"].getString();
-		// Always join low-res data, as some D&I point group refinements may fall into different hands!
-		command += " --low_resol_join_halves 40";
 		command += " --norm --scale ";
 
 		// Helix

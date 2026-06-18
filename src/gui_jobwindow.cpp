@@ -1787,6 +1787,8 @@ void JobWindow::initialiseAutorefineWindow()
 
 	place("particle_diameter");
 	place("do_zero_mask", TOGGLE_DEACTIVATE);
+	place("tau_fudge");
+	place("low_resol_join_halves");
 	// Add a little spacer
 	current_y += STEPY/2;
 
