@@ -29,3 +29,9 @@ if (OPENMP_FOUND)
 	set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 	set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
 endif()
+
+# Self-contained unit tests with analytical ground truth (no external data)
+add_subdirectory(unit)
+
+# Integration tests (optional, longer runtime)
+add_subdirectory(integration)

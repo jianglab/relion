@@ -335,6 +335,8 @@ void GuiEntry::cb_browse_i()
 	fn_out = fn_pre + fn_jobnr + fn_post;
 
 	inp->value(fn_out.c_str());
+	if (my_deactivate_group != NULL || my_additional_deactivate_group != NULL)
+		cb_input_i();
 }
 
 
@@ -383,6 +385,8 @@ void GuiEntry::cb_browse_node_i() {
 	fn_out = fn_pre + fn_jobnr + fn_post;
 
 	inp->value(fn_out.c_str());
+	if (my_deactivate_group != NULL || my_additional_deactivate_group != NULL)
+		cb_input_i();
 }
 
 void GuiEntry::cb_menu(Fl_Widget* o, void* v) {
@@ -393,9 +397,14 @@ void GuiEntry::cb_menu(Fl_Widget* o, void* v) {
 
 void GuiEntry::cb_menu_i()
 {
+	if (menu == NULL || inp == NULL)
+		return;
+
 	if (!create_scheduler_gui)
 	{
 		const Fl_Menu_Item* m = menu->mvalue();
+		if (m == NULL)
+			return;
 		// Set my own value
 		inp->value(m->label());
 		// In case this was a boolean that deactivates a group, do so:
@@ -439,6 +448,26 @@ void GuiEntry::cb_input(Fl_Widget* o, void* v) {
 }
 
 
+static void toggle_group_from_value(Fl_Group *group, const std::string &value, bool actually_activate)
+{
+	if (value.substr(0, 2) == "$$")
+		group->activate();
+	else if (value == "")
+	{
+		if (actually_activate)
+			group->activate();
+		else
+			group->deactivate();
+	}
+	else
+	{
+		if (actually_activate)
+			group->deactivate();
+		else
+			group->activate();
+	}
+}
+
 void GuiEntry::cb_input_i() {
 	static int recurse = 0;
 	if ( recurse ) {
@@ -446,7 +475,14 @@ void GuiEntry::cb_input_i() {
 	} else {
 		recurse = 1;
 
-		if (!create_scheduler_gui) slider->value(fltkTextToFloat(inp->value()));         // pass input's value to slider
+		if (!create_scheduler_gui && slider != NULL) slider->value(fltkTextToFloat(inp->value()));         // pass input's value to slider
+
+		std::string myval = std::string(inp->value());
+		if (my_deactivate_group != NULL)
+			toggle_group_from_value(my_deactivate_group, myval, actually_activate);
+		if (my_additional_deactivate_group != NULL)
+			toggle_group_from_value(my_additional_deactivate_group, myval, actually_activate);
+
 		recurse = 0;
 	}
 }

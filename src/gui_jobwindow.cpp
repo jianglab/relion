@@ -29,7 +29,7 @@ void JobWindow::clear()
 {
 	tabs = NULL;
 	tab1 = tab2 = tab3 = tab4 = tab5 = tab6 = tab7 = runtab = NULL;
-	group1 = group2 = group3 = group4 = group5 = group6 = group7 = queue_group = NULL;
+	group1 = group2 = group3 = group4 = group5 = group6 = group7 = group_ewald = queue_gpu_group = queue_group = NULL;
 	current_y = start_y = 0;
 	is_continue = false;
 	is_tomo = false;
@@ -470,6 +470,11 @@ void JobWindow::initialise(int my_job_type, bool _is_tomo)
             myjob.initialise(my_job_type);
             initialiseTomoReconParWindow();
     }
+	else if (my_job_type == PROC_RECONSTRUCT3D)
+	{
+		myjob.initialise(my_job_type);
+		initialiseReconstruct3DWindow();
+	}
 	else if (my_job_type == PROC_EXTERNAL)
 	{
 		myjob.initialise(my_job_type);
@@ -1597,14 +1602,19 @@ void JobWindow::initialiseClass3DWindow()
 	// Add a little spacer
 	current_y += STEPY/2;
 
-	// Blush group
-	group9 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
-	group9->end();
-	place("do_blush", TOGGLE_DEACTIVATE, group9);
-	group9->begin();
-	place("blush_version");
-	group9->end();
-	guientries["do_blush"].cb_menu_i(); // This is to make the default effective
+	place("do_blush", TOGGLE_DEACTIVATE);
+
+	// Add a little spacer
+	current_y += STEPY/2;
+
+	// Ewald-sphere correction (developmental)
+	group_ewald = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_ewald->end();
+	place("do_ewald", TOGGLE_LEAVE_ACTIVE, group_ewald);
+	group_ewald->begin();
+	place("reverse_curvature", TOGGLE_DEACTIVATE);
+	group_ewald->end();
+	guientries["do_ewald"].cb_menu_i(); // to make default effective
 
 	tab4->end();
 
@@ -1785,14 +1795,19 @@ void JobWindow::initialiseAutorefineWindow()
 	// Add a little spacer
 	current_y += STEPY/2;
 
-    // Blush group
-    group9 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
-    group9->end();
-    place("do_blush", TOGGLE_DEACTIVATE, group9);
-    group9->begin();
-    place("blush_version");
-    group9->end();
-    guientries["do_blush"].cb_menu_i(); // This is to make the default effective
+	place("do_blush", TOGGLE_DEACTIVATE);
+
+	// Add a little spacer
+	current_y += STEPY/2;
+
+	// Ewald-sphere correction (developmental)
+	group_ewald = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_ewald->end();
+	place("do_ewald", TOGGLE_LEAVE_ACTIVE, group_ewald);
+	group_ewald->begin();
+	place("reverse_curvature", TOGGLE_DEACTIVATE);
+	group_ewald->end();
+	guientries["do_ewald"].cb_menu_i(); // to make default effective
 
 	tab4->end();
 	tab5->begin();
@@ -2539,6 +2554,100 @@ void JobWindow::initialiseModelAngeloWindow()
     tab2->end();
 }
 
+void JobWindow::initialiseReconstruct3DWindow()
+{
+	setupTabs(5);
+
+	tab1->begin();
+	tab1->label("I/O");
+	resetHeight();
+
+	place("fn_img", TOGGLE_DEACTIVATE);
+
+	current_y += STEPY/2;
+
+	place("random_subset_size");
+	place("random_subset_seed");
+
+	tab1->end();
+
+	tab2->begin();
+	tab2->label("CTF");
+	resetHeight();
+
+	place("do_ctf_correction", TOGGLE_DEACTIVATE);
+	place("ctf_intact_first_peak", TOGGLE_DEACTIVATE);
+	place("spatial_frequency_mode", TOGGLE_DEACTIVATE);
+	place("s2_ctf_oversampling_min", TOGGLE_DEACTIVATE);
+	setupSpatialFrequencyGrayout();
+	guientries["do_ctf_correction"].cb_menu_i();
+	tab2->end();
+
+	tab3->begin();
+	tab3->label("Reconstruction");
+	resetHeight();
+
+	place("sym_name", TOGGLE_DEACTIVATE);
+
+	current_y += STEPY/2;
+
+	place("do_half1", TOGGLE_DEACTIVATE);
+	place("do_half2", TOGGLE_DEACTIVATE);
+	place("do_alldata", TOGGLE_DEACTIVATE);
+
+	current_y += STEPY/2;
+
+	place("mask_diameter");
+
+	current_y += STEPY/2;
+
+	// Ewald-sphere correction (developmental)
+	group_ewald = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_ewald->end();
+	place("do_ewald", TOGGLE_LEAVE_ACTIVE, group_ewald);
+	group_ewald->begin();
+	place("reverse_curvature", TOGGLE_DEACTIVATE);
+	group_ewald->end();
+	guientries["do_ewald"].cb_menu_i(); // to make default effective
+
+	current_y += STEPY/2;
+
+	place("do_pad1", TOGGLE_LEAVE_ACTIVE);
+	place("do_invert_contrast", TOGGLE_LEAVE_ACTIVE);
+	guientries["do_pad1"].cb_menu_i();
+	guientries["do_invert_contrast"].cb_menu_i();
+
+	tab3->end();
+
+	tab4->begin();
+	tab4->label("Helix");
+	resetHeight();
+
+	group5 = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group5->end();
+	place("do_apply_helical_symmetry", TOGGLE_DEACTIVATE, group5);
+	group5->begin();
+	place("helical_nr_asu", TOGGLE_DEACTIVATE);
+	place("helical_rise", TOGGLE_DEACTIVATE);
+	place("helical_twist", TOGGLE_DEACTIVATE);
+	group5->end();
+	guientries["do_apply_helical_symmetry"].cb_menu_i();
+
+	tab4->end();
+
+	tab5->begin();
+	tab5->label("Compute");
+	resetHeight();
+
+	current_y += STEPY/2;
+
+	place("do_prefetch", TOGGLE_LEAVE_ACTIVE);
+	place("cache_dir", TOGGLE_LEAVE_ACTIVE);
+	place("cache_copy_threads", TOGGLE_LEAVE_ACTIVE);
+
+	tab5->end();
+}
+
 void JobWindow::initialiseExternalWindow()
 {
 	setupTabs(2);
@@ -3180,4 +3289,39 @@ void JobWindow::initialiseTomoExcludeTiltImagesWindow()
 
     place("cache_size", TOGGLE_DEACTIVATE);
     tab1->end();
+}
+
+void JobWindow::setupSpatialFrequencyGrayout()
+{
+	auto it_sfm = guientries.find("spatial_frequency_mode");
+	if (it_sfm == guientries.end())
+		return;
+	if (it_sfm->second.choice == NULL)
+		return;
+
+	it_sfm->second.choice->callback(cb_spatial_frequency_mode, this);
+	// Fire once to set initial s2_ctf_oversampling_min state
+	it_sfm->second.choice->do_callback();
+}
+
+void JobWindow::cb_spatial_frequency_mode(Fl_Widget* w, void* v)
+{
+	JobWindow* win = reinterpret_cast<JobWindow*>(v);
+	Fl_Choice* ch = reinterpret_cast<Fl_Choice*>(w);
+	const char* txt = ch->text();
+	if (txt != NULL)
+		win->guientries["spatial_frequency_mode"].inp->value(txt);
+
+	// Also enable/disable the s2_ctf_oversampling_min entry based on mode
+	auto it_s2 = win->guientries.find("s2_ctf_oversampling_min");
+	if (it_s2 != win->guientries.end())
+	{
+		bool is_s2 = (txt != NULL && strcmp(txt, "s2") == 0);
+		if (it_s2->second.slider != NULL)
+			is_s2 ? it_s2->second.slider->activate() : it_s2->second.slider->deactivate();
+		if (it_s2->second.inp != NULL)
+			is_s2 ? it_s2->second.inp->activate() : it_s2->second.inp->deactivate();
+		if (it_s2->second.help != NULL)
+			is_s2 ? it_s2->second.help->activate() : it_s2->second.help->deactivate();
+	}
 }

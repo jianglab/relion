@@ -80,6 +80,7 @@ protected:
 	// caching of symmetric aberrations (CTF instances can be reallocated for each particle,
 	// while the same obs. model lives for the entire duration of the program)
 	ObservationModel* obsModel;
+	bool hasEvenZernike; // cached for OMP safety — read once
 	int opticsGroup;
 
 public:
@@ -324,11 +325,12 @@ public:
 	//  TODO: FIXME: Thus, the returned values at Nyquist are WRONG!!!
 	void getFftwImage(MultidimArray < RFLOAT > &result, int orixdim, int oriydim, RFLOAT angpix,
 	                  bool do_abs = false, bool do_only_flip_phases = false, bool do_intact_until_first_peak = false,
-	                  bool do_damping = true, bool do_ctf_padding = false, bool do_intact_after_first_peak = false) const;
+	                  bool do_damping = true, bool do_ctf_padding = false, bool do_intact_after_first_peak = false,
+	                  int ctf_pad_factor = 1) const;
 
 	// Get a complex image with the CTFP/Q values, where the angle is in degrees between the Y-axis and the CTFP/Q sector line
 	void getCTFPImage(MultidimArray<Complex> &result, int orixdim, int oriydim, RFLOAT angpix,
-	                  bool is_positive, float angle);
+	                  bool is_positive, float angle, int ctf_pad_factor = 1);
 
 	/// Generate a centered image (with hermitian symmetry)
 	/// The dimensions of the result array should have been set correctly already
@@ -344,13 +346,13 @@ public:
 
 	// Calculate weight W for Ewald-sphere curvature correction: apply this to the result from getFftwImage
 	void applyWeightEwaldSphereCurvature(MultidimArray<RFLOAT>& result, int orixdim, int oriydim,
-	                                     RFLOAT angpix, RFLOAT particle_diameter);
+	                                     RFLOAT angpix, RFLOAT particle_diameter, int ctf_pad_factor = 1);
 
 	void applyWeightEwaldSphereCurvature_new(MultidimArray<RFLOAT>& result, int orixdim, int oriydim,
-	                                         RFLOAT angpix, RFLOAT particle_diameter);
+	                                         RFLOAT angpix, RFLOAT particle_diameter, int ctf_pad_factor = 1);
 
 	// Calculate weight W for Ewald-sphere curvature correction: apply this to the result from getFftwImage
-	void applyWeightEwaldSphereCurvature_noAniso(MultidimArray < RFLOAT > &result, int orixdim, int oriydim, RFLOAT angpix, RFLOAT particle_diameter);
+	void applyWeightEwaldSphereCurvature_noAniso(MultidimArray < RFLOAT > &result, int orixdim, int oriydim, RFLOAT angpix, RFLOAT particle_diameter, int ctf_pad_factor = 1);
 
 	void applyEwaldMask(RawImage<RFLOAT>& result, int orixdim, int oriydim, RFLOAT angpix, RFLOAT particle_diameter);
 

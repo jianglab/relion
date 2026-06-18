@@ -521,8 +521,15 @@ public:
 
 	/** Perform reconstruction using the Blush algorithm */
 	bool do_blush;
-	bool skip_spectral_trailing;
-    std::string blush_model;
+    	bool skip_spectral_trailing;
+	std::string blush_model;
+
+	/** Correct for Ewald-sphere curvature (developmental) */
+	bool do_ewald;
+	/** Try curvature the other way around */
+	bool is_reverse;
+	/** Radius of the Ewald sphere (in pixels) for current optics group */
+	RFLOAT ewald_r_ewald_sphere;
 
 	/** Argumetns to pass to the Blush call */
 	std::string blush_args;
@@ -848,6 +855,10 @@ public:
             do_external_reconstruct(false),
             do_blush(false),
             skip_spectral_trailing(false),
+            blush_model(""),
+            do_ewald(false),
+            is_reverse(false),
+            ewald_r_ewald_sphere(-1.),
             blush_args(""),
             adaptive_oversampling(0),
             nr_iter(0),

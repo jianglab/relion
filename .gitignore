@@ -9,3 +9,7 @@ external
 .project
 Debug
 *.pyc
+.sync/
+test-outputs/
+tests/integration/output/
+src/relion.egg-info/

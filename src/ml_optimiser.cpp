@@ -45,25 +45,26 @@
 #include "src/macros.h"
 #include "src/error.h"
 #include "src/ml_optimiser.h"
-#include "src/cache_init.h"
+#include "src/spatial_frequency_grid.h"
 #include "src/cache_manager.h"
+#include "src/cache_init.h"
 #include <map>
 #include <set>
 #include <iomanip>
 #ifdef _CUDA_ENABLED
-    #include "src/acc/cuda/cuda_ml_optimiser.h"
-    #ifdef CUDA_PROFILING
-        #include <nvtx3/nvToolsExt.h>
-        #include <cuda_profiler_api.h>
-    #endif
+#include "src/acc/cuda/cuda_ml_optimiser.h"
+#ifdef CUDA_PROFILING
+#include <nvtx3/nvToolsExt.h>
+#include <cuda_profiler_api.h>
+#endif
 #elif _HIP_ENABLED
-    #include "src/acc/hip/hip_ml_optimiser.h"
-    #include <roctracer/roctx.h>
+#include "src/acc/hip/hip_ml_optimiser.h"
+#include <roctracer/roctx.h>
 #elif _SYCL_ENABLED
-    #include <cstdlib>
-    #include <cstring>
-    #include <tuple>
-    #include <algorithm>
+	#include <cstdlib>
+	#include <cstring>
+	#include <tuple>
+	#include <algorithm>
     #include "src/acc/sycl/sycl_ml_optimiser.h"
 #elif ALTCPU
     #include <atomic>
@@ -1030,10 +1031,17 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     failsafe_threshold = textToInteger(parser.getOption("--failsafe_threshold", "Maximum number of particles permitted to be handled by fail-safe mode, due to zero sum of weights, before exiting with an error (GPU only).", "40"));
 
     do_blush = parser.checkOption("--blush", "Perform the reconstruction with the Blush algorithm.");
-    blush_model = parser.getOption("--blush_model", "File location of a non-standard blush model", "");
     skip_spectral_trailing = parser.checkOption("--blush_skip_spectral_trailing", "Skip spectral trailing during Blush reconstruction (WARNING: This may inflate resolution estimates)");
 
     do_external_reconstruct = parser.checkOption("--external_reconstruct", "Perform the reconstruction step outside relion_refine, e.g. for learned priors?)");
+
+    // Ewald-sphere correction options
+    int ewald_section = parser.addSection("Ewald-sphere correction options");
+    do_ewald = parser.checkOption("--ewald", "Correct for Ewald-sphere curvature (developmental)");
+    is_reverse = parser.checkOption("--reverse_curvature", "Try curvature the other way around");
+    if (do_ewald && !do_ctf_correction)
+        do_ctf_correction = true;
+
     nr_iter_max = textToInteger(parser.getOption("--auto_iter_max", "In auto-refinement, stop at this iteration.", "999"));
     auto_ignore_angle_changes = parser.checkOption("--auto_ignore_angles", "In auto-refinement, update angular sampling regardless of changes in orientations for convergence. This makes convergence faster.");
     auto_resolution_based_angles= parser.checkOption("--auto_resol_angles", "In auto-refinement, update angular sampling based on resolution-based required sampling. This makes convergence faster.");
@@ -3085,6 +3093,12 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
                     ctf.getFftwImage(Fctf, mymodel.ori_size, mymodel.ori_size, mymodel.pixel_size,
                                      ctf_phase_flipped, only_flip_phases, intact_ctf_first_peak, true, do_ctf_padding);
 
+                    if (do_ewald)
+                    {
+                        ctf.applyWeightEwaldSphereCurvature_noAniso(Fctf, mymodel.ori_size, mymodel.ori_size, mymodel.pixel_size, particle_diameter);
+                        ewald_r_ewald_sphere = wsum_model.current_size * mymodel.pixel_size / ctf.lambda;
+                    }
+
                     FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Fimg)
                     {
                         DIRECT_MULTIDIM_ELEM(Fimg, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
@@ -3092,7 +3106,7 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
                     }
                 }
 
-                wsum_model.BPref[iclass].set2DFourierTransform(Fimg, A, &Fctf);
+                wsum_model.BPref[iclass].set2DFourierTransform(Fimg, A, &Fctf, do_ewald ? ewald_r_ewald_sphere : -1., do_ewald ? !is_reverse : true);
             }
 
             // Keep track how many particles have been done
@@ -4867,7 +4881,7 @@ void MlOptimiser::symmetriseReconstructions()
                     wsum_model.BPref[ith_recons].applyHelicalSymmetry(
                             mymodel.helical_nr_asu,
                             mymodel.helical_twist[ith_recons],
-                            mymodel.helical_rise[ith_recons] / mymodel.pixel_size, nr_threads);
+                            mymodel.helical_rise[ith_recons] / mymodel.pixel_size);
 
                 if (fn_multi_sym.size() > ith_recons) // Always false if size=0
                 {
@@ -4891,7 +4905,7 @@ void MlOptimiser::symmetriseReconstructions()
                         wsum_model.BPref[iclass_half].applyHelicalSymmetry(
                                 mymodel.helical_nr_asu,
                                 mymodel.helical_twist[ith_recons],
-                                mymodel.helical_rise[ith_recons] / mymodel.pixel_size, nr_threads);
+                                mymodel.helical_rise[ith_recons] / mymodel.pixel_size);
 
                     if (fn_multi_sym.size() > ith_recons) // Always false if size=0
                     {
@@ -6607,6 +6621,15 @@ void MlOptimiser::getFourierTransformsAndCtfs(
                     {
                         DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
                     }
+                }
+
+                if (do_ewald)
+                {
+                    if (ctf_premultiplied)
+                        REPORT_ERROR("Cannot perform Ewald sphere correction on CTF premultiplied particles.");
+
+                    ctf.applyWeightEwaldSphereCurvature_noAniso(Fctf, image_full_size[optics_group], image_full_size[optics_group], my_pixel_size, particle_diameter);
+                    ewald_r_ewald_sphere = image_full_size[optics_group] * my_pixel_size / ctf.lambda;
                 }
             }
 
@@ -9072,13 +9095,15 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
                                     iproj_offset = (part_id % 2) * mymodel.nr_classes;
 
                                 // Perform this inside a mutex
-                                int my_mutex = exp_iclass % NR_CLASS_MUTEXES;
-                                omp_set_lock(&global_mutex2[my_mutex]);
-                                if (mymodel.nr_bodies > 1)
-                                    (wsum_model.BPref[ibody + iproj_offset]).set2DFourierTransform(Fimg, Abody, &Fweight);
-                                else
-                                    (wsum_model.BPref[exp_iclass + iproj_offset]).set2DFourierTransform(Fimg, A, &Fweight);
-                                omp_unset_lock(&global_mutex2[my_mutex]);
+                                {
+                                    int my_mutex = exp_iclass % NR_CLASS_MUTEXES;
+                                    omp_set_lock(&global_mutex2[my_mutex]);
+                                    if (mymodel.nr_bodies > 1)
+                                        (wsum_model.BPref[ibody + iproj_offset]).set2DFourierTransform(Fimg, Abody, &Fweight, do_ewald ? ewald_r_ewald_sphere : -1., do_ewald ? !is_reverse : true);
+                                    else
+                                        (wsum_model.BPref[exp_iclass + iproj_offset]).set2DFourierTransform(Fimg, A, &Fweight, do_ewald ? ewald_r_ewald_sphere : -1., do_ewald ? !is_reverse : true);
+                                    omp_unset_lock(&global_mutex2[my_mutex]);
+                                }
     #ifdef TIMING
                                 // Only time one thread, as I also only time one MPI process
                                 if (part_id == mydata.sorted_idx[exp_my_first_part_id])

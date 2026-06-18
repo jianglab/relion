@@ -28,7 +28,18 @@
 #include <src/euler.h>
 #include <src/time.h>
 #include <src/ml_model.h>
+#include <mutex>
 #include <src/jaz/single_particle/obs_model.h>
+#include <src/cache_init.h>
+#include <src/prefetch.h>
+#include <src/spatial_frequency_grid.h>
+#include <memory>
+
+enum SpatialFrequencyMode
+{
+	SPATIAL_FREQUENCY_MODE_S,
+	SPATIAL_FREQUENCY_MODE_S2
+};
 
 class Reconstructor
 {
@@ -37,18 +48,24 @@ public:
 	IOParser parser;
 
 	FileName fn_out, fn_sel, fn_img, fn_sym, fn_sub, fn_fsc, fn_debug, fn_noise, image_path;
+	FileName fn_cache;
+	bool do_s2_grid_diagnostic = false;
 
 	MetaDataTable DF;
 	ObservationModel obsModel;
 	MlModel model;
 
 	int r_max, r_min_nn, blob_order, ref_dim, interpolator, iter,
-	    debug_ori_size, debug_size,
-	    ctf_dim, nr_helical_asu, newbox, width_mask_edge, nr_sectors, subset, chosen_class,
-	    data_dim, output_boxsize, verb, nr_threads;
+	debug_ori_size, debug_size,
+	ctf_dim, nr_helical_asu, newbox, width_mask_edge, nr_sectors, subset, chosen_class,
+	data_dim, output_boxsize, cache_copy_threads, nr_threads;
+	int verb = 1;
 
 	RFLOAT blob_radius, blob_alpha, angular_error, shift_error, angpix, maxres,
 	       helical_rise, helical_twist;
+	int s2_ctf_oversampling_min = 2;
+	RFLOAT voltage_for_s2_ = -1.0;
+	bool s2_uniform_fill_ = false;
 
 	bool do_ctf, ctf_phase_flipped, only_flip_phases, intact_ctf_first_peak,
 	     do_fom_weighting, do_3d_rot, do_reconstruct_ctf, do_ewald, skip_weighting, skip_mask, do_debug,
@@ -56,11 +73,17 @@ public:
 
 
 	bool skip_gridding, do_reconstruct_ctf2, do_reconstruct_meas, is_reverse, read_weights, do_external_reconstruct;
+	bool do_half1, do_half2, do_alldata, do_prefetch, do_invert_contrast;
+	long int random_subset_size;
+	int random_subset_seed;
+	SpatialFrequencyMode spatial_frequency_mode;
 
 	float padding_factor, mask_diameter;
 
 	// All backprojectors needed for parallel reconstruction
 	BackProjector backprojector;
+
+	std::unique_ptr<AsyncReconstructPrefetcher> prefetcher_;
 
 	// A single projector is needed for parallel reconstruction
 	Projector projector;
@@ -97,8 +120,21 @@ public:
 	// For parallelisation purposes
 	void backprojectOneParticle(long int ipart);
 
-	// perform the gridding reconstruction
-	void reconstruct();
+protected:
+    bool skip_cache_init_in_read_ = false;
+
+    std::map<long int, SpatialFrequencyGrid2D> s2_grid_cache_;
+    std::mutex s2_grid_mutex_;
+
+    void ensureS2GridCached(int myBoxSize, RFLOAT myPixelSize, RFLOAT s2_step);
+    const SpatialFrequencyGrid2D& getS2Grid(long int cache_key);
+
+    // perform the gridding reconstruction
+    void reconstruct();
+
+	// Select a random subset of particles from DF based on subset filter
+	MetaDataTable selectRandomSubset(const MetaDataTable &DF_in, long int sample_size,
+	                                 int random_subset_filter, int seed, int verb) const;
 
 	void applyCTFPandCTFQ(MultidimArray<Complex> &Fin, CTF &ctf, FourierTransformer &transformer,
 	                      MultidimArray<Complex> &outP, MultidimArray<Complex> &outQ, bool skip_mask=false);

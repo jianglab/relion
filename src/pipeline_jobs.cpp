@@ -492,6 +492,7 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		    type != PROC_TOMO_PICK_TOMOGRAM &&
 		    type != PROC_TOMO_RECONSTRUCT &&
 		    type != PROC_TOMO_EXCLUDE_TILT_IMAGES &&
+		    type != PROC_RECONSTRUCT3D &&
 		    type != PROC_EXTERNAL)
 			return false;
 
@@ -954,6 +955,12 @@ void RelionJob::initialise(int _job_type)
 		has_mpi = has_thread = true;
 		initialiseTomoReconPartJob();
 	}
+	else if (type == PROC_RECONSTRUCT3D)
+	{
+		has_mpi = true;
+		has_thread = true;
+		initialiseReconstruct3DJob();
+	}
 	else if (type == PROC_EXTERNAL)
 	{
 		has_mpi = false;
@@ -1216,6 +1223,10 @@ bool RelionJob::getCommands(std::string &outputname, std::vector<std::string> &c
 	else if (type == PROC_TOMO_RECONSTRUCT)
 	{
 		result = getCommandsTomoReconPartJob(outputname, commands, final_command, do_makedir, job_counter, error_message);
+	}
+	else if (type == PROC_RECONSTRUCT3D)
+	{
+		result = getCommandsReconstruct3DJob(outputname, commands, final_command, do_makedir, job_counter, error_message);
 	}
 	else if (type == PROC_EXTERNAL)
 	{
@@ -3824,8 +3835,9 @@ High-resolution refinements (e.g. ribosomes or other large complexes in 3D auto-
 	joboptions["highres_limit"] = JobOption("Limit resolution E-step to (A): ", -1, -1, 20, 1, "If set to a positive number, then the expectation step (i.e. the alignment) will be done only including the Fourier components up to this resolution (in Angstroms). \
 This is useful to prevent overfitting, as the classification runs in RELION are not to be guaranteed to be 100% overfitting-free (unlike the 3D auto-refine with its gold-standard FSC). In particular for very difficult data sets, e.g. of very small or featureless particles, this has been shown to give much better class averages. \
 In such cases, values in the range of 7-12 Angstroms have proven useful.");
-    joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
-    joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
+	joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
+	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
+	joboptions["reverse_curvature"] = JobOption("Reverse Ewald curvature?", false, "Try curvature the other way around.");
 
 	joboptions["dont_skip_align"] = JobOption("Perform image alignment?", true, "If set to No, then rather than \
 performing both alignment and classification, only classification will be performed. This allows the use of very focused masks.\
@@ -4102,10 +4114,14 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	}
 
 	if (joboptions["do_blush"].getBoolean())
-    {
-        command += " --blush ";
-        command += " --blush_model " + joboptions["blush_version"].getString();
-    }
+		command += " --blush ";
+
+	if (joboptions["do_ewald"].getBoolean())
+	{
+		command += " --ewald";
+		if (joboptions["reverse_curvature"].getBoolean())
+			command += " --reverse_curvature";
+	}
 
 	if (joboptions["fn_mask"].getString().length() > 0)
 	{
@@ -4333,7 +4349,8 @@ High-resolution refinements (e.g. ribosomes or other large complexes in 3D auto-
 masked half-maps are used and a post-processing-like correction of the FSC curves (with phase-randomisation) is performed every iteration. This only works when a reference mask is provided on the I/O tab. \
 This may yield higher-resolution maps, especially when the mask contains only a relatively small volume inside the box.");
 	joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
-    joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
+	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
+	joboptions["reverse_curvature"] = JobOption("Reverse Ewald curvature?", false, "Try curvature the other way around.");
 
 	joboptions["sampling"] = JobOption("Initial angular sampling:", job_sampling_options, 2, "There are only a few discrete \
 angular samplings possible because we use the HealPix library to generate the sampling of the first two Euler angles on the sphere. \
@@ -4562,7 +4579,13 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
     if (joboptions["do_blush"].getBoolean())
     {
         command += " --blush ";
-        command += " --blush_model " + joboptions["blush_version"].getString();
+    }
+
+    if (joboptions["do_ewald"].getBoolean())
+    {
+        command += " --ewald";
+        if (joboptions["reverse_curvature"].getBoolean())
+            command += " --reverse_curvature";
     }
 
     // Always do compute stuff
@@ -7609,6 +7632,167 @@ bool RelionJob::getCommandsTomoAlignJob(std::string &outputname, std::vector<std
 	commands.push_back(command);
 
     return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
+}
+
+void RelionJob::initialiseReconstruct3DJob()
+{
+	type = PROC_RECONSTRUCT3D;
+	hidden_name = ".gui_reconstruct3d";
+
+	joboptions["fn_img"] = JobOption("Input images STAR file:", LABEL_PARTS_CPIPE, 1, "", "STAR files (*.star)", "A STAR file with aligned particles (and their metadata).");
+	joboptions["random_subset_size"] = JobOption("Random subset size:", 0, 0, 1000000, 100, "If set to a positive value, randomly subsample this many particles from each half-set (or all data). All MPI ranks use the same deterministic seed so the subset is identical across ranks. Set to 0 to use all particles.");
+	joboptions["random_subset_seed"] = JobOption("Random subset seed:", 0, 0, 999999, 1, "Seed for the random subset selection. Different seeds produce different subsets. Use 0 for the default seed (0). All MPI ranks use the same seed to ensure identical subsets.");
+
+	joboptions["sym_name"] = JobOption("Symmetry:", std::string("C1"), "If the molecule is asymmetric, \
+set Symmetry group to C1. Note their are multiple possibilities for icosahedral symmetry: \n \
+* I1: No-Crowther 222 (standard in Heymann, Chagoyen & Belnap, JSB, 151 (2005) 196–207) \n \
+* I2: Crowther 222 \n \
+* I3: 52-setting (as used in SPIDER?)\n \
+* I4: A different 52 setting \n \
+The command 'relion_refine --sym D2 --print_symmetry_ops' prints a list of all symmetry operators for symmetry group D2. \
+RELION uses XMIPP's libraries for symmetry operations. \
+Therefore, look at the XMIPP Wiki for more details:  http://xmipp.cnb.csic.es/twiki/bin/view/Xmipp/WebHome?topic=Symmetry");
+
+	joboptions["do_ctf_correction"] = JobOption("Do CTF-correction?", true, "If set to Yes, CTFs will be applied to the projections of the map. This requires that CTF information is present in the input STAR file.");
+	joboptions["ctf_intact_first_peak"] = JobOption("Ignore CTFs until first peak?", false, "If set to Yes, then CTF-amplitude correction will \
+only be performed from the first peak of each CTF onward. This can be useful if the CTF model is inadequate at the lowest resolution. \
+Still, in general using higher amplitude contrast on the CTFs (e.g. 10-20%) often yields better results. \
+Therefore, this option is not generally recommended: try increasing amplitude contrast (in your input STAR file) first!");
+	joboptions["spatial_frequency_mode"] = JobOption("Spatial-frequency mode:", job_spatial_frequency_mode_options, 0, "Sampling mode for CTF handling in alignment; use 's2' to enable s^2 radial sampling in Fourier space.");
+	joboptions["s2_ctf_oversampling_min"] = JobOption("Min s2 samples per CTF oscillation:", 2, 0, 8, 1, "For s2 spatial-frequency mode: minimum number of s^2 samples per CTF oscillation. Higher values add more fill points in Fourier cells where CTF varies rapidly. 0 = Cartesian-only (no fill). Default 2.");
+
+
+	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
+	joboptions["reverse_curvature"] = JobOption("Reverse Ewald curvature?", false, "Try curvature the other way around.");
+	joboptions["mask_diameter"] = JobOption("Mask diameter (A):", 200, 0, 10000, 10, "Diameter of the circular mask that will be applied to the reconstruction. \
+If the Ewald sphere correction is used, the mask diameter is required to compensate for Ewald curvature effects. \
+If set to a value larger than the image size no masking will be performed.");
+
+	joboptions["do_half1"] = JobOption("Reconstruct half-1 map?", true, "If set to Yes, reconstruct the half-1 map (random subset 1).");
+	joboptions["do_half2"] = JobOption("Reconstruct half-2 map?", true, "If set to Yes, reconstruct the half-2 map (random subset 2).");
+	joboptions["do_alldata"] = JobOption("Reconstruct full map from all data?", true, "If set to Yes, reconstruct the full map from all particles.");
+
+	joboptions["do_prefetch"] = JobOption("Prefetch particles?", true, "If set to Yes, particle images will be read asynchronously in a background thread while the current image is being backprojected. This hides disk I/O latency without requiring all images to fit in RAM simultaneously. Disable this only on systems where background I/O causes instability.");
+
+	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
+	if (default_cache == NULL)
+		default_cache = "";
+	joboptions["cache_dir"] = JobOption("Local SSD cache directory:", std::string(default_cache), "If a directory is provided here, particle stacks will be cached in subdirectory relion_cache/ for reuse across multiple jobs. The default can be set via the RELION_CACHE_DIRECTORY environment variable. Unlike --scratch_dir, cached data persists after the job finishes and is reused on cache hit in subsequent jobs.");
+	joboptions["cache_copy_threads"] = JobOption("Cache copy threads:", std::string("4"), "Number of parallel threads for cache file copy.");
+	joboptions["helical_nr_asu"] = JobOption("Number of helical asymmetrical units:", 1, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box.");
+	joboptions["helical_rise"] = JobOption("Helical rise (A):", 1., 0., 50., 0.5, "Helical rise in Angstroms.");
+	joboptions["helical_twist"] = JobOption("Helical twist (deg):", -1., -50., 50., 1., "Helical twist in degrees. Positive for right-handed helix.");
+	joboptions["do_apply_helical_symmetry"] = JobOption("Apply helical symmetry?", false, "If set to Yes, helical symmetry will be applied in the reconstruction. Set to No if helical symmetry is unknown or not yet estimated.");
+
+	joboptions["do_pad1"] = JobOption("Skip padding?", false, "If set to Yes, the reconstruction will not use padding in Fourier space. Otherwise, the reconstruction is padded 2x. Skipping padding (i.e. use --pad 1) gives nearly as good results as using --pad 2, but some artifacts may appear in the corners from signal that is folded back.");
+	joboptions["do_invert_contrast"] = JobOption("Invert contrast?", false, "If set to Yes, multiply the reconstruction by -1 to flip the contrast.");
+}
+
+bool RelionJob::getCommandsReconstruct3DJob(std::string &outputname, std::vector<std::string> &commands,
+		std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)
+{
+	commands.clear();
+	initialisePipeline(outputname, job_counter);
+
+	if (joboptions["fn_img"].getString() == "")
+	{
+		error_message = "ERROR: empty field for input STAR file...";
+		return false;
+	}
+
+	// Single command with --do_half1/--do_half2/--do_alldata: conditionally generates
+	// run_class001_half1.mrc, run_class001_half2.mrc and/or run_class001.mrc
+	int nr_mpi = (joboptions.find("nr_mpi") != joboptions.end()) ? joboptions["nr_mpi"].getNumber(error_message) : 1;
+	std::string command = (nr_mpi > 1) ? "`which relion_reconstruct_mpi`" : "`which relion_reconstruct`";
+	command += " --i " + joboptions["fn_img"].getString();
+	command += " --o " + outputname + "run_class001.mrc";
+	if (joboptions["random_subset_size"].getNumber(error_message) > 0)
+	{
+		MetaDataTable MD;
+		// Read the "particles" data block explicitly (RELION 5.0 format
+		// has data_optics first; falling back to plain read() would
+		// get the optics table instead of the particle table).
+		if (!MD.read(joboptions["fn_img"].getString(), "particles"))
+		{
+			MD.read(joboptions["fn_img"].getString()); // older format fallback
+		}
+		long int nr_particles = MD.numberOfObjects();
+		long int subset_size = (long int)joboptions["random_subset_size"].getNumber(error_message);
+		if (subset_size > nr_particles)
+		{
+			error_message = "ERROR: Random subset size (" + floatToString(subset_size) + ") is larger than the number of particles in the input STAR file (" + floatToString(nr_particles) + ").";
+			return false;
+		}
+		command += " --random_subset_size " + joboptions["random_subset_size"].getString();
+		command += " --random_subset_seed " + joboptions["random_subset_seed"].getString();
+	}
+	if (joboptions["do_half1"].getBoolean())
+		command += " --do_half1";
+	if (joboptions["do_half2"].getBoolean())
+		command += " --do_half2";
+	if (joboptions["do_alldata"].getBoolean())
+		command += " --do_alldata";
+	if (joboptions["do_ctf_correction"].getBoolean())
+		command += " --ctf";
+	if (joboptions["ctf_intact_first_peak"].getBoolean())
+		command += " --ctf_intact_first_peak";
+	if (joboptions["do_ctf_correction"].getBoolean() && joboptions["spatial_frequency_mode"].getString() == "s2")
+	{
+		command += " --spatial_frequency_mode s2";
+		command += " --s2_ctf_oversampling_min " + joboptions["s2_ctf_oversampling_min"].getString();
+	}
+	command += " --mask_diameter " + joboptions["mask_diameter"].getString();
+	command += " --sym " + joboptions["sym_name"].getString();
+	if (joboptions["do_ewald"].getBoolean())
+	{
+		command += " --ewald";
+		if (joboptions["reverse_curvature"].getBoolean())
+			command += " --reverse_curvature";
+	}
+	if (joboptions["do_apply_helical_symmetry"].getBoolean())
+	{
+		command += " --nr_helical_asu " + joboptions["helical_nr_asu"].getString();
+		command += " --helical_rise " + joboptions["helical_rise"].getString();
+		command += " --helical_twist " + joboptions["helical_twist"].getString();
+	}
+
+	// Pre-read and cache options
+	if (!joboptions["do_prefetch"].getBoolean())
+		command += " --no_prefetch ";
+	if (joboptions["cache_dir"].getString() != "")
+		command += " --cache_dir " + joboptions["cache_dir"].getString()
+		           + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
+
+	if (joboptions["do_pad1"].getBoolean())
+		command += " --pad 1 ";
+	if (joboptions["do_invert_contrast"].getBoolean())
+		command += " --invert_contrast";
+	command += " --j " + joboptions["nr_threads"].getString();
+	command += " " + joboptions["other_args"].getString();
+	commands.push_back(command);
+
+	// Output nodes (only for selected maps)
+	if (joboptions["do_half1"].getBoolean())
+	{
+		Node node_half1(outputname + "run_class001_half1.mrc", LABEL_REFINE3D_HALFMAP);
+		outputNodes.push_back(node_half1);
+	}
+	if (joboptions["do_half2"].getBoolean())
+	{
+		Node node_half2(outputname + "run_class001_half2.mrc", LABEL_REFINE3D_HALFMAP);
+		outputNodes.push_back(node_half2);
+	}
+	if (joboptions["do_alldata"].getBoolean())
+	{
+		Node node_full(outputname + "run_class001.mrc", LABEL_REFINE3D_MAP);
+		outputNodes.push_back(node_full);
+	}
+
+	// Register input node
+	Node node(joboptions["fn_img"].getString(), joboptions["fn_img"].node_type);
+	inputNodes.push_back(node);
+
+	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 }
 
 void RelionJob::initialiseTomoReconPartJob()

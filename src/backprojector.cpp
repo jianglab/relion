@@ -355,6 +355,224 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
 	} // endif y-loop
 }
 
+void BackProjector::backprojectNonuniform2Dto3D(const std::vector<Complex> &samples,
+	                                            const std::vector<RFLOAT> &sample_x,
+	                                            const std::vector<RFLOAT> &sample_y,
+	                                            const Matrix2D<RFLOAT> &A,
+	                                            const std::vector<RFLOAT> *sample_weight,
+	                                            RFLOAT r_ewald_sphere, bool is_positive_curvature,
+	                                            Matrix2D<RFLOAT>* magMatrix)
+{
+	if (samples.size() != sample_x.size() || samples.size() != sample_y.size())
+	{
+		REPORT_ERROR("BackProjector::backprojectNonuniform2Dto3D: inconsistent sample arrays");
+	}
+
+	if (sample_weight != NULL && sample_weight->size() != samples.size())
+	{
+		REPORT_ERROR("BackProjector::backprojectNonuniform2Dto3D: inconsistent sample weights");
+	}
+
+	RFLOAT m00, m10, m01, m11;
+
+	if (magMatrix != 0)
+	{
+		m00 = (*magMatrix)(0,0);
+		m10 = (*magMatrix)(1,0);
+		m01 = (*magMatrix)(0,1);
+		m11 = (*magMatrix)(1,1);
+	}
+	else
+	{
+		m00 = 1.0;
+		m10 = 0.0;
+		m01 = 0.0;
+		m11 = 1.0;
+	}
+
+    Matrix2D<RFLOAT> Ainv = A.inv();
+    Ainv *= (RFLOAT)padding_factor;
+
+    const int max_r2 = ROUND(r_max * padding_factor) * ROUND(r_max * padding_factor);
+    const int min_r2_nn = ROUND(r_min_nn * padding_factor) * ROUND(r_min_nn * padding_factor);
+
+    // Pre-compute AtA coefficients in (xu, yu) space for early ellipse culling.
+    // If |Ainv * (xu, yu, 0)|^2 > max_r2, the sample is outside the 3D sphere
+    // even without Ewald correction, so it can be skipped cheaply.
+    // This is conservative: it never culls a point that would be inside.
+    const RFLOAT Am_Xx = Ainv(0,0) * m00 + Ainv(0,1) * m10;
+    const RFLOAT Am_Xy = Ainv(0,0) * m01 + Ainv(0,1) * m11;
+    const RFLOAT Am_Yx = Ainv(1,0) * m00 + Ainv(1,1) * m10;
+    const RFLOAT Am_Yy = Ainv(1,0) * m01 + Ainv(1,1) * m11;
+    const RFLOAT Am_Zx = Ainv(2,0) * m00 + Ainv(2,1) * m10;
+    const RFLOAT Am_Zy = Ainv(2,0) * m01 + Ainv(2,1) * m11;
+    const RFLOAT AtA_xx = Am_Xx * Am_Xx + Am_Yx * Am_Yx + Am_Zx * Am_Zx;
+    const RFLOAT AtA_xy = Am_Xx * Am_Xy + Am_Yx * Am_Yy + Am_Zx * Am_Zy;
+    const RFLOAT AtA_yy = Am_Xy * Am_Xy + Am_Yy * Am_Yy + Am_Zy * Am_Zy;
+
+	RFLOAT inv_diam_ewald = (r_ewald_sphere > 0.0) ? 1.0 / (2.0 * r_ewald_sphere) : 0.0;
+	if (!is_positive_curvature)
+	{
+		inv_diam_ewald *= -1.0;
+	}
+
+	for (long int idx = 0; idx < (long int)samples.size(); idx++)
+	{
+		Complex my_val = samples[idx];
+		RFLOAT my_weight = (sample_weight == NULL) ? 1.0 : (*sample_weight)[idx];
+
+		if (my_weight <= 0.0)
+		{
+			continue;
+		}
+
+		RFLOAT x = sample_x[idx];
+		RFLOAT y = sample_y[idx];
+
+        RFLOAT xu = m00 * x + m01 * y;
+        RFLOAT yu = m10 * x + m11 * y;
+
+        // Early-out: if the 3D radius without Ewald correction exceeds max_r2,
+        // the sample is outside the sphere. The Ewald correction only makes
+        // the radius larger for typical microscopy, so this is conservative.
+        const RFLOAT r2_no_ewald = AtA_xx * xu * xu + 2.0 * AtA_xy * xu * yu + AtA_yy * yu * yu;
+	if (r2_no_ewald > max_r2)
+	{
+		continue;
+	}
+
+        RFLOAT z_on_ewaldp = inv_diam_ewald * (xu * xu + yu * yu);
+
+		RFLOAT xp = Ainv(0,0) * xu + Ainv(0,1) * yu + Ainv(0,2) * z_on_ewaldp;
+		RFLOAT yp = Ainv(1,0) * xu + Ainv(1,1) * yu + Ainv(1,2) * z_on_ewaldp;
+		RFLOAT zp = Ainv(2,0) * xu + Ainv(2,1) * yu + Ainv(2,2) * z_on_ewaldp;
+
+		const double r2_3D = xp * xp + yp * yp + zp * zp;
+		if (r2_3D > max_r2)
+		{
+			continue;
+		}
+
+		if (interpolator == TRILINEAR || r2_3D < min_r2_nn)
+		{
+			bool is_neg_x;
+
+			if (xp < 0)
+			{
+				xp = -xp;
+				yp = -yp;
+				zp = -zp;
+				is_neg_x = true;
+			}
+			else
+			{
+				is_neg_x = false;
+			}
+
+			int x0 = FLOOR(xp);
+			RFLOAT fx = xp - x0;
+			int x1 = x0 + 1;
+
+			int y0 = FLOOR(yp);
+			RFLOAT fy = yp - y0;
+			y0 -= STARTINGY(data);
+			int y1 = y0 + 1;
+
+			int z0 = FLOOR(zp);
+			RFLOAT fz = zp - z0;
+			z0 -= STARTINGZ(data);
+			int z1 = z0 + 1;
+
+			if (x0 < 0 || x0 + 1 >= data.xdim
+			 || y0 < 0 || y0 + 1 >= data.ydim
+			 || z0 < 0 || z0 + 1 >= data.zdim)
+			{
+				continue;
+			}
+
+			const RFLOAT mfx = 1.0 - fx;
+			const RFLOAT mfy = 1.0 - fy;
+			const RFLOAT mfz = 1.0 - fz;
+
+			const RFLOAT dd000 = mfz * mfy * mfx;
+			const RFLOAT dd001 = mfz * mfy * fx;
+			const RFLOAT dd010 = mfz * fy * mfx;
+			const RFLOAT dd011 = mfz * fy * fx;
+			const RFLOAT dd100 = fz * mfy * mfx;
+			const RFLOAT dd101 = fz * mfy * fx;
+			const RFLOAT dd110 = fz * fy * mfx;
+			const RFLOAT dd111 = fz * fy * fx;
+
+			if (is_neg_x)
+			{
+				my_val = conj(my_val);
+			}
+
+			DIRECT_A3D_ELEM(data, z0, y0, x0) += dd000 * my_val;
+			DIRECT_A3D_ELEM(data, z0, y0, x1) += dd001 * my_val;
+			DIRECT_A3D_ELEM(data, z0, y1, x0) += dd010 * my_val;
+			DIRECT_A3D_ELEM(data, z0, y1, x1) += dd011 * my_val;
+			DIRECT_A3D_ELEM(data, z1, y0, x0) += dd100 * my_val;
+			DIRECT_A3D_ELEM(data, z1, y0, x1) += dd101 * my_val;
+			DIRECT_A3D_ELEM(data, z1, y1, x0) += dd110 * my_val;
+			DIRECT_A3D_ELEM(data, z1, y1, x1) += dd111 * my_val;
+
+			DIRECT_A3D_ELEM(weight, z0, y0, x0) += dd000 * my_weight;
+			DIRECT_A3D_ELEM(weight, z0, y0, x1) += dd001 * my_weight;
+			DIRECT_A3D_ELEM(weight, z0, y1, x0) += dd010 * my_weight;
+			DIRECT_A3D_ELEM(weight, z0, y1, x1) += dd011 * my_weight;
+			DIRECT_A3D_ELEM(weight, z1, y0, x0) += dd100 * my_weight;
+			DIRECT_A3D_ELEM(weight, z1, y0, x1) += dd101 * my_weight;
+			DIRECT_A3D_ELEM(weight, z1, y1, x0) += dd110 * my_weight;
+			DIRECT_A3D_ELEM(weight, z1, y1, x1) += dd111 * my_weight;
+		}
+		else if (interpolator == NEAREST_NEIGHBOUR)
+		{
+			int x0 = ROUND(xp);
+			int y0 = ROUND(yp);
+			int z0 = ROUND(zp);
+
+			bool is_neg_x;
+			if (x0 < 0)
+			{
+				x0 = -x0;
+				y0 = -y0;
+				z0 = -z0;
+				is_neg_x = true;
+			}
+			else
+			{
+				is_neg_x = false;
+			}
+
+			const int xr = x0 - STARTINGX(data);
+			const int yr = y0 - STARTINGY(data);
+			const int zr = z0 - STARTINGZ(data);
+
+			if (xr < 0 || xr >= data.xdim
+			 || yr < 0 || yr >= data.ydim
+			 || zr < 0 || zr >= data.zdim)
+			{
+				continue;
+			}
+
+			if (is_neg_x)
+			{
+				DIRECT_A3D_ELEM(data, zr, yr, xr) += conj(my_val);
+			}
+			else
+			{
+				DIRECT_A3D_ELEM(data, zr, yr, xr) += my_val;
+			}
+			DIRECT_A3D_ELEM(weight, zr, yr, xr) += my_weight;
+		}
+		else
+		{
+			REPORT_ERROR("BackProjector::backprojectNonuniform2Dto3D: unrecognized interpolator");
+		}
+	}
+}
+
 void BackProjector::backproject1Dto2D(const MultidimArray<Complex > &f1d,
                                       const Matrix2D<RFLOAT> &A,
                                       const MultidimArray<RFLOAT> *Mweight)
@@ -1287,9 +1505,6 @@ void BackProjector::externalReconstruct(MultidimArray<RFLOAT> &vol_out,
 
 		cmd += " " + blush_args;
 
-        // The typical command will look something like this:
-        // relion_python_blush Refine3D/job024/run_it006_half2_class001_external_reconstruct.star  -m v1.0 --gpu 1
-        
 		FILE* pipe = popen(cmd.c_str(), "r");
 		if (!pipe)
 			throw std::runtime_error("Failed to dispatch command: " + cmd);
@@ -2143,7 +2358,7 @@ void BackProjector::symmetrise(int nr_helical_asu, RFLOAT helical_twist, RFLOAT 
 	enforceHermitianSymmetry();
 
 	// Then apply helical and point group symmetry (order irrelevant?)
-	applyHelicalSymmetry(nr_helical_asu, helical_twist, helical_rise, threads);
+	applyHelicalSymmetry(nr_helical_asu, helical_twist, helical_rise);
 
 	applyPointGroupSymmetry(threads);
 }
@@ -2167,7 +2382,7 @@ void BackProjector::enforceHermitianSymmetry()
 	}
 }
 
-void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twist, RFLOAT helical_rise, int threads)
+void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twist, RFLOAT helical_rise)
 {
 	if ( (nr_helical_asu < 2) || (ref_dim != 3) )
 		return;
@@ -2175,94 +2390,110 @@ void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twis
 	int rmax2 = ROUND(r_max * padding_factor) * ROUND(r_max * padding_factor);
 
 	Matrix2D<RFLOAT> R(4, 4); // A matrix from the list
-	MultidimArray<RFLOAT> sum_weight(weight);
-	MultidimArray<Complex > sum_data(data);
+	MultidimArray<RFLOAT> sum_weight;
+	MultidimArray<Complex > sum_data;
+	RFLOAT x, y, z, fx, fy, fz, xp, yp, zp, r2;
+	bool is_neg_x;
+	int x0, x1, y0, y1, z0, z1;
+	Complex d000, d001, d010, d011, d100, d101, d110, d111;
+	Complex dx00, dx01, dx10, dx11, dxy0, dxy1, ddd;
+	RFLOAT dd000, dd001, dd010, dd011, dd100, dd101, dd110, dd111;
+	RFLOAT ddx00, ddx01, ddx10, ddx11, ddxy0, ddxy1;
 
 	// First symmetry operator (not stored in SL) is the identity matrix
+	sum_weight = weight;
+	sum_data = data;
 	int h_min = -nr_helical_asu/2;
 	int h_max = -h_min + nr_helical_asu%2;
 	for (int hh = h_min; hh < h_max; hh++)
 	{
-		if (hh == 0) continue; // h==0 is done before the for loop (where sum_data = data)
-
-        RFLOAT rot_ang = hh * (-helical_twist);
-		rotation3DMatrix(rot_ang, 'Z', R);
-		R.setSmallValuesToZero(); // TODO: invert rotation matrix?
-
-		//Only the positive half of the z-range has to be calculated.
-		//The other half is calculated by the x<0 part of the x-loop.
-		#pragma omp parallel for schedule(dynamic) num_threads(threads) default(none) shared(data,weight,sum_data,sum_weight,rmax2,helical_twist,helical_rise,ori_size,padding_factor) firstprivate(hh,R)
-		for (long int k=STARTINGZ(sum_weight); k<=FINISHINGZ(sum_weight); k++)
+		if (hh != 0) // h==0 is done before the for loop (where sum_data = data)
 		{
-			// Allocate minimal 2D slices per thread instead of full 3D arrays
-			MultidimArray<RFLOAT> slice_weight(YSIZE(data), XSIZE(data));
-			MultidimArray<Complex> slice_data(YSIZE(data), XSIZE(data));
-			slice_weight.xdim = sum_weight.xdim;
-			slice_weight.ydim = sum_weight.ydim;
-			slice_weight.yxdim = sum_weight.yxdim;
-			slice_weight.xinit = sum_weight.xinit;
-			slice_weight.yinit = sum_weight.yinit;
-			slice_data.xdim = sum_data.xdim;
-			slice_data.ydim = sum_data.ydim;
-			slice_data.yxdim = sum_data.yxdim;
-			slice_data.xinit = sum_data.xinit;
-			slice_data.yinit = sum_data.yinit;
+			RFLOAT rot_ang = hh * (-helical_twist);
+			rotation3DMatrix(rot_ang, 'Z', R);
+			R.setSmallValuesToZero(); // TODO: invert rotation matrix?
 
-			slice_weight.initZeros(weight.ydim,weight.xdim);
-			slice_data.initZeros(data.ydim,data.xdim);
-
-			for (long int i=STARTINGY(sum_weight); i<=FINISHINGY(sum_weight); i++)
-			for (long int j=STARTINGX(sum_weight); j<=FINISHINGX(sum_weight); j++)
+			// Loop over all points in the output (i.e. rotated, or summed) array
+			FOR_ALL_ELEMENTS_IN_ARRAY3D(sum_weight)
 			{
-				RFLOAT x = (RFLOAT)j; // STARTINGX(sum_weight) is zero!
-				RFLOAT y = (RFLOAT)i;
-				RFLOAT z = (RFLOAT)k;
-				RFLOAT r2 = x*x + y*y + z*z;
-
+				x = (RFLOAT)j; // STARTINGX(sum_weight) is zero!
+				y = (RFLOAT)i;
+				z = (RFLOAT)k;
+				r2 = x*x + y*y + z*z;
 				if (r2 <= rmax2)
 				{
 					// coords_output(x,y) = A * coords_input (xp,yp)
-					RFLOAT xp = x * R(0, 0) + y * R(0, 1);
-					RFLOAT yp = x * R(1, 0) + y * R(1, 1);
-					RFLOAT zp = z;  // Z remains unchanged
+					xp = x * R(0, 0) + y * R(0, 1) + z * R(0, 2);
+					yp = x * R(1, 0) + y * R(1, 1) + z * R(1, 2);
+					zp = x * R(2, 0) + y * R(2, 1) + z * R(2, 2);
 
 					// Only asymmetric half is stored
-					bool is_neg_x = xp < 0;
-					if (is_neg_x)
+					if (xp < 0)
 					{
+						// Get complex conjugated hermitian symmetry pair
 						xp = -xp;
 						yp = -yp;
 						zp = -zp;
+						is_neg_x = true;
+					}
+					else
+					{
+						is_neg_x = false;
 					}
 
 					// Trilinear interpolation (with physical coords)
 					// Subtract STARTINGY and STARTINGZ to accelerate access to data (STARTINGX=0)
 					// In that way use DIRECT_A3D_ELEM, rather than A3D_ELEM
-					int x0 = FLOOR(xp);
-					RFLOAT fx = xp - x0;
-					int x1 = x0 + 1;
+					x0 = FLOOR(xp);
+					fx = xp - x0;
+					x1 = x0 + 1;
 
-					int y0 = FLOOR(yp);
-					RFLOAT fy = yp - y0;
-					y0 -= STARTINGY(data);
-					int y1 = y0 + 1;
+					y0 = FLOOR(yp);
+					fy = yp - y0;
+					y0 -=  STARTINGY(data);
+					y1 = y0 + 1;
 
-					int z0 = FLOOR(zp);
+					z0 = FLOOR(zp);
+					fz = zp - z0;
 					z0 -= STARTINGZ(data);
+					z1 = z0 + 1;
 
+#ifdef CHECK_SIZE
+					if (x0 < 0 || y0 < 0 || z0 < 0 ||
+						x1 < 0 || y1 < 0 || z1 < 0 ||
+						x0 >= XSIZE(data) || y0  >= YSIZE(data) || z0 >= ZSIZE(data) ||
+						x1 >= XSIZE(data) || y1  >= YSIZE(data)  || z1 >= ZSIZE(data) 	)
+					{
+						std::cerr << " x0= " << x0 << " y0= " << y0 << " z0= " << z0 << std::endl;
+						std::cerr << " x1= " << x1 << " y1= " << y1 << " z1= " << z1 << std::endl;
+						data.printShape();
+						REPORT_ERROR("BackProjector::applyPointGroupSymmetry: checksize!!!");
+					}
+#endif
 					// First interpolate (complex) data
-					Complex d00 = DIRECT_A3D_ELEM(data, z0, y0, x0);
-					Complex d01 = DIRECT_A3D_ELEM(data, z0, y0, x1);
-					Complex d10 = DIRECT_A3D_ELEM(data, z0, y1, x0);
-					Complex d11 = DIRECT_A3D_ELEM(data, z0, y1, x1);
-                    Complex dx00 = LIN_INTERP(fx ,d00, d01);
-					Complex dx10 = LIN_INTERP(fx ,d10, d11);
+					d000 = DIRECT_A3D_ELEM(data, z0, y0, x0);
+					d001 = DIRECT_A3D_ELEM(data, z0, y0, x1);
+					d010 = DIRECT_A3D_ELEM(data, z0, y1, x0);
+					d011 = DIRECT_A3D_ELEM(data, z0, y1, x1);
+					d100 = DIRECT_A3D_ELEM(data, z1, y0, x0);
+					d101 = DIRECT_A3D_ELEM(data, z1, y0, x1);
+					d110 = DIRECT_A3D_ELEM(data, z1, y1, x0);
+					d111 = DIRECT_A3D_ELEM(data, z1, y1, x1);
+
+					dx00 = LIN_INTERP(fx, d000, d001);
+					dx01 = LIN_INTERP(fx, d100, d101);
+					dx10 = LIN_INTERP(fx, d010, d011);
+					dx11 = LIN_INTERP(fx, d110, d111);
+					dxy0 = LIN_INTERP(fy, dx00, dx10);
+					dxy1 = LIN_INTERP(fy, dx01, dx11);
 
 					// Take complex conjugated for half with negative x
-					Complex ddd = LIN_INTERP(fy, dx00, dx10);
+					ddd = LIN_INTERP(fz, dxy0, dxy1);
 
-					if (is_neg_x) ddd = conj(ddd);
+					if (is_neg_x)
+						ddd = conj(ddd);
 
+					// Also apply a phase shift for helical translation along Z
 					if (ABS(helical_rise) > 0.)
 					{
 						RFLOAT zshift = hh * helical_rise;
@@ -2278,37 +2509,31 @@ void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twis
 						ddd = Complex(ac - bd, ab_cd - ac - bd);
 					}
 					// Accumulated sum of the data term
-					A2D_ELEM(slice_data,i,j) += ddd;
+					A3D_ELEM(sum_data, k, i, j) += ddd;
 
 					// Then interpolate (real) weight
-					RFLOAT dd00 = DIRECT_A3D_ELEM(weight, z0, y0, x0);
-					RFLOAT dd01 = DIRECT_A3D_ELEM(weight, z0, y0, x1);
-					RFLOAT dd10 = DIRECT_A3D_ELEM(weight, z0, y1, x0);
-					RFLOAT dd11 = DIRECT_A3D_ELEM(weight, z0, y1, x1);
-					RFLOAT ddx00 = LIN_INTERP(fx, dd00, dd01);
-					RFLOAT ddx10 = LIN_INTERP(fx, dd10, dd11);
+					dd000 = DIRECT_A3D_ELEM(weight, z0, y0, x0);
+					dd001 = DIRECT_A3D_ELEM(weight, z0, y0, x1);
+					dd010 = DIRECT_A3D_ELEM(weight, z0, y1, x0);
+					dd011 = DIRECT_A3D_ELEM(weight, z0, y1, x1);
+					dd100 = DIRECT_A3D_ELEM(weight, z1, y0, x0);
+					dd101 = DIRECT_A3D_ELEM(weight, z1, y0, x1);
+					dd110 = DIRECT_A3D_ELEM(weight, z1, y1, x0);
+					dd111 = DIRECT_A3D_ELEM(weight, z1, y1, x1);
 
-					A2D_ELEM(slice_weight,i,j) += LIN_INTERP(fy, ddx00, ddx10);
-				}
-			}
-			#pragma omp critical
-			{
-				for (long int i=STARTINGY(sum_weight); i<=FINISHINGY(sum_weight); i++)
-				for (long int j=STARTINGX(sum_weight); j<=FINISHINGX(sum_weight); j++)
-				{
-					RFLOAT x = (RFLOAT)j; // STARTINGX(sum_weight) is zero!
-					RFLOAT y = (RFLOAT)i;
-					RFLOAT z = (RFLOAT)k;
-					RFLOAT r2 = x*x + y*y + z*z;
-					if (r2 <= rmax2)
-					{
-						A3D_ELEM(sum_data,k,i,j) += A2D_ELEM(slice_data,i,j);
-						A3D_ELEM(sum_weight,k,i,j) += A2D_ELEM(slice_weight,i,j);
-					}
-				}
-			}
-		}
-	}
+					ddx00 = LIN_INTERP(fx, dd000, dd001);
+					ddx01 = LIN_INTERP(fx, dd100, dd101);
+					ddx10 = LIN_INTERP(fx, dd010, dd011);
+					ddx11 = LIN_INTERP(fx, dd110, dd111);
+					ddxy0 = LIN_INTERP(fy, ddx00, ddx10);
+					ddxy1 = LIN_INTERP(fy, ddx01, ddx11);
+
+					A3D_ELEM(sum_weight, k, i, j) +=  LIN_INTERP(fz, ddxy0, ddxy1);
+
+				} // end if r2 <= rmax2
+			 } // end loop over all elements of sum_weight
+		} // end if hh!=0
+	} // end loop over hh
 
 	data = sum_data;
 	weight = sum_weight;

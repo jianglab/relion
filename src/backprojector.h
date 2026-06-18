@@ -37,6 +37,8 @@
 #include "src/symmetries.h"
 #include <src/jaz/single_particle/complex_io.h>
 
+#include <vector>
+
 class BackProjector: public Projector
 {
 public:
@@ -253,6 +255,19 @@ public:
 	                       Matrix2D<RFLOAT>* magMatrix = 0);
 
 	/*
+	* Set a set of nonuniform 2D Fourier samples into the 3D map (backward projection)
+	* Sample coordinates should be given in logical Fourier pixel units.
+	*/
+	void backprojectNonuniform2Dto3D(const std::vector<Complex> &samples,
+	                                 const std::vector<RFLOAT> &sample_x,
+	                                 const std::vector<RFLOAT> &sample_y,
+	                                 const Matrix2D<RFLOAT> &A,
+	                                 const std::vector<RFLOAT> *sample_weight = NULL,
+	                                 RFLOAT r_ewald_sphere = -1.,
+	                                 bool is_positive_curvature = true,
+	                                 Matrix2D<RFLOAT>* magMatrix = 0);
+
+	/*
 	* Set a 1D slice in the 2D map (backward projection)
 	* If a exp_Mweight is given, rather than adding 1 to all relevant pixels in the weight array, we use exp_Mweight
 	*/
@@ -372,7 +387,7 @@ public:
 
 	/* Applies helical symmetry. Note that helical_rise is in PIXELS here, as BackProjector doesn't know angpix
 	 */
-	void applyHelicalSymmetry(int nr_helical_asu = 1, RFLOAT helical_twist = 0., RFLOAT helical_rise = 0., int threads = 1);
+	void applyHelicalSymmetry(int nr_helical_asu = 1, RFLOAT helical_twist = 0., RFLOAT helical_rise = 0.);
 
 	/* Applies the symmetry from the SymList object to the weight and the data array
 	 */

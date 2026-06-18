@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include <src/reconstructor.h>
+#include <unistd.h>
 
 int main(int argc, char *argv[])
 {
@@ -27,6 +28,14 @@ int main(int argc, char *argv[])
 	try
 	{
 		prm.read(argc, argv);
+
+		if (prm.verb > 0)
+		{
+			char nodename[256];
+			if (gethostname(nodename, sizeof(nodename)) == 0)
+				std::cout << " Running on host            = " << nodename << std::endl;
+		}
+
 		prm.run();
 
 	}

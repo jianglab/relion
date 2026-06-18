@@ -742,14 +742,8 @@ void AmyloidFinder::runFOMBatch(long int my_first, long int my_last)
             mktree(fn_dir);
             fn_olddir = fn_dir;
         }
-#ifdef TIMING
-        timer.tic(TIMING_A5);
-#endif
         calculateFOMOneMicrograph(todo_micrographs_fom[imic], todo_micrographs_fom.size() == 1);
         if (verb > 0 && (imic-my_first+1)%barstep == 0) progress_bar(imic - my_first + 1);
-#ifdef TIMING
-        timer.toc(TIMING_A5);
-#endif
     }
 
     if (verb > 0) progress_bar(my_nr);

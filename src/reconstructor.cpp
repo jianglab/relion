@@ -18,6 +18,188 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/reconstructor.h"
+#include "src/cache_manager.h"
+
+#include "src/spatial_frequency_grid.h"
+#include "src/relion_finufft.h"
+
+#include <complex>
+#include <cstdio>
+#include <cstdlib>
+#include <random>
+#include <map>
+#include <unistd.h>
+#ifdef S2_PROFILE
+#include <chrono>
+#endif
+
+namespace
+{
+
+constexpr RFLOAT TWO_PI = 2.0 * PI;
+
+#ifdef S2_PROFILE
+using Clock = std::chrono::high_resolution_clock;
+
+struct S2Profile {
+	long long ns_read_img = 0;
+	long long ns_fft = 0;
+	long long ns_ctf_precomp = 0;
+	long long ns_ewald_precomp = 0;
+	long long ns_grid_ensure = 0;
+	long long ns_finufft = 0;
+	long long ns_shift_jac = 0;
+	long long ns_dc_zero = 0;
+	long long ns_bilinear = 0;
+	long long ns_ctf_analytical = 0;
+
+	long long ns_backproject = 0;
+	long long ns_total = 0;
+	int count = 0;
+	bool is_ewald = false;
+	int nk = 0;
+	int boxsize = 0;
+
+	void accumulate(const S2Profile& o) {
+		ns_read_img += o.ns_read_img;
+		ns_fft += o.ns_fft;
+		ns_ctf_precomp += o.ns_ctf_precomp;
+		ns_ewald_precomp += o.ns_ewald_precomp;
+		ns_grid_ensure += o.ns_grid_ensure;
+		ns_finufft += o.ns_finufft;
+		ns_shift_jac += o.ns_shift_jac;
+		ns_dc_zero += o.ns_dc_zero;
+		ns_bilinear += o.ns_bilinear;
+		ns_ctf_analytical += o.ns_ctf_analytical;
+		ns_backproject += o.ns_backproject;
+		ns_total += o.ns_total;
+		count += o.count;
+		if (o.count > 0) {
+			is_ewald = o.is_ewald;
+			nk = o.nk;
+			boxsize = o.boxsize;
+		}
+	}
+
+	void print(int rank) const {
+		auto ms = [](long long ns) { return (double)ns / 1e6; };
+		fprintf(stderr, "=== S2 PROFILE rank=%d n_particles=%d box=%d nk=%d ewald=%d ===\n",
+			rank, count, boxsize, nk, is_ewald ? 1 : 0);
+		if (count > 0) {
+			fprintf(stderr, " total_per_particle: %.3f ms\n", ms(ns_total / count));
+			fprintf(stderr, " read_img: %.3f ms\n", ms(ns_read_img / count));
+			fprintf(stderr, " fft: %.3f ms\n", ms(ns_fft / count));
+			fprintf(stderr, " ctf_precomp: %.3f ms\n", ms(ns_ctf_precomp / count));
+			fprintf(stderr, " ewald_precomp: %.3f ms\n", ms(ns_ewald_precomp / count));
+			fprintf(stderr, " grid_ensure: %.3f ms\n", ms(ns_grid_ensure / count));
+			fprintf(stderr, " finufft: %.3f ms\n", ms(ns_finufft / count));
+			fprintf(stderr, " shift_jacobian: %.3f ms\n", ms(ns_shift_jac / count));
+			fprintf(stderr, " dc_zero: %.3f ms\n", ms(ns_dc_zero / count));
+			fprintf(stderr, " bilinear_interp: %.3f ms\n", ms(ns_bilinear / count));
+			fprintf(stderr, " ctf_analytical: %.3f ms\n", ms(ns_ctf_analytical / count));
+			fprintf(stderr, " backproject: %.3f ms\n", ms(ns_backproject / count));
+		} else {
+			fprintf(stderr, " (no particles profiled)\n");
+		}
+		fprintf(stderr, "=== END S2 PROFILE ===\n");
+		fflush(stderr);
+	}
+};
+
+static thread_local S2Profile tls_s2_profile;
+#endif
+
+SpatialFrequencyMode parseSpatialFrequencyMode(const std::string& mode)
+{
+	if (mode == "s")
+	{
+		return SPATIAL_FREQUENCY_MODE_S;
+	}
+
+	if (mode == "s2")
+	{
+		return SPATIAL_FREQUENCY_MODE_S2;
+	}
+
+	REPORT_ERROR("ERROR: --spatial_frequency_mode must be either 's' or 's2'.");
+	return SPATIAL_FREQUENCY_MODE_S;
+}
+
+
+
+
+void extractCartesianSamplesAndWeightsFromSPath(const MultidimArray<Complex>& F2D,
+	                                            const MultidimArray<RFLOAT>& Fctf,
+	                                            bool do_ctf,
+	                                            bool ctf_premultiplied,
+	                                            bool do_fom_weighting,
+	                                            RFLOAT fom,
+	                                            std::vector<Complex>& samples,
+	                                            std::vector<RFLOAT>& weights)
+{
+	const int size = YSIZE(F2D);
+	const int sh = XSIZE(F2D);
+
+	samples.clear();
+	weights.clear();
+	samples.reserve(size * sh);
+	weights.reserve(size * sh);
+
+	for (int i = 0; i < size; i++)
+	{
+		const int first_x = (i < sh) ? 0 : 1;
+
+		for (int x = first_x; x < sh; x++)
+		{
+			Complex val = DIRECT_A2D_ELEM(F2D, i, x);
+			RFLOAT w = 1.0;
+
+			if (do_ctf)
+			{
+				const RFLOAT ctf_value = DIRECT_A2D_ELEM(Fctf, i, x);
+				if (!ctf_premultiplied)
+				{
+					val *= ctf_value;
+				}
+				w *= ctf_value * ctf_value;
+			}
+
+			if (do_fom_weighting)
+			{
+				val *= fom;
+				w *= fom;
+			}
+
+			samples.push_back(val);
+			weights.push_back(w);
+		}
+	}
+
+	if (!samples.empty())
+	{
+		samples[0] = Complex(0.0, 0.0);
+	}
+}
+
+void applyFourierShiftToSamples(std::vector<Complex>& samples,
+	                            const SpatialFrequencyGrid2D& grid,
+	                            const Matrix1D<RFLOAT>& trans,
+	                            int size)
+{
+	if (ABS(XX(trans)) < XMIPP_EQUAL_ACCURACY && ABS(YY(trans)) < XMIPP_EQUAL_ACCURACY)
+	{
+		return;
+	}
+
+	for (long int idx = 0; idx < (long int)samples.size(); idx++)
+	{
+		const RFLOAT phase = (RFLOAT)(-TWO_PI * (grid.sample_x[idx] * XX(trans) + grid.sample_y[idx] * YY(trans)) / size);
+		const Complex shift(cos(phase), sin(phase));
+		samples[idx] *= shift;
+	}
+}
+
+}
 
 void Reconstructor::read(int argc, char **argv)
 {
@@ -33,7 +215,20 @@ void Reconstructor::read(int argc, char **argv)
 	subset = textToInteger(parser.getOption("--subset", "Subset of images to consider (1: only reconstruct half1; 2: only half2; other: reconstruct all)", "-1"));
 	chosen_class = textToInteger(parser.getOption("--class", "Consider only this class (-1: use all classes)", "-1"));
 	angpix  = textToFloat(parser.getOption("--angpix", "Pixel size in the reconstruction (take from first optics group by default)", "-1"));
-
+	spatial_frequency_mode = parseSpatialFrequencyMode(parser.getOption("--spatial_frequency_mode", "Spatial-frequency sampling mode for reconstruction ('s' for the current Cartesian frequency grid; 's2' for signed s^2 Cartesian sampling)", "s"));
+s2_ctf_oversampling_min = textToInteger(parser.getOption("--s2_ctf_oversampling_min",
+            "For --spatial_frequency_mode s2: minimum number of s2 samples per CTF oscillation (0 = no fill/Cartesian-only, default 2)", "2"));
+	do_s2_grid_diagnostic = parser.checkOption("--save_s2_grid_diagnostic", "Save s2 grid diagnostic data and plot script");
+	s2_uniform_fill_ = parser.checkOption("--s2_uniform_fill", "For --spatial_frequency_mode s2: use uniform 2x fill (all half-grid positions, equivalent to 2x real-space padding) instead of adaptive s2 oversampling");
+	do_half1 = parser.checkOption("--do_half1", "Reconstruct half-1 map (subset 1)");
+	do_half2 = parser.checkOption("--do_half2", "Reconstruct half-2 map (subset 2)");
+	do_alldata = parser.checkOption("--do_alldata", "Reconstruct full map from all data");
+	do_prefetch = !parser.checkOption("--no_prefetch", "Disable background prefetching of particle images while backprojecting");
+	random_subset_size = textToInteger(parser.getOption("--random_subset_size", "After reconstruction, also reconstruct a random subset of this many particles (for quick validation)", "-1"));
+	random_subset_seed = textToInteger(parser.getOption("--random_subset_seed", "Seed for the random subset selection (deterministic across MPI ranks)", "42"));
+	fn_cache = parser.getOption("--cache_dir", "Local SSD cache directory for persistent particle stack caching", "");
+	cache_copy_threads = textToInteger(parser.getOption("--cache_copy_threads", "Number of parallel threads for cache file copy (default 4)", "4"));
+	nr_threads = textToInteger(parser.getOption("--j", "Number of threads to run in parallel (only useful on multi-core machines)", "1"));
 	int ctf_section = parser.addSection("CTF options");
 	do_ctf = parser.checkOption("--ctf", "Apply CTF correction");
 	intact_ctf_first_peak = parser.checkOption("--ctf_intact_first_peak", "Leave CTFs intact until first peak");
@@ -63,8 +258,9 @@ void Reconstructor::read(int argc, char **argv)
 	skip_subtomo_correction = parser.checkOption("--skip_subtomo_multi", "Skip subtomo multiplicity correction? (For nomalised subtomos only)");
 	ctf3d_squared = !parser.checkOption("--ctf3d_not_squared", "CTF3D files contain sqrt(CTF^2) patterns");
 
-	int expert_section = parser.addSection("Expert options");
-	fn_sub = parser.getOption("--subtract","Subtract projections of this map from the images used for reconstruction", "");
+int expert_section = parser.addSection("Expert options");
+do_invert_contrast = parser.checkOption("--invert_contrast", "Invert the contrast in the reconstruction");
+fn_sub = parser.getOption("--subtract","Subtract projections of this map from the images used for reconstruction", "");
 	if (parser.checkOption("--NN", "Use nearest-neighbour instead of linear interpolation before gridding correction"))
 		interpolator = NEAREST_NEIGHBOUR;
 	else
@@ -90,7 +286,6 @@ void Reconstructor::read(int argc, char **argv)
 	do_debug = parser.checkOption("--write_debug_output", "Write out arrays with data and weight terms prior to reconstruct");
 	do_external_reconstruct = parser.checkOption("--external_reconstruct", "Write out BP denominator and numerator for external_reconstruct program");
 	verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
-	nr_threads = textToInteger(parser.getOption("--j", "Number of threads (only for symmetrisation for now)", "1"));
 
 	// Hidden
 	r_min_nn = textToInteger(getParameter(argc, argv, "--r_min_nn", "10"));
@@ -107,6 +302,9 @@ void Reconstructor::usage()
 
 void Reconstructor::initialise()
 {
+	fftw_init_threads();
+	fftw_plan_with_nthreads(nr_threads);
+
 	do_reconstruct_ctf = (ctf_dim > 0);
 	if (do_reconstruct_ctf)
 	{
@@ -138,6 +336,12 @@ void Reconstructor::initialise()
 		REPORT_ERROR("The rlnClassNumber column is missing in the input STAR file.");
 	}
 
+	if (fn_cache != "" && !skip_cache_init_in_read_)
+	{
+		ObservationModel *obsModel_ptr = do_ignore_optics ? NULL : &obsModel;
+		CacheInitializer::initializeCache(fn_cache, cache_copy_threads, DF, verb, obsModel_ptr);
+	}
+
 	randomize_random_generator();
 
 	if (do_ewald) do_ctf = true;
@@ -166,6 +370,13 @@ void Reconstructor::initialise()
 		}
 
 		Image<RFLOAT> img0;
+		{
+			FileName fn_stack;
+			long int imgno_dummy;
+			fn_img.decompose(imgno_dummy, fn_stack);
+			if (!exists(fn_stack))
+				REPORT_ERROR("First image stack not found: " + fn_stack);
+		}
 		img0.read(fn_img, false);
 		output_boxsize=(int)XSIZE(img0());
 		// When doing Ewald-curvature correction or when having optics groups: allow reconstructing smaller box than the input images (which should have large boxes!!)
@@ -221,6 +432,85 @@ void Reconstructor::initialise()
 	else
 		r_max = CEIL(output_boxsize * angpix / maxres);
 
+	if (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2)
+	{
+		if (data_dim != 2)
+		{
+			REPORT_ERROR("ERROR: --spatial_frequency_mode s2 is currently only supported for 2D particle images.");
+		}
+
+		if (do_reconstruct_ctf)
+		{
+			REPORT_ERROR("ERROR: --spatial_frequency_mode s2 is not yet supported for --reconstruct_ctf.");
+		}
+
+		if (fn_sub != "")
+		{
+			REPORT_ERROR("ERROR: --spatial_frequency_mode s2 is not yet supported together with --subtract.");
+		}
+
+		if (fn_noise != "")
+		{
+			REPORT_ERROR("ERROR: --spatial_frequency_mode s2 is not yet supported for --reconstruct_noise.");
+		}
+
+		if (read_weights)
+		{
+			REPORT_ERROR("ERROR: --spatial_frequency_mode s2 is not yet supported together with --read_weights.");
+		}
+
+#ifndef RELION_USE_FINUFFT
+		REPORT_ERROR("ERROR: --spatial_frequency_mode s2 requires a build configured with -DRELION_USE_FINUFFT=ON.");
+#endif
+	}
+
+	// Print defocus statistics and cache s2 grids for CTF oversampling
+	if (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2 && s2_ctf_oversampling_min > 0)
+	{
+		if (!do_ignore_optics && obsModel.opticsMdt.containsLabel(EMDL_CTF_VOLTAGE))
+		{
+			obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, voltage_for_s2_, 0);
+		}
+
+		if (voltage_for_s2_ > 0.0 && DF.containsLabel(EMDL_CTF_DEFOCUSU) && verb > 0)
+		{
+			std::vector<RFLOAT> defoci;
+			DF.firstObject();
+			for (long int p = 0; p < DF.numberOfObjects(); p++)
+			{
+				RFLOAT du, dv;
+				DF.getValue(EMDL_CTF_DEFOCUSU, du);
+				DF.getValue(EMDL_CTF_DEFOCUSV, dv);
+				if (du > 0.0 && dv > 0.0)
+					defoci.push_back(std::max(du, dv));
+				DF.nextObject();
+			}
+			DF.firstObject();
+
+ if (!defoci.empty())
+ {
+ std::sort(defoci.begin(), defoci.end());
+ RFLOAT dmin = defoci.front();
+ RFLOAT dmax = defoci.back();
+ RFLOAT dmean = 0.0;
+ for (auto d : defoci) dmean += d;
+ dmean /= defoci.size();
+ RFLOAT dmedian = defoci[defoci.size() / 2];
+			printS2CtfOversamplingStats(output_boxsize / 2, angpix,
+				dmin, dmean, dmedian, dmax,
+				s2_ctf_oversampling_min, voltage_for_s2_);
+
+			if (do_s2_grid_diagnostic)
+			{
+				FileName diag_prefix = fn_out.withoutExtension() + "_s2_grid_diag";
+				writeS2GridDiagnostic(output_boxsize, angpix, voltage_for_s2_,
+					dmin, dmean, dmedian, dmax,
+					s2_ctf_oversampling_min, diag_prefix);
+			}
+		}
+	}
+	}
+
 }
 
 void Reconstructor::run()
@@ -228,14 +518,109 @@ void Reconstructor::run()
 	if (fn_debug != "")
 	{
 		readDebugArrays();
+		reconstruct();
+		return;
+	}
+
+	initialise();
+	if (do_half1 || do_half2 || do_alldata)
+	{
+		FileName fn_out_orig = fn_out;
+		// Half-1
+		if (do_half1)
+		{
+			subset = 1;
+			fn_out = fn_out_orig.insertBeforeExtension("_half1");
+			MetaDataTable DF_restore = DF;
+			DF = selectRandomSubset(DF, random_subset_size, 1, random_subset_seed, verb);
+			if (verb > 0)
+				std::cout << "=== Reconstructing half-1 (" << DF.numberOfObjects() << " particles) ===" << std::endl;
+			backproject();
+			reconstruct();
+			DF = DF_restore;
+		}
+		// Half-2
+		if (do_half2)
+		{
+			subset = 2;
+			fn_out = fn_out_orig.insertBeforeExtension("_half2");
+			MetaDataTable DF_restore = DF;
+			DF = selectRandomSubset(DF, random_subset_size, 2, random_subset_seed, verb);
+			if (verb > 0)
+				std::cout << "=== Reconstructing half-2 (" << DF.numberOfObjects() << " particles) ===" << std::endl;
+			backproject();
+			reconstruct();
+			DF = DF_restore;
+		}
+		// All data
+		if (do_alldata)
+		{
+			subset = -1;
+			fn_out = fn_out_orig;
+			MetaDataTable DF_restore = DF;
+			DF = selectRandomSubset(DF, random_subset_size, -1, random_subset_seed, verb);
+			if (verb > 0)
+				std::cout << "=== Reconstructing full map (" << DF.numberOfObjects() << " particles) ===" << std::endl;
+			backproject();
+			reconstruct();
+			DF = DF_restore;
+		}
+		fn_out = fn_out_orig;
 	}
 	else
 	{
-		initialise();
 		backproject();
+		reconstruct();
+	}
+}
+
+MetaDataTable Reconstructor::selectRandomSubset(const MetaDataTable &DF_in,
+                                                 long int sample_size,
+                                                 int random_subset_filter,
+                                                 int seed, int verb) const
+{
+	// Collect candidate indices (filtering by random_subset if needed)
+	std::vector<long int> candidates;
+	for (long int p = 0; p < DF_in.numberOfObjects(); p++)
+	{
+		if (random_subset_filter >= 1 && random_subset_filter <= 2)
+		{
+			int rs = 0;
+			DF_in.getValue(EMDL_PARTICLE_RANDOM_SUBSET, rs, p);
+			if (rs != random_subset_filter)
+				continue;
+		}
+		candidates.push_back(p);
 	}
 
-	reconstruct();
+	long int n = (long int)candidates.size();
+	if (sample_size <= 0 || sample_size >= n)
+	{
+		MetaDataTable out;
+		out.reserve(n);
+		for (long int i = 0; i < n; i++)
+			out.addObject(DF_in.getObject(candidates[i]));
+		return out;
+	}
+
+	// Fisher-Yates partial shuffle to select sample_size random indices
+	std::mt19937 gen(static_cast<unsigned int>(seed));
+	for (long int i = 0; i < sample_size; i++)
+	{
+		long int j = i + (long int)(gen() % (n - i));
+		std::swap(candidates[i], candidates[j]);
+	}
+
+	MetaDataTable out;
+	out.reserve(sample_size);
+	for (long int i = 0; i < sample_size; i++)
+		out.addObject(DF_in.getObject(candidates[i]));
+
+	if (verb > 0)
+		std::cout << "  Selected random subset of " << sample_size
+		          << " particles (from " << n << " candidates)." << std::endl;
+
+	return out;
 }
 
 void Reconstructor::readDebugArrays()
@@ -288,6 +673,41 @@ void Reconstructor::readDebugArrays()
 	output_boxsize = debug_ori_size;
 }
 
+static long int packS2GridKey(int box_size, int int_step)
+{
+    return ((long int)box_size << 20) | (int_step + 1);
+}
+
+void Reconstructor::ensureS2GridCached(int myBoxSize, RFLOAT myPixelSize, RFLOAT s2_step)
+{
+    int int_step = (s2_step > 0) ? ROUND(s2_step) : -1;
+    long int key = packS2GridKey(myBoxSize, int_step);
+    {
+        std::lock_guard<std::mutex> lock(s2_grid_mutex_);
+        auto it = s2_grid_cache_.find(key);
+        if (it != s2_grid_cache_.end())
+            return;
+    }
+
+	SpatialFrequencyGrid2D grid = makeAdaptiveS2HybridGrid2D(myBoxSize, nullptr, s2_step);
+
+	computeBilinearCoeffs(grid);
+
+    {
+        std::lock_guard<std::mutex> lock(s2_grid_mutex_);
+        s2_grid_cache_.emplace(key, std::move(grid));
+    }
+}
+
+const SpatialFrequencyGrid2D& Reconstructor::getS2Grid(long int cache_key)
+{
+    std::lock_guard<std::mutex> lock(s2_grid_mutex_);
+    auto it = s2_grid_cache_.find(cache_key);
+    if (it == s2_grid_cache_.end())
+        REPORT_ERROR("Reconstructor::getS2Grid: grid not found for key " + std::to_string(cache_key));
+    return it->second;
+}
+
 void Reconstructor::backproject(int rank, int size)
 {
 	if (fn_sub != "")
@@ -313,17 +733,67 @@ void Reconstructor::backproject(int rank, int size)
 		init_progress_bar(nr_parts);
 	}
 
+	prefetcher_.reset();
+	const bool use_prefetch = do_prefetch && !do_reconstruct_ctf && fn_noise == "";
+	if (use_prefetch)
+	{
+		prefetcher_.reset(new AsyncReconstructPrefetcher(&DF, rank, size, subset, chosen_class, nr_threads + 2));
+		prefetcher_->start(nr_parts);
+	}
+
+	// Collect this rank's particle indices, then parallelize over them with --j threads.
+	std::vector<long int> my_parts;
+	my_parts.reserve(nr_parts / size + 1);
 	for (long int ipart = 0; ipart < nr_parts; ipart++)
 	{
 		if (ipart % size == rank)
-			backprojectOneParticle(ipart);
+			my_parts.push_back(ipart);
+	}
 
-		if (ipart % barstep == 0 && verb > 0)
-			progress_bar(ipart);
+	if (nr_threads > 1)
+	{
+		// Inside the OMP parallel loop, each thread uses single-threaded FFTW/FINUFFT.
+		// Parallelism comes from OMP at the particle level.
+		fftw_plan_with_nthreads(1);
+		setFinufftThreadCount(1);
+	}
+
+#pragma omp parallel for num_threads(nr_threads) schedule(dynamic, 1)
+	for (long int idx = 0; idx < (long int)my_parts.size(); idx++)
+	{
+		backprojectOneParticle(my_parts[idx]);
+	}
+
+	if (nr_threads > 1)
+	{
+		fftw_plan_with_nthreads(nr_threads);
 	}
 
 	if (verb > 0)
+	{
+		for (long int ipart : my_parts)
+		{
+			if (ipart % barstep == 0)
+				progress_bar(ipart);
+		}
 		progress_bar(nr_parts);
+	}
+
+        if (prefetcher_)
+        {
+                prefetcher_->stop();
+                prefetcher_.reset();
+        }
+
+        if (verb > 0)
+                progress_bar(nr_parts);
+
+	if (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2)
+	{
+#ifdef S2_PROFILE
+		tls_s2_profile.print(rank);
+#endif
+	}
 }
 
 void Reconstructor::backprojectOneParticle(long int p)
@@ -331,7 +801,7 @@ void Reconstructor::backprojectOneParticle(long int p)
 	RFLOAT rot, tilt, psi, fom, r_ewald_sphere;
 	Matrix2D<RFLOAT> A3D;
 	MultidimArray<RFLOAT> Fctf, FstMulti;
-	Matrix1D<RFLOAT> trans(2);
+	Matrix1D<RFLOAT> trans(3); // Always 3 elements so ZZ(trans) is valid for 2D data too
 	FourierTransformer transformer;
 
 	bool do_subtomo_correction = false;
@@ -426,17 +896,49 @@ void Reconstructor::backprojectOneParticle(long int p)
 	// Use either selfTranslate OR shiftImageInFourierTransform!!
 	//selfTranslate(img(), trans, WRAP);
 
-	MultidimArray<Complex> Fsub, F2D, F2DP, F2DQ;
-	FileName fn_img;
-	Image<RFLOAT> img;
+MultidimArray<Complex> Fsub, F2D, F2DP, F2DQ;
+FileName fn_img;
+Image<RFLOAT> img;
+std::vector<Complex> nonuniformSamples;
+std::vector<RFLOAT> nonuniformSampleWeight;
+std::vector<Complex> nonuniformSamplesP, nonuniformSamplesQ;
+std::vector<RFLOAT> gamma_offsets;
+std::vector<RFLOAT> ctf_values;
+bool use_nonuniform_s2 = (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2);
+#ifdef S2_PROFILE
+	auto t_s2_read = Clock::now();
+	auto t_s2_fft = Clock::now();
+	auto t_s2_ctf = Clock::now();
+	auto t_s2_ewald = Clock::now();
+	(void)t_s2_read; (void)t_s2_fft; (void)t_s2_ctf; (void)t_s2_ewald;
+#endif
 
-	if (!do_reconstruct_ctf && fn_noise == "")
-	{
-		DF.getValue(EMDL_IMAGE_NAME, fn_img, p);
-		img.read(fn_img);
+        if (!do_reconstruct_ctf && fn_noise == "")
+        {
+                if (prefetcher_)
+                {
+                        if (!prefetcher_->waitAndPop(p, img))
+                        {
+                                REPORT_ERROR("Unexpected prefetch underflow while reconstructing particles.");
+                        }
+                }
+                else
+                {
+DF.getValue(EMDL_IMAGE_NAME, fn_img, p);
+#ifdef S2_PROFILE
+			t_s2_read = Clock::now();
+#endif
+			img.read(fn_img);
+		}
 		img().setXmippOrigin();
+#ifdef S2_PROFILE
+		t_s2_fft = Clock::now();
+#endif
 		transformer.FourierTransform(img(), F2D);
 		CenterFFTbySign(F2D);
+#ifdef S2_PROFILE
+		if (use_nonuniform_s2) t_s2_ctf = Clock::now();
+#endif
 
 		if (ABS(XX(trans)) > 0. || ABS(YY(trans)) > 0. || ABS(ZZ(trans)) > 0. ) // ZZ(trans) is 0 in case data_dim=2
 		{
@@ -549,47 +1051,317 @@ void Reconstructor::backprojectOneParticle(long int p)
 				REPORT_ERROR("3D CTF volume must be either cubical or adhere to FFTW format!");
 			}
 		}
-		else
+        else
+        {
+                CTF ctf;
+                if (do_ignore_optics)
+                {
+                        ctf.read(DF, DF, p);
+                }
+                else
+                {
+                        ctf.readByGroup(DF, &obsModel, p);
+                }
+
+                ctf.getFftwImage(Fctf, myBoxSize, myBoxSize, myPixelSize,
+                        ctf_phase_flipped, only_flip_phases,
+                        intact_ctf_first_peak, true);
+
+                if (!do_ignore_optics)
+                {
+                        obsModel.demodulatePhase(DF, p, F2D);
+                        obsModel.divideByMtf(DF, p, F2D);
+                }
+
+                // Ewald-sphere curvature correction
+if (do_ewald)
+	{
+#ifdef S2_PROFILE
+		if (use_nonuniform_s2) t_s2_ewald = Clock::now();
+#endif
+		applyCTFPandCTFQ(F2D, ctf, transformer, F2DP, F2DQ, skip_mask);
+
+		if (!skip_weighting)
 		{
-			CTF ctf;
-			if (do_ignore_optics)
-			{
-				ctf.read(DF, DF, p);
-			}
-			else
-			{
-				ctf.readByGroup(DF, &obsModel, p);
-			}
-
-			ctf.getFftwImage(Fctf, myBoxSize, myBoxSize, myPixelSize,
-			                 ctf_phase_flipped, only_flip_phases,
-			                 intact_ctf_first_peak, true);
-
-			if (!do_ignore_optics)
-			{
-				obsModel.demodulatePhase(DF, p, F2D);
-				obsModel.divideByMtf(DF, p, F2D);
-			}
-
-			// Ewald-sphere curvature correction
-			if (do_ewald)
-			{
-				applyCTFPandCTFQ(F2D, ctf, transformer, F2DP, F2DQ, skip_mask);
-
-				if (!skip_weighting)
-				{
-					// Also calculate W, store again in Fctf
-					ctf.applyWeightEwaldSphereCurvature_noAniso(Fctf, myBoxSize, myBoxSize, myPixelSize, mask_diameter);
-				}
-
-				// Also calculate the radius of the Ewald sphere (in pixels)
-				r_ewald_sphere = myBoxSize * myPixelSize / ctf.lambda;
-			}
+			// Also calculate W, store again in Fctf
+			ctf.applyWeightEwaldSphereCurvature_noAniso(Fctf, myBoxSize, myBoxSize, myPixelSize, mask_diameter);
 		}
+
+		// Also calculate the radius of the Ewald sphere (in pixels)
+		r_ewald_sphere = myBoxSize * myPixelSize / ctf.lambda;
+	}
+	else if (use_nonuniform_s2)
+	{
+#ifdef S2_PROFILE
+		t_s2_ewald = Clock::now();
+#endif
+	}
+        }
+        }
+else if (use_nonuniform_s2)
+{
+#ifdef S2_PROFILE
+	t_s2_ctf = Clock::now();
+	t_s2_ewald = Clock::now();
+#endif
+}
+
+        // Subtract reference projection
+if (use_nonuniform_s2)
+	{
+#ifdef S2_PROFILE
+		auto t_s2_total = Clock::now();
+		S2Profile prof;
+		prof.is_ewald = do_ewald;
+		prof.boxsize = myBoxSize;
+#endif
+
+                RFLOAT s2_step = -1.0;
+    if (s2_uniform_fill_)
+    {
+        s2_step = -2.0; // sentinel for uniform ns=2 fill
+    }
+    else if (voltage_for_s2_ > 0.0 && s2_ctf_oversampling_min > 0 && DF.containsLabel(EMDL_CTF_DEFOCUSU))
+    {
+        RFLOAT du, dv;
+        DF.getValue(EMDL_CTF_DEFOCUSU, du, p);
+        DF.getValue(EMDL_CTF_DEFOCUSV, dv, p);
+        RFLOAT defocus = std::max(du, dv);
+        if (defocus > 0.0)
+        {
+            int half = myBoxSize / 2;
+            s2_step = computeS2StepForCtfOversampling(half, myPixelSize,
+                defocus, s2_ctf_oversampling_min, voltage_for_s2_);
+        }
+    }
+                ensureS2GridCached(myBoxSize, myPixelSize, s2_step);
+                int int_step = (s2_step > 0) ? ROUND(s2_step) : -1;
+                long int grid_key = packS2GridKey(myBoxSize, int_step);
+const SpatialFrequencyGrid2D& s2_grid = getS2Grid(grid_key);
+#ifdef S2_PROFILE
+		prof.nk = (int)s2_grid.sample_x.size();
+#endif
+
+#ifdef RELION_USE_FINUFFT
+#ifdef S2_PROFILE
+		auto t0 = Clock::now();
+#endif
+		evaluateNonuniformFourierSamples2D(img(), s2_grid, nonuniformSamples);
+#ifdef S2_PROFILE
+		prof.ns_finufft = (Clock::now() - t0).count();
+#endif
+#endif
+
+#ifdef S2_PROFILE
+		auto t0_shift_jac = Clock::now();
+#endif
+		// FINUFFT was evaluated on the unshifted real-space image, so apply
+		// the image translation and the s^2 Jacobian afterwards.
+		// Fused single pass: Fourier shift (if nonzero) + Jacobian weight.
+		const bool hasShift = (ABS(XX(trans)) >= XMIPP_EQUAL_ACCURACY
+			|| ABS(YY(trans)) >= XMIPP_EQUAL_ACCURACY);
+		nonuniformSampleWeight = s2_grid.sample_weight;
+		for (long int idx = 0; idx < (long int)nonuniformSamples.size(); idx++)
+		{
+			if (hasShift)
+			{
+				const RFLOAT phase = (RFLOAT)(-TWO_PI
+					* (s2_grid.sample_x[idx] * XX(trans)
+					+ s2_grid.sample_y[idx] * YY(trans)) / myBoxSize);
+				const Complex shift(cos(phase), sin(phase));
+				nonuniformSamples[idx] *= shift;
+			}
+			nonuniformSamples[idx] *= nonuniformSampleWeight[idx];
+		}
+#ifdef S2_PROFILE
+		prof.ns_shift_jac = (Clock::now() - t0_shift_jac).count();
+#endif
+
+{
+#ifdef S2_PROFILE
+			auto t0 = Clock::now();
+#endif
+			for (long int idx = 0; idx < (long int)nonuniformSamples.size(); idx++)
+			{
+				if (ABS(s2_grid.sample_x[idx]) < XMIPP_EQUAL_ACCURACY
+					&& ABS(s2_grid.sample_y[idx]) < XMIPP_EQUAL_ACCURACY)
+				{
+					nonuniformSamples[idx] = Complex(0.0, 0.0);
+					break;
+				}
+			}
+#ifdef S2_PROFILE
+			prof.ns_dc_zero = (Clock::now() - t0).count();
+#endif
+		}
+
+        if (do_ctf)
+        {
+if (do_ewald)
+		{
+#ifdef S2_PROFILE
+			auto t0_bilin = Clock::now();
+#endif
+			std::vector<Complex> nonuniformSamplesP(nonuniformSamples.size());
+                        std::vector<Complex> nonuniformSamplesQ(nonuniformSamples.size());
+
+                        for (long int idx = 0; idx < (long int)nonuniformSamples.size(); idx++)
+                        {
+                                const RFLOAT sx = s2_grid.sample_x[idx];
+                                const RFLOAT sy = s2_grid.sample_y[idx];
+                                const RFLOAT jac = s2_grid.sample_weight[idx];
+
+                                nonuniformSamplesP[idx] = sampleComplexFromFftwHalfBilinear(F2DP, sx, sy, myBoxSize) * jac;
+                                nonuniformSamplesQ[idx] = sampleComplexFromFftwHalfBilinear(F2DQ, sx, sy, myBoxSize) * jac;
+                                nonuniformSampleWeight[idx] = sampleRealFromFftwHalfBilinear(Fctf, sx, sy, myBoxSize) * jac;
+                        }
+
+                        if (do_fom_weighting)
+                        {
+                                for (long int idx = 0; idx < (long int)nonuniformSamples.size(); idx++)
+                                {
+                                        nonuniformSamplesP[idx] *= fom;
+                                        nonuniformSamplesQ[idx] *= fom;
+                                        nonuniformSampleWeight[idx] *= fom;
+                                }
+}
+#ifdef S2_PROFILE
+			prof.ns_bilinear = (Clock::now() - t0_bilin).count();
+#endif
+
+                        Matrix2D<RFLOAT> magMat;
+                        if (!do_ignore_optics && obsModel.hasMagMatrices)
+                        {
+                                magMat = obsModel.getMagMatrix(obsModel.getOpticsGroup(DF, p));
+                        }
+                        else
+                        {
+                                magMat = Matrix2D<RFLOAT>(2,2);
+                                magMat.initIdentity();
+                        }
+
+#ifdef S2_PROFILE
+			auto t0_bp = Clock::now();
+#endif
+			#pragma omp critical(backproject)
+			{
+				backprojector.backprojectNonuniform2Dto3D(nonuniformSamplesP, s2_grid.sample_x,
+					s2_grid.sample_y, A3D,
+					&nonuniformSampleWeight,
+					r_ewald_sphere, true, &magMat);
+				backprojector.backprojectNonuniform2Dto3D(nonuniformSamplesQ, s2_grid.sample_x,
+					s2_grid.sample_y, A3D,
+					&nonuniformSampleWeight,
+					r_ewald_sphere, false, &magMat);
+			}
+#ifdef S2_PROFILE
+			prof.ns_backproject = (Clock::now() - t0_bp).count();
+#endif
+
+#ifdef S2_PROFILE
+			prof.count = 1;
+			prof.ns_total = (Clock::now() - t_s2_total).count();
+			prof.ns_read_img = (t_s2_fft - t_s2_read).count();
+			prof.ns_fft = (t_s2_ctf - t_s2_fft).count();
+			prof.ns_ctf_precomp = (t_s2_ewald - t_s2_ctf).count();
+			prof.ns_ewald_precomp = (t_s2_total - t_s2_ewald).count();
+			tls_s2_profile.accumulate(prof);
+#endif
+
+	return;
+                }
+
+                // Apply the analytical 2D CTF directly at the actual s2 sample
+                // positions to both the data samples and their weights.
+#ifdef S2_PROFILE
+		auto t0_ctf = Clock::now();
+#endif
+		CTF ctf;
+                std::vector<RFLOAT> gamma_offsets;
+                const std::vector<RFLOAT>* gamma_offsets_ptr = NULL;
+
+                if (do_ignore_optics)
+                {
+                        ctf.read(DF, DF, p);
+                }
+                else
+                {
+                        ctf.readByGroup(DF, &obsModel, p);
+
+                        const int optics_group = obsModel.getOpticsGroup(DF, p);
+
+                        // Match the s-path optics handling in sample space for nonuniform s2 points.
+                        applyObsModelPhaseCorrectionToSamples(nonuniformSamples, s2_grid, obsModel,
+                                optics_group, myBoxSize);
+                        applyObsModelMtfCorrectionToSamples(nonuniformSamples, s2_grid, obsModel,
+                                optics_group, myBoxSize);
+
+                        if (obsModel.hasEvenZernike)
+                        {
+                                evaluateSymmetricAberrationAtSamplePositions(gamma_offsets, s2_grid, obsModel, optics_group, myBoxSize);
+                                gamma_offsets_ptr = &gamma_offsets;
+                        }
+                }
+
+                // Fused single-pass: CTF evaluation at each exact s2 position,
+                // CTF application to sample/weight, and FOM weighting.
+                {
+                        const RFLOAT xs = (RFLOAT)myBoxSize * myPixelSize;
+                        for (long int idx = 0; idx < (long int)nonuniformSamples.size(); idx++)
+                        {
+                                const RFLOAT x = s2_grid.sample_x[idx] / xs;
+                                const RFLOAT y = s2_grid.sample_y[idx] / xs;
+                                const RFLOAT gamma_offset = (gamma_offsets_ptr != NULL)
+                                        ? (*gamma_offsets_ptr)[idx] : 0.0;
+
+                                const RFLOAT ctf_value = ctf.getCTF(x, y,
+                                        ctf_phase_flipped, only_flip_phases,
+                                        intact_ctf_first_peak, true, gamma_offset);
+
+                                if (!ctf_premultiplied)
+                                {
+                                        nonuniformSamples[idx] *= ctf_value;
+                                }
+                                nonuniformSampleWeight[idx] *= ctf_value * ctf_value;
+
+                                if (do_fom_weighting)
+                                {
+                                        nonuniformSamples[idx] *= fom;
+                                        nonuniformSampleWeight[idx] *= fom;
+                                }
+                        }
+}
+#ifdef S2_PROFILE
+		prof.ns_ctf_analytical = (Clock::now() - t0_ctf).count();
+#endif
 	}
 
-	// Subtract reference projection
-	if (fn_sub != "")
+	{
+#ifdef S2_PROFILE
+		auto t0_bp = Clock::now();
+#endif
+		#pragma omp critical(backproject)
+		backprojector.backprojectNonuniform2Dto3D(nonuniformSamples, s2_grid.sample_x,
+			s2_grid.sample_y, A3D,
+			&nonuniformSampleWeight);
+#ifdef S2_PROFILE
+		prof.ns_backproject = (Clock::now() - t0_bp).count();
+#endif
+	}
+
+#ifdef S2_PROFILE
+		prof.count = 1;
+		prof.ns_total = (Clock::now() - t_s2_total).count();
+		prof.ns_read_img = (t_s2_fft - t_s2_read).count();
+		prof.ns_fft = (t_s2_ctf - t_s2_fft).count();
+		prof.ns_ctf_precomp = (t_s2_ewald - t_s2_ctf).count();
+		prof.ns_ewald_precomp = (t_s2_total - t_s2_ewald).count();
+		tls_s2_profile.accumulate(prof);
+#endif
+}
+
+
+        else if (fn_sub != "")
 	{
 		Fsub.resize(F2D);
 		projector.get2DFourierTransform(Fsub, A3D);
@@ -607,8 +1379,9 @@ void Reconstructor::backprojectOneParticle(long int p)
 		{
 			DIRECT_MULTIDIM_ELEM(F2D, n) -= DIRECT_MULTIDIM_ELEM(Fsub, n);
 		}
-		// Back-project difference image
-		backprojector.set2DFourierTransform(F2D, A3D);
+	// Back-project difference image
+#pragma omp critical(backproject)
+	backprojector.set2DFourierTransform(F2D, A3D);
 	}
 	else
 	{
@@ -620,62 +1393,6 @@ void Reconstructor::backprojectOneParticle(long int p)
 				if (do_reconstruct_ctf2)
 					DIRECT_MULTIDIM_ELEM(F2D, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
 				DIRECT_MULTIDIM_ELEM(Fctf, n) = 1.;
-			}
-		}
-		else if (do_ewald)
-		{
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F2D)
-			{
-				DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
-			}
-		}
-		// "Normal" reconstruction, multiply X by CTF, and W by CTF^2
-		else if (do_ctf)
-		{
-			if (!ctf_premultiplied)
-			{
-				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F2D)
-				{
-					DIRECT_MULTIDIM_ELEM(F2D, n)  *= DIRECT_MULTIDIM_ELEM(Fctf, n);
-				}
-			}
-			if (do_subtomo_correction && normalised_subtomo) // Subtomos have always to be reconstructed ctf_premultiplied
-			{
-				if (ctf3d_squared)
-				{
-					Image<RFLOAT> tt;
-					FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F2D)
-					{
-						DIRECT_MULTIDIM_ELEM(F2D, n)  *= DIRECT_MULTIDIM_ELEM(FstMulti, n);
-						DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(FstMulti, n);
-					}
-				}
-				else
-				{
-					Image<RFLOAT> tt;
-					FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F2D)
-					{
-						DIRECT_MULTIDIM_ELEM(F2D, n)  *= DIRECT_MULTIDIM_ELEM(FstMulti, n);
-						DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n) * DIRECT_MULTIDIM_ELEM(FstMulti, n);
-					}
-				}
-			}
-			else if (data_dim == 2 || !ctf3d_squared)
-			{
-				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Fctf)
-				{
-					DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
-				}
-			}
-		}
-
-		// Do the following after squaring the CTFs!
-		if (do_fom_weighting)
-		{
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F2D)
-			{
-				DIRECT_MULTIDIM_ELEM(F2D, n)  *= fom;
-				DIRECT_MULTIDIM_ELEM(Fctf, n) *= fom;
 			}
 		}
 
@@ -730,12 +1447,25 @@ void Reconstructor::backprojectOneParticle(long int p)
 				magMat.initIdentity();
 			}
 
-			backprojector.set2DFourierTransform(F2DP, A3D, &Fctf, r_ewald_sphere, true, &magMat);
-			backprojector.set2DFourierTransform(F2DQ, A3D, &Fctf, r_ewald_sphere, false, &magMat);
+#pragma omp critical(backproject)
+	{
+	backprojector.set2DFourierTransform(F2DP, A3D, &Fctf, r_ewald_sphere, true, &magMat);
+	backprojector.set2DFourierTransform(F2DQ, A3D, &Fctf, r_ewald_sphere, false, &magMat);
+	}
 		}
 		else
 		{
-			backprojector.set2DFourierTransform(F2D, A3D, &Fctf);
+			if (do_ctf)
+			{
+				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F2D)
+				{
+					if (!ctf_premultiplied)
+						DIRECT_MULTIDIM_ELEM(F2D, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
+					DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
+				}
+			}
+		#pragma omp critical(backproject)
+		backprojector.set2DFourierTransform(F2D, A3D, &Fctf);
 		}
 	}
 
@@ -769,7 +1499,7 @@ void Reconstructor::reconstruct()
 	if (verb > 0)
 		std::cout << " + Starting the reconstruction ..." << std::endl;
 
-	backprojector.symmetrise(nr_helical_asu, helical_twist, helical_rise/angpix, nr_threads);
+	backprojector.symmetrise(nr_helical_asu, helical_twist, helical_rise/angpix);
 
 	if (do_reconstruct_ctf)
 	{
@@ -843,8 +1573,10 @@ void Reconstructor::reconstruct()
 	}
 
 
-	vol.setSamplingRateInHeader(angpix);
-	vol.write(fn_out);
+vol.setSamplingRateInHeader(angpix);
+if (do_invert_contrast)
+	invert_contrast(vol);
+vol.write(fn_out);
 	if (verb > 0)
 		std::cout << " + Done! Written output map in: "<<fn_out<<std::endl;
 
@@ -931,7 +1663,7 @@ void Reconstructor::applyCTFPandCTFQ(MultidimArray<Complex> &Fin, CTF &ctf, Four
 			{
 				RFLOAT x = (RFLOAT)jp;
 				RFLOAT y = (RFLOAT)ip;
-				RFLOAT myangle = (x*x+y*y > 0) ? acos(y/sqrt(x*x+y*y)) : 0; // dot-product with Y-axis: (0,1)
+				RFLOAT myangle = (x*x+y*y > 0) ? acos(std::max(-1.0, std::min(1.0, y/sqrt(x*x+y*y)))) : 0; // dot-product with Y-axis: (0,1)
 				// Only take the relevant sector now...
 				if (do_wrap_max)
 				{

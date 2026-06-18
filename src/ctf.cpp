@@ -51,6 +51,120 @@
 
 using namespace gravis;
 
+namespace
+{
+
+int getEffectiveCtfPadFactor(bool do_ctf_padding, int ctf_pad_factor, bool ctf_premultiplied)
+{
+	if (ctf_pad_factor < 1)
+	{
+		REPORT_ERROR("CTF::getEffectiveCtfPadFactor: ctf_pad_factor must be at least 1");
+	}
+
+	if (ctf_pad_factor > 1)
+	{
+		return ctf_pad_factor;
+	}
+
+	if (!do_ctf_padding)
+	{
+		return 1;
+	}
+
+	return ctf_premultiplied ? 4 : 2;
+}
+
+void fftwHalfToCenteredMap(const MultidimArray<RFLOAT>& half, MultidimArray<RFLOAT>& whole)
+{
+	whole.initZeros(YSIZE(whole), XSIZE(whole));
+	whole.setXmippOrigin();
+
+	for (int i = 0; i < YSIZE(half); i++)
+	{
+		if (i == YSIZE(half) / 2)
+		{
+			continue;
+		}
+
+		const int ip = (i < XSIZE(half)) ? i : i - YSIZE(half);
+
+		for (int j = 0; j < XSIZE(half) - 1; j++)
+		{
+			A2D_ELEM(whole, ip, j) = DIRECT_A2D_ELEM(half, i, j);
+			A2D_ELEM(whole, -ip, -j) = DIRECT_A2D_ELEM(half, i, j);
+		}
+	}
+}
+
+void centeredMapToFftwHalf(const MultidimArray<RFLOAT>& whole, MultidimArray<RFLOAT>& half)
+{
+	half.initZeros(YSIZE(half), XSIZE(half));
+
+	for (int i = 0; i < YSIZE(half); i++)
+	{
+		if (i == YSIZE(half) / 2)
+		{
+			continue;
+		}
+
+		const int ip = (i < XSIZE(half)) ? i : i - YSIZE(half);
+
+		for (int j = 0; j < XSIZE(half) - 1; j++)
+		{
+			DIRECT_A2D_ELEM(half, i, j) = A2D_ELEM(whole, ip, j);
+		}
+	}
+}
+
+void fftwHalfToCenteredComplexMaps(const MultidimArray<Complex>& half, MultidimArray<RFLOAT>& real_map, MultidimArray<RFLOAT>& imag_map)
+{
+	real_map.initZeros(YSIZE(real_map), XSIZE(real_map));
+	imag_map.initZeros(YSIZE(imag_map), XSIZE(imag_map));
+	real_map.setXmippOrigin();
+	imag_map.setXmippOrigin();
+
+	for (int i = 0; i < YSIZE(half); i++)
+	{
+		if (i == YSIZE(half) / 2)
+		{
+			continue;
+		}
+
+		const int ip = (i < XSIZE(half)) ? i : i - YSIZE(half);
+
+		for (int j = 0; j < XSIZE(half) - 1; j++)
+		{
+			const Complex value = DIRECT_A2D_ELEM(half, i, j);
+			A2D_ELEM(real_map, ip, j) = value.real;
+			A2D_ELEM(imag_map, ip, j) = value.imag;
+			A2D_ELEM(real_map, -ip, -j) = value.real;
+			A2D_ELEM(imag_map, -ip, -j) = -value.imag;
+		}
+	}
+}
+
+void centeredComplexMapsToFftwHalf(const MultidimArray<RFLOAT>& real_map, const MultidimArray<RFLOAT>& imag_map, MultidimArray<Complex>& half)
+{
+	half.initZeros(YSIZE(half), XSIZE(half));
+
+	for (int i = 0; i < YSIZE(half); i++)
+	{
+		if (i == YSIZE(half) / 2)
+		{
+			continue;
+		}
+
+		const int ip = (i < XSIZE(half)) ? i : i - YSIZE(half);
+
+		for (int j = 0; j < XSIZE(half) - 1; j++)
+		{
+			DIRECT_A2D_ELEM(half, i, j) = Complex(A2D_ELEM(real_map, ip, j), A2D_ELEM(imag_map, ip, j));
+		}
+	}
+}
+
+}
+
 /* Read -------------------------------------------------------------------- */
 void CTF::readByGroup(const MetaDataTable &partMdt, ObservationModel* obs, long int particle)
 {
@@ -313,57 +427,39 @@ t2Vector<RFLOAT> CTF::getGammaGrad(RFLOAT X, RFLOAT Y) const
 /* Generate a complete CTF Image ------------------------------------------------------ */
 void CTF::getFftwImage(MultidimArray<RFLOAT> &result, int orixdim, int oriydim, RFLOAT angpix,
                        bool do_abs, bool do_only_flip_phases, bool do_intact_until_first_peak,
-                       bool do_damping, bool do_ctf_padding, bool do_intact_after_first_peak) const
+	                   bool do_damping, bool do_ctf_padding, bool do_intact_after_first_peak,
+	                   int ctf_pad_factor) const
 {
+	bool ctf_premultiplied = false;
+	if (obsModel != 0)
+	{
+		ctf_premultiplied = obsModel->getCtfPremultiplied(opticsGroup);
+	}
+
+	const int effective_pad_factor = getEffectiveCtfPadFactor(do_ctf_padding, ctf_pad_factor, ctf_premultiplied);
+
 	// Boxing the particle in a small box from the whole micrograph leads to loss of delocalised information (or aliaising in the CTF)
 	// Here, calculate the CTF in a 2x larger box to support finer oscillations,
 	// and then rescale the large CTF to simulate the effect of the windowing operation
-	if (do_ctf_padding)
+	if (effective_pad_factor > 1)
 	{
-		bool ctf_premultiplied=false;
-		if (obsModel != 0)
-		{
-			ctf_premultiplied = obsModel->getCtfPremultiplied(opticsGroup);
-		}
-
-		// two-fold padding, increased to 4-fold padding for pre-multiplied CTFs
-		int orixdim_pad = 2 * orixdim;
-		int oriydim_pad = 2 * oriydim;
-		// TODO: Such a big box may not be really necessary.....
-		if (ctf_premultiplied)
-		{
-			orixdim_pad *= 2;
-			oriydim_pad *= 2;
-		}
+		const int orixdim_pad = effective_pad_factor * orixdim;
+		const int oriydim_pad = effective_pad_factor * oriydim;
 
 		MultidimArray<RFLOAT> Fctf(oriydim_pad, orixdim_pad/2 + 1);
 
 		getFftwImage(Fctf, orixdim_pad, oriydim_pad, angpix, do_abs,
-		             do_only_flip_phases, do_intact_until_first_peak, do_damping, false, do_intact_after_first_peak);
+		             do_only_flip_phases, do_intact_until_first_peak, do_damping, false, do_intact_after_first_peak, 1);
 
 		// From half to whole
 		MultidimArray<RFLOAT> Mctf(oriydim_pad, orixdim_pad);
-		Mctf.setXmippOrigin();
-		for (int i = 0 ; i<YSIZE(Fctf); i++)
+		fftwHalfToCenteredMap(Fctf, Mctf);
+
+		if (ctf_premultiplied)
 		{
-			// Don't take the middle row of the half-transform
-			if (i != YSIZE(Fctf)/2)
+			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Mctf)
 			{
-				int ip = (i < XSIZE(Fctf)) ? i : i - YSIZE(Fctf);
-				// Don't take the last column from the half-transform
-				for (int j = 0; j<XSIZE(Fctf)-1; j++)
-				{
-					if (ctf_premultiplied)
-					{
-						A2D_ELEM(Mctf, ip, j) = DIRECT_A2D_ELEM(Fctf, i, j) * DIRECT_A2D_ELEM(Fctf, i, j);
-						A2D_ELEM(Mctf, -ip, -j) = DIRECT_A2D_ELEM(Fctf, i, j) * DIRECT_A2D_ELEM(Fctf, i, j);
-					}
-					else
-					{
-						A2D_ELEM(Mctf, ip, j) = DIRECT_A2D_ELEM(Fctf, i, j);
-						A2D_ELEM(Mctf, -ip, -j) = DIRECT_A2D_ELEM(Fctf, i, j);
-					}
-				}
+				DIRECT_MULTIDIM_ELEM(Mctf, n) *= DIRECT_MULTIDIM_ELEM(Mctf, n);
 			}
 		}
 
@@ -371,27 +467,18 @@ void CTF::getFftwImage(MultidimArray<RFLOAT> &result, int orixdim, int oriydim, 
 		Mctf.setXmippOrigin();
 
 		// From whole to half
-		for (int i = 0 ; i<YSIZE(result); i++)
+		centeredMapToFftwHalf(Mctf, result);
+
+		if (ctf_premultiplied)
 		{
-			// Don't take the middle row of the half-transform
-			if (i != YSIZE(result)/2)
+			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(result)
 			{
-				int ip = (i < XSIZE(result)) ? i : i - YSIZE(result);
-				// Don't take the last column from the half-transform
-				for (int j = 0; j<XSIZE(result)-1; j++)
-				{
-					if (ctf_premultiplied)
-					{
-						if (A2D_ELEM(Mctf, ip, j) < 0.)
-							DIRECT_A2D_ELEM(result, i, j) = 0.;
-						else if (A2D_ELEM(Mctf, ip, j) > 1.)
-							DIRECT_A2D_ELEM(result, i, j) = 1.;
-						else
-							DIRECT_A2D_ELEM(result, i, j) = sqrt(A2D_ELEM(Mctf, ip, j));
-					}
-					else
-						DIRECT_A2D_ELEM(result, i, j) = A2D_ELEM(Mctf, ip, j);
-				}
+				if (DIRECT_MULTIDIM_ELEM(result, n) < 0.)
+					DIRECT_MULTIDIM_ELEM(result, n) = 0.;
+				else if (DIRECT_MULTIDIM_ELEM(result, n) > 1.)
+					DIRECT_MULTIDIM_ELEM(result, n) = 1.;
+				else
+					DIRECT_MULTIDIM_ELEM(result, n) = sqrt(DIRECT_MULTIDIM_ELEM(result, n));
 			}
 		}
 	}
@@ -408,11 +495,15 @@ void CTF::getFftwImage(MultidimArray<RFLOAT> &result, int orixdim, int oriydim, 
 				                 << "supported for square images.\n");
 			}
 
-			if (obsModel->getBoxSize(opticsGroup) != orixdim)
+			// Allow padded sizes (integer multiples of the native box size):
+			// getGammaOffset evaluates Zernike polynomials at the requested spatial
+			// frequency grid regardless of box size, so it is valid at any multiple.
+			const int nativeBox = obsModel->getBoxSize(opticsGroup);
+			if (nativeBox > 0 && orixdim % nativeBox != 0)
 			{
 				REPORT_ERROR_STR("CTF::getFftwImage: requested output image size "
-				                 << orixdim << " is not consistent with that in the optics group table "
-				                 << obsModel->getBoxSize(opticsGroup) << "\n");
+				                 << orixdim << " is not an integer multiple of the native box size "
+				                 << nativeBox << " in the optics group table\n");
 			}
 
 			if (fabs(obsModel->getPixelSize(opticsGroup) - angpix) > 1e-4)
@@ -455,8 +546,25 @@ void CTF::getFftwImage(MultidimArray<RFLOAT> &result, int orixdim, int oriydim, 
 
 /* Generate a complete CTFP (complex) image (with sector along angle) ------------------------------------------------------ */
 void CTF::getCTFPImage(MultidimArray<Complex> &result, int orixdim, int oriydim, RFLOAT angpix,
-                       bool is_positive, float angle)
+	                   bool is_positive, float angle, int ctf_pad_factor)
 {
+	if (ctf_pad_factor > 1)
+	{
+		const int orixdim_pad = ctf_pad_factor * orixdim;
+		const int oriydim_pad = ctf_pad_factor * oriydim;
+		MultidimArray<Complex> Fctfp(oriydim_pad, orixdim_pad / 2 + 1);
+		MultidimArray<RFLOAT> real_map(oriydim_pad, orixdim_pad), imag_map(oriydim_pad, orixdim_pad);
+
+		getCTFPImage(Fctfp, orixdim_pad, oriydim_pad, angpix, is_positive, angle, 1);
+		fftwHalfToCenteredComplexMaps(Fctfp, real_map, imag_map);
+		resizeMap(real_map, orixdim);
+		resizeMap(imag_map, orixdim);
+		real_map.setXmippOrigin();
+		imag_map.setXmippOrigin();
+		centeredComplexMapsToFftwHalf(real_map, imag_map, result);
+		return;
+	}
+
 	if (angle < 0 || angle >= 360.)
 	{
 		REPORT_ERROR("CTF::getCTFPImage: angle should be in [0,360>");
@@ -497,7 +605,7 @@ void CTF::getCTFPImage(MultidimArray<Complex> &result, int orixdim, int oriydim,
 		{
 			RFLOAT x = x1 / xs;
 			RFLOAT y = y1 <= result.ydim/2? y1 / ys : (y1 - result.ydim) / ys;
-			RFLOAT myangle = (x * x + y * y > 0) ? acos(y / sqrt(x * x + y * y)) : 0; // dot-product with Y-axis: (0,1)
+			RFLOAT myangle = (x * x + y * y > 0) ? acos(std::max(-1.0, std::min(1.0, y / sqrt(x * x + y * y)))) : 0; // dot-product with Y-axis: (0,1)
 			const int x0 = x1;
 			const int y0 = y1 <= result.ydim/2? y1 : gammaOffset.ydim + y1 - result.ydim;
 
@@ -513,7 +621,7 @@ void CTF::getCTFPImage(MultidimArray<Complex> &result, int orixdim, int oriydim,
 		{
 			RFLOAT x = (RFLOAT)jp / xs;
 			RFLOAT y = (RFLOAT)ip / ys;
-			RFLOAT myangle = (x * x + y * y > 0) ? acos(y / sqrt(x * x + y * y)) : 0; // dot-product with Y-axis: (0,1)
+			RFLOAT myangle = (x * x + y * y > 0) ? acos(std::max(-1.0, std::min(1.0, y / sqrt(x * x + y * y)))) : 0; // dot-product with Y-axis: (0,1)
 
 			if (myangle >= anglerad)
 			{
@@ -569,8 +677,20 @@ void CTF::get1DProfile(MultidimArray < RFLOAT > &result, RFLOAT angle, RFLOAT Tm
 }
 
 void CTF::applyWeightEwaldSphereCurvature(MultidimArray<RFLOAT>& result, int orixdim, int oriydim,
-                                          RFLOAT angpix, RFLOAT particle_diameter)
+	                                      RFLOAT angpix, RFLOAT particle_diameter, int ctf_pad_factor)
 {
+	if (ctf_pad_factor > 1)
+	{
+		MultidimArray<RFLOAT> padded(ctf_pad_factor * oriydim, ctf_pad_factor * orixdim / 2 + 1);
+		applyWeightEwaldSphereCurvature(padded, ctf_pad_factor * orixdim, ctf_pad_factor * oriydim, angpix, particle_diameter, 1);
+		MultidimArray<RFLOAT> whole(ctf_pad_factor * oriydim, ctf_pad_factor * orixdim);
+		fftwHalfToCenteredMap(padded, whole);
+		resizeMap(whole, orixdim);
+		whole.setXmippOrigin();
+		centeredMapToFftwHalf(whole, result);
+		return;
+	}
+
 	RFLOAT xs = (RFLOAT)orixdim * angpix;
 	RFLOAT ys = (RFLOAT)oriydim * angpix;
 
@@ -601,7 +721,7 @@ void CTF::applyWeightEwaldSphereCurvature(MultidimArray<RFLOAT>& result, int ori
 		RFLOAT deltaf = u2 > 0.0? std::abs(astigDefocus / u2) : 0.0;
 		RFLOAT inv_d = sqrt(u2);
 		RFLOAT aux = 2.0 * deltaf * lambda * inv_d / particle_diameter;
-		RFLOAT A = (aux > 1.0)? 0.0 : (2.0/PI) * (acos(aux) - aux * sin(acos(aux)));
+		RFLOAT A = (fabs(aux) > 1.0)? 0.0 : (2.0/PI) * (acos(aux) - aux * sin(acos(aux)));
 
 		DIRECT_A2D_ELEM(result, i, j) = 1.0 + A * (2.0 * fabs(-sin(gamma)) - 1.0);
 		// Keep everything on the same scale inside RELION, where we use sin(chi), not 2sin(chi)
@@ -610,8 +730,20 @@ void CTF::applyWeightEwaldSphereCurvature(MultidimArray<RFLOAT>& result, int ori
 }
 
 void CTF::applyWeightEwaldSphereCurvature_new(MultidimArray<RFLOAT>& result, int orixdim, int oriydim,
-                                              RFLOAT angpix, RFLOAT particle_diameter)
+	                                          RFLOAT angpix, RFLOAT particle_diameter, int ctf_pad_factor)
 {
+	if (ctf_pad_factor > 1)
+	{
+		MultidimArray<RFLOAT> padded(ctf_pad_factor * oriydim, ctf_pad_factor * orixdim / 2 + 1);
+		applyWeightEwaldSphereCurvature_new(padded, ctf_pad_factor * orixdim, ctf_pad_factor * oriydim, angpix, particle_diameter, 1);
+		MultidimArray<RFLOAT> whole(ctf_pad_factor * oriydim, ctf_pad_factor * orixdim);
+		fftwHalfToCenteredMap(padded, whole);
+		resizeMap(whole, orixdim);
+		whole.setXmippOrigin();
+		centeredMapToFftwHalf(whole, result);
+		return;
+	}
+
 	const int s = oriydim;
 	const int sh = s/2 + 1;
 	const double as = angpix * s;
@@ -644,8 +776,20 @@ void CTF::applyWeightEwaldSphereCurvature_new(MultidimArray<RFLOAT>& result, int
 }
 
 void CTF::applyWeightEwaldSphereCurvature_noAniso(MultidimArray <RFLOAT> &result, int orixdim, int oriydim,
-                                                  RFLOAT angpix, RFLOAT particle_diameter)
+	                                              RFLOAT angpix, RFLOAT particle_diameter, int ctf_pad_factor)
 {
+	if (ctf_pad_factor > 1)
+	{
+		MultidimArray<RFLOAT> padded(ctf_pad_factor * oriydim, ctf_pad_factor * orixdim / 2 + 1);
+		applyWeightEwaldSphereCurvature_noAniso(padded, ctf_pad_factor * orixdim, ctf_pad_factor * oriydim, angpix, particle_diameter, 1);
+		MultidimArray<RFLOAT> whole(ctf_pad_factor * oriydim, ctf_pad_factor * orixdim);
+		fftwHalfToCenteredMap(padded, whole);
+		resizeMap(whole, orixdim);
+		whole.setXmippOrigin();
+		centeredMapToFftwHalf(whole, result);
+		return;
+	}
+
 	RFLOAT xs = (RFLOAT)orixdim * angpix;
 	RFLOAT ys = (RFLOAT)oriydim * angpix;
 	FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM2D(result)
@@ -655,8 +799,8 @@ void CTF::applyWeightEwaldSphereCurvature_noAniso(MultidimArray <RFLOAT> &result
 		RFLOAT deltaf = fabs(getDeltaF(x, y));
 		RFLOAT inv_d = sqrt(x * x + y * y);
 		RFLOAT aux = (2. * deltaf * lambda * inv_d) / (particle_diameter);
-		RFLOAT A = (aux > 1.) ? 0. : (2. / PI) * (acos(aux) - aux * sin(acos(aux)));
-		DIRECT_A2D_ELEM(result, i, j) = 1. + A * (2.*fabs(getCTF(x, y)) - 1.);
+		RFLOAT A = (fabs(aux) > 1.) ? 0. : (2. / PI) * (acos(aux) - aux * sin(acos(aux)));
+		DIRECT_A2D_ELEM(result, i, j) = 1. + A * (2.*fabs(DIRECT_A2D_ELEM(result, i, j)) - 1.);
 		// Keep everything on the same scale inside RELION, where we use sin(chi), not 2sin(chi)
 		DIRECT_A2D_ELEM(result, i, j) *= 0.5;
 	}
@@ -681,7 +825,7 @@ void CTF::applyEwaldMask(RawImage<RFLOAT>& weight, int orixdim, int oriydim, RFL
 		const double deltaf = std::abs(getDeltaF(x, y));
 		const double inv_d = sqrt(x * x + y * y);
 		const double aux = (2. * deltaf * lambda * inv_d) / (particle_diameter);
-		const double A = (aux > 1.) ? 0. : (2. / PI) * (acos(aux) - aux * sin(acos(aux)));
+		const double A = (fabs(aux) > 1.) ? 0. : (2. / PI) * (acos(aux) - aux * sin(acos(aux)));
 		
 		weight(xi,yi) = 0.5 * (1 + A * (2 * std::abs(weight(xi,yi)) - 1));
 	}	

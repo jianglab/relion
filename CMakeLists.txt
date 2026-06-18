@@ -1,5 +1,8 @@
-cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
+cmake_minimum_required(VERSION 2.8 FATAL_ERROR)
 
+#if(POLICY CMP0048)
+#  cmake_policy(SET CMP0048 NEW)
+#endif()
 project(Relion)
 
 # Use new policy for OS X @rpath
@@ -13,6 +16,7 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 add_definitions(-DINSTALL_LIBRARY_DIR=${CMAKE_INSTALL_PREFIX}/lib/)
 add_definitions(-DSOURCE_DIR=${CMAKE_SOURCE_DIR}/src/)
+add_definitions(-DTIMING)
 
 # message(STATUS "INSTALL_LIBRARY_DIR set to ${CMAKE_INSTALL_PREFIX}/lib/")
 # message(STATUS "SOURCE_DIR set to ${CMAKE_SOURCE_DIR}/src/")
@@ -67,11 +71,12 @@ endif()
 
 # ----------------------------------------------------------------SET CXX STANDARD--
 set(CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
+if(SYCL)
+	set(CMAKE_CXX_STANDARD 17)
+else()
+	set(CMAKE_CXX_STANDARD 14)
+endif()
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-set(C_STANDARD_REQUIRED ON)
-set(CMAKE_C_STANDARD 99)
 
 # ------------------OPTIONS WHICH ARE NEEDED TO SET BUILD-TYPES (COMPILATION FLAGS)--
 # -------------------------------------------------------------------FURTHER OPTIONS--
@@ -130,6 +135,7 @@ option(DoublePrec_CPU "DoublePrec_CPU" ON)
 option(DoublePrec_ACC "Accelerated Code use double-precision" OFF)
 option(MKLFFT "Use MKL rather than FFTW for FFT" OFF)
 option(DeviceTexture "Texture Memory on the Device" ON)
+option(RELION_USE_FINUFFT "Enable FINUFFT-backed nonuniform spatial-frequency sampling support" OFF)
 
 if(ALTCPU)
     message(STATUS "ALTCPU enabled - Building CPU-accelerated version of RELION")
@@ -164,47 +170,56 @@ else(DoublePrec_ACC)
 endif(DoublePrec_ACC)
 
 if(MDT_TYPE_CHECK)
-	message(STATUS "MetaDataTable type check is enabled.")
+    message("-- MetaDataTable type check is enabled.")
     add_definitions(-DMETADATA_TABLE_TYPE_CHECK)
 endif()
 
 if(CUDA)
     # -----------------------------------------------------------------------------CUDA--
-    FIND_PACKAGE(CUDAToolkit)
+    # DOC: http://www.cmake.org/cmake/help/v3.0/module/FindCUDA.html
+    FIND_PACKAGE(CUDA)
 
-    if((CUDAToolkit_FOUND) AND ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "10.0"))
-	    message(STATUS "CUDAToolkit discovered CUDA " ${CUDAToolkit_VERSION} " at " ${CUDAToolkit_BIN_DIR})
-        set(CMAKE_CUDA_STANDARD 17)
-
-        # Very puzzling but `CUDAToolkit` package and `enable_language(CUDA)` use
-        # different methods to find `nvcc`. The latter does NOT respect `PATH` (`which nvcc`) and
-        # can pick up /usr/bin/nvcc. We can override this by setting `CMAKE_CUDA_COMPILER`.
-        # Another useful variable is `CMAKE_CUDA_HOST_COMPILER`.
-        set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc" CACHE FILEPATH "Path to the CUDA compiler (nvcc)")
-        enable_language(CUDA)
-
-        # "-arch=sm_XX" alone is equal to "-arch=compute_XX -code=compute_XX,sm_XX"
-        # compute_XX generates PTX; thus GPUs newer than XX can also use the binary.
-        # See https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/#gpu-architecture-arch.
-        set(CUDA_ARCH "" CACHE STRING "CUDA architecture to use")
+    # "-arch=sm_XX" alone is equal to "-arch=compute_XX -code=compute_XX,sm_XX"
+    # compute_XX generates PTX; thus GPUs newer than XX can also use the binary.
+    # See https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/#gpu-architecture-arch.
+    set(CUDA_ARCH "" CACHE STRING "Single CUDA sm architecture (e.g. 61)")
+    set(CUDA_GENCODE "" CACHE STRING "Semicolon-separated list of sm archs for -gencode flags (e.g. '61;75;86;89'). Overrides CUDA_ARCH.")
+    if (CUDA_GENCODE STREQUAL "")
         if (CUDA_ARCH STREQUAL "")
-            if (${CUDAToolkit_VERSION} VERSION_LESS "13.0") # Pascal (e.g. 1080)
-                message(STATUS "Setting fallback CUDA_ARCH=50 (Pascal)")
-                set(CMAKE_CUDA_ARCHITECTURES 50)
-            else() # CUDA >= 13.0 no longer supports Pascal. 75 = Turing (e.g. 2080)
-                message(STATUS "Setting fallback CUDA_ARCH=75 (Turing)")
-                set(CMAKE_CUDA_ARCHITECTURES 75)
+            if (${CUDA_VERSION} VERSION_LESS "13.0")
+                message(STATUS "Setting fallback sm=50 (Pascal, e.g. GTX 1080)")
+                set(CUDARCH "-arch=sm_50")
+            else() # CUDA >= 13.0 no longer supports Pascal
+                message(STATUS "Setting fallback sm=75 (Turing, e.g. RTX 2080)")
+                set(CUDARCH "-arch=sm_75")
             endif()
         else ()
-            message(STATUS "Using provided CUDA_ARCH=${CUDA_ARCH}")
-            set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCH})
+            message(STATUS "Using provided CUDA_ARCH=sm_${CUDA_ARCH}")
+            set(CUDARCH "-arch=sm_${CUDA_ARCH}")
         endif ()
-
-        add_definitions(-D_CUDA_ENABLED)
     else()
-        message("!! CUDA was enabled but CUDA >= 10.0 cannot be located. CUDA is set to OFF.")
-        set(CUDA OFF)
+        message(STATUS "Using CUDA_GENCODE: ${CUDA_GENCODE}")
+        foreach(sm ${CUDA_GENCODE})
+            string(APPEND CUDARCH "-gencode arch=compute_${sm},code=sm_${sm} ")
+        endforeach()
     endif()
+
+    if(CUDA_FOUND)
+      message(STATUS "Using cuda wrapper to compile....")
+      if( (NOT ${CUDA_VERSION} VERSION_LESS "7.5") AND (NOT DoublePrec_ACC) )
+          message(STATUS "Cuda version is >= 7.5 and single-precision build, enable double usage warning.")
+		      set(WARN_DBL "--ptxas-options=-warn-double-usage") # cuda>=7.5
+	    elseif( ${CUDA_VERSION} VERSION_LESS "7.0")
+		      message(WARNING "Cuda version is less than 7.0, so relion will be compiled without GPU support.")
+          message(STATUS "Using non-cuda compilation....")
+		      set(CUDA OFF)
+      endif()
+      if(CUDA)
+          add_definitions(-D_CUDA_ENABLED)
+      endif()
+    else(CUDA_FOUND)
+        message(FATAL_ERROR "CUDA enabled but unlable to locate packages...")
+    endif(CUDA_FOUND)
 elseif(HIP)
     # ------------------------------------------------------------------------------HIP--
     if (DEFINED ENV{ROCM_PATH})
@@ -250,24 +265,6 @@ elseif(ALTCPU)
 	endif()
 endif()
  
-# ----------------------------------------------------------------- OpenMP ----------
-# This must come before including BuildTypes.cmake to properly set OpenMP flags to NVCC.
-# CUDA support by the OpenMP package came at CMake 3.31 (too new).
-
-if(SYCL) # Intel DPC++ specific; I don't know when the OpenMP package supports SYCL
-	set(OpenMP_C_FLAGS "-fiopenmp")
-	set(OpenMP_CXX_FLAGS "-fiopenmp")
-	set(OpenMP_EXE_LINKER_FLAGS "-fiopenmp")
-else()
-	FIND_PACKAGE(OpenMP REQUIRED)
-endif()
-
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-set(CMAKE_CXX_FLAGS "-fPIC ${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
-
-#message(STATUS "OpenMP_CXX_FLAGS: ${OpenMP_CXX_FLAGS}")
-
 # ----------------------------------------------------------INCLUDE ALL BUILD TYPES---
 # This has to be AFTER project() and find_package(HIP).
 # Up to RELION 5.0.0, this must come BEFORE find_package(CUDA) as discussed in issue #1032.
@@ -383,6 +380,29 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ----------------------------------------------------------------- OpenMP ----------
+# This MUST be set before all cuda_add_executable/library calls.
+# Otherwise the -Xcompiler argument to NVCC does not contain -fopenmp
+# and #pragma omp critical is SILENTLY ignored, giving a wrong binary!!!
+# https://github.com/3dem/relion/issues/1016
+
+if(SYCL)    # Intel DPC++ specific
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fiopenmp")
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fiopenmp")
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fiopenmp")
+
+	set(CMAKE_C_FLAGS "-std=c99 ${CMAKE_C_FLAGS}")
+	set(CMAKE_CXX_FLAGS "-fPIC -std=c++17 ${CMAKE_CXX_FLAGS}")
+else()
+	FIND_PACKAGE(OpenMP REQUIRED)
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+
+	set(CMAKE_C_FLAGS "-std=c99 ${CMAKE_C_FLAGS}")
+	set(CMAKE_CXX_FLAGS "-fPIC -std=c++17 ${CMAKE_CXX_FLAGS}")
+endif()
+
 # ----------------------------------------------------------Intel Compiler support --
 # ----------------------------------  and build flags including MKL and IPP ---------
 
@@ -474,9 +494,9 @@ if(GUI)
 	endif(NOT FLTK_FOUND)
 
     else(X11_FOUND)
-        message(STATUS "\n-- ------------------ YOU HAVE NO X11-LIBS ------------------")
-        message(STATUS "CCmake found no X11-libs on your system, which are required for the GUI.")
-        message(STATUS " You CAN add the flag -DGUI=OFF to avoid using X11" )
+        message( STATUS "\n-- ------------------ YOU HAVE NO X11-LIBS ------------------")
+        message( STATUS "CCmake found no X11-libs on your system, which are required for the GUI.")
+        message( STATUS " You CAN add the flag -DGUI=OFF to avoid using X11" )
         message(FATAL_ERROR "X11 is required for GUI.")
     endif(X11_FOUND)
 
@@ -503,6 +523,15 @@ if(NOT MKLFFT)
 		include(${CMAKE_SOURCE_DIR}/cmake/BuildFFTW.cmake)
 	endif(NOT FFTW_FOUND)
 endif(NOT MKLFFT)
+
+if(RELION_USE_FINUFFT)
+	find_package(FINUFFT REQUIRED)
+	if(FINUFFT_FOUND)
+		add_definitions(-DRELION_USE_FINUFFT)
+		include_directories(${FINUFFT_INCLUDE_DIRS})
+		message(STATUS "FINUFFT support enabled: ${FINUFFT_LIBRARIES}")
+	endif()
+endif()
 
 # ---------------------------------------------------------------------------SIN/COS--
 
@@ -539,7 +568,7 @@ endif(JPEG_FOUND)
 # -----------------------------------------------------------------PYTHON DEPENDENCIES--
 
 
-set(CONDA_ENV_NAME "relion-5.1" CACHE STRING "The Conda environment name")
+set(CONDA_ENV_NAME "relion-5.0" CACHE STRING "The Conda environment name")
 include(${CMAKE_SOURCE_DIR}/cmake/FindCondaPython.cmake)
 
 list(APPEND RELION_PYTHON_WRAPPERS
@@ -557,8 +586,6 @@ list(APPEND RELION_PYTHON_WRAPPERS
 	python_tomo_get_particle_poses
 	python_tomo_denoise
 	filament_selection
-	python_trace_amyloids
-	schemegui
 )
 
 foreach (SCRIPT_FILE ${RELION_PYTHON_WRAPPERS})
@@ -567,6 +594,10 @@ foreach (SCRIPT_FILE ${RELION_PYTHON_WRAPPERS})
             ${CMAKE_BINARY_DIR}/bin/relion_${SCRIPT_FILE}
             @ONLY
     )
+    file(CHMOD ${CMAKE_BINARY_DIR}/bin/relion_${SCRIPT_FILE}
+         PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                     GROUP_READ GROUP_EXECUTE
+                     WORLD_READ WORLD_EXECUTE)
 endforeach()
 
 option(FETCH_WEIGHTS "Download model weights for dependent packages" ON)
@@ -576,12 +607,6 @@ if (FETCH_WEIGHTS)
 			"\n"
 			"NOTE: You can skip this step by setting -DFETCH_WEIGHTS=OFF"
 	)
-
-	# `relion_trace_amyloids.py` is necessary for weight download during `cmake`.
-	# The `copy_scripts` target below is executed only during `make`.
-	configure_file("${CMAKE_SOURCE_DIR}/scripts/trace_amyloids.py"
-	               "${CMAKE_BINARY_DIR}/bin/relion_trace_amyloids.py"
-	               COPYONLY)
 
 	execute_process(
 			COMMAND bash ${CMAKE_BINARY_DIR}/bin/relion_python_fetch_weights
@@ -619,7 +644,6 @@ list(APPEND RELION_SCRIPT_FILES
         star_datablock_ctfdat
         qsub.csh
         it.py
-	trace_amyloids.py
 )
 
 add_custom_target(copy_scripts ALL)
@@ -671,11 +695,6 @@ message(STATUS "CMAKE_CXX_FLAGS : ${CMAKE_CXX_FLAGS}")
 #message(STATUS "MPI_C_COMPILER : ${MPI_C_COMPILER}")
 #message(STATUS "MPI_CXX_COMPILER : ${MPI_CXX_COMPILER}")
 #message(STATUS "CMAKE_EXE_LINKER_FLAGS : ${CMAKE_EXE_LINKER_FLAGS}")
-#message(STATUS "CUDAToolkit_FOUND: ${CUDAToolkit_FOUND}")
-#get_target_property(CUDART_LIB CUDA::cudart IMPORTED_LOCATION)
-#message(STATUS "CUDA::cudart location: ${CUDART_LIB}")
-#get_target_property(CUDART_INC CUDA::cudart INTERFACE_INCLUDE_DIRECTORIES)
-#message(STATUS "CUDA::cudart includes: ${CUDART_INC}")
 
 # -----------------------------------------------------------------------------TESTS--
 # Include testing flag(s) as precomiler
@@ -683,7 +702,7 @@ message(STATUS "CMAKE_CXX_FLAGS : ${CMAKE_CXX_FLAGS}")
 #enable_testing()
 #include(${CMAKE_SOURCE_DIR}/tests/RelionTests.cmake)
 
-option(BUILD_TESTS "Build and configure tests" OFF)
+option(BUILD_TESTS "Build and configure tests" ON)
 if(BUILD_TESTS)
     include(CTest)
     add_subdirectory(tests)

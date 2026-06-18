@@ -135,6 +135,11 @@ static const std::vector<std::string> job_ctffit_options{
 	"Per-particle"
 };
 
+static const std::vector<std::string> job_spatial_frequency_mode_options{
+	"s",
+	"s2"
+};
+
 static const std::vector<std::string> job_tomo_align_shiftonly_options{
 		"Entire micrographs",
 		"Only particles"
@@ -312,6 +317,9 @@ static bool do_allow_change_minimum_dedicated;
 #define LABEL_RECONSPART_HALFMAP       "DensityMap.mrc.relion.tomo.halfmap.reconstruct"
 #define LABEL_RECONSPART_MAP           "DensityMap.mrc.relion.tomo.map.reconstruct"
 
+#define LABEL_RECONSTRUCT3D_HALFMAP    "DensityMap.mrc.relion.halfmap.refine3d"
+#define LABEL_RECONSTRUCT3D_MAP        "DensityMap.mrc.relion.refine3d"
+
 
 // All the directory names of the different types of jobs defined inside the pipeline
 #define PROC_IMPORT_DIRNAME           "Import"       // Import any file as a Node of a given type
@@ -343,6 +351,7 @@ static bool do_allow_change_minimum_dedicated;
 #define PROC_TOMO_RECONSTRUCT_DIRNAME "Reconstruct" // Calculation of particle average from the individual tilt series images
 #define PROC_TOMO_DENOISE_DIRNAME "Denoise" // Denoise tomograms
 #define PROC_TOMO_PICK_DIRNAME "Picks" // Pick particles in tomograms
+#define PROC_RECONSTRUCT3D_DIRNAME     "Reconstruct3D" // 3D reconstruction
 #define PROC_EXTERNAL_DIRNAME         "External"     // For running non-relion programs
 #define PROC_TOMO_ALIGN_TILTSERIES_DIRNAME "AlignTiltSeries" // Tilt series alignment for tomogram reconstruction
 #define PROC_TOMO_RECONSTRUCT_TOMOGRAM_DIRNAME "Tomograms" // Reconstruction of tomograms for particle picking
@@ -377,6 +386,7 @@ static bool do_allow_change_minimum_dedicated;
 #define PROC_TOMO_RECONSTRUCT_LABELNEW "relion.reconstructparticletomo" // Calculation of particle average from the individual tilt series images
 #define PROC_TOMO_DENOISE_LABELNEW     "relion.denoisetomo"  // Denoise tomograms
 #define PROC_TOMO_PICK_LABELNEW        "relion.picktomo"     // Pick tomograms
+#define PROC_RECONSTRUCT3D_LABELNEW    "relion.reconstruct3d" // 3D reconstruction
 #define PROC_EXTERNAL_LABELNEW         "relion.external"     // For running non-relion programs
 #define PROC_TOMO_ALIGN_TILTSERIES_LABELNEW "relion.aligntiltseries" // Tilt series alignment for tomogram reconstruction
 #define PROC_TOMO_RECONSTRUCT_TOMOGRAM_LABELNEW "relion.reconstructtomograms" // Reconstruction of tomograms for particle picking
@@ -416,6 +426,7 @@ static bool do_allow_change_minimum_dedicated;
 #define PROC_TOMO_EXCLUDE_TILT_IMAGES 57 // Exclude bad tilt-images from tilt-series
 #define PROC_TOMO_DENOISE_TOMOGRAM 58 // Denoise tomograms
 #define PROC_TOMO_PICK_TOMOGRAM 59 // Denoise tomograms
+#define PROC_RECONSTRUCT3D    60 // 3D reconstruction
 #define PROC_EXTERNAL       99// External scripts
 
 
@@ -450,6 +461,7 @@ static std::map<int, std::string> proc_type2dirname = {{PROC_IMPORT, PROC_IMPORT
  	    {PROC_TOMO_DENOISE_TOMOGRAM, PROC_TOMO_DENOISE_DIRNAME},
         {PROC_TOMO_PICK_TOMOGRAM, PROC_TOMO_PICK_DIRNAME},
         {PROC_TOMO_EXCLUDE_TILT_IMAGES, PROC_TOMO_EXCLUDE_TILT_IMAGES_DIRNAME},
+        {PROC_RECONSTRUCT3D,    PROC_RECONSTRUCT3D_DIRNAME},
 		{PROC_EXTERNAL,         PROC_EXTERNAL_DIRNAME}};
 
 static std::map<int, std::string> proc_type2labelnew = {{PROC_IMPORT, PROC_IMPORT_LABELNEW},
@@ -483,6 +495,7 @@ static std::map<int, std::string> proc_type2labelnew = {{PROC_IMPORT, PROC_IMPOR
  	    {PROC_TOMO_DENOISE_TOMOGRAM, PROC_TOMO_DENOISE_LABELNEW},
  	    {PROC_TOMO_PICK_TOMOGRAM, PROC_TOMO_PICK_LABELNEW},
 	    {PROC_TOMO_EXCLUDE_TILT_IMAGES, PROC_TOMO_EXCLUDE_TILT_IMAGES_LABELNEW},
+        {PROC_RECONSTRUCT3D,    PROC_RECONSTRUCT3D_LABELNEW},
         {PROC_EXTERNAL,         PROC_EXTERNAL_LABELNEW}};
 
 static std::map<std::string, int> proc_dirname2type = {
@@ -517,6 +530,7 @@ static std::map<std::string, int> proc_dirname2type = {
         {PROC_TOMO_DENOISE_DIRNAME, PROC_TOMO_DENOISE_TOMOGRAM},
         {PROC_TOMO_PICK_DIRNAME, PROC_TOMO_PICK_TOMOGRAM},
 	    {PROC_TOMO_EXCLUDE_TILT_IMAGES_DIRNAME, PROC_TOMO_EXCLUDE_TILT_IMAGES},
+        {PROC_RECONSTRUCT3D_DIRNAME,    PROC_RECONSTRUCT3D},
         {PROC_EXTERNAL_DIRNAME,         PROC_EXTERNAL}};
 
 static std::map<std::string, int> proc_labelnew2type = {
@@ -551,6 +565,7 @@ static std::map<std::string, int> proc_labelnew2type = {
  	    {PROC_TOMO_DENOISE_LABELNEW, PROC_TOMO_DENOISE_TOMOGRAM},
  	    {PROC_TOMO_PICK_LABELNEW, PROC_TOMO_PICK_TOMOGRAM},
 	    {PROC_TOMO_EXCLUDE_TILT_IMAGES_LABELNEW, PROC_TOMO_EXCLUDE_TILT_IMAGES},
+        {PROC_RECONSTRUCT3D_LABELNEW,    PROC_RECONSTRUCT3D},
         {PROC_EXTERNAL_LABELNEW,         PROC_EXTERNAL}};
 
 
@@ -984,7 +999,11 @@ public:
 
     void initialiseTomoReconPartJob();
     bool getCommandsTomoReconPartJob(std::string &outputname, std::vector<std::string> &commands,
-									 std::string &final_command, bool do_makedir, int job_counter, std::string &error_message);
+                                     std::string &final_command, bool do_makedir, int job_counter, std::string &error_message);
+
+    void initialiseReconstruct3DJob();
+    bool getCommandsReconstruct3DJob(std::string &outputname, std::vector<std::string> &commands,
+                                     std::string &final_command, bool do_makedir, int job_counter, std::string &error_message);
 
 };
 

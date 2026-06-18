@@ -56,7 +56,7 @@ public:
 	Fl_Group *tab1, *tab2, *tab3, *tab4, *tab5, *tab6, *tab7, *runtab;
 
 	// Groups
-	Fl_Group *group0, *group1, *group2, *group3, *group4, *group5, *group6, *group7, *group8, *group9, *queue_group;
+	Fl_Group *group0, *group1, *group2, *group3, *group4, *group5, *group6, *group7, *group8, *group9, *group_ewald, *queue_gpu_group, *queue_group;
 
 public:
 	// Constructor with x, y, w, h and a title
@@ -104,6 +104,8 @@ public:
 private:
 
 	static void cb_menu_continue(Fl_Widget*, void*);
+	static void cb_spatial_frequency_mode(Fl_Widget*, void*);
+	void setupSpatialFrequencyGrayout();
 	inline void cb_menu_continue_i();
 
 
@@ -130,6 +132,7 @@ private:
         void initialiseModelAngeloWindow();
         void initialiseDynaMightWindow();
 	void initialiseExternalWindow();
+	void initialiseReconstruct3DWindow();
 
 	// relion-4.0: add subtomogram averaging programs by Jasenko
 	void placeTomoInput(bool has_tomograms, bool has_particles,	bool has_trajectories, bool has_manifolds);

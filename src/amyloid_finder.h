@@ -43,6 +43,9 @@ public:
     // I/O Parser
     IOParser parser;
 
+    // Timer for performance measurements
+    Timer timer;
+
     // Verbosity
     int verb;
 

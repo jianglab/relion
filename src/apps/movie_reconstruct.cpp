@@ -24,10 +24,144 @@
 #include <src/euler.h>
 #include <src/micrograph_model.h>
 #include <src/renderEER.h>
+#include <src/spatial_frequency_grid.h>
 #include <src/jaz/single_particle/obs_model.h>
 #include <src/jaz/single_particle/stack_helper.h>
 #include <src/jaz/single_particle/motion/motion_helper.h>
 #include <src/jaz/single_particle/img_proc/filter_helper.h>
+
+#include <cstdlib>
+#include <complex>
+
+enum SpatialFrequencyMode
+{
+	SPATIAL_FREQUENCY_MODE_S,
+	SPATIAL_FREQUENCY_MODE_S2
+};
+
+namespace
+{
+
+SpatialFrequencyMode parseSpatialFrequencyMode(const std::string& mode)
+{
+	if (mode == "s")
+	{
+		return SPATIAL_FREQUENCY_MODE_S;
+	}
+
+	if (mode == "s2")
+	{
+		return SPATIAL_FREQUENCY_MODE_S2;
+	}
+
+	REPORT_ERROR("ERROR: --spatial_frequency_mode must be either 's' or 's2'.");
+	return SPATIAL_FREQUENCY_MODE_S;
+}
+
+
+inline RFLOAT sampleRealFromFftwHalfBilinear(const MultidimArray<RFLOAT>& img,
+	                                         RFLOAT x,
+	                                         RFLOAT y_signed,
+	                                         int size)
+{
+	const int sh = size / 2 + 1;
+	RFLOAT xc = x;
+	if (xc < 0.0) xc = 0.0;
+	if (xc > (RFLOAT)(sh - 1)) xc = (RFLOAT)(sh - 1);
+
+	RFLOAT yw = y_signed;
+	while (yw < 0.0) yw += (RFLOAT)size;
+	while (yw >= (RFLOAT)size) yw -= (RFLOAT)size;
+
+	const int x0 = (int)FLOOR(xc);
+	const int x1 = (x0 + 1 < sh) ? x0 + 1 : x0;
+	const int y0 = (int)FLOOR(yw);
+	const int y1 = (y0 + 1 < size) ? y0 + 1 : 0;
+
+	const RFLOAT tx = xc - x0;
+	const RFLOAT ty = yw - y0;
+
+	const RFLOAT v00 = DIRECT_A2D_ELEM(img, y0, x0);
+	const RFLOAT v10 = DIRECT_A2D_ELEM(img, y0, x1);
+	const RFLOAT v01 = DIRECT_A2D_ELEM(img, y1, x0);
+	const RFLOAT v11 = DIRECT_A2D_ELEM(img, y1, x1);
+
+	const RFLOAT v0 = (1.0 - tx) * v00 + tx * v10;
+	const RFLOAT v1 = (1.0 - tx) * v01 + tx * v11;
+
+	return (1.0 - ty) * v0 + ty * v1;
+}
+
+inline RFLOAT sampleRealFromFftwHalfBilinear(const BufferedImage<RFLOAT>& img,
+	                                         RFLOAT x,
+	                                         RFLOAT y_signed,
+	                                         int size)
+{
+	const int sh = size / 2 + 1;
+	RFLOAT xc = x;
+	if (xc < 0.0) xc = 0.0;
+	if (xc > (RFLOAT)(sh - 1)) xc = (RFLOAT)(sh - 1);
+
+	RFLOAT yw = y_signed;
+	while (yw < 0.0) yw += (RFLOAT)size;
+	while (yw >= (RFLOAT)size) yw -= (RFLOAT)size;
+
+	const int x0 = (int)FLOOR(xc);
+	const int x1 = (x0 + 1 < sh) ? x0 + 1 : x0;
+	const int y0 = (int)FLOOR(yw);
+	const int y1 = (y0 + 1 < size) ? y0 + 1 : 0;
+
+	const RFLOAT tx = xc - x0;
+	const RFLOAT ty = yw - y0;
+
+	const RFLOAT v00 = img(x0, y0);
+	const RFLOAT v10 = img(x1, y0);
+	const RFLOAT v01 = img(x0, y1);
+	const RFLOAT v11 = img(x1, y1);
+
+	const RFLOAT v0 = (1.0 - tx) * v00 + tx * v10;
+	const RFLOAT v1 = (1.0 - tx) * v01 + tx * v11;
+
+	return (1.0 - ty) * v0 + ty * v1;
+}
+
+inline Complex sampleComplexFromFftwHalfBilinear(const MultidimArray<Complex>& img,
+	                                             RFLOAT x,
+	                                             RFLOAT y_signed,
+	                                             int size)
+{
+	const int sh = size / 2 + 1;
+	RFLOAT xc = x;
+	if (xc < 0.0) xc = 0.0;
+	if (xc > (RFLOAT)(sh - 1)) xc = (RFLOAT)(sh - 1);
+
+	RFLOAT yw = y_signed;
+	while (yw < 0.0) yw += (RFLOAT)size;
+	while (yw >= (RFLOAT)size) yw -= (RFLOAT)size;
+
+	const int x0 = (int)FLOOR(xc);
+	const int x1 = (x0 + 1 < sh) ? x0 + 1 : x0;
+	const int y0 = (int)FLOOR(yw);
+	const int y1 = (y0 + 1 < size) ? y0 + 1 : 0;
+
+	const RFLOAT tx = xc - x0;
+	const RFLOAT ty = yw - y0;
+
+	const Complex c00 = DIRECT_A2D_ELEM(img, y0, x0);
+	const Complex c10 = DIRECT_A2D_ELEM(img, y0, x1);
+	const Complex c01 = DIRECT_A2D_ELEM(img, y1, x0);
+	const Complex c11 = DIRECT_A2D_ELEM(img, y1, x1);
+
+	const RFLOAT r0 = (1.0 - tx) * c00.real + tx * c10.real;
+	const RFLOAT r1 = (1.0 - tx) * c01.real + tx * c11.real;
+	const RFLOAT i0 = (1.0 - tx) * c00.imag + tx * c10.imag;
+	const RFLOAT i1 = (1.0 - tx) * c01.imag + tx * c11.imag;
+
+	return Complex((1.0 - ty) * r0 + ty * r1,
+	               (1.0 - ty) * i0 + ty * i1);
+}
+
+} // namespace
 
 class MovieReconstructor
 {
@@ -51,6 +185,10 @@ public:
 
 	bool do_ctf, ctf_phase_flipped, only_flip_phases, intact_ctf_first_peak,
 	     do_ewald, skip_weighting, skip_mask, no_barcode;
+	SpatialFrequencyMode spatial_frequency_mode;
+	int s2_ctf_oversampling_min = 2;
+	RFLOAT voltage_for_s2_ = 0.;
+	RFLOAT max_defocus_for_s2_ = 0.;
 
 	bool skip_gridding, is_reverse, read_weights, do_external_reconstruct;
 
@@ -125,7 +263,10 @@ void MovieReconstructor::read(int argc, char **argv)
 	traj_path = parser.getOption("--traj_path", "Trajectory path prefix", "");
 	movie_angpix = textToFloat(parser.getOption("--movie_angpix", "Pixel size in the movie", "-1"));
 	coord_angpix = textToFloat(parser.getOption("--coord_angpix", "Pixel size of particle coordinates", "-1"));
-	
+	spatial_frequency_mode = parseSpatialFrequencyMode(parser.getOption("--spatial_frequency_mode", "Spatial-frequency sampling mode for movie polishing ('s' for Cartesian frequency grid; 's2' for signed s^2 sampling)", "s"));
+s2_ctf_oversampling_min = textToInteger(parser.getOption("--s2_ctf_oversampling_min",
+            "For --spatial_frequency_mode s2: minimum number of s2 samples per CTF oscillation (0 = no fill/Cartesian-only, default 2)", "2"));
+
 	frame = textToInteger(parser.getOption("--frame", "Movie frame to reconstruct (1-indexed)", "1"));
 	requested_eer_grouping = textToInteger(parser.getOption("--eer_grouping", "Override EER grouping (--frame is in this new grouping)", "-1"));
 	movie_boxsize = textToInteger(parser.getOption("--window", "Box size to extract from raw movies", "-1"));
@@ -181,6 +322,8 @@ void MovieReconstructor::read(int argc, char **argv)
 		REPORT_ERROR("You have to specify the extraction box size (--window) as an even number.");
 	if (output_boxsize < 0 || output_boxsize % 2 != 0)
 		REPORT_ERROR("You have to specify the reconstruction box size (--scale) as an even number.");
+	if (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2 && output_boxsize < 2)
+		REPORT_ERROR("ERROR: --spatial_frequency_mode s2 requires output boxes of at least 2 pixels.");
 	if (nr_threads < 0 || nr_threads > 2)
 		REPORT_ERROR("Number of threads (--j) must be 1 or 2");
 	if (verb > 0 && do_ewald && mask_diameter < 0 && !(skip_mask && skip_weighting))
@@ -216,6 +359,36 @@ void MovieReconstructor::initialise()
 	ObservationModel::loadSafely(fn_sel, obsModel, DF, "particles", 0, false);
 	std::cout << "Read " << DF.numberOfObjects() << " particles." << std::endl;
 	data_angpixes = obsModel.getPixelSizes();
+
+	// Scan max defocus for s2 CTF oscillation oversampling
+	if (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2 && s2_ctf_oversampling_min > 0)
+	{
+		if (obsModel.opticsMdt.containsLabel(EMDL_CTF_VOLTAGE))
+		{
+			obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, voltage_for_s2_, 0);
+		}
+		if (voltage_for_s2_ > 0.0 && DF.containsLabel(EMDL_CTF_DEFOCUSU))
+		{
+			max_defocus_for_s2_ = 0.0;
+			RFLOAT du, dv;
+			DF.firstObject();
+			for (long int p = 0; p < DF.numberOfObjects(); p++)
+			{
+				DF.getValue(EMDL_CTF_DEFOCUSU, du);
+				DF.getValue(EMDL_CTF_DEFOCUSV, dv);
+				if (du > max_defocus_for_s2_) max_defocus_for_s2_ = du;
+				if (dv > max_defocus_for_s2_) max_defocus_for_s2_ = dv;
+				DF.nextObject();
+			}
+			DF.firstObject();
+			if (verb > 0)
+			{
+				std::cout << " + CTF oversampling s2 step: min_samples=" << s2_ctf_oversampling_min
+				          << " max_defocus=" << max_defocus_for_s2_
+				          << " voltage=" << voltage_for_s2_ << std::endl;
+			}
+		}
+	}
 
 	if (verb > 0 && !DF.containsLabel(EMDL_PARTICLE_RANDOM_SUBSET))
 	{
@@ -523,6 +696,7 @@ void MovieReconstructor::backprojectOneParticle(MetaDataTable &mdt, long int p, 
 
 	MultidimArray<Complex> F2DP, F2DQ;
 	FileName fn_img;
+	CTF ctf;
 
 	Fctf.resize(F2D);
 	Fctf.initConstant(1.);
@@ -530,33 +704,149 @@ void MovieReconstructor::backprojectOneParticle(MetaDataTable &mdt, long int p, 
 	// Apply CTF if necessary
 	if (do_ctf)
 	{
+		ctf.readByGroup(mdt, &obsModel, p);
+
+		ctf.getFftwImage(Fctf, output_boxsize, output_boxsize, angpix,
+		                 ctf_phase_flipped, only_flip_phases,
+		                 intact_ctf_first_peak, true);
+
+		obsModel.demodulatePhase(mdt, p, F2D); // This internally uses angpix!!
+		obsModel.divideByMtf(mdt, p, F2D);
+
+		// Ewald-sphere curvature correction
+		if (do_ewald)
 		{
-			CTF ctf;
-			
-			ctf.readByGroup(mdt, &obsModel, p);
+			applyCTFPandCTFQ(F2D, ctf, transformer, F2DP, F2DQ, skip_mask);
 
-			ctf.getFftwImage(Fctf, output_boxsize, output_boxsize, angpix,
-			                 ctf_phase_flipped, only_flip_phases,
-			                 intact_ctf_first_peak, true);
+			if (!skip_weighting)
+			{
+				// Also calculate W, store again in Fctf
+				ctf.applyWeightEwaldSphereCurvature_noAniso(Fctf, output_boxsize, output_boxsize, angpix, mask_diameter);
+			}
 
-			obsModel.demodulatePhase(mdt, p, F2D); // This internally uses angpix!!
-			obsModel.divideByMtf(mdt, p, F2D);
+			// Also calculate the radius of the Ewald sphere (in pixels)
+			r_ewald_sphere = output_boxsize * angpix / ctf.lambda;
+		}
+	}
 
-			// Ewald-sphere curvature correction
+	if (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2)
+	{
+    RFLOAT s2_step = -1.0;
+		if (voltage_for_s2_ > 0.0 && max_defocus_for_s2_ > 0.0 && s2_ctf_oversampling_min > 0)
+		{
+			s2_step = computeS2StepForCtfOversampling(
+			    output_boxsize / 2, angpix,
+			    max_defocus_for_s2_, s2_ctf_oversampling_min, voltage_for_s2_);
+		}
+		SpatialFrequencyGrid2D s2_grid = makeAdaptiveS2HybridGrid2D(output_boxsize, nullptr, s2_step);
+		computeBilinearCoeffs(s2_grid);
+
+		std::vector<Complex> samples(s2_grid.sample_x.size());
+		std::vector<RFLOAT> sample_weight(s2_grid.sample_x.size());
+
+		for (long int idx = 0; idx < (long int)s2_grid.sample_x.size(); idx++)
+		{
+			samples[idx] = sampleComplexFromFftwHalfBilinear(F2D,
+													   s2_grid.sample_x[idx],
+													   s2_grid.sample_y[idx],
+													   output_boxsize);
+			sample_weight[idx] = s2_grid.sample_weight[idx];
+		}
+
+		if (!samples.empty())
+		{
+			samples[0] = Complex(0.0, 0.0);
+		}
+
+		if (do_ctf)
+		{
 			if (do_ewald)
 			{
+				MultidimArray<Complex> F2DP, F2DQ;
 				applyCTFPandCTFQ(F2D, ctf, transformer, F2DP, F2DQ, skip_mask);
 
 				if (!skip_weighting)
 				{
-					// Also calculate W, store again in Fctf
 					ctf.applyWeightEwaldSphereCurvature_noAniso(Fctf, output_boxsize, output_boxsize, angpix, mask_diameter);
 				}
 
-				// Also calculate the radius of the Ewald sphere (in pixels)
 				r_ewald_sphere = output_boxsize * angpix / ctf.lambda;
+
+				std::vector<Complex> samplesP(samples.size());
+				std::vector<Complex> samplesQ(samples.size());
+				for (long int idx = 0; idx < (long int)s2_grid.sample_x.size(); idx++)
+				{
+					samplesP[idx] = sampleComplexFromFftwHalfBilinear(F2DP, s2_grid.sample_x[idx], s2_grid.sample_y[idx], output_boxsize);
+					samplesQ[idx] = sampleComplexFromFftwHalfBilinear(F2DQ, s2_grid.sample_x[idx], s2_grid.sample_y[idx], output_boxsize);
+					sample_weight[idx] = sampleRealFromFftwHalfBilinear(Fctf, s2_grid.sample_x[idx], s2_grid.sample_y[idx], output_boxsize) * s2_grid.sample_weight[idx];
+				}
+
+					Matrix2D<RFLOAT> magMat;
+					if (obsModel.hasMagMatrices)
+					{
+						magMat = obsModel.getMagMatrix(opticsGroup);
+					}
+					else
+					{
+						magMat = Matrix2D<RFLOAT>(2,2);
+						magMat.initIdentity();
+					}
+
+				backprojector[this_subset - 1].backprojectNonuniform2Dto3D(samplesP, s2_grid.sample_x, s2_grid.sample_y, A3D,
+																	&sample_weight,
+																	r_ewald_sphere, true, &magMat);
+				backprojector[this_subset - 1].backprojectNonuniform2Dto3D(samplesQ, s2_grid.sample_x, s2_grid.sample_y, A3D,
+																	&sample_weight,
+																	r_ewald_sphere, false, &magMat);
+				return;
+			}
+
+			if (obsModel.hasEvenZernike)
+			{
+				std::vector<RFLOAT> gamma_offsets;
+				const std::vector<RFLOAT>* gamma_offsets_ptr = NULL;
+				gamma_offsets.resize(s2_grid.sample_x.size(), 0.0);
+				const BufferedImage<RFLOAT>& gamma = obsModel.getGammaOffset(opticsGroup, output_boxsize);
+				for (long int idx = 0; idx < (long int)s2_grid.sample_x.size(); idx++)
+				{
+					gamma_offsets[idx] = sampleRealFromFftwHalfBilinear(gamma, s2_grid.sample_x[idx], s2_grid.sample_y[idx], output_boxsize);
+				}
+				gamma_offsets_ptr = &gamma_offsets;
+
+				for (long int idx = 0; idx < (long int)s2_grid.sample_x.size(); idx++)
+				{
+					const RFLOAT x = s2_grid.sample_x[idx] / (output_boxsize * angpix);
+					const RFLOAT y = s2_grid.sample_y[idx] / (output_boxsize * angpix);
+					const RFLOAT gamma_offset = (gamma_offsets_ptr != NULL) ? (*gamma_offsets_ptr)[idx] : 0.0;
+					const RFLOAT ctf_value = ctf.getCTF(x, y, ctf_phase_flipped, only_flip_phases,
+					                                    intact_ctf_first_peak, true, gamma_offset);
+					if (!ctf_premultiplied)
+					{
+						samples[idx] *= ctf_value;
+					}
+					sample_weight[idx] *= ctf_value * ctf_value;
+				}
+			}
+			else
+			{
+				for (long int idx = 0; idx < (long int)s2_grid.sample_x.size(); idx++)
+				{
+					const RFLOAT x = s2_grid.sample_x[idx] / (output_boxsize * angpix);
+					const RFLOAT y = s2_grid.sample_y[idx] / (output_boxsize * angpix);
+					const RFLOAT ctf_value = ctf.getCTF(x, y, ctf_phase_flipped, only_flip_phases,
+					                                    intact_ctf_first_peak, true);
+					if (!ctf_premultiplied)
+					{
+						samples[idx] *= ctf_value;
+					}
+					sample_weight[idx] *= ctf_value * ctf_value;
+				}
 			}
 		}
+
+		backprojector[this_subset - 1].backprojectNonuniform2Dto3D(samples, s2_grid.sample_x, s2_grid.sample_y, A3D,
+															&sample_weight);
+		return;
 	}
 
 	if (true) // not subtract

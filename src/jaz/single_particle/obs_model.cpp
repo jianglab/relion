@@ -1229,7 +1229,9 @@ const BufferedImage<Complex>& ObservationModel::getPhaseCorrection(int optGroup,
 			phaseCorr[optGroup][s] = BufferedImage<Complex>(sh,s);
 
 			BufferedImage<Complex>& img = phaseCorr[optGroup][s];
-			const double as = angpix[optGroup] * boxSizes[optGroup];
+			// Use s (requested size) so that spatial frequency x/(s*angpix) is
+			// correct for both native and padded (CTF-padding) calls.
+			const double as = angpix[optGroup] * s;
 			const Matrix2D<RFLOAT>& M = magMatrices[optGroup];
 			
 			for (int y = 0; y < s;  y++)
@@ -1276,7 +1278,9 @@ const BufferedImage<RFLOAT>& ObservationModel::getGammaOffset(int optGroup, int 
 			gammaOffset[optGroup][s] = BufferedImage<RFLOAT>(sh,s);
 			BufferedImage<RFLOAT>& img = gammaOffset[optGroup][s];
 
-			const double as = angpix[optGroup] * boxSizes[optGroup];
+			// Use s (requested size) so that spatial frequency x/(s*angpix) is
+			// correct for both native and padded (CTF-padding) calls.
+			const double as = angpix[optGroup] * s;
 			const Matrix2D<RFLOAT>& M = magMatrices[optGroup];
 
 			for (int y = 0; y < s;  y++)
