@@ -550,6 +550,13 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	nr_browse_tabs++;
 
 	browse_grp[nr_browse_tabs] = new Fl_Group(WCOL0, 2, 550, 615-MENUHEIGHT);
+	browser->add("3D reconstruction");
+	gui_jobwindows[nr_browse_tabs] = new JobWindow();
+	gui_jobwindows[nr_browse_tabs]->initialise(PROC_RECONSTRUCT3D, _do_tomo);
+	browse_grp[nr_browse_tabs]->end();
+	nr_browse_tabs++;
+
+	browse_grp[nr_browse_tabs] = new Fl_Group(WCOL0, 2, 550, 615-MENUHEIGHT);
 	browser->add("3D multi-body");
 	gui_jobwindows[nr_browse_tabs] = new JobWindow();
 	gui_jobwindows[nr_browse_tabs]->initialise(PROC_MULTIBODY);
@@ -1187,7 +1194,7 @@ void GuiMainWindow::loadJobFromPipeline(int this_job)
 	// What type of job is this?
 	for ( int t=0; t<nr_browse_tabs; t++ )
 	{
-		if ( gui_jobwindows[t]->myjob.type == itype )
+		if ( gui_jobwindows[t] && gui_jobwindows[t]->myjob.type == itype )
 			browser->value(t+1);
 	}
 
@@ -1196,7 +1203,7 @@ void GuiMainWindow::loadJobFromPipeline(int this_job)
 
 	// Re-read the settings for this job and update the values inside the GUI
 	int iwin = (browser->value() - 1);
-	if (gui_jobwindows[iwin]->myjob.read(pipeline.processList[current_job].name, is_main_continue))
+	if ( iwin >= 0 && iwin < nr_browse_tabs && gui_jobwindows[iwin] && gui_jobwindows[iwin]->myjob.read(pipeline.processList[current_job].name, is_main_continue))
     {
         gui_jobwindows[iwin]->updateMyGui();
 
@@ -1235,16 +1242,11 @@ void GuiMainWindow::cb_select_browsegroup(Fl_Widget* o, void* v)
 	// When clicking the job browser on the left: reset current_job to -1 (i.e. a new job, not yet in the pipeline)
 	current_job = -1;
 
-	// If Cache management is selected (has no JobWindow), open the dialog and restore the previous tab
+	// If Cache management is selected (has no JobWindow), open the dialog
 	int iwin = (browser->value() - 1);
 	if (iwin >= 0 && iwin < T->nr_browse_tabs && gui_jobwindows[iwin] == NULL)
 	{
-		int restore = prevBrowserValue;
 		T->cb_cache_management_i();
-		if (restore > 0)
-			browser->value(restore);
-		else
-			browser->value(1);
 		T->cb_select_browsegroup_i();
 		run_button->activate();
 		return;
@@ -1737,6 +1739,7 @@ void GuiMainWindow::cb_run_i(bool only_schedule, bool do_open_edit)
 
 	// Get which jobtype the GUI is on now
 	int iwin = browser->value() - 1;
+	if (iwin < 0 || iwin >= nr_browse_tabs || gui_jobwindows[iwin] == NULL) return;
 	// And update the job inside it
 	gui_jobwindows[iwin]->updateMyJob();
 
@@ -2205,6 +2208,7 @@ void GuiMainWindow::cb_save_i()
 {
 	// Get which job we're dealing with, and update it from the GUI
 	int iwin = browser->value() - 1;
+	if (iwin < 0 || iwin >= nr_browse_tabs || gui_jobwindows[iwin] == NULL) return;
 	gui_jobwindows[iwin]->updateMyJob();
 
 	// SHWS 16092021: to prevent empty labels when saving a job.star from the GUI, go through getCommandLineJob, which also sets deeper levels of labels
@@ -2262,7 +2266,7 @@ void GuiMainWindow::cb_load_i()
     {
         // What type of job is this?
         for (int t = 0; t < nr_browse_tabs; t++) {
-            if (gui_jobwindows[t]->myjob.type == thisjob.type) {
+            if (gui_jobwindows[t] && gui_jobwindows[t]->myjob.type == thisjob.type) {
                 browser->value(t + 1);
                 gui_jobwindows[t]->myjob = thisjob;
                 gui_jobwindows[t]->updateMyGui();
