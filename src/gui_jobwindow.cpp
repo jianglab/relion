@@ -1616,6 +1616,9 @@ void JobWindow::initialiseClass3DWindow()
 	group_ewald->end();
 	guientries["do_ewald"].cb_menu_i(); // to make default effective
 
+	place("do_center");
+	place("do_align");
+
 	tab4->end();
 
 	tab5->begin();
@@ -1788,6 +1791,7 @@ void JobWindow::initialiseAutorefineWindow()
 	place("particle_diameter");
 	place("do_zero_mask", TOGGLE_DEACTIVATE);
 	place("tau_fudge");
+	place("do_align_halves");
 	place("low_resol_join_halves");
 	// Add a little spacer
 	current_y += STEPY/2;

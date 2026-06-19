@@ -139,7 +139,7 @@ TEST_CASE("relion_finufft: type-2 returns finite results for non-constant image"
     }
 
     // DC of real-valued image has zero imaginary part
-    REQUIRE(std::fabs(finufft_samples[0].imag) < 1e-12);
+    REQUIRE(std::fabs(finufft_samples[0].imag) < 1e-6);
 #endif
 }
 

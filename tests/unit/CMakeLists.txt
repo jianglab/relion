@@ -28,6 +28,7 @@ set(RELION_UNIT_TEST_SOURCES
  test_relion_finufft.cpp
  test_backprojector_nonuniform.cpp
  test_s2_vs_smode_consistency.cpp
+ test_align_map_to_map.cpp
 )
 
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})
@@ -62,7 +63,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft unon s2smode)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft unon s2smode alignmap)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]

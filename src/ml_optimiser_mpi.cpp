@@ -37,6 +37,8 @@
 #include <stdlib.h>
 #include "src/cache_manager.h"
 #include "src/cache_init.h"
+#include "src/align_map_to_map.h"
+#include "src/symmetries.h"
 #include <map>
 #include <set>
 #include <iomanip>
@@ -3396,6 +3398,158 @@ void MlOptimiserMpi::joinTwoHalvesAtLowResolution()
 #endif
 }
 
+void MlOptimiserMpi::alignHalves()
+{
+	if (!do_split_random_halves || mymodel.nr_classes > 1)
+		return;
+
+	// Determine search DOF from symmetry
+	int nr_freedom = 6;
+	if ((do_helical_refine) && (!ignore_helical_symmetry))
+	{
+		nr_freedom = 2;
+	}
+	else if (sampling.fn_sym != "C1" && sampling.fn_sym != "c1")
+	{
+		SymList SL;
+		int pgGroup, pgOrder;
+		if (SL.isSymmetryGroup(sampling.fn_sym, pgGroup, pgOrder))
+		{
+			if (pgGroup == pg_CN && pgOrder >= 2)
+				nr_freedom = 2;
+			else if (pgGroup != pg_CN && pgGroup != pg_CI && pgGroup != pg_CS)
+				nr_freedom = 0; // Dn, T, O, I: skip
+		}
+	}
+
+	if (nr_freedom == 0)
+		return;
+
+	RFLOAT maxres = XMIPP_MAX(low_resol_join_halves, 1./mymodel.current_resolution);
+	MPI_Status status;
+
+	for (int ibody = 0; ibody < mymodel.nr_bodies; ibody++)
+	{
+		if (mymodel.nr_bodies > 1 && mymodel.keep_fixed_bodies[ibody] > 0)
+			continue;
+
+		int reconstruct_rank1 = 2 * (ibody % ((node->size - 1)/2)) + 1;
+		int reconstruct_rank2 = 2 * (ibody % ((node->size - 1)/2)) + 2;
+
+		RFLOAT best_rot = 0., best_tilt = 0., best_psi = 0.;
+		RFLOAT best_dx = 0., best_dy = 0., best_dz = 0.;
+
+		// Rank 2 sends Iref to rank 1; rank 1 aligns and broadcasts params
+		if (node->rank == reconstruct_rank2)
+		{
+			node->relion_MPI_Send(MULTIDIM_ARRAY(mymodel.Iref[ibody]),
+					MULTIDIM_SIZE(mymodel.Iref[ibody]),
+					MY_MPI_DOUBLE, reconstruct_rank1, MPITAG_IMAGE, MPI_COMM_WORLD);
+		}
+		else if (node->rank == reconstruct_rank1)
+		{
+			MultidimArray<RFLOAT> half2_Iref;
+			half2_Iref.resize(mymodel.Iref[ibody]);
+			node->relion_MPI_Recv(MULTIDIM_ARRAY(half2_Iref),
+					MULTIDIM_SIZE(half2_Iref),
+					MY_MPI_DOUBLE, reconstruct_rank2, MPITAG_IMAGE, MPI_COMM_WORLD, status);
+
+			alignMapToMap(half2_Iref, mymodel.Iref[ibody], nr_freedom,
+					mymodel.pixel_size, maxres,
+					3, 1., 1.,
+					best_rot, best_tilt, best_psi,
+					best_dx, best_dy, best_dz);
+
+			if (verb > 0)
+				std::cout << " Aligning half2 to half1: rot=" << best_rot
+					<< " tilt=" << best_tilt << " psi=" << best_psi
+					<< " dx=" << best_dx << " dy=" << best_dy << " dz=" << best_dz
+					<< std::endl;
+		}
+
+		// Broadcast best params from rank 1 to all
+		RFLOAT params[6];
+		if (node->rank == reconstruct_rank1)
+		{
+			params[0] = best_rot; params[1] = best_tilt; params[2] = best_psi;
+			params[3] = best_dx;  params[4] = best_dy;  params[5] = best_dz;
+		}
+		node->relion_MPI_Bcast(params, 6, MY_MPI_DOUBLE, reconstruct_rank1, MPI_COMM_WORLD);
+		best_rot = params[0]; best_tilt = params[1]; best_psi = params[2];
+		best_dx  = params[3]; best_dy  = params[4]; best_dz  = params[5];
+
+		// Adjust per-particle orientations for half2 (reconstruct_rank2 processes half2)
+		bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
+
+		if (node->rank == reconstruct_rank2)
+		{
+			RFLOAT my_pixel_size = mymodel.pixel_size;
+			for (int i = 0; i < YSIZE(exp_metadata); i++)
+			{
+				RFLOAT rot  = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_ROT);
+				RFLOAT tilt = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_TILT);
+				RFLOAT psi  = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_PSI);
+				RFLOAT dx   = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_XOFF) * my_pixel_size;
+				RFLOAT dy   = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_YOFF) * my_pixel_size;
+				RFLOAT dz   = 0;
+				if (has_z)
+					dz = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_ZOFF) * my_pixel_size;
+
+				applyInverseOrientationAdjustment(
+						nr_freedom,
+						best_rot, best_tilt, best_psi,
+						best_dx, best_dy, best_dz,
+						rot, tilt, psi, dx, dy, dz);
+
+				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_ROT)  = rot;
+				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_TILT) = tilt;
+				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_PSI)  = psi;
+				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_XOFF) = dx / my_pixel_size;
+				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_YOFF) = dy / my_pixel_size;
+				if (has_z)
+					DIRECT_A2D_ELEM(exp_metadata, i, METADATA_ZOFF) = dz / my_pixel_size;
+			}
+		}
+
+		// Leader (rank 0) also adjusts its MDimg for output
+		if (node->isLeader())
+		{
+			// Determine which particles belong to half2 via random split
+			// For auto-refine, particles are split by sorted_idx parity
+			long int nr_half1 = mydata.sorted_idx.size() / 2;
+			// Only adjust particles past the halfway point (half2)
+			for (long int part_id_sorted = nr_half1; part_id_sorted < (long int)mydata.sorted_idx.size(); part_id_sorted++)
+			{
+				long int part_id = mydata.sorted_idx[part_id_sorted];
+
+				RFLOAT rot, tilt, psi, dx, dy, dz;
+				mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot);
+				mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt);
+				mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi);
+				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
+				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
+				dz = 0;
+				if (has_z)
+					mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
+
+				applyInverseOrientationAdjustment(
+						nr_freedom,
+						best_rot, best_tilt, best_psi,
+						best_dx, best_dy, best_dz,
+						rot, tilt, psi, dx, dy, dz);
+
+				mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot);
+				mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt);
+				mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi);
+				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
+				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
+				if (has_z)
+					mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
+			}
+		}
+	}
+}
+
 void MlOptimiserMpi::reconstructUnregularisedMapAndCalculateSolventCorrectedFSC()
 {
 	if (!do_grad && subset_size > 0)
@@ -4173,13 +4327,15 @@ void MlOptimiserMpi::iterate()
 		if (do_split_random_halves)
 		{
 
+			// Align the two half-maps and adjust per-particle orientations
+			// to prevent divergence at all resolutions
+			if (do_align_halves)
+				alignHalves();
+
 			// For asymmetric molecules, join 2 half-reconstructions at the lowest resolutions to prevent them from diverging orientations
 			if (low_resol_join_halves > 0.)
 				joinTwoHalvesAtLowResolution();
 
-#ifdef DEBUG
-			std::cerr << " before compareHalves..." << std::endl;
-#endif
 			//If doing GD, do an exponenetial averaged FSC
 			std::vector<MultidimArray<RFLOAT> > old_fscs(mymodel.nr_bodies);
 			if (do_grad)
@@ -4325,6 +4481,10 @@ void MlOptimiserMpi::iterate()
 		// Skip center classes in the final stages of gradient refinement
 		if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
 			centerClasses();
+
+		// Align all classes to the largest class at the last iteration
+		if (do_align_classes && mymodel.nr_classes > 1 && iter == nr_iter)
+			alignClasses();
 
 		// Directly use fn_out, without "_it" specifier, so unmasked refs will be overwritten at every iteration
 		if (do_write_unmasked_refs && node->rank == 1)

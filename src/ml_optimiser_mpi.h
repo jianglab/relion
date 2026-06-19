@@ -126,6 +126,11 @@ public:
     void compareTwoHalves();
 
     /**
+     * Align two half-maps during auto-refine to prevent orientation divergence
+     */
+    void alignHalves();
+
+    /**
      * Adjust angular sampling based on the expected angular accuracies for gradient optimization
      */
     void updateAngularSamplingGrad(long int my_first_part_id, long int my_last_part_id, bool verb = true);

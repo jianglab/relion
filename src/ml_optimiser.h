@@ -579,6 +579,12 @@ public:
 	/* Flag to center classes */
 	bool do_center_classes;
 
+	/* Flag to align all classes to the largest class (for Class3D) */
+	bool do_align_classes;
+
+	/* Flag to align half-maps to each other (for auto-refine) */
+	bool do_align_halves;
+
 	//////// Special stuff for the first iterations /////////////////
 
 	// Skip marginalisation in first iteration and use signal cross-product instead of Gaussian
@@ -870,6 +876,8 @@ public:
             do_firstiter_cc(0),
             do_bimodal_psi(0),
             do_center_classes(0),
+            do_align_classes(1),
+            do_align_halves(1),
             exp_my_last_part_id(0),
             particle_diameter(0),
             smallest_changes_optimal_orientations(0),
@@ -1114,6 +1122,10 @@ public:
 	 * and also update the origin offsets in the _data.star file correspondingly
 	 */
 	void centerClasses();
+
+	/* Align all classes to the largest class (for Class3D)
+	 */
+	void alignClasses();
 
 	/* Updates the current resolution (from data_vs_prior array) and keeps track of best resolution thus far
 	 *  and precalculates a 2D Fourier-space array with pointers to the resolution of each point in a FFTW-centered array

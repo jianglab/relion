@@ -3840,6 +3840,9 @@ In such cases, values in the range of 7-12 Angstroms have proven useful.");
 	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
 	joboptions["reverse_curvature"] = JobOption("Reverse Ewald curvature?", false, "Try curvature the other way around.");
 
+	joboptions["do_center"] = JobOption("Center class averages?", true, "If set to Yes, every iteration the class average images will be centered on their center-of-mass. This will only work for positive signals, so the particles should be white.");
+	joboptions["do_align"] = JobOption("Align classes to largest?", true, "If set to Yes, at the last iteration all classes will be rotationally and translationally aligned to the largest class. This ensures consistent orientation between classes for downstream analysis.");
+
 	joboptions["dont_skip_align"] = JobOption("Perform image alignment?", true, "If set to No, then rather than \
 performing both alignment and classification, only classification will be performed. This allows the use of very focused masks.\
 This requires that the optimal orientations of all particles are already stored in the input STAR file. ");
@@ -4124,6 +4127,11 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 			command += " --reverse_curvature";
 	}
 
+	if (joboptions["do_center"].getBoolean())
+		command += " --center_classes ";
+	if (joboptions["do_align"].getBoolean())
+		command += " --align_classes ";
+
 	if (joboptions["fn_mask"].getString().length() > 0)
 	{
 		command += " --solvent_mask " + joboptions["fn_mask"].getString();
@@ -4361,6 +4369,7 @@ weight on the experimental data. Values around 2-4 have been observed to be usef
 Too small values yield too-low resolution structures; too high values result in over-estimated resolutions, mostly notable by the apparition of high-frequency noise in the references.");
 	joboptions["low_resol_join_halves"] = JobOption("Lowres join halves (A):", 40, 0, 100, 1, "Resolution (in Angstrom) up to which the two random \
 half-reconstructions will not be independent, to prevent diverging orientations. Set to 0 to disable joining of low-resolution data.");
+	joboptions["do_align_halves"] = JobOption("Align half-maps to each other?", true, "If set to Yes, at every iteration the two half-maps will be rotationally and translationally aligned to each other. This prevents the two half-maps from diverging orientation at all resolutions.");
 
 	joboptions["sampling"] = JobOption("Initial angular sampling:", job_sampling_options, 2, "There are only a few discrete \
 angular samplings possible because we use the HealPix library to generate the sampling of the first two Euler angles on the sphere. \
@@ -4635,6 +4644,8 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 	// Optimisation
 	command += " --tau2_fudge " + joboptions["tau_fudge"].getString();
 	command += " --low_resol_join_halves " + joboptions["low_resol_join_halves"].getString();
+	if (joboptions["do_align_halves"].getBoolean())
+		command += " --align_halves ";
 	command += " --particle_diameter " + joboptions["particle_diameter"].getString();
 	if (!is_continue)
 	{

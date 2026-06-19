@@ -15,8 +15,8 @@ message(STATUS "Integration tests configured for pytest (Python)")
 message(STATUS "  Run with: pytest tests/integration/ -v")
 message(STATUS "  See tests/integration/README.md for documentation")
 
-# Per-category test groups
-foreach(tag reconstruction class3d ctf_refine autorefine aberrations anisomag ewald movie_polish s2_superiority defocus_sweep reconstruct_crash)
+# Per-category test groups (only tags with existing test_${tag}.py files)
+foreach(tag reconstruction ewald reconstruct_crash)
     add_test(
         NAME integration_${tag}
         COMMAND ${Python3_EXECUTABLE} -m pytest -v ${CMAKE_SOURCE_DIR}/tests/integration/test_${tag}.py

@@ -142,6 +142,9 @@ ignore = "D100,D213,D401,D413,D107"
 [tool.pytest.ini_options]
 minversion = "6.0"
 testpaths = ["src/tomography_python_programs/tests"]
+markers = [
+    "integration: tests that run RELION programs with synthetic data",
+]
 filterwarnings = [
     "error",
 ]

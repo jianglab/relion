@@ -48,6 +48,8 @@
 #include "src/spatial_frequency_grid.h"
 #include "src/cache_manager.h"
 #include "src/cache_init.h"
+#include "src/align_map_to_map.h"
+#include "src/symmetries.h"
 #include <map>
 #include <set>
 #include <iomanip>
@@ -672,6 +674,8 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     do_split_random_halves = parser.checkOption("--split_random_halves", "Refine two random halves of the data completely separately");
     low_resol_join_halves = textToFloat(parser.getOption("--low_resol_join_halves", "Resolution (in Angstrom) up to which the two random half-reconstructions will not be independent to prevent diverging orientations","-1"));
     do_center_classes = parser.checkOption("--center_classes", "Re-center classes based on their center-of-mass?");
+    do_align_classes = parser.checkOption("--align_classes", "Align all classes to the largest class (for Class3D)?");
+    do_align_halves = parser.checkOption("--align_halves", "Align half-maps to each other at every iteration (for auto-refine)?");
 
     // Initialisation
     int init_section = parser.addSection("Initialisation");
@@ -3516,6 +3520,10 @@ void MlOptimiser::iterate()
         if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
             centerClasses();
 
+        // Align all classes to the largest class at the last iteration
+        if (do_align_classes && mymodel.nr_classes > 1 && iter == nr_iter)
+            alignClasses();
+
         // Directly use fn_out, without "_it" specifier, so unmasked refs will be overwritten at every iteration
         if (do_write_unmasked_refs)
             mymodel.write(fn_out+"_unmasked", sampling, false, true);
@@ -5217,6 +5225,148 @@ void MlOptimiser::centerClasses()
                                                        mymodel.ori_size * mymodel.padding_factor, x, y, z);
         }
     }
+}
+
+void MlOptimiser::alignClasses()
+{
+    if (mymodel.nr_bodies > 1 || do_split_random_halves)
+        return;
+
+    if (mymodel.nr_classes <= 1)
+        return;
+
+    // Identify the largest class
+    int iclass_ref = 0;
+    RFLOAT max_pdf = mymodel.pdf_class[0];
+    for (int iclass = 1; iclass < mymodel.nr_classes; iclass++)
+    {
+        if (mymodel.pdf_class[iclass] > max_pdf)
+        {
+            max_pdf = mymodel.pdf_class[iclass];
+            iclass_ref = iclass;
+        }
+    }
+
+    // Determine search DOF from symmetry
+    int nr_freedom = 6; // default C1
+    if ( (do_helical_refine) && (!ignore_helical_symmetry) )
+    {
+        nr_freedom = 2;
+    }
+    else if (sampling.fn_sym != "C1" && sampling.fn_sym != "c1")
+    {
+        SymList SL;
+        int pgGroup, pgOrder;
+        if (SL.isSymmetryGroup(sampling.fn_sym, pgGroup, pgOrder))
+        {
+            if (pgGroup == pg_CN)
+            {
+                if (pgOrder >= 2)
+                    nr_freedom = 2;
+                else
+                    nr_freedom = 6;
+            }
+            else if (pgGroup == pg_CI || pgGroup == pg_CS)
+            {
+                nr_freedom = 6; // or could be 0; C1 and Cs have no symmetry
+            }
+            else
+            {
+                // Dn, T, O, I: skip alignment (symmetry fixes orientation)
+                nr_freedom = 0;
+            }
+        }
+    }
+
+    if (nr_freedom == 0)
+        return;
+
+    std::cout << " Aligning " << mymodel.nr_classes << " classes to class " << iclass_ref + 1
+              << " (largest) with " << ((nr_freedom == 2) ? "2" : "6")
+              << " DOF ..." << std::endl;
+
+    RFLOAT maxres = mymodel.current_resolution;
+    // For each other class, align to the largest class
+    for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+    {
+        if (iclass == iclass_ref) continue;
+
+        std::cout << "  Aligning class " << iclass + 1 << " to class " << iclass_ref + 1 << " ..." << std::endl;
+
+        RFLOAT best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz;
+
+        alignMapToMap(
+            mymodel.Iref[iclass],
+            mymodel.Iref[iclass_ref],
+            nr_freedom,
+            mymodel.pixel_size,
+            maxres,
+            3,                           // search_range: ±3 steps
+            1.,                          // search_step_rot (degrees)
+            1.,                          // search_step_trans (Angstrom)
+            best_rot, best_tilt, best_psi,
+            best_dx, best_dy, best_dz);
+
+        std::cout << "   Best: rot=" << best_rot << " tilt=" << best_tilt
+                  << " psi=" << best_psi << " dx=" << best_dx
+                  << " dy=" << best_dy << " dz=" << best_dz << std::endl;
+
+        // Apply the inverse adjustment to all particles in this class
+        const bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
+        FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
+        {
+            int this_class;
+            mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, this_class);
+            if (this_class != iclass + 1) continue; // 1-indexed
+
+            RFLOAT rot, tilt, psi, dx, dy, dz;
+            mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot);
+            mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt);
+            mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi);
+            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
+            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
+            dz = 0.;
+            if (has_z)
+                mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
+
+            applyInverseOrientationAdjustment(
+                nr_freedom,
+                best_rot, best_tilt, best_psi,
+                best_dx, best_dy, best_dz,
+                rot, tilt, psi, dx, dy, dz);
+
+            mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot);
+            mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt);
+            mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi);
+            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
+            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
+            if (has_z)
+                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
+
+            // Also adjust priors if they exist
+            RFLOAT prior_x, prior_y, prior_z;
+            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
+            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
+            if (prior_x < 999.)
+            {
+                prior_x -= best_dx;
+                prior_y -= best_dy;
+                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
+                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
+                if (has_z)
+                {
+                    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
+                    if (prior_z < 999.)
+                    {
+                        prior_z -= best_dz;
+                        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
+                    }
+                }
+            }
+        }
+    }
+
+    std::cout << " Done aligning classes." << std::endl;
 }
 
 void MlOptimiser::maximizationOtherParameters()
