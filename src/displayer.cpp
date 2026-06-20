@@ -38,6 +38,91 @@ const Fl_Menu_Item color_choices[] =
 };
 const int NUM_COLORS = 6;
 
+// Replace a 3D volume with a 2D composite of its X, Y, Z central sections.
+// Panels are laid out horizontally: Z | Y | X, each padded to the same square size.
+static void extractCentralSectionsComposite(MultidimArray<RFLOAT> &img,
+                                            int &out_panel_w, int &out_panel_h,
+                                            RFLOAT helical_rise_pixels,
+                                            bool show_z, bool show_y, bool show_x)
+{
+    int s_x = XSIZE(img);
+    int s_y = YSIZE(img);
+    int s_z = ZSIZE(img);
+    int cx = s_x / 2;
+    int cy = s_y / 2;
+    int cz = s_z / 2;
+
+    MultidimArray<RFLOAT> zs, ys, xs;
+    if (show_z)
+    {
+        if (helical_rise_pixels > 0. && s_z > 1)
+        {
+            int half = CEIL(helical_rise_pixels / 2.);
+            int start = XMIPP_MAX(0, cz - half);
+            int end = XMIPP_MIN(s_z - 1, cz + half);
+            int n = end - start + 1;
+            img.getSlice(start, zs, 'Z');
+            for (int k = start + 1; k <= end; k++)
+            {
+                MultidimArray<RFLOAT> tmp;
+                img.getSlice(k, tmp, 'Z');
+                for (int i = 0; i < YSIZE(zs); i++)
+                    for (int j = 0; j < XSIZE(zs); j++)
+                        DIRECT_A2D_ELEM(zs, i, j) += DIRECT_A2D_ELEM(tmp, i, j);
+            }
+            for (int i = 0; i < YSIZE(zs); i++)
+                for (int j = 0; j < XSIZE(zs); j++)
+                    DIRECT_A2D_ELEM(zs, i, j) /= n;
+        }
+        else
+        {
+            img.getSlice(cz, zs, 'Z');
+        }
+    }
+    if (show_y)
+        img.getSlice(cy, ys, 'Y');
+    if (show_x)
+        img.getSlice(cx, xs, 'X');
+
+    int p = 0;
+    if (show_z) p = XMIPP_MAX(p, XMIPP_MAX(XSIZE(zs), YSIZE(zs)));
+    if (show_y) p = XMIPP_MAX(p, XMIPP_MAX(XSIZE(ys), YSIZE(ys)));
+    if (show_x) p = XMIPP_MAX(p, XMIPP_MAX(XSIZE(xs), YSIZE(xs)));
+    if (p % 2 != 0) p++;
+
+    auto padToSquare = [p](const MultidimArray<RFLOAT> &src) -> MultidimArray<RFLOAT>
+    {
+        MultidimArray<RFLOAT> dst(p, p);
+        dst.initConstant(0.);
+        int ox = (p - XSIZE(src)) / 2;
+        int oy = (p - YSIZE(src)) / 2;
+        for (int i = 0; i < YSIZE(src); i++)
+            for (int j = 0; j < XSIZE(src); j++)
+                DIRECT_A2D_ELEM(dst, oy + i, ox + j) = DIRECT_A2D_ELEM(src, i, j);
+        return dst;
+    };
+
+    int npanels = (show_z ? 1 : 0) + (show_y ? 1 : 0) + (show_x ? 1 : 0);
+    out_panel_w = p;
+    out_panel_h = p;
+    img.resize(p, npanels * p);
+    int col = 0;
+    if (show_z) { MultidimArray<RFLOAT> pz = padToSquare(zs); for (int i = 0; i < p; i++) for (int j = 0; j < p; j++) DIRECT_A2D_ELEM(img, i, col * p + j) = DIRECT_A2D_ELEM(pz, i, j); col++; }
+    if (show_y) { MultidimArray<RFLOAT> py = padToSquare(ys); for (int i = 0; i < p; i++) for (int j = 0; j < p; j++) DIRECT_A2D_ELEM(img, i, col * p + j) = DIRECT_A2D_ELEM(py, i, j); col++; }
+    if (show_x) { MultidimArray<RFLOAT> px = padToSquare(xs); for (int i = 0; i < p; i++) for (int j = 0; j < p; j++) DIRECT_A2D_ELEM(img, i, col * p + j) = DIRECT_A2D_ELEM(px, i, j); col++; }
+}
+
+static std::string stripTrailingFloatZeros(const std::string &s)
+{
+    size_t dot = s.find('.');
+    if (dot == std::string::npos)
+        return s;
+    size_t end = s.find_last_not_of('0');
+    if (end == dot)
+        return s.substr(0, dot);
+    return s.substr(0, end + 1);
+}
+
 /************************************************************************/
 void DisplayBox::draw()
 {
@@ -62,7 +147,17 @@ void DisplayBox::draw()
         depth = (colour_scheme) ? 3 : 1;
         fl_draw_image((const uchar *)img_data, xpos, ypos, (short)xsize_data, (short)ysize_data, depth);
     }
-	if (img_label != "")
+	if (is_3d_volume && img_label != "")
+	{
+		fl_color(FL_WHITE);
+		int panel_w_display = xsize_data / nr_panels;
+		int col = 0;
+		if (show_z) { fl_draw("Z", xpos + col * panel_w_display + panel_w_display / 2 - 5, ypos + fl_height()); col++; }
+		if (show_y) { fl_draw("Y", xpos + col * panel_w_display + panel_w_display / 2 - 5, ypos + fl_height()); col++; }
+		if (show_x) { fl_draw("X", xpos + col * panel_w_display + panel_w_display / 2 - 5, ypos + fl_height()); col++; }
+		fl_draw(img_label.c_str(), xpos, ypos + fl_height() + fl_height() + 2);
+	}
+	else if (img_label != "")
 	{
 		fl_color(FL_WHITE);
 		fl_draw(img_label.c_str(), xpos, ypos + fl_height());
@@ -152,7 +247,9 @@ unsigned char rgbToGrey(const unsigned char red, const unsigned char green, cons
 }
 
 void DisplayBox::setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, int _ipos,
-                         RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale, bool do_relion_scale)
+                         RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale, bool do_relion_scale,
+                         RFLOAT helical_rise_pixels,
+                         bool _show_z, bool _show_y, bool _show_x)
 {
 	scale = _scale;
 	minval = _minval;
@@ -165,12 +262,20 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, i
 	MDimg.setIsList(true);
 	MDimg.addObject(MDCin);
 
-	// For volumes only show the central slice
-	if (ZSIZE(img) > 1)
+	show_z = _show_z;
+	show_y = _show_y;
+	show_x = _show_x;
+	nr_panels = (show_z ? 1 : 0) + (show_y ? 1 : 0) + (show_x ? 1 : 0);
+
+	// For volumes show central sections as a composite
+	if (ZSIZE(img) > 1 && nr_panels > 0)
 	{
-		MultidimArray<RFLOAT> slice;
-		img.getSlice(ZSIZE(img)/2, slice);
-		img=slice;
+		extractCentralSectionsComposite(img, panel_width, panel_height, helical_rise_pixels, show_z, show_y, show_x);
+		is_3d_volume = true;
+	}
+	else
+	{
+		is_3d_volume = false;
 	}
 
 	// create array for the scaled image data
@@ -315,6 +420,8 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_
 	MDimg.setIsList(true);
 	MDimg.addObject(MDCin);
 
+	is_3d_volume = false;
+
 	// For volumes only show the central slice
 	if (ZSIZE(img) > 1)
 	{
@@ -429,6 +536,7 @@ void DisplayBox::setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &mask
 	ipos = _ipos;
 	selected = NOTSELECTED;
     fom_is_grey_instead = false;
+	is_3d_volume = false;
 
 	// For volumes only show the central slice
 	if (ZSIZE(img) > 1)
@@ -546,7 +654,9 @@ int DisplayBox::unSelect()
 int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, ObservationModel *obsModel, EMDLabel display_label, EMDLabel text_label, bool _do_read_whole_stacks, bool _do_apply_orient,
                                   RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _ori_scale, int _ncol, long int max_nr_images, RFLOAT lowpass, RFLOAT highpass, bool _do_class,
                                   MetaDataTable *_MDdata, int _nr_regroup, bool _do_recenter,  bool _is_data, MetaDataTable *_MDgroups,
-                                  bool do_allow_save, FileName fn_selected_imgs, FileName fn_selected_parts, int max_nr_parts_per_class)
+                                  bool do_allow_save, FileName fn_selected_imgs, FileName fn_selected_parts, int max_nr_parts_per_class,
+                                   RFLOAT _central_z_thickness,
+                                  bool _show_z, bool _show_y, bool _show_x)
 {
 	// Scroll bars
 	Fl_Scroll scroll(0, 0, w(), h());
@@ -560,9 +670,17 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 	int nimgs = MDin.numberOfObjects();
 	if (viewer_type == MULTIVIEWER)
 	{
-		int xsize_canvas = _ncol * (CEIL(XSIZE(img())*_scale) + BOX_OFFSET);
+		int ds = XSIZE(img()), dh = YSIZE(img());
+		if (ZSIZE(img()) > 1)
+		{
+			int p = XMIPP_MAX(XSIZE(img()), XMIPP_MAX(YSIZE(img()), ZSIZE(img())));
+			if (p % 2 != 0) p++;
+			ds = 3 * p;
+			dh = p;
+		}
+		int xsize_canvas = _ncol * (CEIL(ds * _scale) + BOX_OFFSET);
 		int nrow = CEIL((RFLOAT)nimgs/_ncol);
-		int ysize_canvas = nrow * (CEIL(YSIZE(img())*_scale) + BOX_OFFSET);
+		int ysize_canvas = nrow * (CEIL(dh * _scale) + BOX_OFFSET);
 		multiViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
 		canvas.multi_max_nr_images = max_nr_images;
 		canvas.SetScroll(&scroll);
@@ -577,6 +695,10 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		canvas.fn_selected_imgs= fn_selected_imgs;
 		canvas.fn_selected_parts = fn_selected_parts;
 		canvas.max_nr_parts_per_class = max_nr_parts_per_class;
+		canvas.central_z_thickness = _central_z_thickness;
+		canvas.show_z = _show_z;
+		canvas.show_y = _show_y;
+		canvas.show_x = _show_x;
 		canvas.fill(MDin, obsModel, display_label, text_label, _do_apply_orient, _minval, _maxval, _sigma_contrast, _scale, _ncol, _do_recenter, max_nr_images, lowpass, highpass);
 		canvas.nr_regroups = _nr_regroup;
 		canvas.do_recenter = _do_recenter;
@@ -873,17 +995,41 @@ void basisViewerCanvas::fill(MetaDataTable &MDin, ObservationModel *obsModel, EM
 				nrow = XMIPP_MAX(nrow, irow+1);
 				if (my_ipos == 0)
 				{
-					xsize_box = CEIL(_scale * XSIZE(img())) + 2 * xoff; // 2 pixels on each side in between all images
-					ysize_box = CEIL(_scale * YSIZE(img())) + 2 * yoff;
+					int w = XSIZE(img()), h = YSIZE(img());
+					if (ZSIZE(img()) > 1)
+					{
+						int nvis = (show_z ? 1 : 0) + (show_y ? 1 : 0) + (show_x ? 1 : 0);
+						if (nvis == 0) nvis = 1;
+						int p = XMIPP_MAX(XSIZE(img()), XMIPP_MAX(YSIZE(img()), ZSIZE(img())));
+						if (p % 2 != 0) p++;
+						w = nvis * p;
+						h = p;
+					}
+					xsize_box = CEIL(_scale * w) + 2 * xoff; // 2 pixels on each side in between all images
+					ysize_box = CEIL(_scale * h) + 2 * yoff;
 				}
 				int ycoor = irow * ysize_box;
 				int xcoor = icol * xsize_box;
 
+				RFLOAT z_avg_pix = 0.;
+				if (central_z_thickness > 0.)
+				{
+					RFLOAT angpix_loc = angpix;
+					if (angpix_loc <= 0. && obsModel != NULL && obsModel->opticsMdt.numberOfObjects() > 0)
+						obsModel->opticsMdt.getValue(EMDL_IMAGE_PIXEL_SIZE, angpix_loc, 0);
+					if (angpix_loc > 0.)
+					{
+						z_avg_pix = central_z_thickness / angpix_loc;
+						if (z_avg_pix <= 1.)
+							z_avg_pix = 0.;
+					}
+				}
 				DisplayBox* my_box = new DisplayBox(xcoor, ycoor, xsize_box, ysize_box, "");
-				my_box->setData(img(), MDin.getObject(my_ipos), my_ipos, myminval, mymaxval, _scale, false);
+				my_box->setData(img(), MDin.getObject(my_ipos), my_ipos, myminval, mymaxval, _scale, false, z_avg_pix, show_z, show_y, show_x);
 				if (MDin.containsLabel(text_label))
 				{
 					MDin.getValueToString(text_label, my_box->img_label, my_ipos);
+					my_box->img_label = stripTrailingFloatZeros(my_box->img_label);
 				}
 				my_box->redraw();
 				boxes[my_sorted_ipos] = my_box;//boxes.push_back(my_box);
@@ -2782,6 +2928,7 @@ int displayerGuiWindow::fill(FileName &_fn_in)
 		y += ystep;
 
 		sort_button = new Fl_Check_Button(35,y,height,height, "Sort images ");
+		sort_button->value(1);
 		sort_choice = new Fl_Choice(x, y, width-x, height, "on:");
 		for (int i = 0; i < sort_labels.size(); i++)
 			sort_choice->add(sort_labels[i].c_str(), 0, 0,0, FL_MENU_VALUE);
@@ -2791,11 +2938,36 @@ int displayerGuiWindow::fill(FileName &_fn_in)
 		y += ystep;
 
 		reverse_sort_button  = new Fl_Check_Button(35, y, inputwidth, height, "Reverse sort?");
+		reverse_sort_button->value(1);
 		reverse_sort_button->color(GUI_INPUT_COLOR);
 		apply_orient_button  = new Fl_Check_Button(x, y, inputwidth, height, "Apply orientations?");
 		apply_orient_button->color(GUI_INPUT_COLOR);
 		display_label_button = new Fl_Check_Button(x+160, y, inputwidth, height, "Display label?");
+		display_label_button->value(1);
 		display_label_button->color(GUI_INPUT_COLOR);
+		if (is_class && is_3d_class)
+		{
+			y += ROUND(1.5*ystep);
+			Fl_Box *section_box = new Fl_Box(15, y-ROUND(0.25*ystep), width - 15, ROUND(1.5*ystep), "");
+			section_box->color(GUI_BACKGROUND_COLOR);
+			section_box->box(FL_DOWN_BOX);
+			show_x_button = new Fl_Check_Button(25, y, 90, height, "X sec");
+			show_x_button->value(1);
+			show_x_button->color(GUI_INPUT_COLOR);
+			show_y_button = new Fl_Check_Button(136, y, 90, height, "Y sec");
+			show_y_button->value(1);
+			show_y_button->color(GUI_INPUT_COLOR);
+			show_z_button = new Fl_Check_Button(247, y, 90, height, "Z sec");
+			show_z_button->value(1);
+			show_z_button->color(GUI_INPUT_COLOR);
+			{
+				Fl_Box *ct_box = new Fl_Box(358, y, 65, height, "Z thick (A):");
+				ct_box->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				ct_box->labelsize(12);
+				central_z_thickness_input = new Fl_Input(428, y, 42, height, "");
+				central_z_thickness_input->value("0");
+			}
+		}
 		y += ROUND(1.75*ystep);
 
 	}
@@ -2917,6 +3089,8 @@ void displayerGuiWindow::readLastSettings()
 			highpass_input->value(value.c_str());
 		else if (!is_multi && label == angpix_input->label())
 			angpix_input->value(value.c_str());
+		else if (is_class && is_3d_class && label == "Central Z thickness")
+			central_z_thickness_input->value(value.c_str());
 	}
 
 	in.close();
@@ -2950,6 +3124,8 @@ void displayerGuiWindow::writeLastSettings()
 		fh << highpass_input->label() << " = " << highpass_input->value() << std::endl;
 		fh << angpix_input->label() << " = " << angpix_input->value() << std::endl;
 	}
+	if (is_class && is_3d_class)
+		fh << "Central Z thickness = " << central_z_thickness_input->value() << std::endl;
 
 	fh.close();
 }
@@ -3039,6 +3215,18 @@ void displayerGuiWindow::cb_display_i()
 	if (is_class)
 	{
 		cl += " --class ";
+		if (is_3d_class)
+		{
+			RFLOAT ct = textToFloat(central_z_thickness_input->value());
+			if (ct > 0.)
+				cl += " --central_z_thickness " + (std::string)central_z_thickness_input->value();
+			if (!getValue(show_z_button))
+				cl += " --hide_z ";
+			if (!getValue(show_y_button))
+				cl += " --hide_y ";
+			if (!getValue(show_x_button))
+				cl += " --hide_x ";
+		}
 	}
 
 	if (do_allow_save)
@@ -3172,6 +3360,10 @@ void Displayer::read(int argc, char **argv)
 	fn_selected_parts = parser.getOption("--fn_parts", "Name of the STAR file in which to save particles from selected classes.", "");
 	max_nr_parts_per_class  = textToInteger(parser.getOption("--max_nr_parts_per_class", "Select maximum this number of particles from each selected classes.", "-1"));
 	do_recenter = parser.checkOption("--recenter", "Recenter the selected images to the center-of-mass of all positive pixel values. ");
+	central_z_thickness = textToFloat(parser.getOption("--central_z_thickness", "Central Z-section thickness in Angstrom for averaging (0=disable)", "0"));
+	show_z = !parser.checkOption("--hide_z", "Hide Z central section for 3D volumes");
+	show_y = !parser.checkOption("--hide_y", "Hide Y central section for 3D volumes");
+	show_x = !parser.checkOption("--hide_x", "Hide X central section for 3D volumes");
 	max_nr_images = textToInteger(parser.getOption("--max_nr_images", "Only show this many images (default is show all)", "-1"));
 
 	int pick_section  = parser.addSection("Picking options");
@@ -3352,6 +3544,7 @@ int Displayer::runGui()
 
 	displayerGuiWindow win(500, windowheight, "Relion display GUI");
 	win.is_class = false;
+	win.is_3d_class = false;
 	win.is_data = false;
 	win.is_star = false;
 	win.is_multi = false;
@@ -3382,6 +3575,13 @@ int Displayer::runGui()
 			FileName fn_model;
 			MDopt.getValue(EMDL_OPTIMISER_MODEL_STARFILE, fn_model);
 			MD.read(fn_model, "model_classes");
+			{
+				MetaDataTable MDgen;
+				MDgen.read(fn_model, "model_general");
+				int ref_dim = 2;
+				MDgen.getValue(EMDL_MLMODEL_DIMENSIONALITY, ref_dim);
+				win.is_3d_class = (ref_dim == 3);
+			}
 		}
 		// SHWS 28nov2019: backwards compatibility
 		else if (fn_in.contains("_model.star"))
@@ -3389,6 +3589,13 @@ int Displayer::runGui()
 			win.fn_data = fn_in.without("_model.star") + "_data.star";
 			win.is_class = true;
 			MD.read(fn_in, "model_classes");
+			{
+				MetaDataTable MDgen;
+				MDgen.read(fn_in, "model_general");
+				int ref_dim = 2;
+				MDgen.getValue(EMDL_MLMODEL_DIMENSIONALITY, ref_dim);
+				win.is_3d_class = (ref_dim == 3);
+			}
 		}
 		else
 		{
@@ -3558,7 +3765,8 @@ void Displayer::run()
 		basisViewerWindow win(MULTIVIEW_WINDOW_WIDTH, MULTIVIEW_WINDOW_HEIGHT, fn_in.c_str());
 		win.fillCanvas(MULTIVIEWER, MDin, &obsModel, display_label, text_label, do_read_whole_stacks, do_apply_orient, minval, maxval, sigma_contrast, scale, ori_scale, ncol,
 				max_nr_images,  lowpass, highpass, do_class, &MDdata, nr_regroups, do_recenter, fn_in.contains("_data.star"), &MDgroups,
-				do_allow_save, fn_selected_imgs, fn_selected_parts, max_nr_parts_per_class);
+				do_allow_save, fn_selected_imgs, fn_selected_parts, max_nr_parts_per_class, central_z_thickness,
+				show_z, show_y, show_x);
 	}
 	else
 	{

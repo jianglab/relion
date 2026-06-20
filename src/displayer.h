@@ -104,16 +104,24 @@ public:
 
 	std::string img_label;
 
+	// For 3D volumes: panel dimensions and labels for X/Y/Z central sections
+	bool is_3d_volume;
+	int panel_width;   // width of each panel in pixels (before scaling)
+	int panel_height;  // height of each panel in pixels (before scaling)
+	int nr_panels;     // how many panels are shown (1-3)
+	bool show_z, show_y, show_x;
+
 	// For getting back close the original image values from the uchar ones...
 	RFLOAT minval;
 	RFLOAT maxval;
 	RFLOAT scale;
 
 	// Constructor with an image and its metadata
-	DisplayBox(int X, int Y, int W, int H, const char *L=0) : Fl_Box(X,Y,W,H,L) { img_data = NULL; img_label = ""; MDimg.clear(); }
+	DisplayBox(int X, int Y, int W, int H, const char *L=0) : Fl_Box(X,Y,W,H,L) { img_data = NULL; img_label = ""; MDimg.clear(); is_3d_volume = false; panel_width = 0; panel_height = 0; nr_panels = 0; show_z = show_y = show_x = true; }
 
 	void setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, int ipos, RFLOAT minval, RFLOAT maxval,
-	             RFLOAT _scale, bool do_relion_scale = false);
+	             RFLOAT _scale, bool do_relion_scale = false, RFLOAT helical_rise_pixels = 0.,
+	             bool _show_z = true, bool _show_y = true, bool _show_x = true);
 
     void setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &fom_img, MetaDataContainer *MDCin, int ipos,
                  RFLOAT minval, RFLOAT maxval, RFLOAT _fom_min, RFLOAT _fom_max,
@@ -154,7 +162,9 @@ public:
 	               RFLOAT _scale, RFLOAT _ori_scale, int _ncol, long int max_nr_images = -1, RFLOAT lowpass = -1.0 , RFLOAT highpass = -1.0,
 	               bool do_class = false, MetaDataTable *MDdata = NULL,
 	               int _nr_regroup = -1, bool do_recenter = false, bool _is_data = false, MetaDataTable *MDgroups = NULL,
-	               bool do_allow_save = false, FileName fn_selected_imgs="", FileName fn_selected_parts="", int max_nr_parts_per_class = -1);
+	               bool do_allow_save = false, FileName fn_selected_imgs="", FileName fn_selected_parts="", int max_nr_parts_per_class = -1,
+	               RFLOAT central_z_thickness = 0.,
+	               bool _show_z = true, bool _show_y = true, bool _show_x = true);
 	int fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale);
 	int fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _coord_scale,
 	                           int _particle_radius, bool do_startend = false, bool do_lines = false, FileName _fn_coords = "",
@@ -189,6 +199,12 @@ public:
 
 	// Read stacks at once to speed up?
 	bool do_read_whole_stacks;
+
+	// Central Z-section thickness (A) for averaging; 0 = single-pixel slice
+	RFLOAT central_z_thickness;
+
+	// Which central sections to show for 3D volumes
+	bool show_z, show_y, show_x;
 
 	// Minimum value for rlnAutopickFigureOfMerit to display picks
 	RFLOAT minimum_pick_fom;
@@ -496,6 +512,9 @@ public:
 	// Some general settings for different types
 	bool is_class;
 
+	// 3D class averages (show section controls)
+	bool is_3d_class;
+
 	bool is_multi;
 
 	bool is_star;
@@ -537,11 +556,15 @@ public:
 	Fl_Input *black_input, *white_input, *sigma_contrast_input, *scale_input, *lowpass_input, *highpass_input, *angpix_input;
 	Fl_Input *col_input, *ori_scale_input, *max_nr_images_input, *max_parts_per_class_input;
 	Fl_Check_Button *sort_button, *reverse_sort_button, *apply_orient_button, *display_label_button;
+	Fl_Check_Button *show_z_button, *show_y_button, *show_x_button;
+	Fl_Input *central_z_thickness_input;
 	Fl_Choice *display_choice, *sort_choice, *colour_scheme_choice;
 
 	// Constructor with w x h size of the window and a title
 	displayerGuiWindow(int W, int H, const char* title=0): Fl_Window(W, H, title),	sort_button(NULL),
-			reverse_sort_button(NULL), apply_orient_button(NULL), display_label_button(NULL){}
+			reverse_sort_button(NULL), apply_orient_button(NULL), display_label_button(NULL),
+			show_z_button(NULL), show_y_button(NULL), show_x_button(NULL),
+			central_z_thickness_input(NULL), is_3d_class(false) {}
 
 	// Fill all except for the browser
 	int fill(FileName &fn_in);
@@ -670,6 +693,12 @@ public:
 
 	// Flag for reading whole stacks instead of individual images
 	bool do_read_whole_stacks;
+
+	// Central Z-section thickness (A) for averaging; 0 = single-pixel slice
+	RFLOAT central_z_thickness;
+
+	// Which central sections to show for 3D volumes
+	bool show_z, show_y, show_x;
 
 	// Flag to show colour scalebar image
 	bool do_colourbar;
