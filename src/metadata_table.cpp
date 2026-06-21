@@ -1374,7 +1374,7 @@ void MetaDataTable::write(std::ostream& out) const
 	if (version >= 30000)
 	{
 		out << "\n";
-		out << "# version " << getCurrentVersion() <<"\n";
+		out << "# version " << version <<"\n";
 	}
 
 	out << "\n";

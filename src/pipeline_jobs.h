@@ -99,6 +99,7 @@ static const std::vector<std::string> job_sampling_options{
 static const std::vector<std::string> job_nodetype_options{
 	"Particle coordinates (*.box, *_pick.star)",
 	"Particles STAR file (.star)",
+	"CryoSPARC .cs file (.cs)",
 	"Multiple (2D or 3D) references (.star or .mrcs)",
 	"Micrographs STAR file (.star)",
 	"3D reference (.mrc)",

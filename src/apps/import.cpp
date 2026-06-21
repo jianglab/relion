@@ -22,15 +22,18 @@
 #include <src/jaz/single_particle/obs_model.h>
 #include <src/image.h>
 #include <src/metadata_table.h>
+#include <src/cryosparc_import.h>
+
+#include <glob.h>
 
 class import_parameters
 {
 	public:
    	FileName fn_in, fn_odir, fn_out, fn_mtf;
-	bool do_write_types, do_continue, do_movies, do_micrographs, do_coordinates, do_halfmaps, do_particles, do_other;
-   	FileName optics_group_name, node_type, particles_optics_group_name;
-   	RFLOAT kV, Cs, Q0, beamtilt_x, beamtilt_y, pixel_size;
-    long int do_at_most;
+	bool do_write_types, do_continue, do_movies, do_micrographs, do_coordinates, do_halfmaps, do_particles, do_other, do_cryosparc;
+    	FileName optics_group_name, node_type, particles_optics_group_name, passthrough;
+    	RFLOAT kV, Cs, Q0, beamtilt_x, beamtilt_y, pixel_size;
+    	long int do_at_most;
 
 	// I/O Parser
 	IOParser parser;
@@ -55,6 +58,8 @@ class import_parameters
 		do_particles = parser.checkOption("--do_particles", "Import particle STAR files");
 		particles_optics_group_name = parser.getOption("--particles_optics_group_name", "Rename optics group for all imported particles (e.g. \"opticsGroupLMBjan2019\"", "");
 		do_other = parser.checkOption("--do_other", "Import anything else");
+		do_cryosparc = parser.checkOption("--do_cryosparc", "Import a CryoSPARC .cs file");
+		passthrough = parser.getOption("--passthrough", "CryoSPARC passthrough .cs file(s) to merge on uid (comma-separated)", "");
 
 		int mic_section = parser.addSection("Specific options for movies or micrographs");
 		optics_group_name = parser.getOption("--optics_group_name", "Name for this optics group", "opticsGroup1");
@@ -93,9 +98,10 @@ class import_parameters
 		if (do_micrographs) nr_count++;
 		if (do_coordinates) nr_count++;
 		if (do_other || do_halfmaps || do_particles) nr_count++;
+		if (do_cryosparc) nr_count++;
 		if (nr_count != 1)
 		{
-			REPORT_ERROR("ERROR: you can only use only one, and at least one, of the options --do_movies, --do_micrographs, --do_coordinates, --do_halfmaps or --do_other");
+			REPORT_ERROR("ERROR: you can only use only one, and at least one, of the options --do_movies, --do_micrographs, --do_coordinates, --do_halfmaps, --do_particles, --do_other or --do_cryosparc");
 		}
 
 		std::cout << " importing..." << std::endl;
@@ -278,6 +284,47 @@ class import_parameters
 			FileName fnt = "/" + fn_in;
 			fnt = fn_odir + fnt.afterLastOf("/");
 			obsModel.save(MD, fnt, "particles");
+		}
+		else if (do_cryosparc)
+		{
+			if (nr_input_files > 1)
+			{
+				REPORT_ERROR("ERROR: Multiple files (i.e. filename wildcards) are not allowed for CryoSPARC import.");
+			}
+
+			// Auto-discover passthrough .cs file in the same directory
+			FileName pt_file = passthrough;
+			if (pt_file == "")
+			{
+				glob_t glob_result;
+				std::string dir = fn_in.beforeLastOf("/");
+				if (dir == "") dir = ".";
+				std::string pattern = dir + "/*_passthrough.cs";
+				int ret = glob(pattern.c_str(), 0, nullptr, &glob_result);
+				if (ret == 0)
+				{
+					if (glob_result.gl_pathc == 1)
+					{
+						pt_file = glob_result.gl_pathv[0];
+						std::cout << " Auto-discovered passthrough file: " << pt_file << std::endl;
+					}
+					else
+					{
+						std::cout << " WARNING: multiple *_passthrough.cs files found in " << dir
+								  << "; not using any. Specify --passthrough explicitly." << std::endl;
+					}
+					globfree(&glob_result);
+				}
+			}
+
+			FileName fnt;
+			if (fn_out != "")
+				fnt = fn_odir + fn_out;
+			else
+				fnt = fn_odir + fn_in.afterLastOf("/");
+			fnt = fnt.withoutExtension() + ".star";
+
+			cryosparc::convert(fn_in, fnt, optics_group_name, pixel_size, kV, Cs, Q0, pt_file);
 		}
 		else if (do_other || do_halfmaps)
 		{

@@ -1384,6 +1384,11 @@ bool RelionJob::getCommandsImportJob(std::string &outputname, std::vector<std::s
 			std::string mynodetype;
 			if (node_type == "Particles STAR file (.star)")
 				mynodetype = LABEL_IMPORT_PARTS;
+			else if (node_type == "CryoSPARC .cs file (.cs)")
+			{
+				mynodetype = LABEL_IMPORT_PARTS;
+				fn_out = fn_out.withoutExtension() + ".star";
+			}
 			else if (node_type == "Multiple (2D or 3D) references (.star or .mrcs)")
 				mynodetype = LABEL_IMPORT_2DIMG;
 			else if (node_type == "3D reference (.mrc)")
@@ -1427,16 +1432,23 @@ bool RelionJob::getCommandsImportJob(std::string &outputname, std::vector<std::s
 			}
 			else if (mynodetype == LABEL_PARTS_CPIPE)
 			{
-				command += " --do_particles";
-				FileName optics_group = joboptions["optics_group_particles"].getString();
-				if (optics_group != "")
+				if (node_type == "CryoSPARC .cs file (.cs)")
 				{
-					if (!optics_group.validateCharactersStrict())
+					command += " --do_cryosparc";
+				}
+				else
+				{
+					command += " --do_particles";
+					FileName optics_group = joboptions["optics_group_particles"].getString();
+					if (optics_group != "")
 					{
-						error_message = "ERROR: an optics group name may contain only numbers, alphabets and hyphen(-).";
-						return false;
+						if (!optics_group.validateCharactersStrict())
+						{
+							error_message = "ERROR: an optics group name may contain only numbers, alphabets and hyphen(-).";
+							return false;
+						}
+						command += " --particles_optics_group_name \"" + optics_group + "\"";
 					}
-					command += " --particles_optics_group_name \"" + optics_group + "\"";
 				}
 			}
 			else
