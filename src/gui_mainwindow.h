@@ -203,7 +203,8 @@ public:
     // Constructor with w x h size of the window and a title
 	GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 			int _update_every_sec, int _exit_after_sec, bool _do_read_only = false,
-			bool _do_tomo = false, bool _use_ccpem_pipeliner = false, bool _do_projdir = false);
+			bool _do_tomo = false, bool _use_ccpem_pipeliner = false, bool _do_projdir = false,
+			FileName _switch_to = "");
 
     // Destructor
     ~GuiMainWindow(){ clear(); };
@@ -351,6 +352,19 @@ private:
     static void cb_toggle_expand_stdout(Fl_Widget*, void*);
     inline void cb_toggle_expand_stdout_i();
 
+    // Project management
+    static void cb_new_project(Fl_Widget*, void*);
+    inline void cb_new_project_i();
+    static void cb_open_project(Fl_Widget*, void*);
+    inline void cb_open_project_i();
+    static void cb_manage_projects(Fl_Widget*, void*);
+    inline void cb_manage_projects_i();
+    static void cb_import_project(Fl_Widget*, void*);
+    inline void cb_import_project_i();
+    static void cb_recent_project(Fl_Widget*, void*);
+    inline void cb_recent_project_i(int idx);
+    void rebuildRecentProjectsInMenu();
+
     static void cb_cache_management(Fl_Widget*, void*);
     inline void cb_cache_management_i();
 
@@ -359,6 +373,8 @@ private:
 
 public:
     static void cb_quit(Fl_Widget*, void*);
+    void switchToProject(const std::string &path);
+    FileName pending_switch_to_;
 private:
     inline void cb_quit_i();
 };

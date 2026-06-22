@@ -4886,6 +4886,11 @@ Remember that running a single MPI follower on each node that runs as many threa
 	}
 	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then the job will create a sub-directory in it called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
 Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.");
+	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
+	if (default_cache == NULL)
+		default_cache = "";
+	joboptions["cache_dir"] = JobOption("Local SSD cache directory:", std::string(default_cache), "If a directory is provided here, particle stacks will be cached in subdirectory relion_cache/ for reuse across multiple jobs. The default can be set via the RELION_CACHE_DIRECTORY environment variable. Unlike --scratch_dir, cached data persists after the job finishes and is reused on cache hit in subsequent jobs.");
+	joboptions["cache_copy_threads"] = JobOption("Cache copy threads:", std::string("4"), "Number of parallel threads for cache file copy.");
 	joboptions["do_combine_thru_disc"] = JobOption("Combine iterations through disc?", false, "If set to Yes, at the end of every iteration all MPI followers will write out a large file with their accumulated results. The MPI leader will read in all these files, combine them all, and write out a new file with the combined results. \
 All MPI salves will then read in the combined results. This reduces heavy load on the network, but increases load on the disc I/O. \
 This will affect the time it takes between the progress-bar in the expectation step reaching its end (the mouse gets to the cheese) and the start of the ensuing maximisation step. It will depend on your system setup which is most efficient.");
@@ -4989,6 +4994,9 @@ bool RelionJob::getCommandsMultiBodyJob(std::string &outputname, std::vector<std
 			command += " --preread_images " ;
 		else if (joboptions["scratch_dir"].getString() != "")
 					command += " --scratch_dir " +  joboptions["scratch_dir"].getString();
+		if (joboptions["cache_dir"].getString() != "")
+			command += " --cache_dir " +  joboptions["cache_dir"].getString()
+					   + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
 		command += " --pool " + joboptions["nr_pool"].getString();
 		if (joboptions["do_pad1"].getBoolean())
 			command += " --pad 1 ";
@@ -7706,8 +7714,6 @@ If set to a value larger than the image size no masking will be performed.");
 	joboptions["do_half2"] = JobOption("Reconstruct half-2 map?", true, "If set to Yes, reconstruct the half-2 map (random subset 2).");
 	joboptions["do_alldata"] = JobOption("Reconstruct full map from all data?", true, "If set to Yes, reconstruct the full map from all particles.");
 
-	joboptions["do_prefetch"] = JobOption("Prefetch particles?", true, "If set to Yes, particle images will be read asynchronously in a background thread while the current image is being backprojected. This hides disk I/O latency without requiring all images to fit in RAM simultaneously. Disable this only on systems where background I/O causes instability.");
-
 	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
 	if (default_cache == NULL)
 		default_cache = "";
@@ -7791,8 +7797,6 @@ bool RelionJob::getCommandsReconstruct3DJob(std::string &outputname, std::vector
 	}
 
 	// Pre-read and cache options
-	if (!joboptions["do_prefetch"].getBoolean())
-		command += " --no_prefetch ";
 	if (joboptions["cache_dir"].getString() != "")
 		command += " --cache_dir " + joboptions["cache_dir"].getString()
 		           + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();

@@ -2647,7 +2647,6 @@ void JobWindow::initialiseReconstruct3DWindow()
 
 	current_y += STEPY/2;
 
-	place("do_prefetch", TOGGLE_LEAVE_ACTIVE);
 	place("cache_dir", TOGGLE_LEAVE_ACTIVE);
 	place("cache_copy_threads", TOGGLE_LEAVE_ACTIVE);
 

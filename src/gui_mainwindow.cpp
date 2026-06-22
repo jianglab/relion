@@ -21,6 +21,7 @@
 
 #include "src/gui_mainwindow.h"
 #include "src/gui_cache.h"
+#include "src/gui_projects.h"
 #include "src/gui_background.xpm"
 #include <fstream>
 #include <FL/Fl_Text_Buffer.H>
@@ -38,6 +39,12 @@
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 bool show_expand_stdout;
+
+// Per-user project registry (shared across all RELION sessions)
+static ProjectManager project_manager;
+
+// Maximum number of recent projects shown in the Project menu
+#define MAX_RECENT_PROJECTS 5
 
 // The StdOutDisplay allows looking at the entire stdout or stderr file
 int StdOutDisplay::handle(int ev)
@@ -295,9 +302,16 @@ void NoteEditorWindow::cb_save_i()
 	int err = textbuff_note->savefile(fn_note.c_str());
 }
 
+static void SwitchToProjectTimer_CB(void *data)
+{
+	GuiMainWindow *win = (GuiMainWindow*)data;
+	win->switchToProject(win->pending_switch_to_);
+	win->pending_switch_to_.clear();
+}
+
 GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 		int _update_every_sec, int _exit_after_sec, bool _do_read_only, bool _do_tomo,
-		bool _use_ccpem_pipeliner, bool _do_projdir):Fl_Window(w,h,title)
+		bool _use_ccpem_pipeliner, bool _do_projdir, FileName _switch_to):Fl_Window(w,h,title)
 {
 	// Set initial Timer
 	tickTimeLastChanged();
@@ -364,6 +378,8 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 		pipeline.write();
 	}
 
+
+
  	if (use_ccpem_pipeliner)
  	{
  		color((fl_rgb_color(255,240,240)));
@@ -373,35 +389,76 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
  		color(GUI_BACKGROUND_COLOR);
  	}
  	menubar = new Fl_Menu_Bar(-3, 0, WCOL0-7, MENUHEIGHT);
-	menubar->add("File/Re-read pipeline",  FL_ALT+'r', cb_reread_pipeline, this);
-	menubar->add("File/Edit project note",  FL_ALT+'e', cb_edit_project_note, this);
-	if (!maingui_do_read_only)
-		menubar->add("File/Print all notes",  0, cb_print_notes, this);
-	if (!maingui_do_read_only)
-		menubar->add("File/Remake .Nodes\\/",  FL_ALT+'n', cb_remake_nodesdir, this);
-	menubar->add("File/Display",  FL_ALT+'d', cb_display, this);
-	menubar->add("File/_Show initial screen",  FL_ALT+'z', cb_show_initial_screen, this);
-	if (!maingui_do_read_only)
-		menubar->add("File/_Empty trash",  FL_ALT+'t', cb_empty_trash, this);
-	menubar->add("File/Cache management", 0, cb_cache_management, this);
-	menubar->add("File/About", 0, cb_about, this);
-	menubar->add("File/Quit", FL_ALT+'q', cb_quit, this);
-	if (!maingui_do_read_only)
-	{
-		menubar->add("Jobs/Save job.star",  FL_ALT+'s', cb_save, this);
-		menubar->add("Jobs/_Load job.star",  FL_ALT+'l', cb_load, this);
-	}
-	menubar->add("Jobs/Order alphabetically",  FL_ALT+'a', cb_order_jobs_alphabetically, this);
-	menubar->add("Jobs/_Order chronologically",  FL_ALT+'c', cb_order_jobs_chronologically, this);
-	if (!maingui_do_read_only)
-	{	menubar->add("Jobs/Undelete job(s)",  FL_ALT+'u', cb_undelete_job, this);
-                menubar->add("Jobs/_Toggle overwrite button", FL_ALT+'o', cb_toggle_overwrite_continue, this);
-		menubar->add("Jobs/Run scheduled jobs", 0, cb_start_pipeliner, this);
-		menubar->add("Jobs/_Stop running scheduled jobs", 0, cb_stop_pipeliner, this);
-		menubar->add("Jobs/Gently clean all jobs",  FL_ALT+'g', cb_gently_clean_all_jobs, this);
-		menubar->add("Jobs/Harshly clean all jobs",  FL_ALT+'h', cb_harshly_clean_all_jobs, this);
+ 	// -- File menu --
+ 	menubar->add("File/Re-read pipeline",  FL_ALT+'r', cb_reread_pipeline, this);
+ 	menubar->add("File/Edit project note",  FL_ALT+'e', cb_edit_project_note, this);
+ 	if (!maingui_do_read_only)
+ 		menubar->add("File/Print all notes",  0, cb_print_notes, this);
+ 	if (!maingui_do_read_only)
+ 		menubar->add("File/Remake .Nodes\\/",  FL_ALT+'n', cb_remake_nodesdir, this);
+ 	menubar->add("File/Display",  FL_ALT+'d', cb_display, this);
+ 	menubar->add("File/_Show initial screen",  FL_ALT+'z', cb_show_initial_screen, this);
+ 	if (!maingui_do_read_only)
+ 		menubar->add("File/_Empty trash",  FL_ALT+'t', cb_empty_trash, this);
+ 	menubar->add("File/About", 0, cb_about, this);
+ 	menubar->add("File/Quit", FL_ALT+'q', cb_quit, this);
 
-	}
+ 	// -- Project menu --
+ 	if (!maingui_do_read_only)
+ 	{
+  		menubar->add("Project/New project...", FL_ALT+'n', cb_new_project, this);
+  		menubar->add("Project/Open project...", FL_ALT+'o', cb_open_project, this);
+  		// Recent submenu: placeholder only; items are built dynamically
+  		// by rebuildRecentProjectsInMenu().
+  		menubar->add("Project/Recent/(empty)", 0, 0, 0, FL_MENU_INVISIBLE);
+   		menubar->add("Project/Manage projects...", 0, cb_manage_projects, this);
+  		menubar->add("Project/Import project...", 0, cb_import_project, this);
+  		menubar->add("Project/Manage cache...", 0, cb_cache_management, this);
+ 	}
+	project_manager.load();
+	rebuildRecentProjectsInMenu();
+
+	// Auto-register the current directory as a project
+ 	{
+ 		char cwd[4096];
+ 		if (getcwd(cwd, sizeof(cwd)))
+ 		{
+ 			std::string path(cwd);
+ 			if (!project_manager.isRegistered(path))
+ 			{
+ 				std::string name = path;
+ 				size_t slash = name.rfind('/');
+ 				if (slash != std::string::npos)
+ 					name = name.substr(slash + 1);
+ 				project_manager.add(path, name);
+ 				project_manager.save();
+ 				rebuildRecentProjectsInMenu();
+ 			}
+ 			else
+ 			{
+ 				project_manager.touchLastOpened(path);
+ 				project_manager.save();
+ 			}
+ 		}
+ 	}
+
+	// -- Jobs menu --
+ 	if (!maingui_do_read_only)
+ 	{
+ 		menubar->add("Jobs/Save job.star",  FL_ALT+'s', cb_save, this);
+ 		menubar->add("Jobs/_Load job.star",  FL_ALT+'l', cb_load, this);
+ 	}
+ 	menubar->add("Jobs/Order alphabetically",  FL_ALT+'a', cb_order_jobs_alphabetically, this);
+ 	menubar->add("Jobs/_Order chronologically",  FL_ALT+'c', cb_order_jobs_chronologically, this);
+ 	if (!maingui_do_read_only)
+ 	{	menubar->add("Jobs/Undelete job(s)",  FL_ALT+'u', cb_undelete_job, this);
+                 menubar->add("Jobs/_Toggle overwrite button", FL_ALT+'o', cb_toggle_overwrite_continue, this);
+ 		menubar->add("Jobs/Run scheduled jobs", 0, cb_start_pipeliner, this);
+ 		menubar->add("Jobs/_Stop running scheduled jobs", 0, cb_stop_pipeliner, this);
+ 		menubar->add("Jobs/Gently clean all jobs",  FL_ALT+'g', cb_gently_clean_all_jobs, this);
+ 		menubar->add("Jobs/Harshly clean all jobs",  FL_ALT+'h', cb_harshly_clean_all_jobs, this);
+
+ 	}
 	current_y = MENUHEIGHT + 10;
 
 	// Fill browser in the right order
@@ -674,12 +731,6 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	browse_grp[nr_browse_tabs]->end();
 	nr_browse_tabs++;
 
-	browse_grp[nr_browse_tabs] = new Fl_Group(WCOL0, 2, 550, 615-MENUHEIGHT);
-	browser->add("Cache management");
-	gui_jobwindows[nr_browse_tabs] = NULL;
-	browse_grp[nr_browse_tabs]->end();
-	nr_browse_tabs++;
-
 	browser->callback(cb_select_browsegroup, this);
 	browser->end();
 	browser->select(1); // just start from the beginning
@@ -858,6 +909,13 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	// Set and activate current selection from side-browser
 	cb_select_browsegroup_i(true); // make default active; true is used to show_initial_screen
 	is_main_continue = false; // default is a new run
+
+	// If --switch-to was given, schedule a project switch after the event loop starts
+	if (!_switch_to.empty())
+	{
+		pending_switch_to_ = _switch_to;
+		Fl::add_timeout(1.0, SwitchToProjectTimer_CB, (void*)this);
+	}
 }
 
 static void Gui_Timer_CB(void *userdata)
@@ -879,10 +937,8 @@ static void Gui_Timer_CB(void *userdata)
 	if (current_job >= 0 && pipeline.processList[current_job].status == PROC_RUNNING)
 		o->fillStdOutAndErr();
 
-	// Check for job completion if the pipeline has been changed
-
-	if (exists(PIPELINE_HAS_CHANGED))
-		o->updateJobLists();
+	// Periodically check for job completion and refresh the job lists
+	o->updateJobLists();
 
 	// Refresh every so many seconds
 	Fl::repeat_timeout(o->update_every_sec, Gui_Timer_CB, userdata);
@@ -1273,16 +1329,6 @@ void GuiMainWindow::cb_select_browsegroup(Fl_Widget* o, void* v)
 
 	// When clicking the job browser on the left: reset current_job to -1 (i.e. a new job, not yet in the pipeline)
 	current_job = -1;
-
-	// If Cache management is selected (has no JobWindow), open the dialog
-	int iwin = (browser->value() - 1);
-	if (iwin >= 0 && iwin < T->nr_browse_tabs && gui_jobwindows[iwin] == NULL)
-	{
-		T->cb_cache_management_i();
-		T->cb_select_browsegroup_i();
-		run_button->activate();
-		return;
-	}
 
 	T->cb_select_browsegroup_i();
 	run_button->activate();
@@ -2453,6 +2499,7 @@ void GuiMainWindow::cb_empty_trash_i()
 	std::string ask = "Are you sure you want to remove the entire Trash folder?";
 	int proceed =  fl_choice("%s", "Cancel", "Empty Trash", NULL, ask.c_str());
 	if (proceed)
+	{
 	if (use_ccpem_pipeliner)
 	{
 		std::string command = "reSPYon --empty_trash";
@@ -2463,6 +2510,7 @@ void GuiMainWindow::cb_empty_trash_i()
 		std::string command = "rm -rf Trash";
 		std::cout << " Executing: " << command << std::endl;
 		int res = system(command.c_str());
+	}
 	}
 
 }
@@ -2730,3 +2778,438 @@ void GuiMainWindow::cb_quit_i()
 {
 	exit(0);
 }
+
+// ---------------------------------------------------------------------------
+// Project management callbacks
+// ---------------------------------------------------------------------------
+
+void GuiMainWindow::switchToProject(const std::string &path)
+{
+	if (chdir(path.c_str()) != 0)
+	{
+		fl_alert("Failed to switch to project:\n%s", path.c_str());
+		return;
+	}
+
+	touch(".gui_projectdir");
+
+	pipeline.name = "default";
+	if (exists(pipeline.name + "_pipeline.star"))
+	{
+		pipeline.read(DO_LOCK, "switch project");
+		pipeline.write(DO_LOCK);
+	}
+	else
+	{
+		pipeline.clear();
+		pipeline.write();
+	}
+
+	// Reset to no job selected and show the initial screen
+	current_job = -1;
+	cb_select_browsegroup_i(true);
+	run_button->deactivate();
+
+	// Update the window title to reflect the new project directory
+	{
+		std::string project_name = path;
+		size_t slash = project_name.rfind('/');
+		if (slash != std::string::npos)
+			project_name = project_name.substr(slash + 1);
+		std::string new_title = "RELION: " + project_name;
+		copy_label(new_title.c_str());
+	}
+
+	project_manager.touchLastOpened(path);
+	project_manager.save();
+	updateJobLists();
+	rebuildRecentProjectsInMenu();
+}
+
+void GuiMainWindow::cb_new_project(Fl_Widget* o, void* v)
+{
+	GuiMainWindow* T = (GuiMainWindow*)v;
+	T->cb_new_project_i();
+}
+
+void GuiMainWindow::cb_new_project_i()
+{
+	const char *dirname = fl_dir_chooser("Select directory for the new project", ".");
+	if (!dirname || strlen(dirname) == 0)
+		return;
+
+	std::string path(dirname);
+	// Remove trailing slash (macOS native dir chooser adds it)
+	while (path.size() > 1 && path.back() == '/')
+		path.pop_back();
+	FileName fn(path);
+	if (!exists(fn))
+	{
+		std::string cmd = "mkdir -p " + fn;
+		int res = system(cmd.c_str());
+		if (res != 0)
+		{
+			fl_alert("Failed to create directory:\n%s", fn.c_str());
+			return;
+		}
+	}
+
+	// Create .gui_projectdir sentinel
+	touch(fn + "/.gui_projectdir");
+	std::string dircom = "mkdir -p " + fn + "/.TMP_runfiles";
+	int res = system(dircom.c_str());
+
+	// Register project
+	project_manager.add(fn, fn.afterLastOf("/"));
+	project_manager.save();
+
+	switchToProject(fn);
+}
+
+void GuiMainWindow::cb_open_project(Fl_Widget* o, void* v)
+{
+	GuiMainWindow* T = (GuiMainWindow*)v;
+	T->cb_open_project_i();
+}
+
+void GuiMainWindow::cb_open_project_i()
+{
+	const char *dirname = fl_dir_chooser("Select existing RELION project directory", ".");
+	if (!dirname || strlen(dirname) == 0)
+		return;
+
+	std::string path(dirname);
+	while (path.size() > 1 && path.back() == '/')
+		path.pop_back();
+	FileName fn(path);
+	if (!exists(fn))
+	{
+		fl_alert("Directory does not exist:\n%s", fn.c_str());
+		return;
+	}
+
+	if (!exists(fn + "/.gui_projectdir"))
+	{
+		int ret = fl_choice("This directory does not look like a RELION project directory.\n"
+				    "Do you want to create a project here?",
+				    "Cancel", "Yes", 0);
+		if (ret != 1)
+			return;
+		touch(fn + "/.gui_projectdir");
+		std::string dircom = "mkdir -p " + fn + "/.TMP_runfiles";
+		int res = system(dircom.c_str());
+	}
+
+	project_manager.add(fn, fn.afterLastOf("/"));
+	project_manager.save();
+
+	switchToProject(fn);
+}
+
+void GuiMainWindow::cb_recent_project(Fl_Widget* o, void* v)
+{
+	int idx = (int)(intptr_t)v;
+	GuiMainWindow* T = (GuiMainWindow*)Fl::first_window();
+	if (T)
+		T->cb_recent_project_i(idx);
+}
+
+void GuiMainWindow::cb_recent_project_i(int idx)
+{
+	std::vector<ProjectManager::Project> recent = project_manager.getRecent();
+	if (idx < 0 || idx >= (int)recent.size())
+		return;
+
+	const ProjectManager::Project &p = recent[idx];
+	if (!p.exists())
+	{
+		fl_alert("Project directory no longer exists:\n%s\nIt will be removed from the registry.",
+			 p.path.c_str());
+		project_manager.remove(p.path);
+		project_manager.save();
+		rebuildRecentProjectsInMenu();
+		return;
+	}
+
+	// Check for .gui_projectdir
+	if (!exists(FileName(p.path + "/.gui_projectdir")))
+	{
+		int ret = fl_choice("Project \"%s\" is missing .gui_projectdir.\n"
+				    "Create it and open anyway?", "Cancel", "Yes", 0,
+				    p.name.c_str());
+		if (ret != 1)
+			return;
+		touch(FileName(p.path + "/.gui_projectdir"));
+	}
+
+	// Update registry (switchToProject will do the chdir and rebuild)
+	project_manager.add(p.path, p.name);
+	project_manager.save();
+
+	switchToProject(p.path);
+}
+
+void GuiMainWindow::cb_manage_projects(Fl_Widget* o, void* v)
+{
+	GuiMainWindow* T = (GuiMainWindow*)v;
+	T->cb_manage_projects_i();
+}
+
+void GuiMainWindow::cb_manage_projects_i()
+{
+	ManageProjectsWindow *w = new ManageProjectsWindow(800, 400);
+	w->set_modal();
+	w->show();
+
+	// Wait until dialog is closed
+	while (w->shown()) Fl::wait();
+
+	const std::string &open_path = w->getOpenPath();
+	if (!open_path.empty())
+	{
+		project_manager.add(open_path, FileName(open_path).afterLastOf("/"));
+		project_manager.save();
+		switchToProject(open_path);
+	}
+
+	// Reload from disk to pick up any removes/renames done inside the dialog
+	project_manager.load();
+	rebuildRecentProjectsInMenu();
+
+	delete w;
+}
+
+void GuiMainWindow::cb_import_project(Fl_Widget* o, void* v)
+{
+	GuiMainWindow* T = (GuiMainWindow*)v;
+	T->cb_import_project_i();
+}
+
+static bool is_jobdir_name(const std::string &name)
+{
+	if (name.size() <= 3 || name.substr(0, 3) != "job") return false;
+	for (size_t i = 3; i < name.size(); i++)
+		if (!std::isdigit((unsigned char)name[i])) return false;
+	return true;
+}
+
+void GuiMainWindow::cb_import_project_i()
+{
+	// 1. Choose source project directory
+	const char *src = fl_dir_chooser("Select the RELION project directory to import", ".");
+	if (!src || strlen(src) == 0) return;
+	std::string sourceDir(src);
+	while (sourceDir.size() > 1 && sourceDir.back() == '/')
+		sourceDir.pop_back();
+	FileName sourceFn(sourceDir);
+
+	if (!exists(sourceFn + "/.gui_projectdir") && !exists(sourceFn + "/default_pipeline.star"))
+	{
+		fl_alert("The selected directory does not appear to be a RELION project.\n"
+			 "Missing .gui_projectdir or default_pipeline.star.");
+		return;
+	}
+
+	// 2. Choose/create destination directory
+	const char *dest = fl_dir_chooser("Select or create the destination directory for the imported project",
+					  ".");
+	if (!dest || strlen(dest) == 0) return;
+	std::string destDir(dest);
+	while (destDir.size() > 1 && destDir.back() == '/')
+		destDir.pop_back();
+	FileName destFn(destDir);
+
+	if (sourceDir == destDir)
+	{
+		fl_alert("Source and destination must be different directories.");
+		return;
+	}
+
+	if (exists(destFn + "/.gui_projectdir") || exists(destFn + "/default_pipeline.star"))
+	{
+		int ret = fl_choice("The destination already contains a RELION project.\n"
+				    "Continue anyway?", "Cancel", "Continue", NULL);
+		if (ret != 1)
+			return;
+	}
+
+	// 3. Create destination directory and sentinel files
+	if (!exists(destFn))
+	{
+		std::string cmd = "mkdir -p " + destFn;
+		if (system(cmd.c_str()) != 0)
+		{
+			fl_alert("Failed to create destination directory:\n%s", destDir.c_str());
+			return;
+		}
+	}
+
+	touch(destFn + "/.gui_projectdir");
+	system(("mkdir -p " + destFn + "/.TMP_runfiles").c_str());
+
+	// 4. Copy pipeline files and root-level non-directory files
+	{
+		DIR *dir = opendir(sourceDir.c_str());
+		if (dir)
+		{
+			struct dirent *entry;
+			while ((entry = readdir(dir)) != nullptr)
+			{
+				std::string name(entry->d_name);
+				if (name[0] == '.') continue;
+				std::string full = sourceDir + "/" + name;
+				struct stat st;
+				if (::stat(full.c_str(), &st) != 0) continue;
+				if (S_ISDIR(st.st_mode)) continue;                // skip subdirs
+				// Copy small text/data files at the root level
+				copy(FileName(full), FileName(destDir + "/" + name));
+			}
+			closedir(dir);
+		}
+	}
+
+	// 5. Expand source to absolute path for reliable symlinks
+	FileName absSource = realpath(sourceFn, false);
+	if (absSource.back() != '/')
+		absSource += '/';
+
+	// 6. Scan source directories
+	int linked = 0, failed = 0;
+	{
+		DIR *dir = opendir(sourceDir.c_str());
+		if (dir)
+		{
+			struct dirent *entry;
+			while ((entry = readdir(dir)) != nullptr)
+			{
+				std::string name(entry->d_name);
+				if (name.empty() || name[0] == '.') continue;    // skip hidden
+				if (name == "Trash") continue;                     // skip Trash
+				std::string full = sourceDir + "/" + name;
+				struct stat st;
+				if (::stat(full.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+					continue;
+
+				if (is_jobdir_name(name))
+				{
+					// Flat style (RELION 4.0): jobNNN at root
+					std::string linkTarget = (absSource + name).c_str();
+					std::string linkPath   = destDir + "/" + name;
+					if (!exists(FileName(linkPath)))
+					{
+						if (::symlink(linkTarget.c_str(), linkPath.c_str()) == 0)
+							linked++;
+						else
+							failed++;
+					}
+				}
+				else
+				{
+					// Nested style (RELION 5.0): Type/jobNNN
+					// Check one level deeper for jobNNN subdirs
+					DIR *sub = opendir(full.c_str());
+					if (!sub) continue;
+					bool hasJob = false;
+					struct dirent *subentry;
+					while ((subentry = readdir(sub)) != nullptr)
+					{
+						std::string subname(subentry->d_name);
+						if (subname[0] == '.') continue;
+						if (!is_jobdir_name(subname)) continue;
+
+						struct stat st2;
+						std::string subfull = full + "/" + subname;
+						if (::stat(subfull.c_str(), &st2) != 0 || !S_ISDIR(st2.st_mode))
+							continue;
+
+						// Create type directory in dest if first job in this type
+						if (!hasJob)
+						{
+							std::string typeDir = destDir + "/" + name;
+							if (!exists(FileName(typeDir)))
+								mkdir(typeDir.c_str(), 0755);
+							hasJob = true;
+						}
+
+						std::string linkTarget = absSource + name + "/" + subname;
+						std::string linkPath   = destDir + "/" + name + "/" + subname;
+						if (!exists(FileName(linkPath)))
+						{
+							if (::symlink(linkTarget.c_str(), linkPath.c_str()) == 0)
+								linked++;
+							else
+								failed++;
+						}
+					}
+					closedir(sub);
+				}
+			}
+			closedir(dir);
+		}
+	}
+
+	// 7. Register the imported project
+	project_manager.add(destFn, destFn.afterLastOf("/"));
+	project_manager.save();
+
+	// 8. Report result and offer to switch
+	{
+		char msg[512];
+		if (failed > 0)
+			std::snprintf(msg, sizeof(msg),
+				      "Project imported.\n"
+				      "  %d job directories symlinked\n"
+				      "  %d symlinks failed (may already exist)\n\n"
+				      "Switch to the new project now?",
+				      linked, failed);
+		else
+			std::snprintf(msg, sizeof(msg),
+				      "Project imported successfully.\n"
+				      "  %d job directories symlinked\n\n"
+				      "Switch to the new project now?",
+				      linked);
+		int ret = fl_choice("%s", "No", "Yes", NULL, msg);
+		if (ret == 1)
+			switchToProject(destDir);
+		else
+			rebuildRecentProjectsInMenu();
+	}
+}
+
+void GuiMainWindow::rebuildRecentProjectsInMenu()
+{
+	std::vector<ProjectManager::Project> recent = project_manager.getRecent(MAX_RECENT_PROJECTS);
+
+	// Remove all existing children of "Recent" submenu, then add fresh items.
+	const Fl_Menu_Item *items = menubar->menu();
+	for (int mi = 0; ; mi++)
+	{
+		if (!items[mi].text)
+		{
+			if (!items[mi + 1].text)
+				break;
+			continue;
+		}
+		if ((items[mi].flags & (FL_SUBMENU | FL_SUBMENU_POINTER)) &&
+		    strcmp(items[mi].text, "Recent") == 0)
+		{
+			// Count children of Recent, then remove them in reverse order
+			int nchild = 0;
+			const Fl_Menu_Item *c = &items[mi] + 1;
+			while (c->text) { nchild++; c++; }
+			for (int k = nchild - 1; k >= 0; k--)
+				menubar->remove(mi + 1 + k);
+			break;
+		}
+	}
+
+	// Add items for each recent project
+	for (int i = 0; i < (int)recent.size(); i++)
+	{
+		menubar->add(("Project/Recent/" + recent[i].name).c_str(), 0,
+			     cb_recent_project, (void*)(intptr_t)i);
+	}
+	menubar->redraw();
+}
+
+

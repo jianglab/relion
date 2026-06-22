@@ -64,6 +64,7 @@ int main(int argc, char *argv[])
 			std::cerr << " [--tomo]       : show tomography-specific GUI" << std::endl;
 			std::cerr << " [--ccpem]      : use the ccpem pipeliner" << std::endl;
 			std::cerr << " [--do_projdir] : Don't confirm the creation of a new project directory, just make it if it doesn't exist" << std::endl;
+			std::cerr << " [--switch-to dir] : switch to a different project directory on startup" << std::endl;
 			std::cerr << " [--version]    : show the version of this program" << std::endl;
 			exit(0);
 		}
@@ -80,7 +81,8 @@ int main(int argc, char *argv[])
 		bool _do_tomo = checkParameter(argc, argv, "--tomo");
 		bool _use_ccpem_pipeliner = checkParameter(argc, argv, "--ccpem");
 		bool _do_projdir = checkParameter(argc, argv, "--do_projdir");
-		GuiMainWindow window(GUIWIDTH, GUIHEIGHT_EXT, titletext, fn_pipe, _update_every_sec, _exit_after_sec, _do_read_only, _do_tomo, _use_ccpem_pipeliner, _do_projdir);
+		FileName _switch_to = getParameter(argc, argv, "--switch-to", "");
+		GuiMainWindow window(GUIWIDTH, GUIHEIGHT_EXT, titletext, fn_pipe, _update_every_sec, _exit_after_sec, _do_read_only, _do_tomo, _use_ccpem_pipeliner, _do_projdir, _switch_to);
 
 		// Show and run the window
 		window.show();

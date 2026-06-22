@@ -16,7 +16,9 @@
 #include <iostream>
 #include <src/time.h>
 
+#ifndef TIMING
 #define TIMING 0
+#endif
 
 
 using namespace gravis;

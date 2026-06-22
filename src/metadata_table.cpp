@@ -1207,6 +1207,7 @@ long int MetaDataTable::readStar(std::ifstream& in, const std::string &name, boo
 	bool also_has_loop;
 
 	// Start reading the ifstream at the top
+	in.clear();
 	in.seekg(0);
 
 	// Set the version to 30000 by default, in case there is no version tag
