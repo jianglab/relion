@@ -28,10 +28,15 @@ class CacheInitializer
 public:
     static bool initializeCache(const FileName &fn_cache,
         int cache_copy_threads, MetaDataTable &MDimg, int verb,
-        ObservationModel *obsModel = NULL, bool do_register = true);
+        ObservationModel *obsModel = NULL, bool do_register = true,
+        const std::string &node_name = "");
 
     static bool initializeCacheMpi(const FileName &fn_cache,
         int cache_copy_threads, MetaDataTable &MDimg, int verb,
+        ObservationModel *obsModel, bool isLeader, intptr_t mpi_comm_handle);
+
+    static bool initializeCacheMpi(const FileName &fn_cache,
+        int cache_copy_threads, Experiment &exp, int verb,
         ObservationModel *obsModel, bool isLeader, intptr_t mpi_comm_handle);
 };
 

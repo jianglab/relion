@@ -923,7 +923,8 @@ void MlOptimiserMpi::initialiseWorkLoad()
 
 	// Now copy particle stacks to scratch if needed
 	// --cache_dir takes priority over --scratch_dir
-	if (fn_cache != "" && !do_preread_images)
+	// Cache init already done in read(); skip if cacheMode is set
+	if (fn_cache != "" && !do_preread_images && !mydata.cacheMode)
 	{
 		char cwdBuf[4096];
 		std::string projectRoot;
@@ -943,8 +944,14 @@ void MlOptimiserMpi::initialiseWorkLoad()
 		MPI_Bcast(projectRootBuf, sizeof(projectRootBuf), MPI_CHAR, 0, MPI_COMM_WORLD);
 		projectRoot = projectRootBuf;
 
+		char proc_name[MPI_MAX_PROCESSOR_NAME];
+		int name_len;
+		MPI_Get_processor_name(proc_name, &name_len);
+		std::string node_name = std::string(proc_name, name_len);
+		std::string cache_label = node_name + ":" + fn_cache;
+
 		if (verb > 0 && node->isLeader())
-			std::cout << " Using cache directory: " << fn_cache << std::endl;
+			std::cout << " Using cache directory: " << cache_label << std::endl;
 
 		// Leader discovers source jobs and broadcasts
 		int nrSources = 0;
@@ -1047,7 +1054,7 @@ void MlOptimiserMpi::initialiseWorkLoad()
 					{
 						if (verb > 0 && node->isLeader())
 							std::cout << "  Reusing cache " << cacheKey
-								  << " (" << cm.getCacheDirForKey(cacheKey)
+								  << " (" << node_name << ":" << cm.getCacheDirForKey(cacheKey)
 								  << ") — cached by another process" << std::endl;
 					}
 
@@ -1064,7 +1071,7 @@ void MlOptimiserMpi::initialiseWorkLoad()
 				{
 					if (verb > 0 && node->isLeader())
 						std::cout << "  Reusing cache " << cacheKey
-							  << " (" << cm.getCacheDirForKey(cacheKey) << ")" << std::endl;
+							  << " (" << node_name << ":" << cm.getCacheDirForKey(cacheKey) << ")" << std::endl;
 					if (node->isLeader())
 						cm.touchRegistry(cacheKey, srcDir, -1, -1, projectRoot);
 				}
@@ -1088,7 +1095,7 @@ void MlOptimiserMpi::initialiseWorkLoad()
 			}
 
 			if (verb > 0 && node->isLeader())
-				std::cout << " Rewrote " << mydata.numberOfParticles()
+				std::cout << " " << node_name << ": Rewrote " << mydata.numberOfParticles()
 					  << " particle names to point to cache." << std::endl;
 		}
 
