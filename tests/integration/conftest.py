@@ -38,19 +38,19 @@ def relion_bin():
         repo_root = Path(__file__).resolve().parent.parent.parent
         print(f"repo_root: {repo_root}")
         candidates = [
-            repo_root / "build" / "bin",
             repo_root.parent / "relion-build" / "bin",
             repo_root.parent / f"{repo_root.name}-build" / "bin",
+            repo_root / "build" / "bin",
         ]
         
-        relion_dir = repo_root / "build" / "bin" # Default for error message
+        relion_dir = None
         for candidate in candidates:
-            if candidate.exists() and candidate.is_dir():
+            if candidate.exists() and candidate.is_dir() and any(f.stat().st_mode & 0o111 for f in candidate.iterdir() if f.is_file()):
                 relion_dir = candidate
                 break
 
-    assert relion_dir.exists(), (
-        f"RELION binary directory not found: {relion_dir}\n"
+    assert relion_dir is not None and relion_dir.exists(), (
+        f"RELION binary directory not found in any of: {[str(c) for c in candidates]}\n"
         "You can specify it by setting the RELION_BIN_DIR environment variable."
     )
     return relion_dir

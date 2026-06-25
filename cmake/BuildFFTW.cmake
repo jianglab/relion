@@ -37,7 +37,7 @@ else()
 	
 	set(FFTW_FOUND FALSE)
 	
-	set(ext_conf_flags_fft --enable-shared --prefix=${FFTW_EXTERNAL_PATH})
+	set(ext_conf_flags_fft --enable-shared --enable-threads --with-pthread --prefix=${FFTW_EXTERNAL_PATH})
 	if(TARGET_X86)
 		if (AMDFFTW)
 			set(ext_conf_flags_fft ${ext_conf_flags_fft} --enable-sse2 --enable-avx --enable-avx2 --enable-amd-opt)

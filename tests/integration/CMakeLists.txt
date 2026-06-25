@@ -16,7 +16,7 @@ message(STATUS "  Run with: pytest tests/integration/ -v")
 message(STATUS "  See tests/integration/README.md for documentation")
 
 # Per-category test groups (only tags with existing test_${tag}.py files)
-foreach(tag reconstruction ewald reconstruct_crash cryosparc_import)
+foreach(tag reconstruction ewald reconstruct_crash cryosparc_import mpi_prefetch filament_class3d)
     add_test(
         NAME integration_${tag}
         COMMAND ${Python3_EXECUTABLE} -m pytest -v ${CMAKE_SOURCE_DIR}/tests/integration/test_${tag}.py

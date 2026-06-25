@@ -1719,17 +1719,20 @@ void MlOptimiserMpi::expectation()
 				}
 
 				// Update the total number of particles that has been done already
-				nr_particles_done += JOB_NPAR;
-				if (do_split_random_halves)
+				if (JOB_NIMG > 0)
 				{
-					// Also update the number of particles that has been done for each subset
-					if (random_halfset == 1)
+					nr_particles_done += JOB_NPAR;
+					if (do_split_random_halves)
 					{
-						nr_particles_done_halfset1 += JOB_NPAR;
-					}
-					else
-					{
-						nr_particles_done_halfset2 += JOB_NPAR;
+						// Also update the number of particles that has been done for each subset
+						if (random_halfset == 1)
+						{
+							nr_particles_done_halfset1 += JOB_NPAR;
+						}
+						else
+						{
+							nr_particles_done_halfset2 += JOB_NPAR;
+						}
 					}
 				}
 			}
@@ -1828,6 +1831,10 @@ void MlOptimiserMpi::expectation()
 					{
 						int mysize;
 						node->relion_MPI_Recv(&mysize, 1, MPI_INT, 0, MPITAG_IMAGE_SIZE, MPI_COMM_WORLD, status);
+						if (mysize <= 0 || mysize > 10000 || JOB_NIMG <= 0 || JOB_NIMG > 10000)
+						{
+							REPORT_ERROR("Invalid image size or JOB_NIMG received from leader");
+						}
 						// resize the exp_imagedata array
 						if (mymodel.data_dim == 3)
 						{
@@ -4493,10 +4500,6 @@ void MlOptimiserMpi::iterate()
 		// Skip center classes in the final stages of gradient refinement
 		if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
 			centerClasses();
-
-		// Align all classes to the largest class at the last iteration
-		if (do_align_classes && mymodel.nr_classes > 1 && iter == nr_iter)
-			alignClasses();
 
 		// Directly use fn_out, without "_it" specifier, so unmasked refs will be overwritten at every iteration
 		if (do_write_unmasked_refs && node->rank == 1)

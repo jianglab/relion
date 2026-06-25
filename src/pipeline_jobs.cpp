@@ -4239,7 +4239,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
             if (rise_inistep > 0.)
                 command += " --helical_rise_inistep " + joboptions["helical_rise_inistep"].getString();
         }
-		if (joboptions["keep_tilt_prior_fixed"].getBoolean())
+        if (joboptions["keep_tilt_prior_fixed"].getBoolean())
 			command += " --helical_keep_tilt_prior_fixed";
 		if ( (joboptions["dont_skip_align"].getBoolean()) && (!joboptions["do_local_ang_searches"].getBoolean()) )
 		{
@@ -7920,10 +7920,10 @@ bool RelionJob::getCommandsTomoReconPartJob(std::string &outputname, std::vector
         command += " --nr_helical_asu " + joboptions["helical_nr_asu"].getString();
         command += " --helical_twist " + joboptions["helical_twist"].getString();
         command += " --helical_rise " + joboptions["helical_rise"].getString();
-    }
+	}
 
-    // Running stuff
-    command += " --j " + joboptions["nr_threads"].getString();
+	// Running stuff
+	command += " --j " + joboptions["nr_threads"].getString();
     command += " --j_out " + joboptions["nr_threads"].getString();
     command += " --j_in 1 ";
 

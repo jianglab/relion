@@ -40,6 +40,12 @@ if (FFTW_PATH AND FFTW_INCLUDES AND
 	if (_FFTW_DOUBLE_THREADS)
 		set(FFTW_LIBRARIES ${FFTW_LIBRARIES} ${_FFTW_DOUBLE_THREADS})
 	endif()
+
+	# FFTW thread libraries require pthread
+	find_package(Threads QUIET)
+	if (Threads_FOUND)
+		set(FFTW_LIBRARIES ${FFTW_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+	endif()
 	
 	message(STATUS "Found FFTW")
 	message(STATUS "FFTW_PATH: ${FFTW_PATH}")

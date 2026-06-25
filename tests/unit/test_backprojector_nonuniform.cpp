@@ -13,10 +13,18 @@
  */
 
 #include <catch2/catch.hpp>
+#include <streambuf>
+#include <sstream>
 
 #include "src/backprojector.h"
 #include "src/euler.h"
+#include "src/matrix2d.h"
 #include "src/multidim_array.h"
+
+// Null streambuf to suppress output during expected-error tests
+struct NullBuffer : std::streambuf {
+    int overflow(int c) override { return c; }
+};
 #include "src/complex.h"
 #include "src/macros.h"
 #include "src/matrix2d.h"
@@ -315,8 +323,12 @@ TEST_CASE("backprojectNonuniform: mismatched sample and coordinate sizes throw",
     std::vector<RFLOAT> sample_y(1, 0.0);
     Matrix2D<RFLOAT> A = eulerMatrix(0.0, 0.0, 0.0);
 
+    // Suppress REPORT_ERROR output during expected throw
+    NullBuffer nb;
+    std::streambuf *old = std::cerr.rdbuf(&nb);
     REQUIRE_THROWS(bp.backprojectNonuniform2Dto3D(
         samples, sample_x, sample_y, A, NULL, -1.0));
+    std::cerr.rdbuf(old);
 }
 
 TEST_CASE("backprojectNonuniform: mismatched weight and sample sizes throw",
@@ -331,8 +343,12 @@ TEST_CASE("backprojectNonuniform: mismatched weight and sample sizes throw",
     std::vector<RFLOAT> sample_weight(2, 1.0); // size mismatch
     Matrix2D<RFLOAT> A = eulerMatrix(0.0, 0.0, 0.0);
 
+    // Suppress REPORT_ERROR output during expected throw
+    NullBuffer nb;
+    std::streambuf *old = std::cerr.rdbuf(&nb);
     REQUIRE_THROWS(bp.backprojectNonuniform2Dto3D(
         samples, sample_x, sample_y, A, &sample_weight, -1.0));
+    std::cerr.rdbuf(old);
 }
 
 // ---------------------------------------------------------------------------

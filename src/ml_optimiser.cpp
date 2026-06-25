@@ -5315,7 +5315,7 @@ void MlOptimiser::alignClasses()
                   << " psi=" << best_psi << " dx=" << best_dx
                   << " dy=" << best_dy << " dz=" << best_dz << std::endl;
 
-        // Apply the inverse adjustment to all particles in this class
+        // Apply the cumulative alignment to all particles in this class
         const bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
         FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
         {
