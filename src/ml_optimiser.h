@@ -733,7 +733,7 @@ public:
 	std::string exp_fn_img, exp_fn_ctf, exp_fn_recimg;
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;
-	AsyncImagePrefetcher *prefetcher_;
+	AsyncImagePrefetcher *prefetcher_ = nullptr;
 
 	// Calculate translated images on-the-fly
 	bool do_shifts_onthefly;

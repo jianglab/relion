@@ -65,6 +65,7 @@
 #define MPITAG_BCAST 9
 #define MPITAG_WAIT 10
 #define MPITAG_STOP 11
+#define MPITAG_PREFETCH_REQ 12
 
 /** Class to wrapp some MPI common calls in an work node.
 *
