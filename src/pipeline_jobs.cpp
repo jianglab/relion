@@ -3949,6 +3949,8 @@ Values of ~ 2.0 are recommended for the range. Set the range to negative to disa
 Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
 	joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
 
+	joboptions["do_keep_full_filaments"] = JobOption("Keep full filaments during classification?", true, "If set to Yes, then all segments from the same filament (i.e. same micrograph and same helical tube ID) will be assigned to the same 3D class at each iteration during classification. This helps ensure that entire filaments are classified consistently.");
+
 	joboptions["do_parallel_discio"] = JobOption("Use parallel disc I/O?", true, "If set to Yes, all MPI followers will read their own images from disc. \
 Otherwise, only the leader will read images and send them through the network to the followers. Parallel file systems like gluster of fhgfs are good at parallel disc I/O. NFS may break with many followers reading in parallel. If your datasets contain particles with different box sizes, you have to say Yes.");
 	joboptions["nr_pool"] = JobOption("Number of pooled particles:", 3, 1, 16, 1, "Particles are processed in individual batches by MPI followers. During each batch, a stack of particle images is only opened and closed once to improve disk access times. \
@@ -4269,6 +4271,9 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
             }
 		}
 	}
+
+	if ( (joboptions["do_helix"].getBoolean()) && (joboptions["do_keep_full_filaments"].getBoolean()) )
+		command += " --keep_full_filaments";
 
 	// Running stuff
 	command += " --j " + joboptions["nr_threads"].getString();

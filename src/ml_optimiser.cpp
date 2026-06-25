@@ -830,6 +830,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
         SWAP(mymodel.helical_twist_min, mymodel.helical_twist_max, tmp_RFLOAT);
     helical_fourier_mask_resols = parser.getOption("--helical_exclude_resols", "Resolutions (in A) along helical axis to exclude from refinement (comma-separated pairs, e.g. 50,5)", "");
     fn_fourier_mask = parser.getOption("--fourier_mask", "Originally-sized, FFTW-centred image with Fourier mask for Projector", "None");
+    do_keep_full_filaments = parser.checkOption("--keep_full_filaments", "Assign all segments from the same full filament to the same 3D class? (for helical Class3D)");
 
     // CTF, norm, scale, bfactor correction etc.
     int corrections_section = parser.addSection("Corrections");
@@ -3905,6 +3906,9 @@ void MlOptimiser::expectation()
 
     if (verb > 0)
         progress_bar(my_nr_particles);
+
+    // If requested, enforce that all segments from the same filament have the same class
+    enforceFilamentConsistency();
 
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
     if (do_gpu)
@@ -10573,6 +10577,93 @@ void MlOptimiser::setMetaDataSubset(long int first_part_id, long int last_part_i
 
     } // end for part_id
 
+}
+
+void MlOptimiser::enforceFilamentConsistency()
+{
+    if (!do_keep_full_filaments || mymodel.nr_classes <= 1)
+        return;
+    long int n_changed = ::enforceFilamentConsistency(mydata.MDimg, mymodel.nr_classes, verb);
+    if (verb > 0)
+        std::cout << " Enforcing filament consistency: changed " << n_changed
+                  << " particles (of " << mydata.MDimg.numberOfObjects() << ") to match their filament majority."
+                  << std::endl;
+}
+
+long int enforceFilamentConsistency(MetaDataTable &MDimg, int nr_classes, int verb)
+{
+    if (nr_classes <= 1)
+        return 0;
+
+    // Check that required labels are present
+    if (!MDimg.containsLabel(EMDL_MICROGRAPH_NAME) ||
+        !MDimg.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID) ||
+        !MDimg.containsLabel(EMDL_PARTICLE_CLASS))
+    {
+        std::cerr << " WARNING: --keep_full_filaments requires rlnMicrographName, rlnHelicalTubeID and rlnClassNumber in the input STAR file. Skipping." << std::endl;
+        return 0;
+    }
+
+    long int nr_parts = MDimg.numberOfObjects();
+
+    // Map filament key -> (class -> count)
+    // filament key = (micrograph_name, tube_id)
+    std::map<std::pair<FileName, int>, std::map<int, int> > filament_class_counts;
+    std::map<std::pair<FileName, int>, std::vector<long int> > filament_part_ids;
+
+    // First pass: group particles by filament
+    for (long int part_id = 0; part_id < nr_parts; part_id++)
+    {
+        FileName fn_mic;
+        int tube_id, iclass;
+        MDimg.getValue(EMDL_MICROGRAPH_NAME, fn_mic, part_id);
+        if (!MDimg.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube_id, part_id))
+            tube_id = 0;
+        MDimg.getValue(EMDL_PARTICLE_CLASS, iclass, part_id);
+
+        auto key = std::make_pair(fn_mic, tube_id);
+        filament_class_counts[key][iclass]++;
+        filament_part_ids[key].push_back(part_id);
+    }
+
+    // Second pass: enforce filament consistency
+    long int n_changed = 0;
+    for (auto &f : filament_part_ids)
+    {
+        auto &key = f.first;
+        auto &part_ids = f.second;
+
+        if (part_ids.size() <= 1)
+            continue;
+
+        auto &class_counts = filament_class_counts[key];
+
+        // Find majority class
+        int majority_class = 1;
+        int max_count = 0;
+        for (auto &cc : class_counts)
+        {
+            if (cc.second > max_count)
+            {
+                max_count = cc.second;
+                majority_class = cc.first;
+            }
+        }
+
+        // Update all particles in this filament to the majority class
+        for (long int part_id : part_ids)
+        {
+            int current_class;
+            MDimg.getValue(EMDL_PARTICLE_CLASS, current_class, part_id);
+            if (current_class != majority_class)
+            {
+                MDimg.setValue(EMDL_PARTICLE_CLASS, majority_class, part_id);
+                n_changed++;
+            }
+        }
+    }
+
+    return n_changed;
 }
 
 void MlOptimiser::getMetaAndImageDataSubset(long int first_part_id, long int last_part_id, bool do_also_imagedata)

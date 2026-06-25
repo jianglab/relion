@@ -2085,6 +2085,11 @@ void MlOptimiserMpi::expectation()
 		progress_bar(my_nr_particles);
 	}
 
+	// If requested, enforce that all segments from the same filament have the same class
+	// Only the leader has the full MDimg; broadcast the updated classes to followers
+	if (node->isLeader())
+		enforceFilamentConsistency();
+
 #ifdef TIMING
 	// Measure how long I have to wait for the rest
 	timer.tic(TIMING_MPIWAIT);

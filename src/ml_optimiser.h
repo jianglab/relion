@@ -582,6 +582,9 @@ public:
 	/* Flag to align all classes to the largest class (for Class3D) */
 	bool do_align_classes;
 
+	/* Flag to assign all segments from the same helical filament to the same class */
+	bool do_keep_full_filaments;
+
 	/* Flag to align half-maps to each other (for auto-refine) */
 	bool do_align_halves;
 
@@ -877,6 +880,7 @@ public:
             do_bimodal_psi(0),
             do_center_classes(0),
             do_align_classes(1),
+            do_keep_full_filaments(0),
             do_align_halves(1),
             exp_my_last_part_id(0),
             particle_diameter(0),
@@ -1263,6 +1267,9 @@ public:
 	// Set metadata of a subset of particles to the experimental model
 	void setMetaDataSubset(long int my_first_part_id, long int my_last_part_id);
 
+	// Enforce that all particles from the same filament get the same class assignment
+	void enforceFilamentConsistency();
+
 	// Get metadata array of a subset of particles from the experimental model
 	void getMetaAndImageDataSubset(long int my_first_part_id, long int my_last_part_id, bool do_also_imagedata = true);
 
@@ -1278,6 +1285,9 @@ public:
     void selfTranslateSubtomoStack2D(MultidimArray<RFLOAT> &I1, const Matrix1D<RFLOAT> &v, long int part_id, int img_id);
 
 };
+
+// Enforce filament consistency on a MetaDataTable (extracted for testability)
+long int enforceFilamentConsistency(MetaDataTable &MDimg, int nr_classes, int verb);
 
 // Global call to threaded core of doThreadExpectationSomeParticles
 void globalThreadExpectationSomeParticles(void *self, int thread_id);
