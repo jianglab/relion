@@ -45,33 +45,28 @@ void alignMapToMap(
     if (orig_size != XSIZE(vol_align))
         REPORT_ERROR("alignMapToMap: vol_align and vol_ref must have the same size!");
 
-    // Working box size for the search
     int work_size = 64;
     if (orig_size < work_size) work_size = orig_size;
     if (work_size % 2 != 0) work_size++;
     RFLOAT work_angpix = angpix * orig_size / work_size;
 
-    // Downsample both maps to the working size
     MultidimArray<RFLOAT> vol_work, vol_ref_down;
     vol_work = vol_align;
     vol_ref_down = vol_ref;
+
     resizeMap(vol_work, work_size);
     resizeMap(vol_ref_down, work_size);
 
-    // Center for FFT
     CenterFFT(vol_work, true);
     CenterFFT(vol_ref_down, true);
 
-    // Maximum Fourier radius to consider (from maxres)
     int r_max = (maxres > 0.) ? CEIL(work_size * work_angpix / maxres) : work_size;
     if (r_max > work_size) r_max = work_size;
 
-    // Create Projector from the alignment map (source)
     MultidimArray<RFLOAT> dummy;
     Projector projector(work_size, TRILINEAR, 1, 10, 3);
     projector.computeFourierTransformMap(vol_work, dummy, 2 * r_max, 1, false);
 
-    // Set up transformer for rotating the map via Fourier interpolation
     MultidimArray<RFLOAT> rotated;
     MultidimArray<Complex> rot_ft;
     FourierTransformer transformer;
@@ -81,8 +76,7 @@ void alignMapToMap(
 
     double best_diff2 = 1E99;
 
-    // Generate trial parameters and evaluate
-    if (nr_freedom == 2) // Cn (n>=2) or helical: search rot + dz
+    if (nr_freedom == 2)
     {
         for (int irot = -search_range; irot <= search_range; irot++)
         {
@@ -92,6 +86,7 @@ void alignMapToMap(
 
             rot_ft.initZeros();
             projector.rotate3D(rot_ft, A);
+            CenterFFTbySign(rot_ft);
             transformer.inverseFourierTransform();
 
             for (int idz = -search_range; idz <= search_range; idz++)
@@ -103,7 +98,7 @@ void alignMapToMap(
                 {
                     Matrix1D<RFLOAT> shift(3);
                     XX(shift) = 0.; YY(shift) = 0.; ZZ(shift) = dz / work_angpix;
-                    selfTranslate(trial, shift, DONT_WRAP);
+                    selfTranslate(trial, shift, WRAP);
                 }
 
                 double diff2 = 0;
@@ -127,9 +122,8 @@ void alignMapToMap(
             }
         }
     }
-    else if (nr_freedom == 6) // C1: search all 6 DOF
+    else if (nr_freedom == 6)
     {
-        // Stage 1: rotation-only coarse search (125 evaluations)
         for (int irot = -search_range; irot <= search_range; irot++)
         {
             RFLOAT rot = irot * search_step_rot;
@@ -144,6 +138,7 @@ void alignMapToMap(
 
                     rot_ft.initZeros();
                     projector.rotate3D(rot_ft, A);
+                    CenterFFTbySign(rot_ft);
                     transformer.inverseFourierTransform();
 
                     double diff2 = 0;
@@ -165,16 +160,15 @@ void alignMapToMap(
             }
         }
 
-        // Apply the best rotation to the working map for translation search
         {
             Matrix2D<RFLOAT> A;
             Euler_rotation3DMatrix(best_rot, best_tilt, best_psi, A);
             rot_ft.initZeros();
             projector.rotate3D(rot_ft, A);
+            CenterFFTbySign(rot_ft);
             transformer.inverseFourierTransform();
         }
 
-        // Stage 2: translation-only search (125 evaluations)
         for (int idx = -search_range; idx <= search_range; idx++)
         {
             RFLOAT dx = idx * search_step_trans;
@@ -192,7 +186,7 @@ void alignMapToMap(
                         XX(shift) = dx / work_angpix;
                         YY(shift) = dy / work_angpix;
                         ZZ(shift) = dz / work_angpix;
-                        selfTranslate(trial, shift, DONT_WRAP);
+                        selfTranslate(trial, shift, WRAP);
                     }
 
                     double diff2 = 0;
@@ -206,16 +200,163 @@ void alignMapToMap(
                     if (diff2 < best_diff2)
                     {
                         best_diff2 = diff2;
-                        best_dx = dx;
-                        best_dy = dy;
-                        best_dz = dz;
+                        best_dx = -dx;
+                        best_dy = -dy;
+                        best_dz = -dz;
                     }
                 }
             }
         }
     }
 
-    // Apply the best transformation to the original full-size vol_align
+    // --- Multi-resolution refinement ---
+    {
+        RFLOAT cur_rot = best_rot, cur_tilt = best_tilt, cur_psi = best_psi;
+        RFLOAT cur_dx = best_dx, cur_dy = best_dy, cur_dz = best_dz;
+        RFLOAT ang_step = search_step_rot;
+        RFLOAT trans_step = search_step_trans;
+        const RFLOAT min_ang = 0.05;
+        const RFLOAT min_trans = 0.05;
+        const int max_levels = 8;
+        const int fine_range = 1;
+
+        for (int level = 0; level < max_levels; level++)
+        {
+            RFLOAT lv_rot = cur_rot, lv_tilt = cur_tilt, lv_psi = cur_psi;
+            RFLOAT lv_dx = cur_dx, lv_dy = cur_dy, lv_dz = cur_dz;
+            double lv_best = 1E99;
+
+            if (nr_freedom == 2)
+            {
+                for (int irot = -fine_range; irot <= fine_range; irot++)
+                {
+                    RFLOAT rot = cur_rot + irot * ang_step;
+                    Matrix2D<RFLOAT> A;
+                    Euler_rotation3DMatrix(rot, 0., 0., A);
+                    rot_ft.initZeros();
+                    projector.rotate3D(rot_ft, A);
+                    CenterFFTbySign(rot_ft);
+                    transformer.inverseFourierTransform();
+
+                    for (int idz = -fine_range; idz <= fine_range; idz++)
+                    {
+                        RFLOAT dz = cur_dz + idz * trans_step;
+                        MultidimArray<RFLOAT> trial = rotated;
+                        if (fabs(dz) > 0.)
+                        {
+                            Matrix1D<RFLOAT> shift(3);
+                            XX(shift) = 0.; YY(shift) = 0.; ZZ(shift) = dz / work_angpix;
+                            selfTranslate(trial, shift, WRAP);
+                        }
+                        double diff2 = 0;
+                        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(trial)
+                        {
+                            double d = DIRECT_MULTIDIM_ELEM(trial, n) - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
+                            diff2 += d * d;
+                        }
+                        if (diff2 < lv_best)
+                        {
+                            lv_best = diff2;
+                            lv_rot = -rot; lv_dz = -dz;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (int irot = -fine_range; irot <= fine_range; irot++)
+                {
+                    RFLOAT rot = cur_rot + irot * ang_step;
+                    for (int itilt = -fine_range; itilt <= fine_range; itilt++)
+                    {
+                        RFLOAT tilt = cur_tilt + itilt * ang_step;
+                        for (int ipsi = -fine_range; ipsi <= fine_range; ipsi++)
+                        {
+                            RFLOAT psi = cur_psi + ipsi * ang_step;
+                            Matrix2D<RFLOAT> A;
+                            Euler_rotation3DMatrix(rot, tilt, psi, A);
+                            rot_ft.initZeros();
+                            projector.rotate3D(rot_ft, A);
+                            CenterFFTbySign(rot_ft);
+                            transformer.inverseFourierTransform();
+                            double diff2 = 0;
+                            FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(rotated)
+                            {
+                                double d = DIRECT_MULTIDIM_ELEM(rotated, n) - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
+                                diff2 += d * d;
+                            }
+                            if (diff2 < lv_best)
+                            {
+                                lv_best = diff2;
+                                lv_rot = rot; lv_tilt = tilt; lv_psi = psi;
+                            }
+                        }
+                    }
+                }
+{
+                    Matrix2D<RFLOAT> A;
+                    Euler_rotation3DMatrix(lv_rot, lv_tilt, lv_psi, A);
+                    rot_ft.initZeros();
+                    projector.rotate3D(rot_ft, A);
+                    CenterFFTbySign(rot_ft);
+                    transformer.inverseFourierTransform();
+                }
+                for (int idx = -fine_range; idx <= fine_range; idx++)
+                {
+                    RFLOAT dx = cur_dx + idx * trans_step;
+                    for (int idy = -fine_range; idy <= fine_range; idy++)
+                    {
+                        RFLOAT dy = cur_dy + idy * trans_step;
+                        for (int idz = -fine_range; idz <= fine_range; idz++)
+                        {
+                            RFLOAT dz = cur_dz + idz * trans_step;
+                            MultidimArray<RFLOAT> trial = rotated;
+                            if (fabs(dx) > 0. || fabs(dy) > 0. || fabs(dz) > 0.)
+                            {
+                                Matrix1D<RFLOAT> shift(3);
+                                XX(shift) = dx / work_angpix;
+                                YY(shift) = dy / work_angpix;
+                                ZZ(shift) = dz / work_angpix;
+                                selfTranslate(trial, shift, WRAP);
+                            }
+                            double diff2 = 0;
+                            FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(trial)
+                            {
+                                double d = DIRECT_MULTIDIM_ELEM(trial, n) - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
+                                diff2 += d * d;
+                            }
+                            if (diff2 < lv_best)
+                            {
+                                lv_best = diff2;
+                                lv_dx = -dx; lv_dy = -dy; lv_dz = -dz;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Convergence: only apply if diff2 actually improved
+            bool improved = (lv_best < best_diff2 - 1e-10);
+
+            cur_rot = lv_rot; cur_tilt = lv_tilt; cur_psi = lv_psi;
+            cur_dx = lv_dx; cur_dy = lv_dy; cur_dz = lv_dz;
+
+            best_rot = cur_rot; best_tilt = cur_tilt; best_psi = cur_psi;
+            best_dx = cur_dx; best_dy = cur_dy; best_dz = cur_dz;
+
+            if (improved)
+                best_diff2 = lv_best;
+
+            if (ang_step < min_ang && trans_step < min_trans)
+                break;
+            if (!improved)
+                break;
+
+            ang_step *= 0.5;
+            trans_step *= 0.5;
+        }
+    }
+
     bool do_rot = (fabs(best_rot) > 1e-6 || fabs(best_tilt) > 1e-6 || fabs(best_psi) > 1e-6);
     bool do_trans = (fabs(best_dx) > 1e-6 || fabs(best_dy) > 1e-6 || fabs(best_dz) > 1e-6);
 
@@ -244,28 +385,21 @@ void applyInverseOrientationAdjustment(
     RFLOAT &p_rot, RFLOAT &p_tilt, RFLOAT &p_psi,
     RFLOAT &p_dx, RFLOAT &p_dy, RFLOAT &p_dz)
 {
-    if (nr_freedom == 2) // Cn/helical: only Z-rotation and Z-shift
+    if (nr_freedom == 2)
     {
         p_rot -= drot;
         p_dz -= ddz;
     }
-    else if (nr_freedom == 6) // C1: full inverse
+    else if (nr_freedom == 6)
     {
-        // Compose the inverse of the reference rotation into the particle orientation
-        // The reference was rotated by (drot, dtilt, dpsi) → new particle orientation
-        // is old orientation composed with the inverse of that rotation.
-        // Euler_new = Euler_old * R_inv → using Euler_apply_transf(L=I, R=R_inv)
         Matrix2D<RFLOAT> A_rot(3,3), L(3,3), R(3,3);
         Euler_angles2matrix(drot, dtilt, dpsi, A_rot);
         L.initIdentity();
-        R = A_rot.transpose(); // inverse = transpose for rotation matrices
+        R = A_rot.transpose();
         Euler_apply_transf(L, R, p_rot, p_tilt, p_psi, p_rot, p_tilt, p_psi);
 
-        // The map was shifted by (ddx, ddy, ddz). The particle offset needs
-        // to be adjusted by the inverse shift.
         p_dx -= ddx;
         p_dy -= ddy;
         p_dz -= ddz;
     }
-    // nr_freedom == 0: do nothing
 }
