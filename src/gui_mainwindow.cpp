@@ -1732,6 +1732,27 @@ void GuiMainWindow::cb_print_cl_i()
 	// And update the job inside it
 	gui_jobwindows[iwin]->updateMyJob();
 
+	// If continuation mode is on but fn_cont is empty, auto-find the latest optimiser star
+	if (is_main_continue && gui_jobwindows[iwin]->myjob.joboptions.count("fn_cont") &&
+	    gui_jobwindows[iwin]->myjob.joboptions["fn_cont"].getString() == "" &&
+	    current_job >= 0 && current_job < pipeline.processList.size())
+	{
+		FileName fn_dir = pipeline.processList[current_job].name;
+		std::vector<FileName> fn_opts;
+		FileName fn_pat;
+		fn_pat = fn_dir + "run_it*optimiser.star";
+		fn_pat.globFiles(fn_opts);
+		fn_pat = fn_dir + "run_ct?_it???_optimiser.star";
+		fn_pat.globFiles(fn_opts, false);
+		fn_pat = fn_dir + "run_ct??_it???_optimiser.star";
+		fn_pat.globFiles(fn_opts, false);
+		if (fn_opts.size() > 0)
+		{
+			gui_jobwindows[iwin]->myjob.joboptions["fn_cont"].setString(fn_opts[fn_opts.size() - 1]);
+			gui_jobwindows[iwin]->updateMyGui();
+		}
+	}
+
 	if (use_ccpem_pipeliner)
 	{
 		std::string error_message;
@@ -1885,6 +1906,27 @@ void GuiMainWindow::cb_run_i(bool only_schedule, bool do_open_edit)
 	if (iwin < 0 || iwin >= nr_browse_tabs || gui_jobwindows[iwin] == NULL) return;
 	// And update the job inside it
 	gui_jobwindows[iwin]->updateMyJob();
+
+	// If continuation mode is on but fn_cont is empty, auto-find the latest optimiser star
+	if (is_main_continue && gui_jobwindows[iwin]->myjob.joboptions.count("fn_cont") &&
+	    gui_jobwindows[iwin]->myjob.joboptions["fn_cont"].getString() == "" &&
+	    current_job >= 0 && current_job < pipeline.processList.size())
+	{
+		FileName fn_dir = pipeline.processList[current_job].name;
+		std::vector<FileName> fn_opts;
+		FileName fn_pat;
+		fn_pat = fn_dir + "run_it*optimiser.star";
+		fn_pat.globFiles(fn_opts);
+		fn_pat = fn_dir + "run_ct?_it???_optimiser.star";
+		fn_pat.globFiles(fn_opts, false);
+		fn_pat = fn_dir + "run_ct??_it???_optimiser.star";
+		fn_pat.globFiles(fn_opts, false);
+		if (fn_opts.size() > 0)
+		{
+			gui_jobwindows[iwin]->myjob.joboptions["fn_cont"].setString(fn_opts[fn_opts.size() - 1]);
+			gui_jobwindows[iwin]->updateMyGui();
+		}
+	}
 
 	// Update timer
 	tickTimeLastChanged();

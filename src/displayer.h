@@ -147,15 +147,24 @@ public:
 	int unSelect();
 };
 
+// Forward declaration for dynamic reflow
+class multiViewerCanvas;
+
 // This class only puts scrollbars around the resizable canvas
 class basisViewerWindow : public Fl_Window
 {
 public:
+	// Pointer to the multi-viewer canvas for dynamic reflow on resize
+	multiViewerCanvas *multi_canvas;
+
 	// Constructor with w x h size of the window and a title
 	basisViewerWindow(int W, int H, const char* title=0): Fl_Window(W, H, title)
 	{
 		current_selection_type = 1;
+		multi_canvas = NULL;
 	}
+
+	void resize(int X, int Y, int W, int H);
 
 	int fillCanvas(int viewer_type, MetaDataTable &MDin, ObservationModel *obsModel, EMDLabel display_label, EMDLabel text_label, bool _do_read_whole_stacks, bool _do_apply_orient,
 	               RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
@@ -190,6 +199,7 @@ public:
 	int ysize_box;
 	int xoff;
 	int yoff;
+	RFLOAT scale; // stored for dynamic reflow on resize
 
 	// To get positions in scrolled canvas...
 	Fl_Scroll *scroll;
@@ -291,6 +301,9 @@ public:
 	multiViewerCanvas(int X,int Y, int W, int H, const char* title=0): basisViewerCanvas(X,Y,W, H, title)
 	{
 	}
+
+	// Dynamic reflow: reposition all boxes when viewport width changes (auto-flow mode)
+	void reflow(int viewport_w = 0);
 
 private:
 

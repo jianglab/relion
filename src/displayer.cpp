@@ -651,6 +651,13 @@ int DisplayBox::unSelect()
 	return selected;
 }
 
+void basisViewerWindow::resize(int X, int Y, int W, int H)
+{
+	Fl_Window::resize(X, Y, W, H);
+	if (multi_canvas)
+		multi_canvas->reflow(W);
+}
+
 int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, ObservationModel *obsModel, EMDLabel display_label, EMDLabel text_label, bool _do_read_whole_stacks, bool _do_apply_orient,
                                   RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _ori_scale, int _ncol, long int max_nr_images, RFLOAT lowpass, RFLOAT highpass, bool _do_class,
                                   MetaDataTable *_MDdata, int _nr_regroup, bool _do_recenter,  bool _is_data, MetaDataTable *_MDgroups,
@@ -678,8 +685,11 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 			ds = 3 * p;
 			dh = p;
 		}
-		int xsize_canvas = _ncol * (CEIL(ds * _scale) + BOX_OFFSET);
-		int nrow = CEIL((RFLOAT)nimgs/_ncol);
+		// Auto-flow when ncol < 1, otherwise honor the user-provided value
+		int cell_w = CEIL(ds * _scale) + BOX_OFFSET;
+		int ncol_use = (_ncol >= 1) ? _ncol : XMIPP_MAX(1, w() / cell_w);
+		int xsize_canvas = ncol_use * cell_w;
+		int nrow = CEIL((RFLOAT)nimgs/ncol_use);
 		int ysize_canvas = nrow * (CEIL(dh * _scale) + BOX_OFFSET);
 		multiViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
 		canvas.multi_max_nr_images = max_nr_images;
@@ -699,7 +709,7 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		canvas.show_z = _show_z;
 		canvas.show_y = _show_y;
 		canvas.show_x = _show_x;
-		canvas.fill(MDin, obsModel, display_label, text_label, _do_apply_orient, _minval, _maxval, _sigma_contrast, _scale, _ncol, _do_recenter, max_nr_images, lowpass, highpass);
+		canvas.fill(MDin, obsModel, display_label, text_label, _do_apply_orient, _minval, _maxval, _sigma_contrast, _scale, ncol_use, _do_recenter, max_nr_images, lowpass, highpass);
 		canvas.nr_regroups = _nr_regroup;
 		canvas.do_recenter = _do_recenter;
 		canvas.do_apply_orient = _do_apply_orient;
@@ -728,6 +738,9 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		fn_dir += "/backup_selection.star";
 		if (exists(fn_dir))
 			canvas.loadBackupSelection(false); // false means dont ask for filename
+
+		// Store canvas pointer for dynamic reflow on window resize
+		multi_canvas = &canvas;
 
 		resizable(*this);
 		show();
@@ -840,6 +853,7 @@ void basisViewerCanvas::fill(MetaDataTable &MDin, ObservationModel *obsModel, EM
                             RFLOAT _sigma_contrast, RFLOAT _scale, int _ncol, bool _do_recenter, long int max_images, RFLOAT lowpass, RFLOAT highpass)
 {
 	ncol = _ncol;
+	scale = _scale;
 	int nr_imgs = MDin.numberOfObjects();
 	if (nr_imgs > 1)
 	{
@@ -1102,6 +1116,35 @@ void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT>
 	my_box->setData(image, mask_image,  0, _minval, _maxval,  _scale, true);
 	my_box->redraw();
 	boxes.push_back(my_box);
+}
+
+void multiViewerCanvas::reflow(int viewport_w)
+{
+	if (boxes.empty() || xsize_box <= 0 || ysize_box <= 0 || scale <= 0)
+		return;
+
+	// Use provided viewport width, fall back to canvas width
+	int available_w = (viewport_w > 0) ? viewport_w : w();
+	int cell_w = xsize_box;
+	int new_ncol = XMIPP_MAX(1, available_w / cell_w);
+	if (new_ncol == ncol)
+		return;
+
+	ncol = new_ncol;
+	nrow = XMIPP_MAX(1, (int)CEIL((RFLOAT)boxes.size() / ncol));
+
+	for (int ipos = 0; ipos < (int)boxes.size(); ipos++)
+	{
+		int icol = ipos % ncol;
+		int irow = ipos / ncol;
+		boxes[ipos]->resize(icol * xsize_box, irow * ysize_box, xsize_box, ysize_box);
+	}
+
+	int new_h = nrow * ysize_box;
+	if (new_h != h() || available_w != w())
+		resize(x(), y(), available_w, new_h);
+
+	redraw();
 }
 
 void basisViewerCanvas::draw()
@@ -2990,7 +3033,7 @@ int displayerGuiWindow::fill(FileName &_fn_in)
 		int x3p = x2p + 170;
 
 		col_input = new Fl_Input(x1p, y, 40, height, "Nr. columns:");
-		col_input->value("5");
+		col_input->value("-1");
 		col_input->color(GUI_INPUT_COLOR);
 
 		ori_scale_input = new Fl_Input(x2p, y, 40, height, "Ori scale:");
@@ -3345,7 +3388,7 @@ void Displayer::read(int argc, char **argv)
 	do_ignore_optics = parser.checkOption("--ignore_optics", "Ignore information about optics groups in input STAR file?");
 
 	int disp_section  = parser.addSection("Multiviewer options");
-	ncol = textToInteger(parser.getOption("--col", "Number of columns", "5"));
+	ncol = textToInteger(parser.getOption("--col", "Number of columns (0 = auto-flow to fit viewport width)", "0"));
 	do_apply_orient = parser.checkOption("--apply_orient","Apply the orientation as stored in the input STAR file angles and offsets");
 	angpix = textToFloat(parser.getOption("--angpix", "Pixel size (in A) to calculate lowpass filter and/or translational offsets ", "-1"));
 	ori_scale = textToFloat(parser.getOption("--ori_scale", "Relative scale for viewing individual images in multiviewer", "1"));

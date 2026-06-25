@@ -393,7 +393,7 @@ std::string ProjectTable::cellText(int row, int col) const
     {
         std::string text;
         if (p.path == win_->currentProjectPath())
-            text = "\xe2\x97\x8f ";  // black circle marker
+            text = "* ";
         text += p.name;
         return text;
     }

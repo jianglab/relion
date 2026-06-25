@@ -1677,6 +1677,7 @@ void JobWindow::initialiseClass3DWindow()
 	place3("range_rot", "range_tilt", "range_psi", "Angular search range - rot, tilt, psi (deg):", TOGGLE_DEACTIVATE);
     place2("helical_range_distance", "helical_nstart", "Local averaging - range (box), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
+	place("do_keep_full_filaments", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
 	current_y += STEPY/2;
