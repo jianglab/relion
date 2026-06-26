@@ -842,12 +842,12 @@ void MotioncorrRunner::plotShifts(FileName fn_mic, Micrograph &mic)
 	dataSet.SetDatasetColor(0.0,0.0,1.0);
 	RFLOAT xshift, yshift;
 
-	const RFLOAT xcenter = mic.getWidth() / 2.0;
-	const RFLOAT ycenter = mic.getHeight() / 2.0;
+	const RFLOAT xcenter = angpix * mic.getWidth() / 2.0;
+	const RFLOAT ycenter = angpix * mic.getHeight() / 2.0;
 	for (int j = mic.first_frame, jlim = mic.getNframes(); j <= jlim; j++) // 1-indexed
 	{
 		if (mic.getShiftAt(j, 0, 0, xshift, yshift, false) == 0) {
-			CDataPoint point(xcenter + shift_scale * xshift, ycenter + shift_scale * yshift);
+			CDataPoint point(xcenter + shift_scale * angpix * xshift, ycenter + shift_scale * angpix * yshift);
 			dataSet.AddDataPoint(point);
 		}
 	}
@@ -859,7 +859,7 @@ void MotioncorrRunner::plotShifts(FileName fn_mic, Micrograph &mic)
 		dataSetStart.SetDrawMarker(true);
 		dataSetStart.SetMarkerSize(5);
 		dataSetStart.SetDatasetColor(1.0,0.0,0.0);
-		CDataPoint point2(xcenter + shift_scale * xshift, ycenter + shift_scale * yshift);
+		CDataPoint point2(xcenter + shift_scale * angpix * xshift, ycenter + shift_scale * angpix * yshift);
 		dataSetStart.AddDataPoint(point2);
 		plot2D->AddDataSet(dataSetStart);
 	}
@@ -886,9 +886,9 @@ void MotioncorrRunner::plotShifts(FileName fn_mic, Micrograph &mic)
 //				std::cout << "End of a trace" << std::endl;
 				break; // start again from this frame
 			}
-			CDataPoint p_obs(mic.patchX[start] + shift_scale * mic.localShiftX[i], mic.patchY[start] + shift_scale * mic.localShiftY[i]);
+			CDataPoint p_obs(angpix * mic.patchX[start] + shift_scale * angpix * mic.localShiftX[i], angpix * mic.patchY[start] + shift_scale * angpix * mic.localShiftY[i]);
 			obs.AddDataPoint(p_obs);
-			CDataPoint p_fit(mic.patchX[start] + shift_scale * mic.localFitX[i], mic.patchY[start] + shift_scale * mic.localFitY[i]);
+			CDataPoint p_fit(angpix * mic.patchX[start] + shift_scale * angpix * mic.localFitX[i], angpix * mic.patchY[start] + shift_scale * angpix * mic.localFitY[i]);
 			fit.AddDataPoint(p_fit);
 			if (i == start) patch_start.AddDataPoint(p_fit);
 			i++;
@@ -900,7 +900,7 @@ void MotioncorrRunner::plotShifts(FileName fn_mic, Micrograph &mic)
 	}
 
 	char title[256];
-	snprintf(title, 255, "X (in pixels; trajectory scaled by %.0f)", shift_scale);
+	snprintf(title, 255, "X [Å] (trajectory scaled by %.0f)", shift_scale * angpix);
 	plot2D->SetXAxisTitle(title);
 	title[0] = 'Y';
 	plot2D->SetYAxisTitle(title);

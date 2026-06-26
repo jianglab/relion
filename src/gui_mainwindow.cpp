@@ -1569,6 +1569,14 @@ void GuiMainWindow::cb_display_io_node_i()
 				command += " --minimum_pick_fom " + manualpickjob.joboptions["minimum_pick_fom"].getString();
 			}
 
+			std::string sort_mode = manualpickjob.joboptions["sort_micrographs_by"].getString();
+			if (sort_mode == "CTF resolution")
+				command += " --sort_by_ctf_res";
+			else if (sort_mode == "defocus (high->low)")
+				command += " --sort_by_defocus_high_low";
+			else if (sort_mode == "defocus (low->high)")
+				command += " --sort_by_defocus_low_high";
+
 			if (manualpickjob.joboptions["do_color"].getBoolean())
 			{
 				command += " --color_label " + manualpickjob.joboptions["color_label"].getString();

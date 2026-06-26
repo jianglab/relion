@@ -699,6 +699,9 @@ void MotionEstimator::writeTracks(
 
 	std::vector<gravis::d2Vector> globalTrack(fc);
 
+	const RFLOAT mgAngpix = micrographHandler->movie_angpix;
+	const RFLOAT coordAngpix = micrographHandler->coords_angpix;
+
 	for (int f = 0; f < fc; f++)
 	{
 		globalTrack[f] = d2Vector(0,0);
@@ -712,7 +715,7 @@ void MotionEstimator::writeTracks(
 
 		for (int p = 0; p < pc; p++)
 		{
-			visTracks[p][f] = positions[p] + visScale * tracks[p][f];
+			visTracks[p][f] = coordAngpix * positions[p] + visScale * mgAngpix * tracks[p][f];
 		}
 	}
 
@@ -730,19 +733,13 @@ void MotionEstimator::writeTracks(
 	dataSet.SetDatasetColor(0.0,0.0,1.0);
 	dataSet.SetLineWidth(1.);
 
-	const RFLOAT xcenterMg =  micrographHandler->micrograph_size.x / 2.0;
-	const RFLOAT ycenterMg =  micrographHandler->micrograph_size.y / 2.0;
-
-	const RFLOAT xcenterCoord = micrographHandler->movie_angpix * xcenterMg
-			/ micrographHandler->coords_angpix;
-
-	const RFLOAT ycenterCoord = micrographHandler->movie_angpix * ycenterMg
-			/ micrographHandler->coords_angpix;
+	const RFLOAT xcenterAngstrom = mgAngpix * micrographHandler->micrograph_size.x / 2.0;
+	const RFLOAT ycenterAngstrom = mgAngpix * micrographHandler->micrograph_size.y / 2.0;
 
 	for (int f = 0; f < fc; f++)
 	{
-		CDataPoint point(xcenterCoord + visScale * globalTrack[f].x,
-						 ycenterCoord + visScale * globalTrack[f].y);
+		CDataPoint point(xcenterAngstrom + visScale * mgAngpix * globalTrack[f].x,
+						 ycenterAngstrom + visScale * mgAngpix * globalTrack[f].y);
 		dataSet.AddDataPoint(point);
 	}
 
@@ -754,8 +751,8 @@ void MotionEstimator::writeTracks(
 	dataSetStart.SetMarkerSize(2);
 	dataSetStart.SetDatasetColor(1.0,0.0,0.0);
 	CDataPoint point2(
-				xcenterCoord + visScale * globalTrack[0].x,
-				ycenterCoord + visScale * globalTrack[0].y);
+				xcenterAngstrom + visScale * mgAngpix * globalTrack[0].x,
+				ycenterAngstrom + visScale * mgAngpix * globalTrack[0].y);
 	dataSetStart.AddDataPoint(point2);
 	plot2D->AddDataSet(dataSetStart);
 
@@ -789,7 +786,7 @@ void MotionEstimator::writeTracks(
 	}
 
 	char title[256];
-	snprintf(title, 255, "X (in pixels; trajectory scaled by %.0f)", visScale);
+	snprintf(title, 255, "X [Å] (trajectory scaled by %.0f)", visScale * mgAngpix);
 	plot2D->SetXAxisTitle(title);
 	title[0] = 'Y';
 	plot2D->SetYAxisTitle(title);

@@ -713,6 +713,9 @@ void JobWindow::initialiseManualpickWindow()
 	group1->end();
 	guientries["do_fom_threshold"].cb_menu_i();
 
+	current_y += STEPY/4;
+	place("sort_micrographs_by");
+
 	tab1->end();
 
 	tab2->begin();
@@ -1675,7 +1678,7 @@ void JobWindow::initialiseClass3DWindow()
 	group5->begin();
 	place2("helical_tube_inner_diameter", "helical_tube_outer_diameter", "Tube diameter - inner, outer (A):", TOGGLE_DEACTIVATE);
 	place3("range_rot", "range_tilt", "range_psi", "Angular search range - rot, tilt, psi (deg):", TOGGLE_DEACTIVATE);
-    place2("helical_range_distance", "helical_nstart", "Local averaging - range (box), N-start:", TOGGLE_DEACTIVATE);
+    place2("helical_range_distance", "helical_nstart", "Local averaging - range (Å), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
 	place("do_keep_full_filaments", TOGGLE_DEACTIVATE);
 
@@ -1849,7 +1852,7 @@ void JobWindow::initialiseAutorefineWindow()
 	group2->begin();
 	place2("helical_tube_inner_diameter", "helical_tube_outer_diameter", "Tube diameter - inner, outer (A):",TOGGLE_DEACTIVATE);
 	place3("range_rot", "range_tilt", "range_psi", "Angular search range - rot, tilt, psi (deg):", TOGGLE_DEACTIVATE);
-    place2("helical_range_distance", "helical_nstart", "Local averaging - range (box), N-start:", TOGGLE_DEACTIVATE);
+    place2("helical_range_distance", "helical_nstart", "Local averaging - range (Å), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer

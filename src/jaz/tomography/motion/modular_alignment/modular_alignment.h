@@ -814,7 +814,7 @@ void ModularAlignment<MotionModel, DeformationModel2D>::visualiseTrajectories(
 			start.SetMarkerSize(8);
 			start.SetDatasetColor(0.2,0.5,1.0);
 
-			const gravis::d3Vector a = initialPos[p] + scale * track.shifts_Ang[0] / pixelSize;
+			const gravis::d3Vector a = pixelSize * initialPos[p] + scale * track.shifts_Ang[0];
 			const gravis::i2Vector di = dim_indices[dim];
 
 			CDataPoint point3(a[di[0]],a[di[1]]);
@@ -833,7 +833,7 @@ void ModularAlignment<MotionModel, DeformationModel2D>::visualiseTrajectories(
 
 			for (int f = 0; f < fc; f++)
 			{
-				const gravis::d3Vector a = initialPos[p] + scale * track.shifts_Ang[f] / pixelSize;
+				const gravis::d3Vector a = pixelSize * initialPos[p] + scale * track.shifts_Ang[f];
 				const gravis::i2Vector di = dim_indices[dim];
 
 				CDataPoint point(a[di[0]],a[di[1]]);
@@ -856,7 +856,7 @@ void ModularAlignment<MotionModel, DeformationModel2D>::visualiseTrajectories(
 
 			for (int f = 0; f < fc; f++)
 			{
-				const gravis::d3Vector a = initialPos[p] + scale * track.shifts_Ang[f] / pixelSize;
+				const gravis::d3Vector a = pixelSize * initialPos[p] + scale * track.shifts_Ang[f];
 				const gravis::i2Vector di = dim_indices[dim];
 
 				CDataPoint point(a[di[0]],a[di[1]]);
@@ -868,9 +868,9 @@ void ModularAlignment<MotionModel, DeformationModel2D>::visualiseTrajectories(
 		}
 
 		std::string label_x = plot_names[dim].substr(0,1) +
-				" (in pixels; trajectory scaled by " + ZIO::itoa(scale) + ")";
+				" [Å] (trajectory scaled by " + ZIO::itoa(scale) + ")";
 
-		std::string label_y = plot_names[dim].substr(1,1);
+		std::string label_y = plot_names[dim].substr(1,1) + " [Å]";
 
 		plot2D.SetXAxisTitle(label_x);
 		plot2D.SetYAxisTitle(label_y);

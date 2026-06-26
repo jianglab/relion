@@ -739,8 +739,8 @@ Mesh MotionFit::visualiseTrajectories3D(const std::vector<double> &x, double sca
 		
 		for (int f = 0; f < fc-1; f++)
 		{
-			const d3Vector a = initialPos[p] + scale * track.shifts_Ang[f] / pixelSize;
-			const d3Vector b = initialPos[p] + scale * track.shifts_Ang[f+1] / pixelSize;
+			const d3Vector a = pixelSize * initialPos[p] + scale * track.shifts_Ang[f];
+			const d3Vector b = pixelSize * initialPos[p] + scale * track.shifts_Ang[f+1];
 			
 			const double c = (f == 0)? 1.0 : 0.66 - 0.33*(f%2);
 						
@@ -785,7 +785,7 @@ void MotionFit::visualiseTrajectories2D(
 			start.SetMarkerSize(8);
 			start.SetDatasetColor(0.2,0.5,1.0);
 
-			const d3Vector a = initialPos[p] + scale * track.shifts_Ang[0] / pixelSize;
+			const d3Vector a = pixelSize * initialPos[p] + scale * track.shifts_Ang[0];
 			const i2Vector di = dim_indices[dim];
 
 			CDataPoint point3(a[di[0]],a[di[1]]);
@@ -804,7 +804,7 @@ void MotionFit::visualiseTrajectories2D(
 
 			for (int f = 0; f < fc; f++)
 			{
-				const d3Vector a = initialPos[p] + scale * track.shifts_Ang[f] / pixelSize;
+				const d3Vector a = pixelSize * initialPos[p] + scale * track.shifts_Ang[f];
 				const i2Vector di = dim_indices[dim];
 
 				CDataPoint point(a[di[0]],a[di[1]]);
@@ -816,9 +816,9 @@ void MotionFit::visualiseTrajectories2D(
 		}
 
 		std::string label_x = plot_names[dim].substr(0,1) +
-				" (in pixels; trajectory scaled by " + ZIO::itoa(scale) + ")";
+				" [Å] (trajectory scaled by " + ZIO::itoa(scale) + ")";
 
-		std::string label_y = plot_names[dim].substr(1,1);
+		std::string label_y = plot_names[dim].substr(1,1) + " [Å]";
 
 		plot2D.SetXAxisTitle(label_x);
 		plot2D.SetYAxisTitle(label_y);

@@ -32,9 +32,56 @@ std::vector<Fl_Button*> viewctf_buttons;
 std::vector<Fl_Text_Display*> text_displays;
 std::vector<Fl_Text_Display*> count_displays;
 std::vector<Fl_Text_Display*> defocus_displays;
+std::vector<Fl_Text_Display*> ctfres_displays;
 std::vector<Fl_Check_Button*> check_buttons;
 int first_pick_viewed, last_pick_viewed;
+int prev_pick_viewed = -1;
 int last_ctf_viewed;
+
+#define GUI_HIGHLIGHT_ACTIVE_COLOR (fl_rgb_color(200, 230, 255))
+
+void highlight_active(int imic)
+{
+	// Reset previous active row to default color (respecting selection state)
+	if (prev_pick_viewed >= 0 && prev_pick_viewed < (int)text_displays.size())
+	{
+		Fl_Color bg = selected[prev_pick_viewed] ? GUI_INPUT_COLOR : GUI_BACKGROUND_COLOR;
+		text_displays[prev_pick_viewed]->color(bg, bg);
+		text_displays[prev_pick_viewed]->redraw();
+		count_displays[prev_pick_viewed]->color(bg, bg);
+		count_displays[prev_pick_viewed]->redraw();
+		if (prev_pick_viewed < (int)defocus_displays.size())
+		{
+			defocus_displays[prev_pick_viewed]->color(bg, bg);
+			defocus_displays[prev_pick_viewed]->redraw();
+		}
+		if (prev_pick_viewed < (int)ctfres_displays.size())
+		{
+			ctfres_displays[prev_pick_viewed]->color(bg, bg);
+			ctfres_displays[prev_pick_viewed]->redraw();
+		}
+	}
+	// Highlight the new active row (respecting selection state)
+	if (imic >= 0 && imic < (int)text_displays.size())
+	{
+		Fl_Color bg = selected[imic] ? GUI_HIGHLIGHT_ACTIVE_COLOR : GUI_BACKGROUND_COLOR;
+		text_displays[imic]->color(bg, bg);
+		text_displays[imic]->redraw();
+		count_displays[imic]->color(bg, bg);
+		count_displays[imic]->redraw();
+		if (imic < (int)defocus_displays.size())
+		{
+			defocus_displays[imic]->color(bg, bg);
+			defocus_displays[imic]->redraw();
+		}
+		if (imic < (int)ctfres_displays.size())
+		{
+			ctfres_displays[imic]->color(bg, bg);
+			ctfres_displays[imic]->redraw();
+		}
+	}
+	prev_pick_viewed = imic;
+}
 
 bool   global_has_ctf;
 bool   global_pick_startend;
@@ -121,6 +168,7 @@ void cb_viewmic(Fl_Widget* w, void* data)
 
 	// Launch the picking window
 	first_pick_viewed = imic;
+	highlight_active(imic);
 	last_pick_viewed = XMIPP_MIN(global_fn_mics.size() - 1, imic + nr_simultaneous - 1);
 	for (int mymic = first_pick_viewed; mymic <= last_pick_viewed; mymic++)
 	{
@@ -236,6 +284,11 @@ void cb_selectmic(Fl_Widget* w, void* data)
 			viewctf_buttons[imic]->activate();
 			defocus_displays[imic]->color(GUI_INPUT_COLOR, GUI_INPUT_COLOR);
 			defocus_displays[imic]->activate();
+			if (imic < (int)ctfres_displays.size())
+			{
+				ctfres_displays[imic]->color(GUI_INPUT_COLOR, GUI_INPUT_COLOR);
+				ctfres_displays[imic]->activate();
+			}
 		}
 	}
 	else
@@ -252,6 +305,11 @@ void cb_selectmic(Fl_Widget* w, void* data)
 			viewctf_buttons[imic]->deactivate();
 			defocus_displays[imic]->color(GUI_BACKGROUND_COLOR, GUI_BACKGROUND_COLOR);
 			defocus_displays[imic]->deactivate();
+			if (imic < (int)ctfres_displays.size())
+			{
+				ctfres_displays[imic]->color(GUI_BACKGROUND_COLOR, GUI_BACKGROUND_COLOR);
+				ctfres_displays[imic]->deactivate();
+			}
 		}
 	}
 }
@@ -275,8 +333,8 @@ int manualpickerGuiWindow::fill()
 	int current_y = 25;
 
 	// Scroll bars
-	Fl_Scroll scroll(0, current_y, w(), h()-current_y);
-	scroll.type(Fl_Scroll::VERTICAL);
+	scroll_widget = new Fl_Scroll(0, current_y, w(), h()-current_y);
+	scroll_widget->type(Fl_Scroll::VERTICAL);
 
 	selected.clear();
 	number_picked.clear();
@@ -298,6 +356,7 @@ int manualpickerGuiWindow::fill()
 	global_fn_ctfs.clear();
     global_fn_foms.clear();
 	text_displays.clear();
+	ctfres_displays.clear();
 	viewmic_buttons.clear();
 	viewctf_buttons.clear();
 	number_picked.clear();
@@ -385,6 +444,19 @@ int manualpickerGuiWindow::fill()
 			myDF->color(GUI_INPUT_COLOR, GUI_INPUT_COLOR);
 			myDF->buffer(textbuffDF);
 			defocus_displays.push_back(myDF);
+
+			// CTF resolution
+			Fl_Text_Buffer *textbuffCTFR = new Fl_Text_Buffer();
+			if (MDin.containsLabel(EMDL_CTF_MAXRES))
+			{
+				RFLOAT ctf_res;
+				MDin.getValue(EMDL_CTF_MAXRES, ctf_res);
+				textbuffCTFR->text(floatToString(ctf_res).c_str());
+			}
+			Fl_Text_Display* myCTFR = new Fl_Text_Display(MXCOL5, current_y, MWCOL5, ystep-5);
+			myCTFR->color(GUI_INPUT_COLOR, GUI_INPUT_COLOR);
+			myCTFR->buffer(textbuffCTFR);
+			ctfres_displays.push_back(myCTFR);
 		}
 
 		imic++;
@@ -402,9 +474,44 @@ int manualpickerGuiWindow::fill()
 	// Also count the number of particles that were already picked
 	cb_menubar_recount_i();
 
+	// Highlight the first micrograph as initially active
+	if (text_displays.size() > 0)
+		highlight_active(0);
+
 	resizable(*this);
 	show();
 	return Fl::run();
+}
+
+int manualpickerGuiWindow::handle(int event)
+{
+	if (event == FL_SHORTCUT || event == FL_KEYDOWN)
+	{
+		const int key = Fl::event_key();
+		const int n = (int)viewmic_buttons.size();
+
+		if ((key == 'z' || key == 'Z') && first_pick_viewed > 0)
+		{
+			int imic = first_pick_viewed - 1;
+			if (imic >= 0 && imic < n)
+			{
+				viewmic_buttons[imic]->do_callback();
+				scroll_widget->scroll_to(0, 25 + imic * 35);
+			}
+			return 1;
+		}
+		else if ((key == 'x' || key == 'X') && first_pick_viewed < n - 1)
+		{
+			int imic = first_pick_viewed + 1;
+			if (imic >= 0 && imic < n)
+			{
+				viewmic_buttons[imic]->do_callback();
+				scroll_widget->scroll_to(0, 25 + (imic - 2) * 35);
+			}
+			return 1;
+		}
+	}
+	return Fl_Window::handle(event);
 }
 
 void manualpickerGuiWindow::readOutputStarfile()
@@ -727,6 +834,13 @@ void ManualPicker::read(int argc, char **argv)
     global_pick_lines = parser.checkOption("--pick_lines", "Pick lines for curvy helices");
 	do_allow_save = parser.checkOption("--allow_save", "Allow saving of the selected micrographs");
 	do_fast_save = parser.checkOption("--fast_save", "Save a default selection of all micrographs immediately");
+	sort_micrographs_by = parser.getOption("--sort_micrographs_by", "Sort micrographs: none, ctf_resolution, defocus_high_low, defocus_low_high", "none");
+	if (parser.checkOption("--sort_by_ctf_res", ""))
+		sort_micrographs_by = "CTF resolution";
+	if (parser.checkOption("--sort_by_defocus_high_low", ""))
+		sort_micrographs_by = "defocus (high->low)";
+	if (parser.checkOption("--sort_by_defocus_low_high", ""))
+		sort_micrographs_by = "defocus (low->high)";
 	global_nr_simultaneous = textToInteger(parser.getOption("--open_simultaneous", "Open this many of the next micrographs simultaneously when pressing CTRL and a Pick button", "10"));
 
 	int mic_section = parser.addSection("Displaying options");
@@ -860,7 +974,15 @@ void ManualPicker::run()
 {
 	Fl::scheme("gtk+");
 
-	manualpickerGuiWindow win(TOTALWIDTH, TOTALHEIGHT, "RELION manual-picking GUI");
+	manualpickerGuiWindow win(TOTALWIDTH, TOTALHEIGHT, "RELION manual-picking  [Z:prev  X:next]");
+
+	// Sort micrographs if requested
+	if (sort_micrographs_by == "CTF resolution" && MDin.containsLabel(EMDL_CTF_MAXRES))
+		MDin.sort(EMDL_CTF_MAXRES);
+	else if (sort_micrographs_by == "defocus (high->low)" && MDin.containsLabel(EMDL_CTF_DEFOCUSU))
+		MDin.sort(EMDL_CTF_DEFOCUSU, true);
+	else if (sort_micrographs_by == "defocus (low->high)" && MDin.containsLabel(EMDL_CTF_DEFOCUSU))
+		MDin.sort(EMDL_CTF_DEFOCUSU, false);
 
 	// Transfer all parameters to the gui
 	win.MDin = MDin;

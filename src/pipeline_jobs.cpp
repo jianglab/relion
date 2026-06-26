@@ -1887,11 +1887,14 @@ to the average PLUS this value times the standard deviation. Use zero to set the
 	joboptions["angpix"] = JobOption("Pixel size (A)", -1, 0.3, 5, 0.1, "Pixel size in Angstroms. This will be used to calculate the filters and the particle diameter in pixels. If a CTF-containing STAR file is input, then the value given here will be ignored, and the pixel size will be calculated from the values in the STAR file. A negative value can then be given here.");
 	joboptions["do_topaz_denoise"] = JobOption("OR: use Topaz denoising?", false, "If set to true, Topaz denoising will be performed instead of lowpass filtering.");
 
-    joboptions["do_startend"] = JobOption("Pick start-end coordinates helices?", false, "If set to true, start and end coordinates are picked subsequently and a line will be drawn between each pair");
+	joboptions["do_startend"] = JobOption("Pick start-end coordinates helices?", false, "If set to true, start and end coordinates are picked subsequently and a line will be drawn between each pair");
     joboptions["do_lines"] = JobOption("Pick helices as lines?", false, "If set to true, lines of coordinates are picked as one drags the mouse");
 
 	joboptions["do_fom_threshold"] = JobOption("Use autopick FOM threshold?", false, "If set to Yes, only particles with rlnAutopickFigureOfMerit values below the threshold below will be extracted.");
 	joboptions["minimum_pick_fom"] = JobOption("Minimum autopick FOM: ", 0, -5, 10, 0.1, "The minimum value for the rlnAutopickFigureOfMerit for particles to be extracted.");
+
+	std::vector<std::string> sort_opts = {"none", "CTF resolution", "defocus (high->low)", "defocus (low->high)"};
+	joboptions["sort_micrographs_by"] = JobOption("Sort micrographs by", sort_opts, 0, "Select how to sort the micrographs before displaying them.");
 
 	joboptions["do_color"] = JobOption("Blue<>red color particles?", false, "If set to true, then the circles for each particles are coloured from red to blue (or the other way around) for a given metadatalabel. If this metadatalabel is not in the picked coordinates STAR file \
 (basically only the rlnAutopickFigureOfMerit or rlnClassNumber) would be useful values there, then you may provide an additional STAR file (e.g. after classification/refinement below. Particles with values -999, or that are not in the additional STAR file will be coloured the default color: green");
@@ -1959,6 +1962,14 @@ bool RelionJob::getCommandsManualpickJob(std::string &outputname, std::vector<st
 	{
 		command += " --minimum_pick_fom " + joboptions["minimum_pick_fom"].getString();
 	}
+
+	std::string sort_mode = joboptions["sort_micrographs_by"].getString();
+	if (sort_mode == "CTF resolution")
+		command += " --sort_by_ctf_res";
+	else if (sort_mode == "defocus (high->low)")
+		command += " --sort_by_defocus_high_low";
+	else if (sort_mode == "defocus (low->high)")
+		command += " --sort_by_defocus_low_high";
 
 	command += " --particle_diameter " + joboptions["diameter"].getString();
 
@@ -3943,11 +3954,11 @@ does not guarantee convergence. The program cannot find a reasonable symmetry if
 	joboptions["helical_rise_inistep"] = JobOption("Helical rise search (A) - Step:", std::string("0"), "Minimum, maximum and initial step for helical rise search. Helical rise is a positive value in Angstroms. \
 Generally it is not necessary for the user to provide an initial step (less than 1% the initial helical rise, 5~1000 samplings as default). But it needs to be set manually if the default value \
 does not guarantee convergence. The program cannot find a reasonable symmetry if the true helical parameters fall out of the given ranges. Note that the final reconstruction can still converge if wrong helical and point group symmetry are provided.");
-	joboptions["helical_range_distance"] = JobOption("Local averaging - range (box)", std::string("-1"), "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
+	joboptions["helical_range_distance"] = JobOption("Local averaging - range (Å)", std::string("-1"), "Local averaging of orientations and translations will be performed within a range of +/- this value (in Angstroms). This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
+Values of ~ 100 Angstroms are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
+    joboptions["helical_nstart"] = JobOption("Local averaging - N-start symmetry", std::string("1"), "Local averaging of orientations and translations will be performed within a range of +/- this value (in Angstroms). This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
 Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
-    joboptions["helical_nstart"] = JobOption("Local averaging - N-start symmetry", std::string("1"), "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
-Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
-	joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
+    joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
 
 	joboptions["do_keep_full_filaments"] = JobOption("Keep full filaments during classification?", true, "If set to Yes, then all segments from the same filament (i.e. same micrograph and same helical tube ID) will be assigned to the same 3D class at each iteration during classification. This helps ensure that entire filaments are classified consistently.");
 
@@ -4265,7 +4276,32 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 			if (error_message != "") return false;
 			if (val > 0.)
             {
-				command += " --helical_sigma_distance " + floatToString(val / 3.);
+                if (!is_continue)
+                {
+                    RFLOAT box_size_Angstrom = 0.;
+                    FileName fn_star = joboptions["fn_img"].getString();
+                    if (fn_star != "")
+                    {
+                        MetaDataTable MDopt;
+                        if (MDopt.read(fn_star, "optics"))
+                        {
+                            RFLOAT angpix = 1.;
+                            int box_size = 256;
+                            MDopt.getValue(EMDL_IMAGE_PIXEL_SIZE, angpix, 0);
+                            if (MDopt.containsLabel(EMDL_IMAGE_SIZE))
+                                MDopt.getValue(EMDL_IMAGE_SIZE, box_size, 0);
+                            box_size_Angstrom = box_size * angpix;
+                        }
+                    }
+                    if (box_size_Angstrom > 0.)
+                        command += " --helical_sigma_distance " + floatToString(val / (3. * box_size_Angstrom));
+                    else
+                        command += " --helical_sigma_distance " + floatToString(val / 3.);
+                }
+                else
+                {
+                    command += " --helical_sigma_distance " + floatToString(val / 3.);
+                }
                 int nstart = joboptions["helical_nstart"].getNumber(error_message);
                 command += " --helical_nstart " + floatToString(nstart);
             }
@@ -4470,9 +4506,9 @@ does not guarantee convergence. The program cannot find a reasonable symmetry if
 	joboptions["helical_rise_inistep"] = JobOption("Helical rise search (A) - Step:", std::string("0"), "Minimum, maximum and initial step for helical rise search. Helical rise is a positive value in Angstroms. \
 Generally it is not necessary for the user to provide an initial step (less than 1% the initial helical rise, 5~1000 samplings as default). But it needs to be set manually if the default value \
 does not guarantee convergence. The program cannot find a reasonable symmetry if the true helical parameters fall out of the given ranges. Note that the final reconstruction can still converge if wrong helical and point group symmetry are provided.");
-    joboptions["helical_range_distance"] = JobOption("Local averaging - range (box)", std::string("-1"), "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
-Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
-    joboptions["helical_nstart"] = JobOption("Local averaging - N-start symmetry", std::string("1"), "Local averaging of orientations and translations will be performed within a range of +/- this value * the box size. This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
+    joboptions["helical_range_distance"] = JobOption("Local averaging - range (Å)", std::string("-1"), "Local averaging of orientations and translations will be performed within a range of +/- this value (in Angstroms). This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
+Values of ~ 100 Angstroms are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
+    joboptions["helical_nstart"] = JobOption("Local averaging - N-start symmetry", std::string("1"), "Local averaging of orientations and translations will be performed within a range of +/- this value (in Angstroms). This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
 Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
 	joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
 
@@ -4783,7 +4819,32 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 			if (error_message != "") return false;
 			if (val > 0.)
             {
-				command += " --helical_sigma_distance " + floatToString(val / 3.);
+                if (!is_continue)
+                {
+                    RFLOAT box_size_Angstrom = 0.;
+                    FileName fn_star = joboptions["fn_img"].getString();
+                    if (fn_star != "")
+                    {
+                        MetaDataTable MDopt;
+                        if (MDopt.read(fn_star, "optics"))
+                        {
+                            RFLOAT angpix = 1.;
+                            int box_size = 256;
+                            MDopt.getValue(EMDL_IMAGE_PIXEL_SIZE, angpix, 0);
+                            if (MDopt.containsLabel(EMDL_IMAGE_SIZE))
+                                MDopt.getValue(EMDL_IMAGE_SIZE, box_size, 0);
+                            box_size_Angstrom = box_size * angpix;
+                        }
+                    }
+                    if (box_size_Angstrom > 0.)
+                        command += " --helical_sigma_distance " + floatToString(val / (3. * box_size_Angstrom));
+                    else
+                        command += " --helical_sigma_distance " + floatToString(val / 3.);
+                }
+                else
+                {
+                    command += " --helical_sigma_distance " + floatToString(val / 3.);
+                }
                 int nstart = joboptions["helical_nstart"].getNumber(error_message);
                 command += " --helical_nstart " + floatToString(nstart);
             }
