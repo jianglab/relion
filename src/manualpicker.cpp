@@ -29,14 +29,6 @@
 #include <objc/message.h>
 #endif
 
-struct PickWindowEntry {
-	Fl_Window *win;
-	Fl_Scroll *scroll;
-	int imic;
-};
-std::vector<PickWindowEntry> pick_windows;
-std::map<int, std::pair<int,int>> mic_scroll_pos;
-
 std::vector<int> imics;
 std::vector<FileName> global_fn_mics;
 std::vector<FileName> global_fn_picks;
@@ -177,6 +169,15 @@ public:
 	}
 };
 
+struct PickWindowEntry {
+	Fl_Window *win;
+	Fl_Scroll *scroll;
+	MyPickCanvas *canvas;
+	int imic;
+};
+std::vector<PickWindowEntry> pick_windows;
+std::map<int, std::pair<int,int>> mic_scroll_pos;
+
 void cb_viewmic(Fl_Widget* w, void* data)
 {
 	int *iptr = (int*)data;
@@ -229,49 +230,27 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			viewmic_buttons[mymic]->redraw();
 		}
 	}
-	// Save scroll positions and window position before closing
-	static int prev_win_x = -1, prev_win_y = -1;
-	for (auto &entry : pick_windows)
-	{
-		mic_scroll_pos[entry.imic] = {entry.scroll->hscrollbar.value(), entry.scroll->scrollbar.value()};
-		prev_win_x = entry.win->x();
-		prev_win_y = entry.win->y();
-	}
 
-	for (auto &entry : pick_windows) delete entry.win;
-	pick_windows.clear();
+	// Save scroll positions before reusing/creating windows
+	for (auto &entry : pick_windows)
+		mic_scroll_pos[entry.imic] = {entry.scroll->hscrollbar.value(), entry.scroll->scrollbar.value()};
 
 	first_pick_viewed = imic;
 	highlight_active(imic);
-	last_pick_viewed = XMIPP_MIN(global_fn_mics.size() - 1, imic + nr_simultaneous - 1);
-	for (int mymic = first_pick_viewed; mymic <= last_pick_viewed; mymic++)
+	last_pick_viewed = XMIPP_MIN((int)global_fn_mics.size() - 1, imic + nr_simultaneous - 1);
+
+	int required = last_pick_viewed - first_pick_viewed + 1;
+
+	// Delete excess windows (range shrunk)
+	while ((int)pick_windows.size() > required)
 	{
-		FileName fn_coord = global_fn_picks[mymic];
+		delete pick_windows.back().win;
+		pick_windows.pop_back();
+	}
 
-		Image<RFLOAT> img;
-		img.read(global_fn_mics[mymic]);
-
-		if (global_lowpass > 0.)
-			lowPassFilterMap(img(), global_lowpass, global_angpix);
-		if (global_highpass > 0.)
-			highPassFilterMap(img(), global_highpass, global_angpix, 25);
-
-		int xsize_canvas = CEIL(XSIZE(img()) * global_micscale);
-		int ysize_canvas = CEIL(YSIZE(img()) * global_micscale);
-
-		Fl_Double_Window *win = new Fl_Double_Window(xsize_canvas + 20, ysize_canvas + 20, global_fn_mics[mymic].c_str());
-		Fl_Scroll *scroll = new Fl_Scroll(0, 0, win->w(), win->h());
-		int rad = ROUND(global_particle_diameter/(2. * global_angpix));
-		MyPickCanvas *canvas = new MyPickCanvas(0, 0, xsize_canvas, ysize_canvas);
-		canvas->my_imic = mymic;
-		canvas->particle_radius = rad;
-		canvas->do_startend = global_pick_startend;
-		canvas->do_lines = global_pick_lines;
-		canvas->coord_scale = global_coord_scale;
-		canvas->SetScroll(scroll);
-		canvas->fill(img(), global_black_val, global_white_val, global_sigma_contrast, global_micscale);
-		canvas->fn_coords = fn_coord;
-		canvas->fn_mic = global_fn_mics[mymic];
+	// Helper: set up color-related canvas properties (same for all code paths)
+	auto setupCanvasColors = [](MyPickCanvas *canvas)
+	{
 		if (global_fn_foms.size() == 0 && global_color_label != "")
 		{
 			canvas->color_label = EMDL::str2Label(global_color_label);
@@ -283,35 +262,159 @@ void cb_viewmic(Fl_Widget* w, void* data)
 		}
 		canvas->minimum_pick_fom = global_minimum_fom;
 		canvas->do_read_whole_stacks = false;
-		if (exists(fn_coord))
+	};
+
+	// Helper: read, filter and return the image for a given micrograph index
+	auto readMicrograph = [](int idx) -> Image<RFLOAT>
+	{
+		Image<RFLOAT> img;
+		img.read(global_fn_mics[idx]);
+		if (global_lowpass > 0.)
+			lowPassFilterMap(img(), global_lowpass, global_angpix);
+		if (global_highpass > 0.)
+			highPassFilterMap(img(), global_highpass, global_angpix, 25);
+		return img;
+	};
+
+	for (int idx = 0; idx < required; idx++)
+	{
+		int mymic = first_pick_viewed + idx;
+
+		if (idx < (int)pick_windows.size())
 		{
-			canvas->loadCoordinates(false);
+			// ---- Reuse existing window ----
+			PickWindowEntry &entry = pick_windows[idx];
+			entry.imic = mymic;
+
+			Image<RFLOAT> img = readMicrograph(mymic);
+			int xsize_canvas = CEIL(XSIZE(img()) * global_micscale);
+			int ysize_canvas = CEIL(YSIZE(img()) * global_micscale);
+
+			// If canvas dimensions changed, replace the canvas widget
+			if (entry.canvas->w() != xsize_canvas || entry.canvas->h() != ysize_canvas)
+			{
+				entry.scroll->remove(entry.canvas);
+				delete entry.canvas;
+
+				entry.scroll->begin();
+				MyPickCanvas *new_canvas = new MyPickCanvas(0, 0, xsize_canvas, ysize_canvas);
+				entry.scroll->end();
+				entry.canvas = new_canvas;
+			}
+
+			MyPickCanvas *canvas = entry.canvas;
+
+			// Delete old DisplayBox children of the scroll and clear canvas
+			// pointers before creating new DisplayBoxes for the new micrograph.
+			for (auto *box : canvas->boxes) delete box;
+			canvas->boxes.clear();
+
+			FileName fn_coord = global_fn_picks[mymic];
+			int rad = ROUND(global_particle_diameter/(2. * global_angpix));
+			canvas->my_imic = mymic;
+			canvas->particle_radius = rad;
+			canvas->do_startend = global_pick_startend;
+			canvas->do_lines = global_pick_lines;
+			canvas->coord_scale = global_coord_scale;
+			canvas->SetScroll(entry.scroll);
+
+			// DisplayBox objects must be children of the window, not the scroll
+			// or canvas. FLTK draws window children in reverse index order
+			// (highest index first), so DisplayBox (highest) draws the image
+			// first, then MyPickCanvas draws coordinates on top, then the
+			// scroll draws the frame last. Ensure the window is the current
+			// Fl_Group so new DisplayBoxes are correctly parented.
+			entry.win->begin();
+			canvas->fill(img(), global_black_val, global_white_val,
+				     global_sigma_contrast, global_micscale);
+			entry.win->end();
+
+			canvas->fn_coords = fn_coord;
+			canvas->fn_mic = global_fn_mics[mymic];
+			setupCanvasColors(canvas);
+
+			// Always clear old coordinate data before loading new.
+			// Using loadCoordinates here caused stale data issues; clear
+			// explicitly and read directly from the correct file path.
+			canvas->MDcoords.clear();
+			if (exists(fn_coord))
+				canvas->MDcoords.read(fn_coord);
+
+			// Replicate do_lines and color handling that loadCoordinates did
+			if (canvas->do_lines)
+			{
+				int ifil_max = 0;
+				FOR_ALL_OBJECTS_IN_METADATA_TABLE(canvas->MDcoords)
+				{
+					int ifil;
+					canvas->MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, ifil);
+					if (ifil > ifil_max) ifil_max = ifil;
+				}
+				current_selection_type = ifil_max + 1;
+			}
+			if (canvas->fn_color != "")
+				canvas->findColorColumnForCoordinates();
+
 			canvas->redraw();
+			entry.win->label(global_fn_mics[mymic].c_str());
+
+			// Restore saved scroll position for this micrograph
+			auto it = mic_scroll_pos.find(mymic);
+			if (it != mic_scroll_pos.end())
+				entry.scroll->scroll_to(it->second.first, it->second.second);
+
+			if (mymic == first_pick_viewed)
+				Fl::focus(canvas);
 		}
+		else
+		{
+			// ---- Create new window ----
+			Image<RFLOAT> img = readMicrograph(mymic);
+			int xsize_canvas = CEIL(XSIZE(img()) * global_micscale);
+			int ysize_canvas = CEIL(YSIZE(img()) * global_micscale);
+			FileName fn_coord = global_fn_picks[mymic];
 
-		win->resizable(*win);
-		win->show();
+			Fl_Double_Window *win = new Fl_Double_Window(xsize_canvas + 20, ysize_canvas + 20,
+								    global_fn_mics[mymic].c_str());
+			Fl_Scroll *scroll = new Fl_Scroll(0, 0, win->w(), win->h());
+			int rad = ROUND(global_particle_diameter/(2. * global_angpix));
+			MyPickCanvas *canvas = new MyPickCanvas(0, 0, xsize_canvas, ysize_canvas);
+			canvas->my_imic = mymic;
+			canvas->particle_radius = rad;
+			canvas->do_startend = global_pick_startend;
+			canvas->do_lines = global_pick_lines;
+			canvas->coord_scale = global_coord_scale;
+			canvas->SetScroll(scroll);
+			canvas->fill(img(), global_black_val, global_white_val, global_sigma_contrast, global_micscale);
+			canvas->fn_coords = fn_coord;
+			canvas->fn_mic = global_fn_mics[mymic];
+			setupCanvasColors(canvas);
 
-		// Restore saved window position (after show on macOS)
-		if (prev_win_x >= 0)
-			win->position(prev_win_x, prev_win_y);
+			if (exists(fn_coord))
+			{
+				canvas->loadCoordinates(false);
+				canvas->redraw();
+			}
 
-		// Restore saved scroll position for this micrograph
-		auto it = mic_scroll_pos.find(mymic);
-		if (it != mic_scroll_pos.end())
-			scroll->scroll_to(it->second.first, it->second.second);
+			win->resizable(*win);
+			win->show();
 
-		// Give focus to the canvas so keyboard Z/X works from the pick window
-		if (mymic == first_pick_viewed)
-			Fl::focus(canvas);
+			// Restore saved scroll position for this micrograph
+			auto it = mic_scroll_pos.find(mymic);
+			if (it != mic_scroll_pos.end())
+				scroll->scroll_to(it->second.first, it->second.second);
+
+			if (mymic == first_pick_viewed)
+				Fl::focus(canvas);
 
 #ifdef __APPLE__
-		Fl::add_timeout(0.0, disable_tabbing_cb, win);
+			Fl::add_timeout(0.0, disable_tabbing_cb, win);
 #endif
-		pick_windows.push_back({win, scroll, mymic});
+			pick_windows.push_back({win, scroll, canvas, mymic});
+		}
 	}
 
-	for (int i = 0; i < viewmic_buttons.size(); i++)
+	for (int i = 0; i < (int)viewmic_buttons.size(); i++)
 	{
 		if (i >= first_pick_viewed && i <= last_pick_viewed)
 			viewmic_buttons[i]->color(GUI_BUTTON_DARK_COLOR, GUI_BUTTON_DARK_COLOR);
