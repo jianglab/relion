@@ -793,7 +793,7 @@ int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, Multi
 	canvas.color_label = EMDL::str2Label(_color_label);
 	canvas.smallest_color_value = XMIPP_MIN(_color_blue_value, _color_red_value);
 	canvas.biggest_color_value = XMIPP_MAX(_color_blue_value, _color_red_value);
-	canvas.minimum_pick_fom = _minimum_pick_fom;
+        canvas.minimum_pick_fom = _minimum_pick_fom;
 	canvas.do_blue_to_red = (_color_blue_value < _color_red_value);
 	canvas.do_read_whole_stacks = false;
 	if (_fn_coords != "" && exists(_fn_coords))
@@ -3429,6 +3429,7 @@ void Displayer::read(int argc, char **argv)
     fn_fom = parser.getOption("--fom_img", "FOM-image to colour the micrograph for picking","");
     fom_min = textToFloat(parser.getOption("--fom_min", "Pixel value for lowest FOM value (black)", "0"));
     fom_max = textToFloat(parser.getOption("--fom_max", "Pixel value for highest FOM value (yellow)", "0"));
+
 
 	int mask_section  = parser.addSection("Mask design options");
 	do_mask = parser.checkOption("--paint_mask", "Paint mask in input image");

@@ -97,7 +97,6 @@ public:
 
 private:
 	Fl_Scroll *scroll_widget;
-
     static void cb_menubar_save(Fl_Widget*, void*);
     inline void cb_menubar_save_i();
 

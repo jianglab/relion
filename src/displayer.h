@@ -670,6 +670,8 @@ public:
 	// Minimum value for rlnAutopickFigureOfMerit to display picks
 	RFLOAT minimum_pick_fom;
 
+
+
 	// Tablename to read from in the input STAR file
 	FileName table_name;
 

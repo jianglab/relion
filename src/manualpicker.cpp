@@ -19,6 +19,23 @@
  ***************************************************************************/
 
 #include "src/manualpicker.h"
+#include "src/displayer.h"
+#include "src/fftw.h"
+#include <signal.h>
+#include <cstdio>
+#include <FL/x.H>
+#ifdef __APPLE__
+#include <objc/runtime.h>
+#include <objc/message.h>
+#endif
+
+struct PickWindowEntry {
+	Fl_Window *win;
+	Fl_Scroll *scroll;
+	int imic;
+};
+std::vector<PickWindowEntry> pick_windows;
+std::map<int, std::pair<int,int>> mic_scroll_pos;
 
 std::vector<int> imics;
 std::vector<FileName> global_fn_mics;
@@ -109,16 +126,65 @@ FileName global_fn_color;
 FileName global_color_label;
 bool global_do_color;
 
+#ifdef __APPLE__
+// Deferred call to disable macOS native tabbing on a window
+static void disable_tabbing_cb(void *data)
+{
+	Fl_Window *win = (Fl_Window*)data;
+	void *xid = fl_xid(win);
+	if (xid)
+	{
+		SEL setTabbingMode = sel_registerName("setTabbingMode:");
+		if (setTabbingMode)
+		{
+			typedef void (*msgSend_fn)(void*, SEL, long);
+			((msgSend_fn)objc_msgSend)(xid, setTabbingMode, 2);
+		}
+	}
+}
+#endif
+
+class MyPickCanvas : public pickerViewerCanvas
+{
+public:
+	int my_imic;
+	MyPickCanvas(int X, int Y, int W, int H) : pickerViewerCanvas(X, Y, W, H), my_imic(-1) {}
+	int handle(int ev)
+	{
+		if (ev == FL_KEYDOWN || ev == FL_SHORTCUT)
+		{
+			int key = Fl::event_key();
+			if (my_imic >= 0 && (key == 'z' || key == 'Z'))
+			{
+				int imic = my_imic - 1;
+				if (imic >= 0 && imic < (int)viewmic_buttons.size())
+				{
+					viewmic_buttons[imic]->do_callback();
+					return 1;
+				}
+			}
+			if (my_imic >= 0 && (key == 'x' || key == 'X'))
+			{
+				int imic = my_imic + 1;
+				if (imic >= 0 && imic < (int)viewmic_buttons.size())
+				{
+					viewmic_buttons[imic]->do_callback();
+					return 1;
+				}
+			}
+		}
+		return pickerViewerCanvas::handle(ev);
+	}
+};
+
 void cb_viewmic(Fl_Widget* w, void* data)
 {
-	// Get my own number back
 	int *iptr = (int*)data;
 	int imic = *iptr;
 
 	const bool with_control = (Fl::event_ctrl() != 0);
 	int nr_simultaneous = (with_control) ? global_nr_simultaneous : 1;
 
-	// Update the count of the last one we picked...
 	for (int mymic = first_pick_viewed; mymic <= last_pick_viewed; mymic++)
 	{
 		if (mymic >= 0 && mymic < count_displays.size())
@@ -145,7 +211,6 @@ void cb_viewmic(Fl_Widget* w, void* data)
 					{
 						my_nr_picked = MDcoord.numberOfObjects();
 					}
-
 				}
 				else
 				{
@@ -160,13 +225,22 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			textbuff2->text(floatToString(my_nr_picked).c_str());
 			count_displays[mymic]->buffer(textbuff2);
 			count_displays[mymic]->redraw();
-			// Also reset the color of the button to light
 			viewmic_buttons[mymic]->color(GUI_BUTTON_COLOR, GUI_BUTTON_COLOR);
 			viewmic_buttons[mymic]->redraw();
 		}
 	}
+	// Save scroll positions and window position before closing
+	static int prev_win_x = -1, prev_win_y = -1;
+	for (auto &entry : pick_windows)
+	{
+		mic_scroll_pos[entry.imic] = {entry.scroll->hscrollbar.value(), entry.scroll->scrollbar.value()};
+		prev_win_x = entry.win->x();
+		prev_win_y = entry.win->y();
+	}
 
-	// Launch the picking window
+	for (auto &entry : pick_windows) delete entry.win;
+	pick_windows.clear();
+
 	first_pick_viewed = imic;
 	highlight_active(imic);
 	last_pick_viewed = XMIPP_MIN(global_fn_mics.size() - 1, imic + nr_simultaneous - 1);
@@ -174,64 +248,76 @@ void cb_viewmic(Fl_Widget* w, void* data)
 	{
 		FileName fn_coord = global_fn_picks[mymic];
 
+		Image<RFLOAT> img;
+		img.read(global_fn_mics[mymic]);
+
+		if (global_lowpass > 0.)
+			lowPassFilterMap(img(), global_lowpass, global_angpix);
+		if (global_highpass > 0.)
+			highPassFilterMap(img(), global_highpass, global_angpix, 25);
+
+		int xsize_canvas = CEIL(XSIZE(img()) * global_micscale);
+		int ysize_canvas = CEIL(YSIZE(img()) * global_micscale);
+
+		Fl_Double_Window *win = new Fl_Double_Window(xsize_canvas + 20, ysize_canvas + 20, global_fn_mics[mymic].c_str());
+		Fl_Scroll *scroll = new Fl_Scroll(0, 0, win->w(), win->h());
 		int rad = ROUND(global_particle_diameter/(2. * global_angpix));
-		std::string command;
-		command =  "relion_display --pick  --i " + global_fn_mics[mymic];
-		command += "  --coords " + fn_coord;
-		command += " --scale " + floatToString(global_micscale);
-		command += " --coord_scale " + floatToString(global_coord_scale);
-		command += " --black "  + floatToString(global_black_val);
-		command += " --white "  + floatToString(global_white_val);
-		command += " --sigma_contrast "  + floatToString(global_sigma_contrast);
-		command += " --particle_radius " + floatToString(rad);
-		if (global_do_topaz_denoise)
+		MyPickCanvas *canvas = new MyPickCanvas(0, 0, xsize_canvas, ysize_canvas);
+		canvas->my_imic = mymic;
+		canvas->particle_radius = rad;
+		canvas->do_startend = global_pick_startend;
+		canvas->do_lines = global_pick_lines;
+		canvas->coord_scale = global_coord_scale;
+		canvas->SetScroll(scroll);
+		canvas->fill(img(), global_black_val, global_white_val, global_sigma_contrast, global_micscale);
+		canvas->fn_coords = fn_coord;
+		canvas->fn_mic = global_fn_mics[mymic];
+		if (global_fn_foms.size() == 0 && global_color_label != "")
 		{
-                    command += " --topaz_denoise ";
-		}
-		command += " --lowpass " + floatToString(global_lowpass);
-		command += " --highpass " + floatToString(global_highpass);
-		command += " --angpix " + floatToString(global_angpix);
-		if (global_pick_startend)
-			command += " --pick_start_end ";
-        else if (global_pick_lines)
-            command += " --pick_lines ";
-
-		if (fabs(global_minimum_fom + 9999.) > 1e-6)
-		{
-			command += " --minimum_pick_fom " + floatToString(global_minimum_fom);
-		}
-		if (global_fn_foms.size() ==0 & global_color_label != "")
-		{
-			command += " --color_label " + global_color_label;
-			command += " --blue " + floatToString(global_blue_value);
-			command += " --red " + floatToString(global_red_value);
+			canvas->color_label = EMDL::str2Label(global_color_label);
+			canvas->smallest_color_value = XMIPP_MIN(global_blue_value, global_red_value);
+			canvas->biggest_color_value = XMIPP_MAX(global_blue_value, global_red_value);
+			canvas->do_blue_to_red = (global_blue_value < global_red_value);
 			if (global_fn_color != "")
-				command += " --color_star " + global_fn_color;
+				canvas->fn_color = global_fn_color;
 		}
-        if (global_fn_foms.size() > 0)
-        {
-            command += " --fom_img " + global_fn_foms[mymic];
-            command += " --fom_min " + floatToString(global_blue_value);
-            command += " --fom_max " + floatToString(global_red_value);
-        }
+		canvas->minimum_pick_fom = global_minimum_fom;
+		canvas->do_read_whole_stacks = false;
+		if (exists(fn_coord))
+		{
+			canvas->loadCoordinates(false);
+			canvas->redraw();
+		}
 
-		command += " &";
-		//std::cerr << " command= " << command << std::endl;
-		int res = system(command.c_str());
+		win->resizable(*win);
+		win->show();
+
+		// Restore saved window position (after show on macOS)
+		if (prev_win_x >= 0)
+			win->position(prev_win_x, prev_win_y);
+
+		// Restore saved scroll position for this micrograph
+		auto it = mic_scroll_pos.find(mymic);
+		if (it != mic_scroll_pos.end())
+			scroll->scroll_to(it->second.first, it->second.second);
+
+		// Give focus to the canvas so keyboard Z/X works from the pick window
+		if (mymic == first_pick_viewed)
+			Fl::focus(canvas);
+
+#ifdef __APPLE__
+		Fl::add_timeout(0.0, disable_tabbing_cb, win);
+#endif
+		pick_windows.push_back({win, scroll, mymic});
 	}
 
 	for (int i = 0; i < viewmic_buttons.size(); i++)
 	{
 		if (i >= first_pick_viewed && i <= last_pick_viewed)
-		{
 			viewmic_buttons[i]->color(GUI_BUTTON_DARK_COLOR, GUI_BUTTON_DARK_COLOR);
-		}
 		else
-		{
 			viewmic_buttons[i]->color(GUI_BUTTON_COLOR, GUI_BUTTON_COLOR);
-		}
 		viewmic_buttons[i]->redraw();
-
 	}
 }
 
@@ -478,6 +564,12 @@ int manualpickerGuiWindow::fill()
 	if (text_displays.size() > 0)
 		highlight_active(0);
 
+	// Global keyboard handler for Z/X passthrough from pick windows
+#ifdef __APPLE__
+	// Disable macOS native tabbing on the main window too
+	Fl::add_timeout(0.0, disable_tabbing_cb, this);
+#endif
+
 	resizable(*this);
 	show();
 	return Fl::run();
@@ -720,6 +812,8 @@ void manualpickerGuiWindow::cb_menubar_quit(Fl_Widget* w, void* v)
 void manualpickerGuiWindow::cb_menubar_quit_i()
 {
 	cb_menubar_recount_i();
+	for (auto &pw_entry : pick_windows) delete pw_entry.win;
+	pick_windows.clear();
 	exit(0);
 }
 
