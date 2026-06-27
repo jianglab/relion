@@ -79,6 +79,7 @@
 
 #define METADATA_LINE_LENGTH_BEFORE_BODIES 25
 #define METADATA_NR_BODY_PARAMS 6
+#define METADATA_NR_CLASS_PARAMS 7   // rot, tilt, psi, xoff, yoff, zoff, best_weight (per class, for filament consistency)
 
 #define DO_WRITE_DATA true
 #define DONT_WRITE_DATA false
@@ -733,6 +734,9 @@ public:
 
 	long int exp_my_first_part_id, exp_my_last_part_id;
 	MultidimArray<RFLOAT> exp_metadata, exp_imagedata;
+	// Per-class best orientations for each particle [nr_parts][nr_classes * METADATA_NR_CLASS_PARAMS]
+	// Used by enforceFilamentConsistency to fix orientations after class reassignment
+	MultidimArray<RFLOAT> exp_per_class_metadata_;
 	std::string exp_fn_img, exp_fn_ctf, exp_fn_recimg;
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;

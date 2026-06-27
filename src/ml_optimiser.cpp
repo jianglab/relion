@@ -4108,6 +4108,10 @@ void MlOptimiser::expectationSetup()
 
     // Initialise all weighted sums to zero
     wsum_model.initZeros();
+
+    // Initialise per-class orientation tracking for filament consistency
+    if (do_keep_full_filaments && mymodel.nr_classes > 1)
+        exp_per_class_metadata_.initZeros(mydata.numberOfParticles(), mymodel.nr_classes * METADATA_NR_CLASS_PARAMS);
 }
 
 void MlOptimiser::expectationSetupCheckMemory(int myverb)
@@ -9102,6 +9106,60 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
 #endif
                                         } // end if !do_skip_maximization
 
+                                        // Keep track of max_weight per class for filament consistency
+                                        if (img_id == 0 && do_keep_full_filaments && mymodel.nr_classes > 1)
+                                        {
+                                            int class_base = METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS
+                                                             + exp_iclass * METADATA_NR_CLASS_PARAMS;
+                                            RFLOAT &class_best_weight = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 6);
+                                            if (weight > class_best_weight)
+                                            {
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 0) = rot;
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 1) = tilt;
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 2) = psi;
+                                                RFLOAT cx = XX(exp_old_offset) + oversampled_translations_x[iover_trans];
+                                                RFLOAT cy = YY(exp_old_offset) + oversampled_translations_y[iover_trans];
+                                                RFLOAT cz = 0.;
+                                                if (mymodel.data_dim == 3 || mydata.is_tomo)
+                                                    cz = ZZ(exp_old_offset) + oversampled_translations_z[iover_trans];
+                                                if ( (do_helical_refine) && (!ignore_helical_symmetry) )
+                                                {
+                                                    RFLOAT orot  = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_ROT);
+                                                    RFLOAT otilt = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_TILT);
+                                                    RFLOAT opsi  = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_PSI);
+                                                    transformCartesianAndHelicalCoords(cx, cy, cz, cx, cy, cz, orot, otilt, opsi, mymodel.data_dim, HELICAL_TO_CART_COORDS);
+                                                }
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 3) = cx;
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 4) = cy;
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 5) = cz;
+                                                class_best_weight = weight;
+                                            }
+                                            else if (weight == class_best_weight && class_best_weight == 0.)
+                                            {
+                                                // First zero-weight hidden variable: still record orientation
+                                                // so enforceFilamentConsistency has data even when all weights are 0
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 0) = rot;
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 1) = tilt;
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 2) = psi;
+                                                RFLOAT cx = XX(exp_old_offset) + oversampled_translations_x[iover_trans];
+                                                RFLOAT cy = YY(exp_old_offset) + oversampled_translations_y[iover_trans];
+                                                RFLOAT cz = 0.;
+                                                if (mymodel.data_dim == 3 || mydata.is_tomo)
+                                                    cz = ZZ(exp_old_offset) + oversampled_translations_z[iover_trans];
+                                                if ( (do_helical_refine) && (!ignore_helical_symmetry) )
+                                                {
+                                                    RFLOAT orot  = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_ROT);
+                                                    RFLOAT otilt = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_TILT);
+                                                    RFLOAT opsi  = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_PSI);
+                                                    transformCartesianAndHelicalCoords(cx, cy, cz, cx, cy, cz, orot, otilt, opsi, mymodel.data_dim, HELICAL_TO_CART_COORDS);
+                                                }
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 3) = cx;
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 4) = cy;
+                                                DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_base + 5) = cz;
+                                                class_best_weight = -1.; // sentinel: recorded orientation from zero-weight sample
+                                            }
+                                        }
+
                                         // Keep track of max_weight and the corresponding optimal hidden variables
                                         // SHWS7July2022: only do this for the first img_id
                                         if (img_id == 0 && weight > exp_max_weight)
@@ -10548,6 +10606,16 @@ void MlOptimiser::setMetaDataSubset(long int first_part_id, long int last_part_i
             }
         }
 
+        // Extract per-class best orientations into global tracking array for filament consistency
+        if (do_keep_full_filaments && mymodel.nr_classes > 1)
+        {
+            int nr_class_params = mymodel.nr_classes * METADATA_NR_CLASS_PARAMS;
+            int class_col_offset = METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS;
+            for (int j = 0; j < nr_class_params; j++)
+                DIRECT_A2D_ELEM(exp_per_class_metadata_, part_id, j) =
+                    DIRECT_A2D_ELEM(exp_metadata, metadata_offset, class_col_offset + j);
+        }
+
         // For multi-body refinement
         if (mymodel.nr_bodies > 1)
         {
@@ -10583,10 +10651,57 @@ void MlOptimiser::enforceFilamentConsistency()
 {
     if (!do_keep_full_filaments || mymodel.nr_classes <= 1)
         return;
+
+    // Save old class assignments before enforcing consistency
+    long int nr_parts = mydata.MDimg.numberOfObjects();
+    std::vector<int> old_classes(nr_parts);
+    for (long int part_id = 0; part_id < nr_parts; part_id++)
+        mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, old_classes[part_id], part_id);
+
     long int n_changed = ::enforceFilamentConsistency(mydata.MDimg, mymodel.nr_classes, verb);
+
+    if (n_changed > 0)
+    {
+        // Update orientations for particles whose class was changed
+        for (long int part_id = 0; part_id < nr_parts; part_id++)
+        {
+            int new_class;
+            mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, new_class, part_id);
+            if (new_class != old_classes[part_id])
+            {
+                int ic = new_class - 1; // 0-indexed class index
+                int col_base = ic * METADATA_NR_CLASS_PARAMS;
+                RFLOAT best_weight = DIRECT_A2D_ELEM(exp_per_class_metadata_, part_id, col_base + 6);
+                if (best_weight != 0.)
+                {
+                    RFLOAT new_rot   = DIRECT_A2D_ELEM(exp_per_class_metadata_, part_id, col_base + 0);
+                    RFLOAT new_tilt  = DIRECT_A2D_ELEM(exp_per_class_metadata_, part_id, col_base + 1);
+                    RFLOAT new_psi   = DIRECT_A2D_ELEM(exp_per_class_metadata_, part_id, col_base + 2);
+                    RFLOAT new_xoff  = DIRECT_A2D_ELEM(exp_per_class_metadata_, part_id, col_base + 3);
+                    RFLOAT new_yoff  = DIRECT_A2D_ELEM(exp_per_class_metadata_, part_id, col_base + 4);
+
+                    if (mymodel.ref_dim > 2)
+                    {
+                        mydata.MDimg.setValue(EMDL_ORIENT_ROT, new_rot, part_id);
+                        mydata.MDimg.setValue(EMDL_ORIENT_TILT, new_tilt, part_id);
+                    }
+                    mydata.MDimg.setValue(EMDL_ORIENT_PSI, new_psi, part_id);
+                    RFLOAT pixel_size = mydata.getImagePixelSize(part_id);
+                    mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, new_xoff * pixel_size, part_id);
+                    mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, new_yoff * pixel_size, part_id);
+                    if (mymodel.data_dim == 3 || mydata.is_tomo)
+                    {
+                        RFLOAT new_zoff = DIRECT_A2D_ELEM(exp_per_class_metadata_, part_id, col_base + 5);
+                        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, new_zoff * pixel_size, part_id);
+                    }
+                }
+            }
+        }
+    }
+
     if (verb > 0)
         std::cout << " Enforcing filament consistency: changed " << n_changed
-                  << " particles (of " << mydata.MDimg.numberOfObjects() << ") to match their filament majority."
+                  << " particles (of " << nr_parts << ") to match their filament majority."
                   << std::endl;
 }
 
@@ -10691,7 +10806,8 @@ void MlOptimiser::getMetaAndImageDataSubset(long int first_part_id, long int las
         long int part_id = mydata.sorted_idx[part_id_sorted];
         nr_images += mydata.numberOfImagesInParticle(part_id);
     }
-    exp_metadata.initZeros(last_part_id-first_part_id+1, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS);
+    int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
+    exp_metadata.initZeros(last_part_id-first_part_id+1, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 
     // This assumes all images in first_part_id to last_part_id have the same image_size
     // If not, then do_also_imagedata will not work! Also warn during intialiseGeneral!

@@ -1343,6 +1343,11 @@ void MlOptimiserMpi::expectation()
 #ifdef TIMING
 	timer.toc(TIMING_EXP_4a);
 #endif
+
+	// Initialise per-class orientation tracking on the leader (followers were initialised in expectationSetup)
+	if (node->isLeader() && do_keep_full_filaments && mymodel.nr_classes > 1)
+		exp_per_class_metadata_.initZeros(mydata.numberOfParticles(), mymodel.nr_classes * METADATA_NR_CLASS_PARAMS);
+
 	// Now perform real expectation step in parallel, use an on-demand leader-follower system
 #define JOB_FIRST (first_last_nr_images(0))
 #define JOB_LAST  (first_last_nr_images(1))
@@ -1613,7 +1618,8 @@ void MlOptimiserMpi::expectation()
 				// Otherwise, the leader needs to receive and handle the updated metadata from the followers
 				if (JOB_NIMG > 0)
 				{
-					exp_metadata.resize(JOB_NIMG, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS);
+					int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
+					exp_metadata.resize(JOB_NIMG, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 					node->relion_MPI_Recv(MULTIDIM_ARRAY(exp_metadata), MULTIDIM_SIZE(exp_metadata), MY_MPI_DOUBLE, this_follower, MPITAG_METADATA, MPI_COMM_WORLD, status);
 
 					// The leader monitors the changes in the optimal orientations and classes
@@ -1798,7 +1804,8 @@ void MlOptimiserMpi::expectation()
 					timer.tic(TIMING_MPISLAVEWAIT2);
 #endif
 					// Also receive the imagedata and the metadata for these images from the leader
-					exp_metadata.resize(JOB_NIMG, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS);
+					int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
+					exp_metadata.resize(JOB_NIMG, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 					node->relion_MPI_Recv(MULTIDIM_ARRAY(exp_metadata), MULTIDIM_SIZE(exp_metadata), MY_MPI_DOUBLE, 0, MPITAG_METADATA, MPI_COMM_WORLD, status);
 
 					// Receive the image filenames or the exp_imagedata
@@ -3995,7 +4002,8 @@ void MlOptimiserMpi::calculateExpectedAngularErrors(long int my_first_part_id, l
 	{
 		// Follower has to receive all metadata from the leader!
 		node->relion_MPI_Recv(&my_nr_images, 1, MPI_INT, 0, MPITAG_JOB_REQUEST, MPI_COMM_WORLD, status);
-		exp_metadata.resize(my_nr_images, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS);
+		int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
+		exp_metadata.resize(my_nr_images, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 		node->relion_MPI_Recv(MULTIDIM_ARRAY(exp_metadata), MULTIDIM_SIZE(exp_metadata), MY_MPI_DOUBLE, 0, MPITAG_METADATA, MPI_COMM_WORLD, status);
 		node->relion_MPI_Recv(&length_fn_ctf, 1, MPI_INT, 0, MPITAG_JOB_REQUEST, MPI_COMM_WORLD, status);
 		if (length_fn_ctf > 1)

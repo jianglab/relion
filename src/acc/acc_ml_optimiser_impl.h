@@ -2918,6 +2918,103 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     if (accMLO->shiftsIs3D)
         DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, icol_zoff) = ZZ(shifts);
 
+    // Per-class best orientation tracking for filament consistency (see CPU storeWeightedSums)
+    FinePassWeights.weights.cpToHost();
+    FinePassWeights.rot_idx.cpToHost();
+#ifdef _HIP_ENABLED
+    DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
+#else
+    DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+#endif
+
+    if (ibody == 0 && baseMLO->do_keep_full_filaments && baseMLO->mymodel.nr_classes > 1)
+    {
+        for (long int iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+        {
+            if ((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))
+                continue;
+            if (FPCMasks[iclass].weightNum == 0)
+                continue;
+
+            int class_base = METADATA_LINE_LENGTH_BEFORE_BODIES
+                           + (baseMLO->mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS
+                           + iclass * METADATA_NR_CLASS_PARAMS;
+            RFLOAT &class_best_weight = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, class_base + 6);
+
+            long int best_s = -1;
+            long int firstPos = (long int)FPCMasks[iclass].firstPos;
+            long int lastPos = firstPos + (long int)FPCMasks[iclass].weightNum;
+            for (long int s = firstPos; s < lastPos; s++)
+            {
+                RFLOAT w = (RFLOAT)FinePassWeights.weights[s];
+                if (w > class_best_weight)
+                {
+                    class_best_weight = w;
+                    best_s = s;
+                }
+                else if (w == 0. && class_best_weight == 0.)
+                {
+                    best_s = s;
+                    class_best_weight = -1.; // sentinel: recorded orientation from zero-weight sample
+                }
+            }
+
+            if (best_s >= 0)
+            {
+                // Use rot_idx to get the exact orientation index within the class,
+                // then look up the actual Euler angles from ProjectionData arrays.
+                // This matches the GPU kernel's orientation encoding exactly.
+                size_t rot_idx_val = FinePassWeights.rot_idx[best_s];
+                size_t global_orient_idx = ProjectionData.class_idx[iclass] + rot_idx_val;
+                RFLOAT rot, tilt, psi;
+                if (baseMLO->do_skip_align || baseMLO->do_skip_rotate)
+                {
+                    rot = 0.;
+                    tilt = 0.;
+                    psi = 0.;
+                }
+                else
+                {
+                    rot = ProjectionData.rots[global_orient_idx];
+                    tilt = ProjectionData.tilts[global_orient_idx];
+                    psi = ProjectionData.psis[global_orient_idx];
+                }
+
+                size_t trans_idx_val = FinePassWeights.trans_idx[best_s];
+                long int itrans_base = trans_idx_val / sp.nr_oversampled_trans;
+                long int iover_trans = trans_idx_val % sp.nr_oversampled_trans;
+                long int itrans = sp.itrans_min + itrans_base;
+
+                std::vector<RFLOAT> trans_x, trans_y, trans_z;
+                baseMLO->sampling.getTranslationsInPixel(itrans, baseMLO->adaptive_oversampling, my_pixel_size,
+                        trans_x, trans_y, trans_z,
+                        (baseMLO->do_helical_refine) && (!baseMLO->ignore_helical_symmetry));
+
+                RFLOAT cx = XX(op.old_offset) + trans_x[iover_trans];
+                RFLOAT cy = YY(op.old_offset) + trans_y[iover_trans];
+                RFLOAT cz = 0.;
+                if (accMLO->shiftsIs3D)
+                    cz = ZZ(op.old_offset) + trans_z[iover_trans];
+
+                if ((baseMLO->do_helical_refine) && (!baseMLO->ignore_helical_symmetry))
+                {
+                    RFLOAT orot  = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_ROT);
+                    RFLOAT otilt = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_TILT);
+                    RFLOAT opsi  = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_PSI);
+                    transformCartesianAndHelicalCoords(cx, cy, cz, cx, cy, cz,
+                            orot, otilt, opsi, accMLO->shiftsIs3D ? 3 : 2, HELICAL_TO_CART_COORDS);
+                }
+
+                DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, class_base + 0) = rot;
+                DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, class_base + 1) = tilt;
+                DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, class_base + 2) = psi;
+                DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, class_base + 3) = cx;
+                DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, class_base + 4) = cy;
+                DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, class_base + 5) = cz;
+            }
+        }
+    }
+
     if (ibody == 0)
     {
         DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CLASS) = (RFLOAT)op.max_index.iclass + 1;
