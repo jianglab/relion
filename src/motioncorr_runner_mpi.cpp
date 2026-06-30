@@ -67,13 +67,6 @@ void MotioncorrRunnerMpi::run()
 		if (pipeline_control_check_abort_job())
 			MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
 
-		Micrograph mic(fn_micrographs[imic], fn_gain_reference, bin_factor, eer_upsampling, eer_grouping);
-		mic.pre_exposure = pre_exposure + pre_exposure_micrographs[imic];
-		if (!dose_per_frame_vec.empty())
-			mic.setDosePerFrame(dose_per_frame_vec[imic]);
-		        std::cout << "Set dose from vec: " << dose_per_frame_vec[imic] << std::endl;
-		std::cout << "Mic init finished" << std::endl;
-
 		// Get angpix and voltage from the optics groups:
 		obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, voltage, optics_group_micrographs[imic]-1);
 		obsModel.opticsMdt.getValue(EMDL_MICROGRAPH_ORIGINAL_PIXEL_SIZE, angpix, optics_group_micrographs[imic]-1);
