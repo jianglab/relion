@@ -3504,40 +3504,10 @@ void MlOptimiserMpi::alignHalves()
 		best_rot = params[0]; best_tilt = params[1]; best_psi = params[2];
 		best_dx  = params[3]; best_dy  = params[4]; best_dz  = params[5];
 
-		// Adjust per-particle orientations for half2 (reconstruct_rank2 processes half2)
 		bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
 
-		if (node->rank == reconstruct_rank2)
-		{
-			RFLOAT my_pixel_size = mymodel.pixel_size;
-			for (int i = 0; i < YSIZE(exp_metadata); i++)
-			{
-				RFLOAT rot  = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_ROT);
-				RFLOAT tilt = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_TILT);
-				RFLOAT psi  = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_PSI);
-				RFLOAT dx   = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_XOFF) * my_pixel_size;
-				RFLOAT dy   = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_YOFF) * my_pixel_size;
-				RFLOAT dz   = 0;
-				if (has_z)
-					dz = DIRECT_A2D_ELEM(exp_metadata, i, METADATA_ZOFF) * my_pixel_size;
-
-				applyInverseOrientationAdjustment(
-						nr_freedom,
-						best_rot, best_tilt, best_psi,
-						best_dx, best_dy, best_dz,
-						rot, tilt, psi, dx, dy, dz);
-
-				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_ROT)  = rot;
-				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_TILT) = tilt;
-				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_PSI)  = psi;
-				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_XOFF) = dx / my_pixel_size;
-				DIRECT_A2D_ELEM(exp_metadata, i, METADATA_YOFF) = dy / my_pixel_size;
-				if (has_z)
-					DIRECT_A2D_ELEM(exp_metadata, i, METADATA_ZOFF) = dz / my_pixel_size;
-			}
-		}
-
-		// Leader (rank 0) also adjusts its MDimg for output
+		// Adjust the leader's authoritative metadata for half2. Followers receive
+		// these updated values when expectation distributes the next set of jobs.
 		if (node->isLeader())
 		{
 			// Determine which particles belong to half2 via random split
