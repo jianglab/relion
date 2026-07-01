@@ -1065,13 +1065,6 @@ void GuiMainWindow::fillRunningJobLists()
 		}
 	}
 
-	running_job_browser->position(mypos_running);
-	scheduled_job_browser->position(mypos_scheduled);
-	finished_job_browser->position(mypos_finished);
-	running_job_browser->hposition(myhpos_running);
-	scheduled_job_browser->hposition(myhpos_scheduled);
-	finished_job_browser->hposition(myhpos_finished);
-
 	// Re-select the currently loaded job in the appropriate browser
 	if (current_job >= 0)
 	{
@@ -1100,6 +1093,15 @@ void GuiMainWindow::fillRunningJobLists()
 			}
 		}
 	}
+
+	// Selecting an item scrolls it into view, so restore the user's scroll
+	// positions only after re-selecting the currently loaded job.
+	running_job_browser->position(mypos_running);
+	scheduled_job_browser->position(mypos_scheduled);
+	finished_job_browser->position(mypos_finished);
+	running_job_browser->hposition(myhpos_running);
+	scheduled_job_browser->hposition(myhpos_scheduled);
+	finished_job_browser->hposition(myhpos_finished);
 }
 
 void GuiMainWindow::fillToAndFromJobLists()
