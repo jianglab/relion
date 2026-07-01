@@ -3541,22 +3541,23 @@ void MlOptimiserMpi::alignHalves()
 		if (node->isLeader())
 		{
 			// Determine which particles belong to half2 via random split
-			// For auto-refine, particles are split by sorted_idx parity
-			long int nr_half1 = mydata.sorted_idx.size() / 2;
-			// Only adjust particles past the halfway point (half2)
+			// sorted_idx is ordered by random subset, but the two subsets need
+			// not contain exactly the same number of particles.
+			long int nr_half1 = mydata.numberOfParticles(1);
+			// Only adjust particles past the half1 boundary (half2)
 			for (long int part_id_sorted = nr_half1; part_id_sorted < (long int)mydata.sorted_idx.size(); part_id_sorted++)
 			{
 				long int part_id = mydata.sorted_idx[part_id_sorted];
 
 				RFLOAT rot, tilt, psi, dx, dy, dz;
-				mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot);
-				mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt);
-				mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi);
-				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
-				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
+				mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot, part_id);
+				mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt, part_id);
+				mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi, part_id);
+				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
+				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
 				dz = 0;
 				if (has_z)
-					mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
+					mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
 
 				applyInverseOrientationAdjustment(
 						nr_freedom,
@@ -3564,13 +3565,13 @@ void MlOptimiserMpi::alignHalves()
 						best_dx, best_dy, best_dz,
 						rot, tilt, psi, dx, dy, dz);
 
-				mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot);
-				mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt);
-				mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi);
-				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
-				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
+				mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot, part_id);
+				mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt, part_id);
+				mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi, part_id);
+				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
+				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
 				if (has_z)
-					mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
+					mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
 			}
 		}
 	}
