@@ -261,7 +261,7 @@ void CPlot2D::OutputPostScriptPlot(std::string fileName)
         DrawLegendPostScript();
     }
 
-
+    outputFile << "showpage\n";
     outputFile.close();
 
 }
