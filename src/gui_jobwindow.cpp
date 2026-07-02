@@ -1615,7 +1615,7 @@ void JobWindow::initialiseClass3DWindow()
 	guientries["do_blush"].cb_menu_i(); // This is to make the default effective
 
 	// Add a little spacer
-	current_y += STEPY/2;
+	// current_y += STEPY/2;
 
 	// Ewald-sphere correction (developmental)
 	group_ewald = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
@@ -1822,7 +1822,7 @@ void JobWindow::initialiseAutorefineWindow()
     guientries["do_blush"].cb_menu_i(); // This is to make the default effective
 
 	// Add a little spacer
-	current_y += STEPY/2;
+	//current_y += STEPY/2;
 
 	// Ewald-sphere correction (developmental)
 	group_ewald = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");

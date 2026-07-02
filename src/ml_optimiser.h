@@ -522,7 +522,7 @@ public:
 
 	/** Perform reconstruction using the Blush algorithm */
 	bool do_blush;
-    	bool skip_spectral_trailing;
+    bool skip_spectral_trailing;
 	std::string blush_model;
 
 	/** Correct for Ewald-sphere curvature (developmental) */
