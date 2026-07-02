@@ -3859,8 +3859,8 @@ High-resolution refinements (e.g. ribosomes or other large complexes in 3D auto-
 	joboptions["highres_limit"] = JobOption("Limit resolution E-step to (A): ", -1, -1, 20, 1, "If set to a positive number, then the expectation step (i.e. the alignment) will be done only including the Fourier components up to this resolution (in Angstroms). \
 This is useful to prevent overfitting, as the classification runs in RELION are not to be guaranteed to be 100% overfitting-free (unlike the 3D auto-refine with its gold-standard FSC). In particular for very difficult data sets, e.g. of very small or featureless particles, this has been shown to give much better class averages. \
 In such cases, values in the range of 7-12 Angstroms have proven useful.");
-	joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
-	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
+    joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
+    joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
 	joboptions["reverse_curvature"] = JobOption("Reverse Ewald curvature?", false, "Try curvature the other way around.");
 
 	joboptions["do_center"] = JobOption("Center class averages?", true, "If set to Yes, every iteration the class average images will be centered on their center-of-mass. This will only work for positive signals, so the particles should be white.");
@@ -4144,6 +4144,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 
 	if (joboptions["do_blush"].getBoolean())
 		command += " --blush ";
+		joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
 
 	if (joboptions["do_ewald"].getBoolean())
 	{
@@ -4411,6 +4412,7 @@ High-resolution refinements (e.g. ribosomes or other large complexes in 3D auto-
 masked half-maps are used and a post-processing-like correction of the FSC curves (with phase-randomisation) is performed every iteration. This only works when a reference mask is provided on the I/O tab. \
 This may yield higher-resolution maps, especially when the mask contains only a relatively small volume inside the box.");
 	joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
+    joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
 	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
 	joboptions["reverse_curvature"] = JobOption("Reverse Ewald curvature?", false, "Try curvature the other way around.");
 
@@ -4652,6 +4654,7 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
     if (joboptions["do_blush"].getBoolean())
     {
         command += " --blush ";
+        command += " --blush_model " + joboptions["blush_version"].getString();
     }
 
     if (joboptions["do_ewald"].getBoolean())
