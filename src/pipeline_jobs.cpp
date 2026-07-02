@@ -4144,7 +4144,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 
 	if (joboptions["do_blush"].getBoolean())
 		command += " --blush ";
-		joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
+		command += " --blush_model " + joboptions["blush_version"].getString();
 
 	if (joboptions["do_ewald"].getBoolean())
 	{
