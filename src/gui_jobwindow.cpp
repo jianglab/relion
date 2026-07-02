@@ -1605,7 +1605,14 @@ void JobWindow::initialiseClass3DWindow()
 	// Add a little spacer
 	current_y += STEPY/2;
 
-	place("do_blush", TOGGLE_DEACTIVATE);
+	// Blush group
+	group9 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group9->end();
+	place("do_blush", TOGGLE_DEACTIVATE, group9);
+	group9->begin();
+	place("blush_version");
+	group9->end();
+	guientries["do_blush"].cb_menu_i(); // This is to make the default effective
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -1805,7 +1812,14 @@ void JobWindow::initialiseAutorefineWindow()
 	// Add a little spacer
 	current_y += STEPY/2;
 
-	place("do_blush", TOGGLE_DEACTIVATE);
+    // Blush group
+    group9 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+    group9->end();
+    place("do_blush", TOGGLE_DEACTIVATE, group9);
+    group9->begin();
+    place("blush_version");
+    group9->end();
+    guientries["do_blush"].cb_menu_i(); // This is to make the default effective
 
 	// Add a little spacer
 	current_y += STEPY/2;

@@ -47,9 +47,9 @@
 #include <src/args.h>
 
 
-#define GUI_BACKGROUND_COLOR (fl_rgb_color(230,230,240))
+#define GUI_BACKGROUND_COLOR (fl_rgb_color(240,240,240))
 #define GUI_INPUT_COLOR (fl_rgb_color(255,255,230))
-#define GUI_RUNBUTTON_COLOR (fl_rgb_color(100, 60, 255))
+#define GUI_RUNBUTTON_COLOR (fl_rgb_color(100, 178, 178))
 
 
 
