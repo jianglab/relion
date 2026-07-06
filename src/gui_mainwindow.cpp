@@ -452,7 +452,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
  	menubar->add("Jobs/_Order chronologically",  FL_ALT+'c', cb_order_jobs_chronologically, this);
  	if (!maingui_do_read_only)
  	{	menubar->add("Jobs/Undelete job(s)",  FL_ALT+'u', cb_undelete_job, this);
-                 menubar->add("Jobs/_Toggle overwrite button", FL_ALT+'o', cb_toggle_overwrite_continue, this);
+                 menubar->add("Jobs/_Quick overwrite current job", FL_ALT+'o', cb_quick_overwrite, this);
  		menubar->add("Jobs/Run scheduled jobs", 0, cb_start_pipeliner, this);
  		menubar->add("Jobs/_Stop running scheduled jobs", 0, cb_stop_pipeliner, this);
  		menubar->add("Jobs/Gently clean all jobs",  FL_ALT+'g', cb_gently_clean_all_jobs, this);
@@ -737,7 +737,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 
 	// Add run buttons on the menubar as well
 
-	print_CL_button = new Fl_Button(GUIWIDTH - 215, h-60, 100, 32, "Check command");
+	print_CL_button = new Fl_Button(GUIWIDTH - 320, h-60, 100, 32, "Check command");
 	print_CL_button->color(GUI_RUNBUTTON_COLOR);
 	print_CL_button->labelsize(11);
 	print_CL_button->callback(cb_print_cl, this);
@@ -759,7 +759,13 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	if (maingui_do_read_only)
 		run_button->deactivate();
 
-	schedule_button = new Fl_Button(GUIWIDTH - 320 , h-60, 100, 32, "Schedule");
+	quick_overwrite_button = new Fl_Button(GUIWIDTH - 215, h-60, 100, 32, "Quick overwrite");
+	quick_overwrite_button->color(GUI_RUNBUTTON_COLOR);
+	quick_overwrite_button->labelsize(11);
+	quick_overwrite_button->callback(cb_quick_overwrite, this);
+	quick_overwrite_button->deactivate();
+
+	schedule_button = new Fl_Button(GUIWIDTH - 425 , h-60, 100, 32, "Schedule");
 	schedule_button->color(GUI_RUNBUTTON_COLOR);
 	schedule_button->labelfont(FL_ITALIC);
 	schedule_button->labelsize(14);
@@ -774,7 +780,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 	if (!maingui_do_read_only)
 	{
 		menubar2->add("Job actions/Alias", 0, cb_set_alias, this);
-		menubar2->add("Job actions/Overwrite", 0, cb_toggle_overwrite_continue, this);
+		menubar2->add("Job actions/Quick overwrite", 0, cb_quick_overwrite, this);
 		menubar2->add("Job actions/Abort running", 0, cb_abort, this);
 		menubar2->add("Job actions/Mark as finished", 0, cb_mark_as_finished, this);
 		menubar2->add("Job actions/Mark as failed", 0, cb_mark_as_failed, this);
@@ -1275,6 +1281,8 @@ void GuiMainWindow::updateJobLists()
 
 void GuiMainWindow::loadJobFromPipeline(int this_job)
 {
+	quick_overwrite_button->deactivate();
+
 	// Set the "static int" to which job we're currently pointing
 	current_job = this_job;
 	int itype = pipeline.processList[current_job].type;
@@ -1307,6 +1315,9 @@ void GuiMainWindow::loadJobFromPipeline(int this_job)
         // Any job loaded from the pipeline will initially be set as a continuation job
         is_main_continue = true;
         cb_toggle_continue_i();
+
+        if (!maingui_do_read_only)
+            quick_overwrite_button->activate();
     }
     else
     {
@@ -1334,6 +1345,7 @@ void GuiMainWindow::cb_select_browsegroup(Fl_Widget* o, void* v)
 
 	T->cb_select_browsegroup_i();
 	run_button->activate();
+	quick_overwrite_button->deactivate();
 }
 
 void GuiMainWindow::cb_select_browsegroup_i(bool show_initial_screen)
@@ -1687,30 +1699,10 @@ void GuiMainWindow::cb_display_i()
 void GuiMainWindow::cb_toggle_continue_i()
 {
 
-	if (is_main_continue || do_overwrite_continue)
+	if (is_main_continue)
 	{
-		if (do_overwrite_continue)
-		{
-			if (current_job < 0) return;
-			run_button->label("Overwrite!");
-			if (pipeline.processList[current_job].alias != "None")
-			{
-				FileName fn_alias = pipeline.processList[current_job].alias;
-				fn_alias = (fn_alias.afterFirstOf("/")).beforeLastOf("/");
-				alias_current_job->value(fn_alias.c_str());
-			}
-			else
-			{
-				alias_current_job->value("Give_alias_here");
-			}
-			alias_current_job->position(0); //left-centered text in box
-			alias_current_job->activate();
-		}
-		else
-		{
-			run_button->label("Continue!");
-			alias_current_job->deactivate();
-		}
+		run_button->label("Continue!");
+		alias_current_job->deactivate();
 		run_button->color(GUI_BUTTON_COLOR);
 		run_button->labelfont(FL_ITALIC);
 		run_button->labelsize(13);
@@ -1726,7 +1718,7 @@ void GuiMainWindow::cb_toggle_continue_i()
 
 	int my_window = (browser->value() - 1);
 	if (my_window >= 0 && my_window < nr_browse_tabs && gui_jobwindows[my_window])
-		gui_jobwindows[my_window]->toggle_new_continue(is_main_continue && !do_overwrite_continue);
+		gui_jobwindows[my_window]->toggle_new_continue(is_main_continue);
 }
 
 void GuiMainWindow::cb_print_cl(Fl_Widget* o, void* v)
@@ -1742,38 +1734,30 @@ void GuiMainWindow::cb_print_cl_i()
 	// And update the job inside it
 	gui_jobwindows[iwin]->updateMyJob();
 
-	// If continuation mode is on but fn_cont is empty, auto-find the latest optimiser star
-	if (is_main_continue && gui_jobwindows[iwin]->myjob.joboptions.count("fn_cont") &&
-	    gui_jobwindows[iwin]->myjob.joboptions["fn_cont"].getString() == "" &&
-	    current_job >= 0 && current_job < pipeline.processList.size())
+	// An existing job without a continuation STAR file is previewed as a quick overwrite.
+	bool preview_is_continue = is_main_continue;
+	bool preview_is_overwrite = false;
+	if (preview_is_continue && current_job >= 0 && current_job < pipeline.processList.size() &&
+	    gui_jobwindows[iwin]->myjob.joboptions.count("fn_cont") &&
+	    gui_jobwindows[iwin]->myjob.joboptions["fn_cont"].getString() == "")
 	{
-		FileName fn_dir = pipeline.processList[current_job].name;
-		std::vector<FileName> fn_opts;
-		FileName fn_pat;
-		fn_pat = fn_dir + "run_it*optimiser.star";
-		fn_pat.globFiles(fn_opts);
-		fn_pat = fn_dir + "run_ct?_it???_optimiser.star";
-		fn_pat.globFiles(fn_opts, false);
-		fn_pat = fn_dir + "run_ct??_it???_optimiser.star";
-		fn_pat.globFiles(fn_opts, false);
-		if (fn_opts.size() > 0)
-		{
-			gui_jobwindows[iwin]->myjob.joboptions["fn_cont"].setString(fn_opts[fn_opts.size() - 1]);
-			gui_jobwindows[iwin]->updateMyGui();
-		}
+		preview_is_continue = false;
+		preview_is_overwrite = true;
 	}
 
+	// The scheduled-job path reuses the selected job's output directory while
+	// keeping thisjob.is_continue false, which is exactly what overwrite preview needs.
 	if (use_ccpem_pipeliner)
 	{
 		std::string error_message;
-		pipeline.PrintComCpipe(gui_jobwindows[iwin]->myjob, current_job, is_main_continue, false,
+		pipeline.PrintComCpipe(gui_jobwindows[iwin]->myjob, current_job, preview_is_continue, preview_is_overwrite,
 			DONT_MKDIR, commands, final_command, error_message);
 	}
 
 	else
 	{
 		std::string error_message;
-		if (!pipeline.getCommandLineJob(gui_jobwindows[iwin]->myjob, current_job, is_main_continue, false,
+		if (!pipeline.getCommandLineJob(gui_jobwindows[iwin]->myjob, current_job, preview_is_continue, preview_is_overwrite,
 				DONT_MKDIR, commands, final_command, error_message))
 		{
 			fl_message("%s",error_message.c_str());
@@ -1800,7 +1784,7 @@ void GuiMainWindow::cb_print_cl_i()
 					std::vector<std::string> cmds2;
 					std::string fc2;
 					pipeline.getCommandLineJob(gui_jobwindows[iwin]->myjob, current_job,
-					                           is_main_continue, false, true /*do_makedir*/,
+					                           preview_is_continue, preview_is_overwrite, true /*do_makedir*/,
 					                           cmds2, fc2, err2);
 					ifs.open(script_path.c_str());
 				}
@@ -1856,6 +1840,7 @@ void GuiMainWindow::cb_print_cl_i()
 			}
 		}
 	}
+
 }
 
 // Run button call-back functions
@@ -1868,6 +1853,7 @@ void GuiMainWindow::cb_run(Fl_Widget* o, void* v)
 	}
 	// Deactivate Run button to prevent the user from accidentally submitting many jobs
 	run_button->deactivate();
+	quick_overwrite_button->deactivate();
 	// Run the job
 	T->cb_run_i(false, false); // 1st false means dont only_schedule, 2nd false means dont open the note editor window
 }
@@ -1899,6 +1885,9 @@ void GuiMainWindow::cb_run_i(bool only_schedule, bool do_open_edit)
 		if (!proceed)
 		{
 			do_overwrite_continue = false;
+			run_button->activate();
+			if (!maingui_do_read_only && current_job >= 0)
+				quick_overwrite_button->activate();
 			return;
 		}
 		else
@@ -1913,7 +1902,14 @@ void GuiMainWindow::cb_run_i(bool only_schedule, bool do_open_edit)
 
 	// Get which jobtype the GUI is on now
 	int iwin = browser->value() - 1;
-	if (iwin < 0 || iwin >= nr_browse_tabs || gui_jobwindows[iwin] == NULL) return;
+	if (iwin < 0 || iwin >= nr_browse_tabs || gui_jobwindows[iwin] == NULL)
+	{
+		if (do_overwrite_continue)
+			pipeline.setJobCounter(my_overwrite_job_counter);
+		do_overwrite_continue = false;
+		run_button->activate();
+		return;
+	}
 	// And update the job inside it
 	gui_jobwindows[iwin]->updateMyJob();
 
@@ -1953,6 +1949,9 @@ void GuiMainWindow::cb_run_i(bool only_schedule, bool do_open_edit)
 			fl_message("%s", error_message.c_str());
 			// Allow the user to fix the error and submit this job again
 			run_button->activate();
+			do_overwrite_continue = false;
+			if (!maingui_do_read_only && current_job >= 0)
+				quick_overwrite_button->activate();
 			return;
 		}
 
@@ -1968,6 +1967,9 @@ void GuiMainWindow::cb_run_i(bool only_schedule, bool do_open_edit)
 			fl_message("%s", error_message.c_str());
 			// Allow the user to fix the error and submit this job again
 			run_button->activate();
+			do_overwrite_continue = false;
+			if (!maingui_do_read_only && current_job >= 0)
+				quick_overwrite_button->activate();
 			return;
 		}
 	}
@@ -2060,6 +2062,7 @@ void GuiMainWindow::cb_delete_i(bool do_ask, bool do_recursive)
 
 			// Reset current_job
 			current_job = -1;
+			quick_overwrite_button->deactivate();
 			fillStdOutAndErr();
 
 			// Update all job lists in the main GUI
@@ -2072,6 +2075,7 @@ void GuiMainWindow::cb_delete_i(bool do_ask, bool do_recursive)
 
 		// Reset current_job
 		current_job = -1;
+		quick_overwrite_button->deactivate();
 		fillStdOutAndErr();
 
 		// Update all job lists in the main GUI
@@ -2643,16 +2647,33 @@ void GuiMainWindow::cb_reactivate_runbutton_i()
 	run_button->activate();
 }
 
-void GuiMainWindow::cb_toggle_overwrite_continue(Fl_Widget* o, void* v)
+void GuiMainWindow::cb_quick_overwrite(Fl_Widget* o, void* v)
 {
 	GuiMainWindow* T=(GuiMainWindow*)v;
-	T->cb_toggle_overwrite_continue_i();
+	T->cb_quick_overwrite_i();
 }
 
-void GuiMainWindow::cb_toggle_overwrite_continue_i()
+void GuiMainWindow::cb_quick_overwrite_i()
 {
-	do_overwrite_continue = !do_overwrite_continue;
-	cb_toggle_continue_i();
+	if (maingui_do_read_only || !quick_overwrite_button->active() ||
+	    current_job < 0 || current_job >= pipeline.processList.size())
+		return;
+
+	if (pipeline.processList[current_job].alias != "None")
+	{
+		FileName fn_alias = pipeline.processList[current_job].alias;
+		fn_alias = (fn_alias.afterFirstOf("/")).beforeLastOf("/");
+		alias_current_job->value(fn_alias.c_str());
+	}
+	else
+	{
+		alias_current_job->value("Give_alias_here");
+	}
+
+	do_overwrite_continue = true;
+	run_button->deactivate();
+	quick_overwrite_button->deactivate();
+	cb_run_i(false, false);
 }
 
 void GuiMainWindow::cb_show_initial_screen(Fl_Widget* o, void* v)
@@ -2664,6 +2685,7 @@ void GuiMainWindow::cb_show_initial_screen(Fl_Widget* o, void* v)
 void GuiMainWindow::cb_show_initial_screen_i()
 {
 	run_button->deactivate();
+	quick_overwrite_button->deactivate();
 	cb_select_browsegroup_i(true);
 }
 
@@ -2861,6 +2883,7 @@ void GuiMainWindow::switchToProject(const std::string &path)
 	current_job = -1;
 	cb_select_browsegroup_i(true);
 	run_button->deactivate();
+	quick_overwrite_button->deactivate();
 
 	// Update the window title to reflect the new project directory
 	{

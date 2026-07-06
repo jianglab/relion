@@ -83,6 +83,7 @@ static JobWindow *gui_jobwindows[MAX_JOBS_BROWSER];
 // Sjors 16feb2018: somehow suddenly this run_button needs to be a non-static: otherwise it doesn't change to 'continue now' and doesnt grey out...
 static Fl_Button *run_button;
 static Fl_Button *print_CL_button;
+static Fl_Button *quick_overwrite_button;
 static Fl_Button *schedule_button;
 static Fl_Button *expand_stdout_button;
 static Fl_Input *alias_current_job;
@@ -337,8 +338,8 @@ private:
     static void cb_reactivate_runbutton(Fl_Widget*, void*);
     inline void cb_reactivate_runbutton_i();
 
-    static void cb_toggle_overwrite_continue(Fl_Widget*, void*);
-    inline void cb_toggle_overwrite_continue_i();
+    static void cb_quick_overwrite(Fl_Widget*, void*);
+    inline void cb_quick_overwrite_i();
 
     static void cb_show_initial_screen(Fl_Widget*, void*);
     inline void cb_show_initial_screen_i();
