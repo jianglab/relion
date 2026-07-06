@@ -75,8 +75,8 @@
 #define DEFAULTSCRATCHDIR ""
 
 std::string getDefaultJobOutputName(int type, int job_counter);
-std::string getJobScratchDirectory(const std::string &scratch_root, const std::string &outputname);
-bool isScratchDirectoryDefaultOrExpandedDefault(const std::string &scratch_dir, const std::string &scratch_root);
+std::string getDefaultJobScratchDirectory(const std::string &scratch_root, const std::string &outputname);
+bool isScratchDirectoryDefaultOrExpandedDefault(const std::string &scratch_dir, const std::string &scratch_root, int type);
 
 static const std::vector<std::string> job_undefined_options{
 	"undefined"

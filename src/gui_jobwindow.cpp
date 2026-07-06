@@ -292,11 +292,11 @@ void JobWindow::updateScratchDirectoryForNewJob(int job_counter)
 		return;
 
 	std::string current_scratch = myjob.joboptions["scratch_dir"].getString();
-	if (!isScratchDirectoryDefaultOrExpandedDefault(current_scratch, scratch_root))
+	if (!isScratchDirectoryDefaultOrExpandedDefault(current_scratch, scratch_root, myjob.type))
 		return;
 
 	std::string outputname = getDefaultJobOutputName(myjob.type, job_counter);
-	std::string job_scratch = getJobScratchDirectory(scratch_root, outputname);
+	std::string job_scratch = getDefaultJobScratchDirectory(scratch_root, outputname);
 	myjob.joboptions["scratch_dir"].setString(job_scratch);
 
 	if (guientries.find("scratch_dir") != guientries.end())

@@ -74,19 +74,19 @@ static std::string normaliseScratchPath(std::string path)
 	return path;
 }
 
-static bool scratchPathEndsWith(const std::string &path, const std::string &suffix)
+static bool scratchPathStartsWith(const std::string &path, const std::string &prefix)
 {
 	std::string norm_path = normaliseScratchPath(path);
-	std::string norm_suffix = normaliseScratchPath(suffix);
+	std::string norm_prefix = normaliseScratchPath(prefix);
 
-	if (norm_path == norm_suffix)
+	if (norm_path == norm_prefix)
 		return true;
 
-	if (norm_path.length() <= norm_suffix.length())
+	if (norm_path.length() <= norm_prefix.length())
 		return false;
 
-	return norm_path.compare(norm_path.length() - norm_suffix.length(), norm_suffix.length(), norm_suffix) == 0
-			&& norm_path[norm_path.length() - norm_suffix.length() - 1] == '/';
+	return norm_path.compare(0, norm_prefix.length(), norm_prefix) == 0
+			&& norm_path[norm_prefix.length()] == '/';
 }
 
 std::string getDefaultJobOutputName(int type, int job_counter)
@@ -98,24 +98,17 @@ std::string getDefaultJobOutputName(int type, int job_counter)
 		return dirname + "/job" + integerToString(job_counter) + "/";
 }
 
-std::string getJobScratchDirectory(const std::string &scratch_root, const std::string &outputname)
+std::string getDefaultJobScratchDirectory(const std::string &scratch_root, const std::string &outputname)
 {
 	if (scratch_root == "")
 		return "";
-
-	// Refinement programs add relion_volatile below --scratch_dir. Use the
-	// project directory name and RELION output name to avoid collisions between
-	// projects and concurrently running jobs.
-	std::string project_outputname = appendPathComponent(getCurrentProjectDirectoryName(), outputname);
-	if (scratchPathEndsWith(scratch_root, project_outputname))
-		return scratch_root;
 
 	return appendPathComponent(
 			appendPathComponent(scratch_root, getCurrentProjectDirectoryName()),
 			outputname);
 }
 
-bool isScratchDirectoryDefaultOrExpandedDefault(const std::string &scratch_dir, const std::string &scratch_root)
+bool isScratchDirectoryDefaultOrExpandedDefault(const std::string &scratch_dir, const std::string &scratch_root, int type)
 {
 	if (scratch_root == "")
 		return false;
@@ -125,10 +118,26 @@ bool isScratchDirectoryDefaultOrExpandedDefault(const std::string &scratch_dir, 
 	if (norm_scratch_dir == norm_scratch_root)
 		return true;
 
-	std::string project_root = normaliseScratchPath(appendPathComponent(scratch_root, getCurrentProjectDirectoryName()));
-	return norm_scratch_dir.length() > project_root.length()
-			&& norm_scratch_dir.compare(0, project_root.length(), project_root) == 0
-			&& norm_scratch_dir[project_root.length()] == '/';
+	std::string proc_root = appendPathComponent(
+			appendPathComponent(scratch_root, getCurrentProjectDirectoryName()),
+			proc_type2dirname.at(type));
+	std::string norm_proc_root = normaliseScratchPath(proc_root);
+	if (!scratchPathStartsWith(scratch_dir, norm_proc_root))
+		return false;
+	if (norm_scratch_dir.length() <= norm_proc_root.length())
+		return false;
+
+	std::string job_name = norm_scratch_dir.substr(norm_proc_root.length() + 1);
+	if (job_name.length() < 4 || job_name.substr(0, 3) != "job")
+		return false;
+
+	for (size_t i = 3; i < job_name.length(); i++)
+	{
+		if (job_name[i] < '0' || job_name[i] > '9')
+			return false;
+	}
+
+	return true;
 }
 
 std::vector<Node> getOutputNodesRefine(std::string outputname, std::string jobtype, int iter, int K, int dim, int nr_bodies, bool _is_tomo)
@@ -3373,7 +3382,7 @@ Remember that running a single MPI follower on each node that runs as many threa
 	{
 		default_scratch = DEFAULTSCRATCHDIR;
 	}
-	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will use it as the root scratch directory and create project/job-specific sub-directories below it, followed by a sub-directory called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
+	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will create a sub-directory in it called relion_volatile. For new jobs, the default is expanded from RELION_SCRATCH_DIR into a project/job-specific scratch directory. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
 Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.");
 
 	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
@@ -3485,7 +3494,7 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 	if (joboptions["do_preread_images"].getBoolean())
 		command += " --preread_images " ;
 	else if (joboptions["scratch_dir"].getString() != "")
-		command += " --scratch_dir " +  getJobScratchDirectory(joboptions["scratch_dir"].getString(), outputname);
+		command += " --scratch_dir " +  joboptions["scratch_dir"].getString();
 	if (joboptions["cache_dir"].getString() != "")
 		command += " --cache_dir " +  joboptions["cache_dir"].getString()
 				   + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
@@ -3662,7 +3671,7 @@ Remember that running a single MPI follower on each node that runs as many threa
 	{
 		default_scratch = DEFAULTSCRATCHDIR;
 	}
-	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will use it as the root scratch directory and create project/job-specific sub-directories below it, followed by a sub-directory called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
+	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will create a sub-directory in it called relion_volatile. For new jobs, the default is expanded from RELION_SCRATCH_DIR into a project/job-specific scratch directory. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
 Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.");
 
 	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
@@ -3792,7 +3801,7 @@ bool RelionJob::getCommandsInimodelJob(std::string &outputname, std::vector<std:
 	if (joboptions["do_preread_images"].getBoolean())
 		command += " --preread_images " ;
 	else if (joboptions["scratch_dir"].getString() != "")
-		command += " --scratch_dir " +  getJobScratchDirectory(joboptions["scratch_dir"].getString(), outputname);
+		command += " --scratch_dir " +  joboptions["scratch_dir"].getString();
 	if (joboptions["cache_dir"].getString() != "")
 		command += " --cache_dir " +  joboptions["cache_dir"].getString()
 			   + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
@@ -4079,7 +4088,7 @@ Remember that running a single MPI follower on each node that runs as many threa
 	{
 		default_scratch = DEFAULTSCRATCHDIR;
 	}
-	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will use it as the root scratch directory and create project/job-specific sub-directories below it, followed by a sub-directory called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
+	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will create a sub-directory in it called relion_volatile. For new jobs, the default is expanded from RELION_SCRATCH_DIR into a project/job-specific scratch directory. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
 Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.");
 
 	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
@@ -4205,7 +4214,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	if (joboptions["do_preread_images"].getBoolean())
 		command += " --preread_images " ;
 	else if (joboptions["scratch_dir"].getString() != "")
-		command += " --scratch_dir " +  getJobScratchDirectory(joboptions["scratch_dir"].getString(), outputname);
+		command += " --scratch_dir " +  joboptions["scratch_dir"].getString();
 	if (joboptions["cache_dir"].getString() != "")
 		command += " --cache_dir " +  joboptions["cache_dir"].getString()
 				   + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
@@ -4631,7 +4640,7 @@ Remember that running a single MPI follower on each node that runs as many threa
 	{
 		default_scratch = DEFAULTSCRATCHDIR;
 	}
-	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will use it as the root scratch directory and create project/job-specific sub-directories below it, followed by a sub-directory called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
+	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will create a sub-directory in it called relion_volatile. For new jobs, the default is expanded from RELION_SCRATCH_DIR into a project/job-specific scratch directory. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
 Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.");
 
 	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
@@ -4775,7 +4784,7 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 	if (joboptions["do_preread_images"].getBoolean())
 		command += " --preread_images " ;
 	else if (joboptions["scratch_dir"].getString() != "")
-		command += " --scratch_dir " +  getJobScratchDirectory(joboptions["scratch_dir"].getString(), outputname);
+		command += " --scratch_dir " +  joboptions["scratch_dir"].getString();
 	if (joboptions["cache_dir"].getString() != "")
 		command += " --cache_dir " +  joboptions["cache_dir"].getString()
 				   + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
@@ -5056,7 +5065,7 @@ Remember that running a single MPI follower on each node that runs as many threa
 	{
 		default_scratch = DEFAULTSCRATCHDIR;
 	}
-	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will use it as the root scratch directory and create project/job-specific sub-directories below it, followed by a sub-directory called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
+	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "If a directory is provided here, then RELION will create a sub-directory in it called relion_volatile. For new jobs, the default is expanded from RELION_SCRATCH_DIR into a project/job-specific scratch directory. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. \
 Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.");
 	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
 	if (default_cache == NULL)
@@ -5165,7 +5174,7 @@ bool RelionJob::getCommandsMultiBodyJob(std::string &outputname, std::vector<std
 		if (joboptions["do_preread_images"].getBoolean())
 			command += " --preread_images " ;
 		else if (joboptions["scratch_dir"].getString() != "")
-			command += " --scratch_dir " +  getJobScratchDirectory(joboptions["scratch_dir"].getString(), outputname);
+			command += " --scratch_dir " +  joboptions["scratch_dir"].getString();
 		if (joboptions["cache_dir"].getString() != "")
 			command += " --cache_dir " +  joboptions["cache_dir"].getString()
 					   + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
