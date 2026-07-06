@@ -341,6 +341,9 @@ private:
     static void cb_quick_overwrite(Fl_Widget*, void*);
     inline void cb_quick_overwrite_i();
 
+    static void cb_toggle_overwrite_continue(Fl_Widget*, void*);
+    inline void cb_toggle_overwrite_continue_i();
+
     static void cb_show_initial_screen(Fl_Widget*, void*);
     inline void cb_show_initial_screen_i();
 
