@@ -1389,6 +1389,9 @@ void GuiMainWindow::cb_select_browsegroup_i(bool show_initial_screen)
 	// toggle the continue status of this job
 	cb_toggle_continue_i();
 
+	if (gui_jobwindows[iwin])
+		gui_jobwindows[iwin]->updateScratchDirectoryForNewJob(pipeline.job_counter);
+
 	alias_current_job->value("Give_alias_here");
 
 	textbuff_stdout->text("stdout will go here; double-click this window to open stdout in a separate window");

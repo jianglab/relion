@@ -58,7 +58,47 @@ static std::string getCurrentProjectDirectoryName()
 		return project_name;
 }
 
-static std::string getJobScratchDirectory(const std::string &scratch_root, const std::string &outputname)
+static std::string normaliseScratchPath(std::string path)
+{
+	for (size_t i = 0; i < path.length(); i++)
+	{
+		if (path[i] == '\\')
+			path[i] = '/';
+	}
+
+	while (path.length() > 1 && path[path.length() - 1] == '/')
+	{
+		path.erase(path.length() - 1);
+	}
+
+	return path;
+}
+
+static bool scratchPathEndsWith(const std::string &path, const std::string &suffix)
+{
+	std::string norm_path = normaliseScratchPath(path);
+	std::string norm_suffix = normaliseScratchPath(suffix);
+
+	if (norm_path == norm_suffix)
+		return true;
+
+	if (norm_path.length() <= norm_suffix.length())
+		return false;
+
+	return norm_path.compare(norm_path.length() - norm_suffix.length(), norm_suffix.length(), norm_suffix) == 0
+			&& norm_path[norm_path.length() - norm_suffix.length() - 1] == '/';
+}
+
+std::string getDefaultJobOutputName(int type, int job_counter)
+{
+	FileName dirname = proc_type2dirname.at(type);
+	if (job_counter < 1000)
+		return dirname + "/job" + integerToString(job_counter, 3) + "/";
+	else
+		return dirname + "/job" + integerToString(job_counter) + "/";
+}
+
+std::string getJobScratchDirectory(const std::string &scratch_root, const std::string &outputname)
 {
 	if (scratch_root == "")
 		return "";
@@ -66,9 +106,29 @@ static std::string getJobScratchDirectory(const std::string &scratch_root, const
 	// Refinement programs add relion_volatile below --scratch_dir. Use the
 	// project directory name and RELION output name to avoid collisions between
 	// projects and concurrently running jobs.
+	std::string project_outputname = appendPathComponent(getCurrentProjectDirectoryName(), outputname);
+	if (scratchPathEndsWith(scratch_root, project_outputname))
+		return scratch_root;
+
 	return appendPathComponent(
 			appendPathComponent(scratch_root, getCurrentProjectDirectoryName()),
 			outputname);
+}
+
+bool isScratchDirectoryDefaultOrExpandedDefault(const std::string &scratch_dir, const std::string &scratch_root)
+{
+	if (scratch_root == "")
+		return false;
+
+	std::string norm_scratch_dir = normaliseScratchPath(scratch_dir);
+	std::string norm_scratch_root = normaliseScratchPath(scratch_root);
+	if (norm_scratch_dir == norm_scratch_root)
+		return true;
+
+	std::string project_root = normaliseScratchPath(appendPathComponent(scratch_root, getCurrentProjectDirectoryName()));
+	return norm_scratch_dir.length() > project_root.length()
+			&& norm_scratch_dir.compare(0, project_root.length(), project_root) == 0
+			&& norm_scratch_dir[project_root.length()] == '/';
 }
 
 std::vector<Node> getOutputNodesRefine(std::string outputname, std::string jobtype, int iter, int K, int dim, int nr_bodies, bool _is_tomo)
@@ -727,16 +787,8 @@ void RelionJob::initialisePipeline(std::string &outputname, int job_counter)
 	outputNodes.clear();
 	inputNodes.clear();
 
-	FileName dirname = proc_type2dirname.at(type);
-	// TODO: insert "relion." prefix to dirname when using the ccpem-pipeliner...
-
 	if (outputname == "") // for continue jobs, use the same outputname
-	{
-		if (job_counter < 1000)
-			outputname = dirname + "/job" + integerToString(job_counter, 3) + "/";
-		else
-			outputname = dirname + "/job" + integerToString(job_counter) + "/";
-	}
+		outputname = getDefaultJobOutputName(type, job_counter);
 
 	// This is the default label, deeper levels can be added for specific jobs
 	label = get_proc_label(type);

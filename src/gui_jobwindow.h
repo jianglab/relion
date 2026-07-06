@@ -87,6 +87,9 @@ public:
 	// De/re-activate options upon toggling the continue button
 	void toggle_new_continue(bool is_continue);
 
+	// Update visible default scratch directory for newly created jobs
+	void updateScratchDirectoryForNewJob(int job_counter);
+
 	// Write the job submission script
 	void saveJobSubmissionScript(std::string newfilename, std::string outputname, std::vector<std::string> commands);
 

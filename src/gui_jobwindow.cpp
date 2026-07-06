@@ -19,6 +19,7 @@
  ***************************************************************************/
 #include "src/gui_jobwindow.h"
 #include "src/gui_entries.h"
+#include <cstdlib>
 JobWindow::JobWindow(int _x, int _y, int _w, int _h, const char* title ) : Fl_Box(_x,_y,_w,_h,title)
 {
 	clear();
@@ -275,6 +276,31 @@ void JobWindow::toggle_new_continue(bool _is_continue)
 		}
 		}
 	}
+}
+
+void JobWindow::updateScratchDirectoryForNewJob(int job_counter)
+{
+	if (is_continue || myjob.joboptions.find("scratch_dir") == myjob.joboptions.end())
+		return;
+
+	const char *default_scratch = getenv("RELION_SCRATCH_DIR");
+	if (default_scratch == NULL)
+		default_scratch = DEFAULTSCRATCHDIR;
+
+	std::string scratch_root = default_scratch;
+	if (scratch_root == "")
+		return;
+
+	std::string current_scratch = myjob.joboptions["scratch_dir"].getString();
+	if (!isScratchDirectoryDefaultOrExpandedDefault(current_scratch, scratch_root))
+		return;
+
+	std::string outputname = getDefaultJobOutputName(myjob.type, job_counter);
+	std::string job_scratch = getJobScratchDirectory(scratch_root, outputname);
+	myjob.joboptions["scratch_dir"].setString(job_scratch);
+
+	if (guientries.find("scratch_dir") != guientries.end())
+		guientries["scratch_dir"].setValue(job_scratch);
 }
 
 void JobWindow::resetHeight()
