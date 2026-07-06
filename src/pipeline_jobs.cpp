@@ -3401,7 +3401,6 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 	}
 
 	command += " --tau2_fudge " + joboptions["tau_fudge"].getString();
-	command += " --low_resol_join_halves " + joboptions["low_resol_join_halves"].getString();
 	command += " --particle_diameter " + joboptions["particle_diameter"].getString();
 	if (!is_continue)
 	{
