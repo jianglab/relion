@@ -5,6 +5,8 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <unordered_set>
+#include <unordered_map>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -13,6 +15,7 @@
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
+#include <unistd.h>
 
 #include "src/metadata_table.h"
 #include "src/npy.hpp"
@@ -277,23 +280,14 @@ static std::string read_string(const char* base, int offset, int itemsize) {
     return std::string(s, len);
 }
 
-// Resolve a (possibly relative) path against an absolute base directory.
-// If the path is already absolute, return it unchanged.
-static std::string resolve_path(const std::string& path, const std::string& base_dir) {
-    if (path.empty() || path[0] == '/')
-        return path;
-    if (base_dir.empty())
-        return path;
-
-    std::string full = base_dir + "/" + path;
-    // Normalize: remove "./" and resolve "../"
+static std::string normalize_path(const std::string& path) {
     std::vector<std::string> parts;
-    size_t start = (full[0] == '/') ? 1 : 0;
-    while (start < full.size()) {
-        size_t end = full.find('/', start);
+    size_t start = (path[0] == '/') ? 1 : 0;
+    while (start < path.size()) {
+        size_t end = path.find('/', start);
         std::string part = (end == std::string::npos)
-            ? full.substr(start)
-            : full.substr(start, end - start);
+            ? path.substr(start)
+            : path.substr(start, end - start);
         if (part == "..") {
             if (!parts.empty())
                 parts.pop_back();
@@ -304,12 +298,45 @@ static std::string resolve_path(const std::string& path, const std::string& base
         start = end + 1;
     }
     std::string result;
-    if (full[0] == '/') result = "/";
+    if (path[0] == '/') result = "/";
     for (size_t i = 0; i < parts.size(); i++) {
         if (i > 0) result += "/";
         result += parts[i];
     }
-    return result.empty() ? (full[0] == '/' ? "/" : ".") : result;
+    return result.empty() ? (path[0] == '/' ? "/" : ".") : result;
+}
+
+// Resolve a (possibly relative) path against a base directory.
+// If the path is already absolute, return it unchanged.
+// Some CryoSPARC .cs files store absolute Unix paths without the leading '/';
+// this is detected by checking whether the first path component matches the
+// first component of base_dir when the relative result stays relative.
+static std::string resolve_path(const std::string& path, const std::string& base_dir) {
+    if (path.empty() || path[0] == '/')
+        return path;
+    if (base_dir.empty())
+        return path;
+
+    std::string full = base_dir + "/" + path;
+    std::string result = normalize_path(full);
+
+    // If the result is still a relative path (base_dir was also relative),
+    // check whether the raw path starts with the same first component as
+    // base_dir. If so, the .cs file likely stored an absolute path without
+    // the leading '/', and we should use the absolute form.
+    if (!result.empty() && result[0] != '/') {
+        size_t path_slash = path.find('/');
+        size_t base_slash = base_dir.find('/');
+        std::string path_first = path.substr(0, path_slash);
+        std::string base_first = base_dir.substr(0, base_slash);
+        if (path_first == base_first) {
+            std::string abs_result = normalize_path("/" + path);
+            if (!abs_result.empty() && abs_result[0] == '/')
+                result = abs_result;
+        }
+    }
+
+    return result;
 }
 
 // Verify a file path exists; warn once per unique path, up to SAMPLE_LIMIT paths per label.
@@ -368,6 +395,14 @@ static void convert(const std::string& cs_filename,
     {
         size_t slash = cs_filename.rfind('/');
         std::string cs_dir = (slash != std::string::npos) ? cs_filename.substr(0, slash) : ".";
+        // Resolve cs_dir to absolute if it is relative, so that project_dir
+        // and all subsequently resolved blob paths are absolute.
+        if (!cs_dir.empty() && cs_dir[0] != '/') {
+            char cwd[4096];
+            if (getcwd(cwd, sizeof(cwd))) {
+                cs_dir = normalize_path(std::string(cwd) + "/" + cs_dir);
+            }
+        }
         project_dir = resolve_path("..", cs_dir);
     }
 
@@ -874,6 +909,256 @@ static void convert(const std::string& cs_filename,
     fh.close();
 
     std::cout << " Written " << star_filename << " with " << hdr.num_rows << " particles from CryoSPARC .cs file" << std::endl;
+}
+
+// Check whether the .cs file's particles originated from a RELION STAR file
+// that was imported into CryoSPARC. Returns true if the original STAR file
+// and its matching imported_particles.cs are found.
+static bool detect_original_star(
+        const std::string& cs_filename,
+        std::string& import_star_path_out,
+        std::string& import_cs_path_out)
+{
+    try {
+        CsHeader hdr = read_header(cs_filename);
+        std::vector<char> data = read_data(cs_filename, hdr);
+
+        int fi_path = find_field(hdr.fields, "blob/path");
+        if (fi_path < 0 || hdr.num_rows == 0)
+            return false;
+
+        const char* row0 = data.data();
+        const CsField& fp = hdr.fields[fi_path];
+        std::string first_path = read_string(row0 + fp.offset, 0, fp.itemsize);
+
+        size_t first_slash = first_path.find('/');
+        if (first_slash == std::string::npos)
+            return false;
+        std::string import_job = first_path.substr(0, first_slash);
+
+        // Compute project_dir from cs_filename
+        std::string project_dir;
+        {
+            size_t slash = cs_filename.rfind('/');
+            std::string cs_dir = (slash != std::string::npos)
+                ? cs_filename.substr(0, slash) : ".";
+            if (!cs_dir.empty() && cs_dir[0] != '/') {
+                char cwd[4096];
+                if (getcwd(cwd, sizeof(cwd))) {
+                    cs_dir = normalize_path(std::string(cwd) + "/" + cs_dir);
+                }
+            }
+            project_dir = resolve_path("..", cs_dir);
+        }
+
+        import_star_path_out = project_dir + "/" + import_job + "/particles.star";
+        import_cs_path_out   = project_dir + "/" + import_job + "/imported_particles.cs";
+
+        return exists(import_star_path_out) && exists(import_cs_path_out);
+    } catch (...) {
+        return false;
+    }
+}
+
+// Convert a CryoSPARC .cs file by tracing back to the original RELION STAR file
+// that was imported into CryoSPARC. Uses the original STAR file as the data
+// source (preserving all original RELION fields) and the .cs file as a subset
+// selector via uid matching. Also overlays fields from the .cs file (class,
+// alignments, CTF) on the selected particles.
+//
+// The import job is determined from the blob/path in the .cs file:
+//   e.g. "J1/imported/..." → import job is J1
+// The import job directory must contain:
+//   - imported_particles.cs  (uid->row mapping, same order as particles.star)
+//   - particles.star         (the original imported RELION STAR file)
+static void convert_with_original_star(
+        const std::string& cs_filename,
+        const std::string& star_filename,
+        const std::string& optics_group_name,
+        RFLOAT pixel_size, RFLOAT kV, RFLOAT Cs, RFLOAT Q0)
+{
+    // 1. Read target .cs file (subset selector)
+    CsHeader hdr = read_header(cs_filename);
+    std::vector<char> data = read_data(cs_filename, hdr);
+
+    // 2. Compute project_dir (same as convert())
+    std::string project_dir;
+    {
+        size_t slash = cs_filename.rfind('/');
+        std::string cs_dir = (slash != std::string::npos) ? cs_filename.substr(0, slash) : ".";
+        if (!cs_dir.empty() && cs_dir[0] != '/') {
+            char cwd[4096];
+            if (getcwd(cwd, sizeof(cwd))) {
+                cs_dir = normalize_path(std::string(cwd) + "/" + cs_dir);
+            }
+        }
+        project_dir = resolve_path("..", cs_dir);
+    }
+
+    // 3. Find key fields in target .cs
+    int fi_path = find_field(hdr.fields, "blob/path");
+    int fi_uid  = find_field(hdr.fields, "uid");
+
+    if (fi_path < 0 || fi_uid < 0)
+        REPORT_ERROR("convert_with_original_star: .cs file missing blob/path or uid");
+
+    // 4. Determine import job name from first blob/path (e.g. "J1" from "J1/imported/...")
+    const CsField& fp = hdr.fields[fi_path];
+    const char* row0 = data.data();
+    std::string first_path = read_string(row0 + fp.offset, 0, fp.itemsize);
+    size_t first_slash = first_path.find('/');
+    if (first_slash == std::string::npos)
+        REPORT_ERROR("convert_with_original_star: cannot parse import job from blob/path: " + first_path);
+    std::string import_job = first_path.substr(0, first_slash);
+
+    std::string import_cs_path   = project_dir + "/" + import_job + "/imported_particles.cs";
+    std::string import_star_path = project_dir + "/" + import_job + "/particles.star";
+
+    // 5. Read import job's imported_particles.cs to build uid→position mapping
+    CsHeader hdr_imp;
+    std::vector<char> data_imp;
+    try {
+        hdr_imp = read_header(import_cs_path);
+        data_imp = read_data(import_cs_path, hdr_imp);
+    } catch (...) {
+        REPORT_ERROR("convert_with_original_star: cannot read " + import_cs_path);
+    }
+    int imp_fi_uid = find_field(hdr_imp.fields, "uid");
+    if (imp_fi_uid < 0)
+        REPORT_ERROR("convert_with_original_star: import .cs has no uid field");
+
+    std::vector<long> import_uids(hdr_imp.num_rows);
+    for (size_t i = 0; i < hdr_imp.num_rows; i++) {
+        const char* row = data_imp.data() + i * hdr_imp.total_itemsize;
+        import_uids[i] = read_int(row + hdr_imp.fields[imp_fi_uid].offset, 0,
+                                  hdr_imp.fields[imp_fi_uid].kind,
+                                  hdr_imp.fields[imp_fi_uid].itemsize);
+    }
+
+    // 6. Build selected_uids set and uid→cs_row map from target .cs
+    std::unordered_set<long> selected_uids;
+    std::unordered_map<long, size_t> uid_to_csrow;
+    {
+        const CsField& fu = hdr.fields[fi_uid];
+        for (size_t i = 0; i < hdr.num_rows; i++) {
+            const char* row = data.data() + i * hdr.total_itemsize;
+            long uid = read_int(row + fu.offset, 0, fu.kind, fu.itemsize);
+            selected_uids.insert(uid);
+            uid_to_csrow[uid] = i;
+        }
+    }
+
+    // 7. Read original STAR file
+    if (!exists(import_star_path))
+        REPORT_ERROR("convert_with_original_star: cannot read " + import_star_path);
+    std::cout << " Using original STAR file: " << import_star_path << std::endl;
+    std::cout << " Total particles in original: " << hdr_imp.num_rows
+              << ", selected: " << selected_uids.size() << std::endl;
+
+    MetaDataTable MDopt, MDparts;
+    MDopt.read(import_star_path, "optics");
+    MDparts.read(import_star_path, "particles");
+
+    if (MDparts.numberOfObjects() != (long)hdr_imp.num_rows)
+        REPORT_ERROR("convert_with_original_star: particle count mismatch between " +
+                     import_star_path + " and " + import_cs_path);
+
+    // 8. Find overlay fields in target .cs
+    struct CsFieldRef {
+        int fi;
+        EMDLabel label;
+        double mul;
+    };
+    std::vector<CsFieldRef> overlay_scalar;
+    std::vector<int> overlay_2d;
+    int fi_cs_ctf_df1   = find_field(hdr.fields, "ctf/df1_A");
+    int fi_cs_ctf_df2   = find_field(hdr.fields, "ctf/df2_A");
+    int fi_cs_ctf_dfang = find_field(hdr.fields, "ctf/df_angle_rad");
+    int fi_cs_ctf_pshift= find_field(hdr.fields, "ctf/phase_shift_rad");
+    int fi_cs_ctf_bfac  = find_field(hdr.fields, "ctf/bfactor");
+    int fi_cs_ctf_scale = find_field(hdr.fields, "ctf/scale");
+    int fi_cs_align2d_cls = find_field(hdr.fields, "alignments2D/class");
+    int fi_cs_align2d_sh  = find_field(hdr.fields, "alignments2D/shift");
+    int fi_cs_align2d_ps  = find_field(hdr.fields, "alignments2D/pose");
+    int fi_cs_blob_psize  = find_field(hdr.fields, "blob/psize_A");
+
+    const double DEG_PER_RAD = 180.0 / M_PI;
+
+    // 9. Overlay .cs fields on selected particles, then remove non-selected
+    //    Iterate once: overlay selected particles, track which to keep.
+    std::vector<bool> keep(MDparts.numberOfObjects(), false);
+    for (long i = 0; i < MDparts.numberOfObjects(); i++) {
+        long uid = import_uids[i];
+        auto it = selected_uids.find(uid);
+        if (it == selected_uids.end())
+            continue;
+
+        keep[i] = true;
+        size_t cs_row = uid_to_csrow[uid];
+        const char* csr = data.data() + cs_row * hdr.total_itemsize;
+
+        // Overlay 2D class
+        if (fi_cs_align2d_cls >= 0) {
+            const auto& f = hdr.fields[fi_cs_align2d_cls];
+            long val = read_int(csr + f.offset, 0, f.kind, f.itemsize);
+            MDparts.setValue(EMDL_PARTICLE_CLASS, val + 1, i);
+        }
+
+        // Overlay 2D shift → origin
+        if (fi_cs_align2d_sh >= 0) {
+            const auto& f = hdr.fields[fi_cs_align2d_sh];
+            double sx = read_double(csr + f.offset, 0, f.kind, f.itemsize);
+            double sy = (f.subshape.size() > 0 && f.subshape[0] > 1)
+                ? read_double(csr + f.offset, 1 * f.itemsize, f.kind, f.itemsize) : 0.0;
+            double apix = pixel_size;
+            if (fi_cs_blob_psize >= 0)
+                apix = read_double(csr + hdr.fields[fi_cs_blob_psize].offset, 0,
+                                  hdr.fields[fi_cs_blob_psize].kind,
+                                  hdr.fields[fi_cs_blob_psize].itemsize);
+            MDparts.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, (-sx) * apix, i);
+            MDparts.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, (-sy) * apix, i);
+        }
+
+        // Overlay 2D psi
+        if (fi_cs_align2d_ps >= 0) {
+            const auto& f = hdr.fields[fi_cs_align2d_ps];
+            double psi = read_double(csr + f.offset, 0, f.kind, f.itemsize);
+            MDparts.setValue(EMDL_ORIENT_PSI, -psi * DEG_PER_RAD, i);
+        }
+
+        // Overlay CTF params (scalar fields with optional multiplier)
+        auto set_ctf = [&](int fi, EMDLabel label, double mul) {
+            if (fi < 0) return;
+            double val = read_double(csr + hdr.fields[fi].offset, 0,
+                                    hdr.fields[fi].kind, hdr.fields[fi].itemsize);
+            MDparts.setValue(label, val * mul, i);
+        };
+        set_ctf(fi_cs_ctf_df1,   EMDL_CTF_DEFOCUSU,     1.0);
+        set_ctf(fi_cs_ctf_df2,   EMDL_CTF_DEFOCUSV,     1.0);
+        set_ctf(fi_cs_ctf_dfang, EMDL_CTF_DEFOCUS_ANGLE, DEG_PER_RAD);
+        set_ctf(fi_cs_ctf_pshift,EMDL_CTF_PHASESHIFT,  1.0);
+        set_ctf(fi_cs_ctf_bfac,  EMDL_CTF_BFACTOR,      1.0);
+        set_ctf(fi_cs_ctf_scale, EMDL_CTF_SCALEFACTOR,  1.0);
+    }
+
+    // 10. Remove non-selected particles (iterate backwards to preserve indices)
+    for (long i = MDparts.numberOfObjects() - 1; i >= 0; i--) {
+        if (!keep[i])
+            MDparts.removeObject(i);
+    }
+
+    // 11. Write output STAR file
+    std::ofstream fh(star_filename.c_str());
+    if (!fh)
+        REPORT_ERROR("convert_with_original_star: cannot write " + star_filename);
+
+    MDopt.write(fh);
+    MDparts.write(fh);
+    fh.close();
+
+    std::cout << " Written " << star_filename << " with " << MDparts.numberOfObjects()
+              << " particles (subset from original STAR file via uid matching)"
+              << std::endl;
 }
 
 } // namespace cryosparc

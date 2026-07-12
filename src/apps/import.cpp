@@ -30,8 +30,8 @@ class import_parameters
 {
 	public:
    	FileName fn_in, fn_odir, fn_out, fn_mtf;
-	bool do_write_types, do_continue, do_movies, do_micrographs, do_coordinates, do_halfmaps, do_particles, do_other, do_cryosparc;
-    	FileName optics_group_name, node_type, particles_optics_group_name, passthrough;
+		bool do_write_types, do_continue, do_movies, do_micrographs, do_coordinates, do_halfmaps, do_particles, do_other, do_cryosparc;
+     	FileName optics_group_name, node_type, particles_optics_group_name, passthrough;
     	RFLOAT kV, Cs, Q0, beamtilt_x, beamtilt_y, pixel_size;
     	long int do_at_most;
 
@@ -324,7 +324,18 @@ class import_parameters
 				fnt = fn_odir + fn_in.afterLastOf("/");
 			fnt = fnt.withoutExtension() + ".star";
 
-			cryosparc::convert(fn_in, fnt, optics_group_name, pixel_size, kV, Cs, Q0, pt_file);
+			std::string detected_star_path, detected_cs_path;
+			if (cryosparc::detect_original_star(fn_in, detected_star_path, detected_cs_path))
+			{
+				std::cout << " Auto-detected original RELION STAR file: "
+						  << detected_star_path << std::endl;
+				cryosparc::convert_with_original_star(
+						fn_in, fnt, optics_group_name, pixel_size, kV, Cs, Q0);
+			}
+			else
+			{
+				cryosparc::convert(fn_in, fnt, optics_group_name, pixel_size, kV, Cs, Q0, pt_file);
+			}
 		}
 		else if (do_other || do_halfmaps)
 		{
