@@ -376,6 +376,11 @@ void JobWindow::initialise(int my_job_type, bool _is_tomo)
 		myjob.initialise(my_job_type);
 		initialiseSelectWindow();
 	}
+	else if (my_job_type == PROC_SELECT2D)
+	{
+		myjob.initialise(my_job_type);
+		initialiseSelect2DWindow();
+	}
 	else if (my_job_type == PROC_2DCLASS)
 	{
 		myjob.initialise(my_job_type);
@@ -1266,6 +1271,28 @@ void JobWindow::initialiseSelectWindow()
 
 
 	// Always deactivate the queue option
+	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
+	myjob.joboptions["do_queue"].setString("No");
+}
+
+void JobWindow::initialiseSelect2DWindow()
+{
+	setupTabs(2);
+
+	tab1->begin();
+	tab1->label("I/O");
+	resetHeight();
+	place("fn_optimiser", TOGGLE_DEACTIVATE);
+	tab1->end();
+
+	tab2->begin();
+	tab2->label("Class types");
+	resetHeight();
+	place("nr_types", TOGGLE_DEACTIVATE);
+	place("do_similarity_sort", TOGGLE_DEACTIVATE);
+	tab2->end();
+
+	// This is an interactive local GUI program.
 	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
 	myjob.joboptions["do_queue"].setString("No");
 }

@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "src/displayer.h"
+#include <limits>
 //#define DEBUG
 //
 #ifdef HAVE_PNG
@@ -162,9 +163,16 @@ void DisplayBox::draw()
 		fl_color(FL_WHITE);
 		fl_draw(img_label.c_str(), xpos, ypos + fl_height());
 	}
+	if (show_type_id)
+	{
+		std::string type_label = (selected > 0) ?
+				"type " + integerToString(selected) : "junk";
+		fl_color(FL_WHITE);
+		fl_draw(type_label.c_str(), xpos + 3, ypos + ysize_data - 3);
+	}
 	/* Draw a red rectangle around the particle if it is selected */
-	if (selected >= 1 && selected <= 6)
-		fl_color(color_choices[selected - 1].labelcolor_);
+	if (selected >= 1)
+		fl_color(color_choices[(selected - 1) % NUM_COLORS].labelcolor_);
 	else
 		fl_color(FL_BLACK);
 
@@ -663,7 +671,9 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
                                   MetaDataTable *_MDdata, int _nr_regroup, bool _do_recenter,  bool _is_data, MetaDataTable *_MDgroups,
                                   bool do_allow_save, FileName fn_selected_imgs, FileName fn_selected_parts, int max_nr_parts_per_class,
                                    RFLOAT _central_z_thickness,
-                                  bool _show_z, bool _show_y, bool _show_x)
+                                  bool _show_z, bool _show_y, bool _show_x,
+                                  bool _do_filament_vote, int _nr_types,
+                                  FileName _fn_vote_prefix, FileName _fn_type_assignments)
 {
 	// Scroll bars
 	Fl_Scroll scroll(0, 0, w(), h());
@@ -705,6 +715,11 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		canvas.fn_selected_imgs= fn_selected_imgs;
 		canvas.fn_selected_parts = fn_selected_parts;
 		canvas.max_nr_parts_per_class = max_nr_parts_per_class;
+		canvas.do_filament_vote = _do_filament_vote;
+		canvas.nr_types = _nr_types;
+		canvas.selection_type_limit = _do_filament_vote ? _nr_types : NUM_COLORS;
+		canvas.fn_vote_prefix = _fn_vote_prefix;
+		canvas.fn_type_assignments = _fn_type_assignments;
 		canvas.central_z_thickness = _central_z_thickness;
 		canvas.show_z = _show_z;
 		canvas.show_y = _show_y;
@@ -727,6 +742,11 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		{
 			canvas.do_class = false;
 		}
+		if (_do_filament_vote)
+		{
+			for (long int ipos = 0; ipos < canvas.boxes.size(); ipos++)
+				canvas.boxes[ipos]->show_type_id = true;
+		}
 
 		// Pre-load existing backup_selection.star file
 		FileName fn_sel, fn_dir=".";
@@ -734,6 +754,8 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 			fn_dir = fn_selected_imgs.beforeLastOf("/");
 		else if (fn_selected_parts != "")
 			fn_dir = fn_selected_parts.beforeLastOf("/");
+		else if (_fn_type_assignments != "")
+			fn_dir = _fn_type_assignments.beforeLastOf("/");
 
 		fn_dir += "/backup_selection.star";
 		if (exists(fn_dir))
@@ -744,7 +766,17 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 
 		resizable(*this);
 		show();
-		return Fl::run();
+		if (_do_filament_vote)
+		{
+			fl_message("Each image is labelled with its original 2D class number.\n\n"
+					   "Right-click and choose 'Set current type ID', then left-click classes "
+					   "to assign that type. Unassigned classes remain junk.\n\n"
+					   "When done, right-click and choose 'Finish assignment and vote'.");
+		}
+		int fl_result = Fl::run();
+		if (_do_filament_vote)
+			REPORT_ERROR("The class-type window was closed without finishing filament voting.");
+		return fl_result;
 	}
 	else if (viewer_type == SINGLEVIEWER)
 	{
@@ -1180,7 +1212,10 @@ int multiViewerCanvas::handle(int ev)
 						// This multiview window should have all the DisplayBoxes inside it....
 						for (int my_ipos = ipos0; my_ipos <= iposF; my_ipos++)
 						{
-							boxes[my_ipos]->select();
+							if (do_filament_vote)
+								boxes[my_ipos]->setSelect(current_selection_type);
+							else
+								boxes[my_ipos]->select();
 						}
 						has_shift = false;
 					}
@@ -1193,7 +1228,14 @@ int multiViewerCanvas::handle(int ev)
 				}
 				else
 				{
-					boxes[ipos]->toggleSelect(current_selection_type);
+					if (do_filament_vote)
+					{
+						int new_type = (boxes[ipos]->selected == current_selection_type) ?
+								0 : current_selection_type;
+						boxes[ipos]->setSelect(new_type);
+					}
+					else
+						boxes[ipos]->toggleSelect(current_selection_type);
 				}
 			}
 			else  if ( Fl::event_button() == FL_RIGHT_MOUSE )
@@ -1201,6 +1243,38 @@ int multiViewerCanvas::handle(int ev)
 				Fl_Menu_Item rclick_menu;
 				if (do_class)
 				{
+					if (do_filament_vote)
+					{
+						Fl_Menu_Item vote_menu[] = {
+							{ "Save type-assignment backup" },
+							{ "Load type-assignment backup" },
+							{ "Set all classes to junk" },
+							{ "Set current type ID" },
+							{ "Finish assignment and vote" },
+							{ "Quit without voting" },
+							{ 0 }
+						};
+						const Fl_Menu_Item *m = vote_menu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
+						if (!m)
+							return 0;
+						if (strcmp(m->label(), "Save type-assignment backup") == 0)
+							saveBackupSelection();
+						else if (strcmp(m->label(), "Load type-assignment backup") == 0)
+							loadBackupSelection();
+						else if (strcmp(m->label(), "Set all classes to junk") == 0)
+							clearSelection();
+						else if (strcmp(m->label(), "Set current type ID") == 0)
+							setSelectionType();
+						else if (strcmp(m->label(), "Finish assignment and vote") == 0)
+						{
+							saveBackupSelection();
+							if (saveFilamentVotes())
+								exit(RELION_EXIT_SUCCESS);
+						}
+						else if (strcmp(m->label(), "Quit without voting") == 0)
+							exit(RELION_EXIT_FAILURE);
+						return 1;
+					}
 
 					Fl_Menu_Item rclick_menu[] = {
 						{ "Save backup selection" },
@@ -1381,6 +1455,8 @@ void multiViewerCanvas::saveBackupSelection()
 		fn_dir = fn_selected_imgs.beforeLastOf("/");
 	else if (fn_selected_parts != "")
 		fn_dir = fn_selected_parts.beforeLastOf("/");
+	else if (fn_type_assignments != "")
+		fn_dir = fn_type_assignments.beforeLastOf("/");
 	else
 		fn_dir = ".";
 	fn_dir += "/backup_selection.star";
@@ -1397,6 +1473,8 @@ void multiViewerCanvas::loadBackupSelection(bool do_ask)
 		fn_dir = fn_selected_imgs.beforeLastOf("/");
 	else if (fn_selected_parts != "")
 		fn_dir = fn_selected_parts.beforeLastOf("/");
+	else if (fn_type_assignments != "")
+		fn_dir = fn_type_assignments.beforeLastOf("/");
 	else
 		fn_dir = ".";
 	fn_dir += "/";
@@ -2083,10 +2161,129 @@ void multiViewerCanvas::saveSelected(int save_selected)
 		std::cout <<" No images to save...." << std::endl;
 }
 
+bool multiViewerCanvas::saveFilamentVotes()
+{
+	if (!do_filament_vote || !do_class || MDdata == NULL)
+	{
+		fl_message("Filament voting is only available for 2D classification data.");
+		return false;
+	}
+	if (nr_types < 1 || nr_types > 99)
+	{
+		fl_message("The requested number of types is outside the supported range.");
+		return false;
+	}
+	if (!MDdata->containsLabel(EMDL_MICROGRAPH_NAME) ||
+		!MDdata->containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID) ||
+		!MDdata->containsLabel(EMDL_PARTICLE_CLASS))
+	{
+		fl_message("The classification data STAR must contain rlnMicrographName, "
+				   "rlnHelicalTubeID and rlnClassNumber.");
+		return false;
+	}
+
+	// Map original 2D class numbers to the user-assigned type. Zero is junk.
+	std::map<int, int> class_to_type;
+	MetaDataTable MDassign;
+	MDassign.setName("class_type_assignments");
+	for (long int ipos = 0; ipos < boxes.size(); ipos++)
+	{
+		int class_number;
+		boxes[ipos]->MDimg.getValue(EMDL_PARTICLE_CLASS, class_number);
+		int type_id = boxes[ipos]->selected;
+		if (type_id < 0 || type_id > nr_types)
+		{
+			fl_message("At least one class has a type ID larger than the configured number of types.");
+			return false;
+		}
+		class_to_type[class_number] = type_id;
+		MDassign.addObject(boxes[ipos]->MDimg.getObject());
+		MDassign.setValue(EMDL_PARTICLE_SELECTION_TYPE, type_id);
+	}
+	if (MDassign.containsLabel(EMDL_PARTICLE_CLASS))
+		MDassign.sort(EMDL_PARTICLE_CLASS);
+	if (fn_type_assignments != "")
+		MDassign.write(fn_type_assignments);
+
+	typedef std::pair<FileName, int> FilamentKey;
+	std::map<FilamentKey, std::vector<long int> > vote_counts;
+	for (long int ipart = 0; ipart < MDdata->numberOfObjects(); ipart++)
+	{
+		FileName fn_mic;
+		int tube_id, class_number;
+		MDdata->getValue(EMDL_MICROGRAPH_NAME, fn_mic, ipart);
+		MDdata->getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube_id, ipart);
+		MDdata->getValue(EMDL_PARTICLE_CLASS, class_number, ipart);
+		int type_id = 0;
+		std::map<int, int>::const_iterator assignment = class_to_type.find(class_number);
+		if (assignment != class_to_type.end())
+			type_id = assignment->second;
+
+		FilamentKey key(fn_mic, tube_id);
+		if (vote_counts.find(key) == vote_counts.end())
+			vote_counts[key] = std::vector<long int>(nr_types + 1, 0);
+		vote_counts[key][type_id]++;
+	}
+
+	// Junk is index zero and deliberately wins exact ties. This conservative
+	// rule prevents ambiguous filaments from leaking into a selected type.
+	std::map<FilamentKey, int> winning_type;
+	std::vector<long int> filament_totals(nr_types + 1, 0);
+	for (std::map<FilamentKey, std::vector<long int> >::const_iterator it = vote_counts.begin();
+		 it != vote_counts.end(); ++it)
+	{
+		int winner = 0;
+		for (int type_id = 1; type_id <= nr_types; type_id++)
+			if (it->second[type_id] > it->second[winner])
+				winner = type_id;
+		winning_type[it->first] = winner;
+		filament_totals[winner]++;
+	}
+
+	std::vector<MetaDataTable> outputs(nr_types + 1);
+	for (int type_id = 0; type_id <= nr_types; type_id++)
+	{
+		outputs[type_id].addMissingLabels(MDdata);
+		outputs[type_id].setName("particles");
+	}
+
+	for (long int ipart = 0; ipart < MDdata->numberOfObjects(); ipart++)
+	{
+		FileName fn_mic;
+		int tube_id;
+		MDdata->getValue(EMDL_MICROGRAPH_NAME, fn_mic, ipart);
+		MDdata->getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube_id, ipart);
+		int winner = winning_type[FilamentKey(fn_mic, tube_id)];
+		outputs[winner].addObject(MDdata->getObject(ipart));
+		outputs[winner].setValue(EMDL_PARTICLE_SELECTION_TYPE, winner);
+	}
+
+	for (int type_id = 0; type_id <= nr_types; type_id++)
+	{
+		FileName fn_out;
+		if (type_id == 0)
+			fn_out = fn_vote_prefix + "_junk.star";
+		else
+			fn_out = fn_vote_prefix + "_type" + integerToString(type_id, 3) + ".star";
+
+		if (obsModel != NULL && obsModel->opticsMdt.numberOfObjects() > 0)
+			obsModel->save(outputs[type_id], fn_out, "particles");
+		else
+			outputs[type_id].write(fn_out);
+
+		std::cout << "Saved " << outputs[type_id].numberOfObjects() << " particles from "
+				  << filament_totals[type_id] << " filaments to " << fn_out << std::endl;
+	}
+
+	if (fn_type_assignments != "")
+		std::cout << "Saved class-to-type assignments to " << fn_type_assignments << std::endl;
+	return true;
+}
+
 void basisViewerCanvas::setSelectionType()
 {
 	popupSelectionTypeWindow win(250, 50, "Set selection type");
-	win.fill();
+	win.fill(selection_type_limit);
 }
 
 void basisViewerCanvas::setFOMThreshold()
@@ -2102,13 +2299,24 @@ void basisViewerCanvas::setFOMThreshold()
 }
 
 
-int popupSelectionTypeWindow::fill()
+int popupSelectionTypeWindow::fill(int max_types)
 {
 	color(GUI_BACKGROUND_COLOR);
 	choice = new Fl_Choice(50, 10, 130, 30, "type: ") ;
 
-	choice->menu(color_choices);
+	for (int itype = 0; itype < max_types; itype++)
+	{
+		std::string label;
+		if (itype < NUM_COLORS)
+			label = color_choices[itype].label();
+		else
+			label = "Type " + integerToString(itype + 1);
+		choice->add(label.c_str(), 0, 0,
+				   reinterpret_cast<void*>(static_cast<intptr_t>(itype + 1)));
+	}
 	choice->color(GUI_INPUT_COLOR);
+	if (current_selection_type > max_types)
+		current_selection_type = 1;
 
 	choice->value(current_selection_type - 1);
 
@@ -3396,6 +3604,11 @@ void Displayer::read(int argc, char **argv)
 	random_sort = parser.checkOption("--random_sort", "Use random order in the sorting");
 	reverse_sort = parser.checkOption("--reverse", "Use reverse order (from high to low) in the sorting");
 	do_class = parser.checkOption("--class", "Use this to analyse classes in input optimiser.star or model.star file");
+	do_filament_vote = parser.checkOption("--filament_vote", "Assign 2D classes to types and vote once per helical filament");
+	nr_types = textToInteger(parser.getOption("--nr_types", "Number of non-junk types for filament voting", "2"));
+	do_similarity_sort = parser.checkOption("--similarity_sort", "Group and sort 2D class averages by normalized image similarity");
+	fn_vote_prefix = parser.getOption("--fn_vote_prefix", "Output prefix for per-type particle STAR files", "");
+	fn_type_assignments = parser.getOption("--fn_type_assignments", "Output STAR file for class-to-type assignments", "");
 	nr_regroups = textToInteger(parser.getOption("--regroup", "Number of groups to regroup saved particles from selected classes in (default is no regrouping)", "-1"));
 	do_allow_save = parser.checkOption("--allow_save", "Allow saving of selected particles or class averages");
 
@@ -3453,6 +3666,15 @@ void Displayer::initialise()
 {
 	if (!do_gui && fn_in=="")
 		REPORT_ERROR("Displayer::initialise ERROR: either provide --i or --gui");
+	if (do_filament_vote)
+	{
+		if (!do_class)
+			REPORT_ERROR("Displayer::initialise ERROR: --filament_vote requires --class.");
+		if (nr_types < 1 || nr_types > 99)
+			REPORT_ERROR("Displayer::initialise ERROR: --nr_types must be between 1 and 99.");
+		if (fn_vote_prefix == "")
+			REPORT_ERROR("Displayer::initialise ERROR: --filament_vote requires --fn_vote_prefix.");
+	}
 	Fl::visual(FL_RGB);
 	// initialise some static variables
 	has_dragged = false;
@@ -3478,8 +3700,25 @@ void Displayer::initialise()
 			MDopt.getValue(EMDL_OPTIMISER_MODEL_STARFILE, fn_model);
 		}
 
+		if (do_filament_vote)
+		{
+			if (!fn_in.contains("_optimiser.star"))
+				REPORT_ERROR("Filament voting requires an optimiser STAR file from 2D classification.");
+			MetaDataTable MDgeneral;
+			MDgeneral.read(fn_model, "model_general");
+			int dimensionality = 2;
+			MDgeneral.getValue(EMDL_MLMODEL_DIMENSIONALITY, dimensionality);
+			if (dimensionality != 2)
+				REPORT_ERROR("Filament voting only supports 2D classification optimiser STAR files.");
+		}
+
 		if (do_ignore_optics) MDdata.read(fn_data);
 		else ObservationModel::loadSafely(fn_data, obsModel, MDdata);
+		if (do_filament_vote &&
+			(!MDdata.containsLabel(EMDL_MICROGRAPH_NAME) ||
+			 !MDdata.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID) ||
+			 !MDdata.containsLabel(EMDL_PARTICLE_CLASS)))
+			REPORT_ERROR("Filament voting requires rlnMicrographName, rlnHelicalTubeID and rlnClassNumber in the classification data STAR file.");
 
 		// If regrouping, also read the model_groups table into memory
 		if (nr_regroups > 0)
@@ -3556,6 +3795,104 @@ void Displayer::initialise()
 			REPORT_ERROR("Displayer::initialise ERROR: cannot display Fourier maps for 3D images or stacks!");
 	}
 
+}
+
+void Displayer::sortClassesBySimilarity()
+{
+	const long int nr_classes = MDin.numberOfObjects();
+	if (nr_classes < 2)
+		return;
+
+	FileName fn_first;
+	MDin.getValue(EMDL_MLMODEL_REF_IMAGE, fn_first, 0);
+	Image<RFLOAT> first_image;
+	first_image.read(fn_first, false);
+	const int target_x = XMIPP_MIN(48, XSIZE(first_image()));
+	const int target_y = XMIPP_MIN(48, YSIZE(first_image()));
+
+	std::vector<std::vector<RFLOAT> > features(nr_classes);
+	for (long int iclass = 0; iclass < nr_classes; iclass++)
+	{
+		FileName fn_img;
+		MDin.getValue(EMDL_MLMODEL_REF_IMAGE, fn_img, iclass);
+		Image<RFLOAT> img;
+		img.read(fn_img);
+		if (ZSIZE(img()) != 1)
+			REPORT_ERROR("Similarity sorting is only supported for 2D class averages.");
+
+		if (XSIZE(img()) != target_x || YSIZE(img()) != target_y)
+			selfScaleToSize(img(), target_x, target_y);
+
+		RFLOAT mean = 0.;
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(img())
+			mean += DIRECT_MULTIDIM_ELEM(img(), n);
+		mean /= MULTIDIM_SIZE(img());
+
+		RFLOAT norm = 0.;
+		features[iclass].resize(MULTIDIM_SIZE(img()));
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(img())
+		{
+			RFLOAT value = DIRECT_MULTIDIM_ELEM(img(), n) - mean;
+			features[iclass][n] = value;
+			norm += value * value;
+		}
+		norm = sqrt(norm);
+		if (norm > 0.)
+			for (long int n = 0; n < features[iclass].size(); n++)
+				features[iclass][n] /= norm;
+	}
+
+	// Begin with the most populated class, then make a nearest-neighbour
+	// correlation chain. This gives a deterministic visual grouping without
+	// changing rlnClassNumber.
+	long int first = 0;
+	if (MDin.containsLabel(EMDL_MLMODEL_PDF_CLASS))
+	{
+		RFLOAT largest = -1.;
+		for (long int iclass = 0; iclass < nr_classes; iclass++)
+		{
+			RFLOAT population;
+			MDin.getValue(EMDL_MLMODEL_PDF_CLASS, population, iclass);
+			if (population > largest)
+			{
+				largest = population;
+				first = iclass;
+			}
+		}
+	}
+
+	std::vector<bool> used(nr_classes, false);
+	std::vector<long int> order;
+	order.reserve(nr_classes);
+	order.push_back(first);
+	used[first] = true;
+	while (order.size() < nr_classes)
+	{
+		const long int previous = order.back();
+		long int best = -1;
+		RFLOAT best_correlation = -std::numeric_limits<RFLOAT>::max();
+		for (long int candidate = 0; candidate < nr_classes; candidate++)
+		{
+			if (used[candidate])
+				continue;
+			RFLOAT correlation = 0.;
+			for (long int n = 0; n < features[previous].size(); n++)
+				correlation += features[previous][n] * features[candidate][n];
+			if (correlation > best_correlation)
+			{
+				best_correlation = correlation;
+				best = candidate;
+			}
+		}
+		order.push_back(best);
+		used[best] = true;
+	}
+
+	for (long int sorted_position = 0; sorted_position < nr_classes; sorted_position++)
+		MDin.setValue(EMDL_SORTED_IDX, sorted_position, order[sorted_position]);
+	do_read_whole_stacks = false;
+	std::cout << "Grouped and sorted " << nr_classes
+			  << " class averages by normalized image similarity." << std::endl;
 }
 
 int Displayer::runGui()
@@ -3798,7 +4135,16 @@ void Displayer::run()
 			}
 		}
 
-		if (sort_label != EMDL_UNDEFINED || random_sort)
+		if (do_filament_vote)
+			text_label = EMDL_PARTICLE_CLASS;
+
+		if (do_similarity_sort)
+		{
+			if (!do_class)
+				REPORT_ERROR("Similarity sorting is only available for class averages.");
+			sortClassesBySimilarity();
+		}
+		else if (sort_label != EMDL_UNDEFINED || random_sort)
 		{
 			MDin.sort(sort_label, reverse_sort, true, random_sort); // true means only store sorted_idx!
 			// When sorting: never read in the whole stacks!
@@ -3810,7 +4156,7 @@ void Displayer::run()
 		win.fillCanvas(MULTIVIEWER, MDin, &obsModel, display_label, text_label, do_read_whole_stacks, do_apply_orient, minval, maxval, sigma_contrast, scale, ori_scale, ncol,
 				max_nr_images,  lowpass, highpass, do_class, &MDdata, nr_regroups, do_recenter, fn_in.contains("_data.star"), &MDgroups,
 				do_allow_save, fn_selected_imgs, fn_selected_parts, max_nr_parts_per_class, central_z_thickness,
-				show_z, show_y, show_x);
+				show_z, show_y, show_x, do_filament_vote, nr_types, fn_vote_prefix, fn_type_assignments);
 	}
 	else
 	{

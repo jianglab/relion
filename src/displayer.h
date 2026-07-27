@@ -104,6 +104,9 @@ public:
 
 	std::string img_label;
 
+	// Show the interactive filament-voting type assignment on this class image.
+	bool show_type_id;
+
 	// For 3D volumes: panel dimensions and labels for X/Y/Z central sections
 	bool is_3d_volume;
 	int panel_width;   // width of each panel in pixels (before scaling)
@@ -117,7 +120,7 @@ public:
 	RFLOAT scale;
 
 	// Constructor with an image and its metadata
-	DisplayBox(int X, int Y, int W, int H, const char *L=0) : Fl_Box(X,Y,W,H,L) { img_data = NULL; img_label = ""; MDimg.clear(); is_3d_volume = false; panel_width = 0; panel_height = 0; nr_panels = 0; show_z = show_y = show_x = true; }
+	DisplayBox(int X, int Y, int W, int H, const char *L=0) : Fl_Box(X,Y,W,H,L) { img_data = NULL; img_label = ""; show_type_id = false; MDimg.clear(); is_3d_volume = false; panel_width = 0; panel_height = 0; nr_panels = 0; show_z = show_y = show_x = true; }
 
 	void setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, int ipos, RFLOAT minval, RFLOAT maxval,
 	             RFLOAT _scale, bool do_relion_scale = false, RFLOAT helical_rise_pixels = 0.,
@@ -173,7 +176,9 @@ public:
 	               int _nr_regroup = -1, bool do_recenter = false, bool _is_data = false, MetaDataTable *MDgroups = NULL,
 	               bool do_allow_save = false, FileName fn_selected_imgs="", FileName fn_selected_parts="", int max_nr_parts_per_class = -1,
 	               RFLOAT central_z_thickness = 0.,
-	               bool _show_z = true, bool _show_y = true, bool _show_x = true);
+	               bool _show_z = true, bool _show_y = true, bool _show_x = true,
+	               bool _do_filament_vote = false, int _nr_types = 0,
+	               FileName _fn_vote_prefix = "", FileName _fn_type_assignments = "");
 	int fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale);
 	int fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _coord_scale,
 	                           int _particle_radius, bool do_startend = false, bool do_lines = false, FileName _fn_coords = "",
@@ -219,8 +224,11 @@ public:
 	// Minimum value for rlnAutopickFigureOfMerit to display picks
 	RFLOAT minimum_pick_fom;
 
+	// Maximum type ID offered by the selection-type popup.
+	int selection_type_limit;
+
 	// Constructor with w x h size of the window and a title
-	basisViewerCanvas(int X,int Y, int W, int H, const char* title=0) : Fl_Widget(X,Y,W, H, title) { }
+	basisViewerCanvas(int X,int Y, int W, int H, const char* title=0) : Fl_Widget(X,Y,W, H, title) { selection_type_limit = 6; }
 
 	void SetScroll(Fl_Scroll *val) { scroll = val; }
 
@@ -254,6 +262,12 @@ public:
 
 	// Maximum number of selected particles per class
 	int max_nr_parts_per_class;
+
+	// Dedicated interactive mode for assigning each 2D class to a type and
+	// assigning complete helical filaments by majority vote.
+	bool do_filament_vote;
+	int nr_types;
+	FileName fn_vote_prefix, fn_type_assignments;
 
 	// Flag to indicate whether this is a viewer for a data.star (to also allow regrouping)
 	bool is_data;
@@ -324,6 +338,7 @@ private:
 	void saveTrainingSet();
 	void saveSelected(int save_selected);
 	void saveBackupSelection();
+	bool saveFilamentVotes();
 	// Allow re-loading of existing backup selection
 public:
 	void loadBackupSelection(bool do_ask = true);
@@ -341,7 +356,7 @@ public:
 	// Constructor with w x h size of the window and a title
 	popupSelectionTypeWindow(int W, int H, const char* title=0): Fl_Window(W, H, title){}
 
-	int fill();
+	int fill(int max_types = 6);
 
 	static void cb_set(Fl_Widget* o, void* v)
 	{
@@ -703,6 +718,12 @@ public:
 	// Number of groups for regrouping (negative number is no regrouping)
 	int nr_regroups;
 
+	// Interactive 2D-class type assignment and filament voting.
+	bool do_filament_vote;
+	bool do_similarity_sort;
+	int nr_types;
+	FileName fn_vote_prefix, fn_type_assignments;
+
 	// Re-center class averages to their center-of-mass?
 	bool do_recenter;
 
@@ -781,6 +802,10 @@ public:
 
 	// Decide what to do
 	void run();
+
+	// Place similar 2D class averages next to each other while retaining their
+	// original rlnClassNumber values.
+	void sortClassesBySimilarity();
 
 	// run the GUI
 	int runGui();

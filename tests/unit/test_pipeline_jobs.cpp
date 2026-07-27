@@ -65,3 +65,37 @@ TEST_CASE("Class3D: cache_dir and cache_copy_threads options exist",
 	REQUIRE(job.joboptions.find("cache_dir") != job.joboptions.end());
 	REQUIRE(job.joboptions.find("cache_copy_threads") != job.joboptions.end());
 }
+
+// ---------------------------------------------------------------------------
+// Select2D filament voting
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Select2D: registers interactive filament-voting options",
+          "[pipeline][select2d]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_SELECT2D);
+	REQUIRE(job.joboptions.find("fn_optimiser") != job.joboptions.end());
+	REQUIRE(job.joboptions.find("nr_types") != job.joboptions.end());
+	REQUIRE(job.joboptions.find("do_similarity_sort") != job.joboptions.end());
+}
+
+TEST_CASE("Select2D: emits voting and similarity command options",
+          "[pipeline][select2d]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_SELECT2D);
+	job.joboptions["fn_optimiser"].setString("Class2D/job001/run_it025_optimiser.star");
+	job.joboptions["nr_types"].setString("3");
+	job.joboptions["do_similarity_sort"].setString("Yes");
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find("relion_display") != std::string::npos);
+	REQUIRE(command.find("--filament_vote") != std::string::npos);
+	REQUIRE(command.find("--nr_types 3") != std::string::npos);
+	REQUIRE(command.find("--similarity_sort") != std::string::npos);
+	REQUIRE(job.outputNodes.size() == 5); // Three selected types, junk, and class assignments.
+}

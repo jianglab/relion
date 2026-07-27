@@ -120,6 +120,7 @@ private:
 	void initialiseAutopickWindow();
 	void initialiseExtractWindow();
 	void initialiseSelectWindow();
+	void initialiseSelect2DWindow();
 	void initialiseClass2DWindow();
 	void initialiseInimodelWindow();
 	void initialiseClass3DWindow();

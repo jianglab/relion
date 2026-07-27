@@ -1434,6 +1434,7 @@ bool PipeLine::cleanupJob(int this_job, bool do_harsh, std::string &error_messag
 	if (processList[this_job].type == PROC_IMPORT ||
 	    processList[this_job].type == PROC_MANUALPICK ||
 	    processList[this_job].type == PROC_CLASSSELECT ||
+	    processList[this_job].type == PROC_SELECT2D ||
 	    processList[this_job].type == PROC_MASKCREATE ||
 	    processList[this_job].type == PROC_JOINSTAR ||
 	    processList[this_job].type == PROC_RESMAP)
