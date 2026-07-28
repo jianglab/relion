@@ -43,6 +43,7 @@ const int THUMBNAIL_SIZE = 128;
 const int TILE_WIDTH = THUMBNAIL_SIZE + 16;
 const int TILE_HEIGHT = THUMBNAIL_SIZE + 46;
 const int TOOLBAR_HEIGHT = 92;
+const int STATUS_WIDTH = 400;
 
 Fl_Color typeColor(int type_id)
 {
@@ -394,10 +395,15 @@ public:
 
 		junk_button = new Fl_Button(12, 48, 125, 28, "Set all junk");
 		save_button = new Fl_Button(150, 48, 145, 28, "Save assignments");
+		save_button->tooltip(
+				"Save the current class-to-type assignments as a checkpoint. "
+				"This does not run filament voting or finish the job.");
 		finish_button = new Fl_Button(310, 48, 170, 28, "Finish and vote");
 		finish_button->color(fl_rgb_color(100, 178, 178));
-		status_box = new Fl_Box(500, 48, W - 512, 28, "");
-		status_box->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+		status_box = new Fl_Box(
+				XMIPP_MAX(500, W - STATUS_WIDTH - 12), 48,
+				XMIPP_MIN(STATUS_WIDTH, W - 512), 28, "");
+		status_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
 
 		scroll = new Fl_Scroll(0, TOOLBAR_HEIGHT, W, H - TOOLBAR_HEIGHT);
 		scroll->type(Fl_Scroll::VERTICAL_ALWAYS);
@@ -568,7 +574,9 @@ public:
 	{
 		Fl_Double_Window::resize(X, Y, W, H);
 		scroll->resize(0, TOOLBAR_HEIGHT, W, H - TOOLBAR_HEIGHT);
-		status_box->resize(500, 48, XMIPP_MAX(50, W - 512), 28);
+		const int status_x = XMIPP_MAX(500, W - STATUS_WIDTH - 12);
+		status_box->resize(
+				status_x, 48, XMIPP_MAX(50, W - status_x - 12), 28);
 		reflow();
 	}
 
