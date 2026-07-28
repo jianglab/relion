@@ -70,32 +70,40 @@ TEST_CASE("Class3D: cache_dir and cache_copy_threads options exist",
 // Select2D filament voting
 // ---------------------------------------------------------------------------
 
-TEST_CASE("Select2D: registers interactive filament-voting options",
+TEST_CASE("Select2D: keeps runtime controls out of the pipeline window",
           "[pipeline][select2d]")
 {
 	RelionJob job;
 	job.clear();
 	job.initialise(PROC_SELECT2D);
 	REQUIRE(job.joboptions.find("fn_optimiser") != job.joboptions.end());
-	REQUIRE(job.joboptions.find("nr_types") != job.joboptions.end());
-	REQUIRE(job.joboptions.find("do_similarity_sort") != job.joboptions.end());
+	REQUIRE(job.joboptions.find("nr_types") == job.joboptions.end());
+	REQUIRE(job.joboptions.find("do_similarity_sort") == job.joboptions.end());
 }
 
-TEST_CASE("Select2D: emits voting and similarity command options",
+TEST_CASE("Select2D: launches the dedicated interactive program",
           "[pipeline][select2d]")
 {
 	RelionJob job;
 	job.clear();
 	job.initialise(PROC_SELECT2D);
 	job.joboptions["fn_optimiser"].setString("Class2D/job001/run_it025_optimiser.star");
-	job.joboptions["nr_types"].setString("3");
-	job.joboptions["do_similarity_sort"].setString("Yes");
 
 	std::string command;
 	REQUIRE(generateCommand(job, command));
-	REQUIRE(command.find("relion_display") != std::string::npos);
-	REQUIRE(command.find("--filament_vote") != std::string::npos);
-	REQUIRE(command.find("--nr_types 3") != std::string::npos);
-	REQUIRE(command.find("--similarity_sort") != std::string::npos);
-	REQUIRE(job.outputNodes.size() == 5); // Three selected types, junk, and class assignments.
+	REQUIRE(command.find("relion_select_2d_classes") != std::string::npos);
+	REQUIRE(command.find("relion_display") == std::string::npos);
+	REQUIRE(command.find("--i Class2D/job001/run_it025_optimiser.star") != std::string::npos);
+	REQUIRE(command.find("--o Select2D/job001/") != std::string::npos);
+	REQUIRE(job.outputNodes.empty()); // The GUI registers its runtime-selected outputs dynamically.
+}
+
+TEST_CASE("Select2D: requires an optimiser input", "[pipeline][select2d]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_SELECT2D);
+
+	std::string command;
+	REQUIRE_FALSE(generateCommand(job, command));
 }

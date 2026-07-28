@@ -1277,20 +1277,13 @@ void JobWindow::initialiseSelectWindow()
 
 void JobWindow::initialiseSelect2DWindow()
 {
-	setupTabs(2);
+	setupTabs(1);
 
 	tab1->begin();
 	tab1->label("I/O");
 	resetHeight();
 	place("fn_optimiser", TOGGLE_DEACTIVATE);
 	tab1->end();
-
-	tab2->begin();
-	tab2->label("Class types");
-	resetHeight();
-	place("nr_types", TOGGLE_DEACTIVATE);
-	place("do_similarity_sort", TOGGLE_DEACTIVATE);
-	tab2->end();
 
 	// This is an interactive local GUI program.
 	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;

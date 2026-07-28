@@ -119,7 +119,7 @@ if(RELION_TEST)
 	file(GLOB RELION_JAZ_EXPERIMENTAL_TARGETS "${CMAKE_SOURCE_DIR}/src/jaz/scripts/*.cpp")
 endif(RELION_TEST)
 
-set(GUI_TARGETS maingui display manualpick)
+set(GUI_TARGETS maingui display manualpick select_2d_classes)
 
 #--Remove apps using X11 if no GUI--
 if(NOT GUI)

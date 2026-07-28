@@ -2910,14 +2910,6 @@ void RelionJob::initialiseSelect2DJob()
 			"2D classification optimiser STAR:",
 			LABEL_CLASS2D_OPT, 1, "", "STAR files (*_optimiser.star)",
 			"An optimiser STAR file from a completed 2D classification. The corresponding model and data STAR files are read automatically.");
-	joboptions["nr_types"] = JobOption(
-			"Number of non-junk types:", 2, 1, 20, 1,
-			"Number of particle types to assign interactively. Classes left unassigned are treated as junk. "
-			"In the class window, choose the current type ID and left-click class averages to assign them.");
-	joboptions["do_similarity_sort"] = JobOption(
-			"Group and sort classes by image similarity?", false,
-			"If set to Yes, class averages are ordered by normalized image correlation before the interactive window opens. "
-			"Class numbers remain the original 2D-classification class numbers.");
 }
 
 bool RelionJob::getCommandsSelect2DJob(std::string &outputname, std::vector<std::string> &commands,
@@ -2933,35 +2925,12 @@ bool RelionJob::getCommandsSelect2DJob(std::string &outputname, std::vector<std:
 		return false;
 	}
 
-	int nr_types = ROUND(joboptions["nr_types"].getNumber(error_message));
-	if (error_message != "")
-		return false;
-	if (nr_types < 1 || nr_types > 20)
-	{
-		error_message = "ERROR: the number of non-junk types must be between 1 and 20.";
-		return false;
-	}
-
 	label += ".filamentvote";
 	inputNodes.push_back(Node(fn_opt, joboptions["fn_optimiser"].node_type));
 
-	std::string command = "`which relion_display`";
+	std::string command = "`which relion_select_2d_classes`";
 	command += " --i " + fn_opt;
-	command += " --class --filament_vote";
-	command += " --nr_types " + integerToString(nr_types);
-	command += " --fn_vote_prefix " + outputname + "particles";
-	command += " --fn_type_assignments " + outputname + "class_type_assignments.star";
-	command += " --text_label rlnClassNumber";
-	if (joboptions["do_similarity_sort"].getBoolean())
-		command += " --similarity_sort";
-
-	for (int itype = 1; itype <= nr_types; itype++)
-	{
-		FileName fn_type = outputname + "particles_type" + integerToString(itype, 3, '0') + ".star";
-		outputNodes.push_back(Node(fn_type, LABEL_SELECT_PARTS));
-	}
-	outputNodes.push_back(Node(outputname + "particles_junk.star", LABEL_SELECT_PARTS));
-	outputNodes.push_back(Node(outputname + "class_type_assignments.star", LABEL_SELECT_CLAVS));
+	command += " --o " + outputname;
 
 	command += " " + joboptions["other_args"].getString();
 	commands.push_back(command);
