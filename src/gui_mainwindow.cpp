@@ -638,6 +638,13 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 		gui_jobwindows[nr_browse_tabs]->initialise(PROC_SELECT2D);
 		browse_grp[nr_browse_tabs]->end();
 		nr_browse_tabs++;
+
+		browse_grp[nr_browse_tabs] = new Fl_Group(WCOL0, 2, 550, 615-MENUHEIGHT);
+		browser->add("Co-occurrence select");
+		gui_jobwindows[nr_browse_tabs] = new JobWindow();
+		gui_jobwindows[nr_browse_tabs]->initialise(PROC_COOCCURRENCE);
+		browse_grp[nr_browse_tabs]->end();
+		nr_browse_tabs++;
 	}
 
 	if (_do_tomo)

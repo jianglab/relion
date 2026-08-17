@@ -268,6 +268,7 @@ static bool do_allow_change_minimum_dedicated;
 #define LABEL_REFINE3D_PARTS           "ParticleGroupMetadata.star.relion.refine3d"
 #define LABEL_REFINE3D_PARTS_HELIX     "ParticleGroupMetadata.star.relion.refine3d.helicalsegements"
 #define LABEL_REFINE3D_OPTSET          "TomoOptimisationSet.star.relion.refine3d"
+#define LABEL_COOCCURRENCE_PARTS       "ParticleGroupMetadata.star.relion.cooccurrence"
 #define LABEL_MULTIBODY_HALFMAP        "DensityMap.mrc.relion.halfmap.multibody"
 #define LABEL_MULTIBODY_PARTS          "ParticleGroupMetadata.star.relion.multibody"
 #define LABEL_MULTIBODY_OPT            "OptimiserData.star.relion.multibody"
@@ -335,6 +336,7 @@ static bool do_allow_change_minimum_dedicated;
 #define PROC_EXTRACT_DIRNAME		  "Extract"      // Window particles, normalize, downsize etc from micrographs (also combine CTF into metadata file)
 #define PROC_CLASSSELECT_DIRNAME      "Select" 	   // Read in model.star file, and let user interactively select classes through the display (later: auto-selection as well)
 #define PROC_SELECT2D_DIRNAME         "Select2D"     // Assign 2D classes to types and vote per helical filament
+#define PROC_COOCCURRENCE_DIRNAME     "CoOccurrence" // Jaccard co-occurrence population selection with interactive GUI
 #define PROC_2DCLASS_DIRNAME 		  "Class2D"      // 2D classification (from input particles)
 #define PROC_3DCLASS_DIRNAME		  "Class3D"      // 3D classification (from input 2D/3D particles, an input 3D-reference, and possibly a 3D mask)
 #define PROC_3DAUTO_DIRNAME           "Refine3D"     // 3D auto-refine (from input particles, an input 3Dreference, and possibly a 3D mask)
@@ -371,6 +373,7 @@ static bool do_allow_change_minimum_dedicated;
 #define PROC_EXTRACT_LABELNEW	       "relion.extract"      // Window particles, normalize, downsize etc from micrographs (also combine CTF into metadata file)
 #define PROC_CLASSSELECT_LABELNEW      "relion.select" 	   // Read in model.star file, and let user interactively select classes through the display (later: auto-selection as well)
 #define PROC_SELECT2D_LABELNEW         "relion.select2d"     // Assign 2D classes to types and vote per helical filament
+#define PROC_COOCCURRENCE_LABELNEW     "relion.cooccurrence" // Jaccard co-occurrence population selection with interactive GUI
 #define PROC_2DCLASS_LABELNEW 		   "relion.class2d"      // 2D classification (from input particles)
 #define PROC_3DCLASS_LABELNEW		   "relion.class3d"      // 3D classification (from input 2D/3D particles, an input 3D-reference, and possibly a 3D mask)
 #define PROC_3DAUTO_LABELNEW           "relion.refine3d"     // 3D auto-refine (from input particles, an input 3Dreference, and possibly a 3D mask)
@@ -424,6 +427,7 @@ static bool do_allow_change_minimum_dedicated;
 #define PROC_DYNAMIGHT      22// wrapper to Johannes' DynaMight
 #define PROC_MODELANGELO    23// wrapper to Kiasrash's ModelAngelo
 #define PROC_SELECT2D       24// Interactive 2D class type assignment followed by filament voting
+#define PROC_COOCCURRENCE   25// Jaccard co-occurrence population selection with interactive GUI
 #define PROC_TOMO_IMPORT    50// Import for tomography GUI
 #define PROC_TOMO_SUBTOMO   51// Creation of pseudo-subtomograms from tilt series images
 #define PROC_TOMO_CTFREFINE     52// CTF refinement (defocus & aberrations for tomography)
@@ -446,6 +450,7 @@ static std::map<int, std::string> proc_type2dirname = {{PROC_IMPORT, PROC_IMPORT
 		{PROC_EXTRACT, PROC_EXTRACT_DIRNAME},
 		{PROC_CLASSSELECT, PROC_CLASSSELECT_DIRNAME},
 		{PROC_SELECT2D, PROC_SELECT2D_DIRNAME},
+		{PROC_COOCCURRENCE, PROC_COOCCURRENCE_DIRNAME},
 		{PROC_2DCLASS, PROC_2DCLASS_DIRNAME},
 		{PROC_3DCLASS, PROC_3DCLASS_DIRNAME},
 		{PROC_3DAUTO, PROC_3DAUTO_DIRNAME},
@@ -481,6 +486,7 @@ static std::map<int, std::string> proc_type2labelnew = {{PROC_IMPORT, PROC_IMPOR
 		{PROC_EXTRACT, PROC_EXTRACT_LABELNEW},
 		{PROC_CLASSSELECT, PROC_CLASSSELECT_LABELNEW},
 		{PROC_SELECT2D, PROC_SELECT2D_LABELNEW},
+		{PROC_COOCCURRENCE, PROC_COOCCURRENCE_LABELNEW},
 		{PROC_2DCLASS, PROC_2DCLASS_LABELNEW},
 		{PROC_3DCLASS, PROC_3DCLASS_LABELNEW},
 		{PROC_3DAUTO, PROC_3DAUTO_LABELNEW},
@@ -517,6 +523,7 @@ static std::map<std::string, int> proc_dirname2type = {
 		{PROC_EXTRACT_DIRNAME,          PROC_EXTRACT},
 		{PROC_CLASSSELECT_DIRNAME,      PROC_CLASSSELECT},
 		{PROC_SELECT2D_DIRNAME,         PROC_SELECT2D},
+		{PROC_COOCCURRENCE_DIRNAME,     PROC_COOCCURRENCE},
 		{PROC_2DCLASS_DIRNAME,          PROC_2DCLASS},
 		{PROC_3DCLASS_DIRNAME,          PROC_3DCLASS},
 		{PROC_3DAUTO_DIRNAME,           PROC_3DAUTO},
@@ -553,6 +560,7 @@ static std::map<std::string, int> proc_labelnew2type = {
 		{PROC_EXTRACT_LABELNEW,          PROC_EXTRACT},
 		{PROC_CLASSSELECT_LABELNEW,      PROC_CLASSSELECT},
 		{PROC_SELECT2D_LABELNEW,         PROC_SELECT2D},
+		{PROC_COOCCURRENCE_LABELNEW,     PROC_COOCCURRENCE},
 		{PROC_2DCLASS_LABELNEW,          PROC_2DCLASS},
 		{PROC_3DCLASS_LABELNEW,          PROC_3DCLASS},
 		{PROC_3DAUTO_LABELNEW,           PROC_3DAUTO},
@@ -907,6 +915,10 @@ public:
 
 	void initialiseSelect2DJob();
 	bool getCommandsSelect2DJob(std::string &outputname, std::vector<std::string> &commands,
+			std::string &final_command, bool do_makedir, int job_counter, std::string &error_message);
+
+	void initialiseCoOccurrenceJob();
+	bool getCommandsCoOccurrenceJob(std::string &outputname, std::vector<std::string> &commands,
 			std::string &final_command, bool do_makedir, int job_counter, std::string &error_message);
 
 	void initialiseClass2DJob();

@@ -615,6 +615,7 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		    type != PROC_TOMO_RECONSTRUCT &&
 		    type != PROC_TOMO_EXCLUDE_TILT_IMAGES &&
 		    type != PROC_RECONSTRUCT3D &&
+		    type != PROC_COOCCURRENCE &&
 		    type != PROC_EXTERNAL)
 			return false;
 
@@ -944,6 +945,11 @@ void RelionJob::initialise(int _job_type)
 		has_mpi = has_thread = false;
 		initialiseSelect2DJob();
 	}
+	else if (type == PROC_COOCCURRENCE)
+	{
+		has_mpi = has_thread = false;
+		initialiseCoOccurrenceJob();
+	}
 	else if (type == PROC_2DCLASS)
 	{
 		has_mpi = has_thread = true;
@@ -1249,6 +1255,10 @@ bool RelionJob::getCommands(std::string &outputname, std::vector<std::string> &c
 	else if (type == PROC_SELECT2D)
 	{
 		result = getCommandsSelect2DJob(outputname, commands, final_command, do_makedir, job_counter, error_message);
+	}
+	else if (type == PROC_COOCCURRENCE)
+	{
+		result = getCommandsCoOccurrenceJob(outputname, commands, final_command, do_makedir, job_counter, error_message);
 	}
 	else if (type == PROC_2DCLASS)
 	{
@@ -2934,6 +2944,90 @@ bool RelionJob::getCommandsSelect2DJob(std::string &outputname, std::vector<std:
 
 	command += " " + joboptions["other_args"].getString();
 	commands.push_back(command);
+	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
+}
+
+void RelionJob::initialiseCoOccurrenceJob()
+{
+	hidden_name = ".gui_cooccurrence";
+
+	joboptions["fn_data_star"] = JobOption(
+			"Class2D data STAR:",
+			LABEL_CLASS2D_PARTS_HELIX, 1, "", "STAR files (*.star)",
+			"The run_it025_data.star (or similar) output from a completed 2D classification job. "
+			"Must contain _rlnClassNumber and _rlnHelicalTubeID columns.");
+
+	joboptions["fn_mrcs"] = JobOption(
+			"Class2D class images .mrcs:",
+			std::string(""), "*.mrcs", "",
+			"The class average stack produced by Class2D (e.g. run_it025_classes.mrcs). "
+			"Displayed in the interactive cluster browser.");
+
+	joboptions["fn_good_txt"] = JobOption(
+			"Good classes list (optional):",
+			std::string(""), "*.txt", "",
+			"Output of the class triage step (good_classes.txt). "
+			"If left blank, all classes found in the data STAR will be used.");
+
+	joboptions["fn_refine3d_star"] = JobOption(
+			"Refine3D run_data.star:",
+			LABEL_REFINE3D_PARTS_HELIX, 1, "", "STAR files (*.star)",
+			"The run_data.star from the Refine3D job whose particles you want to filter. "
+			"One filtered STAR file per population is written to the output directory.");
+
+	joboptions["min_segs"] = JobOption(
+			"Min. segments per filament:",
+			(float)20, (float)1, (float)500, (float)1,
+			"Filaments contributing fewer than this many segments to any single class cluster "
+			"are excluded from the membership vote and from all output STAR files.");
+}
+
+bool RelionJob::getCommandsCoOccurrenceJob(std::string &outputname, std::vector<std::string> &commands,
+		std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)
+{
+	commands.clear();
+	initialisePipeline(outputname, job_counter);
+
+	FileName fn_data = joboptions["fn_data_star"].getString();
+	if (fn_data == "")
+	{
+		error_message = "ERROR: provide a Class2D data STAR file.";
+		return false;
+	}
+	FileName fn_refine = joboptions["fn_refine3d_star"].getString();
+	if (fn_refine == "")
+	{
+		error_message = "ERROR: provide a Refine3D run_data.star file.";
+		return false;
+	}
+	FileName fn_mrcs = joboptions["fn_mrcs"].getString();
+	if (fn_mrcs == "")
+	{
+		error_message = "ERROR: provide the Class2D class images .mrcs file.";
+		return false;
+	}
+
+	inputNodes.push_back(Node(fn_data,   joboptions["fn_data_star"].node_type));
+	inputNodes.push_back(Node(fn_refine, joboptions["fn_refine3d_star"].node_type));
+
+	std::string command = "python /net/jiang/home/prb5371/src/cooccurrence_select.py";
+	command += " --i "             + fn_data;
+	command += " --mrcs "          + fn_mrcs;
+	command += " --refine3d_star " + fn_refine;
+	command += " --o "             + outputname;
+
+	FileName fn_good = joboptions["fn_good_txt"].getString();
+	if (fn_good != "")
+		command += " --good_txt " + fn_good;
+
+	command += " --min_segs " + joboptions["min_segs"].getString();
+
+	command += " " + joboptions["other_args"].getString();
+	commands.push_back(command);
+
+	// Register a placeholder output node; actual per-population files are written by the Python GUI
+	outputNodes.push_back(Node(outputname + "particles_pop1.star", LABEL_COOCCURRENCE_PARTS));
+
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 }
 
