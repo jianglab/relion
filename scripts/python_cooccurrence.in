@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+
+print_error() {
+echo "
+---------------------------------- PYTHON ERROR ---------------------------------
+   Has RELION been provided a Python interpreter with the correct environment?
+   The interpreter can be passed to RELION either during Cmake configuration by
+     using the Cmake flag -DPYTHON_EXE_PATH=<path/to/python/interpreter>.
+   Required packages: numpy, scipy, matplotlib, mrcfile
+---------------------------------------------------------------------------------
+
+  Using python executable: $1
+"
+}
+
+# Set the Python executable path
+python_executable="@PYTHON_EXE_PATH@"
+relion_home="@Relion_BINARY_DIR@"
+
+# Check if the python executable exists
+if [ ! -x "$python_executable" ]; then
+    python_executable=$(command -v python3)
+    if [ -z "$python_executable" ]; then
+        python_executable=$(command -v python)
+    fi
+    if [ -z "$python_executable" ]; then
+        print_error "$python_executable"
+        exit 1
+    fi
+fi
+
+# Add the relion bin directory to PYTHONPATH so that co-occurrence helper
+# modules (cooccurrence_2d_classes, select_populations_gui, filter_star)
+# can be imported by cooccurrence_select.py.
+export PYTHONPATH="$relion_home/bin:${PYTHONPATH}"
+
+# Run the top-level co-occurrence pipeline script
+"$python_executable" "$relion_home"/bin/cooccurrence_select.py "$@"
+
+if [ $? -ne 0 ]; then
+    print_error "$python_executable"
+    exit 2
+fi
+
+exit 0

@@ -586,7 +586,24 @@ list(APPEND RELION_PYTHON_WRAPPERS
 	python_tomo_get_particle_poses
 	python_tomo_denoise
 	filament_selection
+        python_cooccurrence
 )
+
+# Co-occurrence scripts: installed to bin/ WITHOUT the relion_ prefix so that
+# Python cross-imports (e.g. "from filter_star import ...") work correctly.
+list(APPEND RELION_COOCCURRENCE_SCRIPTS
+        cooccurrence_select.py
+        cooccurrence_2d_classes.py
+        select_populations_gui.py
+        filter_star.py
+)
+
+foreach (SCRIPT_FILE ${RELION_COOCCURRENCE_SCRIPTS})
+    add_custom_command(TARGET copy_scripts POST_BUILD
+                     COMMAND ${CMAKE_COMMAND} -E
+                     copy ${CMAKE_SOURCE_DIR}/scripts/${SCRIPT_FILE}
+                     ${CMAKE_BINARY_DIR}/bin/${SCRIPT_FILE} )
+endforeach()
 
 foreach (SCRIPT_FILE ${RELION_PYTHON_WRAPPERS})
     configure_file(

@@ -3010,7 +3010,7 @@ bool RelionJob::getCommandsCoOccurrenceJob(std::string &outputname, std::vector<
 	inputNodes.push_back(Node(fn_data,   joboptions["fn_data_star"].node_type));
 	inputNodes.push_back(Node(fn_refine, joboptions["fn_refine3d_star"].node_type));
 
-	std::string command = "python /net/jiang/home/prb5371/src/cooccurrence_select.py";
+	std::string command = "`which relion_python_cooccurrence`";
 	command += " --i "             + fn_data;
 	command += " --mrcs "          + fn_mrcs;
 	command += " --refine3d_star " + fn_refine;
