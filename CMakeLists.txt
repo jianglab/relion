@@ -596,6 +596,7 @@ list(APPEND RELION_COOCCURRENCE_SCRIPTS
         cooccurrence_2d_classes.py
         select_populations_gui.py
         filter_star.py
+        triage_2d_classes.py
 )
 
 foreach (SCRIPT_FILE ${RELION_COOCCURRENCE_SCRIPTS})

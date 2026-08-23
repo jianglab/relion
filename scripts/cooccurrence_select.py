@@ -80,6 +80,72 @@ def all_classes_from_star(data_star):
     return sorted(classes)
 
 
+def parse_apix_from_star(data_star):
+    """Read _rlnImagePixelSize from the data_optics block. Returns float or None."""
+    try:
+        with open(data_star) as fh:
+            in_optics = in_loop = False
+            headers = []
+            for line in fh:
+                s = line.strip()
+                if s == 'data_optics':
+                    in_optics = True; continue
+                if s.startswith('data_') and in_optics:
+                    break
+                if not in_optics:
+                    continue
+                if s == 'loop_':
+                    in_loop = True; continue
+                if in_loop and s.startswith('_rln'):
+                    headers.append(s.split()[0]); continue
+                if in_loop and s and not s.startswith('#'):
+                    parts = s.split()
+                    for i, h in enumerate(headers):
+                        if h == '_rlnImagePixelSize' and i < len(parts):
+                            return float(parts[i])
+    except Exception:
+        pass
+    return None
+
+
+def run_triage(data_star, out_dir):
+    """Auto-triage Class2D output to produce good_classes.txt.
+
+    Derives relion_dir and iteration from the data_star path, reads pixel size
+    from the optics block, and runs triage_2d_classes.py as a subprocess so
+    its matplotlib.use("Agg") call stays isolated from the GUI process.
+
+    Returns the path to the generated good_classes.txt.
+    """
+    import subprocess, re
+
+    relion_dir = os.path.dirname(os.path.abspath(data_star))
+    basename   = os.path.basename(data_star)
+    m = re.search(r'run_it(\d+)', basename)
+    iteration  = m.group(1) if m else '025'
+
+    apix = parse_apix_from_star(data_star)
+    triage_dir = os.path.join(out_dir, 'auto_triage')
+    os.makedirs(triage_dir, exist_ok=True)
+
+    script = os.path.join(os.path.dirname(__file__), 'triage_2d_classes.py')
+    cmd = [
+        sys.executable, script,
+        '--relion_dir', relion_dir,
+        '--iter',       iteration,
+        '--out_dir',    triage_dir,
+    ]
+    if apix is not None:
+        cmd += ['--apix', str(apix)]
+    print(f'Auto-triaging classes (pixel size {apix} Å/px) …')
+    subprocess.run(cmd, check=True)
+
+    good_txt = os.path.join(triage_dir, 'good_classes.txt')
+    if not os.path.exists(good_txt):
+        raise RuntimeError(f'Triage did not produce {good_txt}')
+    return good_txt
+
+
 def compute_jaccard(data_star, good_idx, out_dir):
     """Run cooccurrence_2d_classes.py in a subprocess and return path to jaccard.npy.
 
@@ -119,7 +185,7 @@ def main():
     ap.add_argument('--mrcs',          required=True,
                     help='Class2D class images .mrcs stack')
     ap.add_argument('--good_txt',      default=None,
-                    help='good_classes.txt from triage (optional; uses all if absent)')
+                    help='good_classes.txt from triage (optional; auto-triages if absent)')
     ap.add_argument('--refine3d_star', required=True,
                     help='Refine3D run_data.star to filter')
     ap.add_argument('--o',             required=True,
@@ -144,15 +210,15 @@ def main():
             print(f'Good classes: {len(good_idx)} from {good_txt}')
         else:
             if args.good_txt:
-                print(f'WARNING: {args.good_txt} not found — using all classes')
-            print('Scanning data.star for all class numbers …')
-            good_idx = all_classes_from_star(args.i)
-            good_txt = os.path.join(args.o, 'good_classes_all.txt')
-            with open(good_txt, 'w') as fh:
-                fh.write('# all classes (no triage applied)\n')
-                for cls in good_idx:
-                    fh.write(f'{cls}\n')
-            print(f'  Found {len(good_idx)} classes → {good_txt}')
+                print(f'WARNING: {args.good_txt} not found — running auto-triage')
+            else:
+                print('No good_classes.txt provided — running auto-triage …')
+            good_txt = run_triage(args.i, args.o)
+            with open(good_txt) as fh:
+                good_idx = [int(l.strip())
+                            for l in fh
+                            if l.strip() and not l.startswith('#')]
+            print(f'  Auto-triage: {len(good_idx)} good classes → {good_txt}')
 
         # ── Step 2: Jaccard matrix ────────────────────────────────────────────
         if args.jaccard and os.path.exists(args.jaccard):
