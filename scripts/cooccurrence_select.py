@@ -9,7 +9,8 @@ Steps
 -----
 1. Check for precomputed Jaccard matrix; compute it if absent.
 2. Launch the interactive population selector GUI.
-3. On GUI exit write RELION_JOB_EXIT_SUCCESS (or _FAILURE).
+3. Under RELION pipeline control, write RELION_JOB_EXIT_SUCCESS (or _FAILURE)
+   on GUI exit.
 
 RELION External job arguments (set in the GUI parameter panel)
 --------------------------------------------------------------
@@ -19,6 +20,7 @@ RELION External job arguments (set in the GUI parameter panel)
   --refine3d_star Refine3D/jobXXX/run_data.star
   --o            output directory
   --min_segs     minimum segments per filament (default 20)
+  --pipeline_control RELION pipeline-control output directory
 
 If --good_txt does not exist, all classes present in --i are used.
 
@@ -41,9 +43,13 @@ import numpy as np
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def relion_exit(out_dir, success):
+def relion_exit(pipeline_control, success):
+    """Write a RELION pipeline exit marker when pipeline control is active."""
+    if not pipeline_control:
+        return
+
     tag = 'RELION_JOB_EXIT_SUCCESS' if success else 'RELION_JOB_EXIT_FAILURE'
-    path = os.path.join(out_dir, tag)
+    path = os.path.join(pipeline_control, tag)
     open(path, 'w').close()
 
 
@@ -194,6 +200,8 @@ def main():
                     help='minimum segments per filament (default 20)')
     ap.add_argument('--jaccard',       default=None,
                     help='precomputed cooccurrence_jaccard.npy (skip recompute)')
+    ap.add_argument('--pipeline_control', default='',
+                    help='RELION pipeline-control output directory')
 
     args = ap.parse_args()
 
@@ -275,14 +283,14 @@ def main():
         gui.run()
 
         # ── Step 4: RELION exit marker ────────────────────────────────────────
-        relion_exit(args.o, success=True)
+        relion_exit(args.pipeline_control, success=True)
         print(f'Done.  Output in {args.o}')
 
     except Exception as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         import traceback
         traceback.print_exc()
-        relion_exit(args.o, success=False)
+        relion_exit(args.pipeline_control, success=False)
         sys.exit(1)
 
 
