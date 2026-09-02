@@ -589,6 +589,9 @@ list(APPEND RELION_PYTHON_WRAPPERS
         python_cooccurrence
 )
 
+# Define the target before attaching any POST_BUILD commands to it.
+add_custom_target(copy_scripts ALL)
+
 # Co-occurrence scripts: installed to bin/ WITHOUT the relion_ prefix so that
 # Python cross-imports (e.g. "from filter_star import ...") work correctly.
 list(APPEND RELION_COOCCURRENCE_SCRIPTS
@@ -663,8 +666,6 @@ list(APPEND RELION_SCRIPT_FILES
         qsub.csh
         it.py
 )
-
-add_custom_target(copy_scripts ALL)
 
 foreach (SCRIPT_FILE ${RELION_SCRIPT_FILES})
     add_custom_command(TARGET copy_scripts POST_BUILD
