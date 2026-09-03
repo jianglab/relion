@@ -867,7 +867,8 @@ public:
 	void write(std::string fn);
 
 	// Write the job submission script
-	bool saveJobSubmissionScript(std::string newfilename, std::string outputname, std::vector<std::string> commands, std::string &error_message);
+	bool saveJobSubmissionScript(std::string newfilename, std::string outputname, std::vector<std::string> commands, std::string &error_message,
+			int nr_parallel_runs = 1);
 
 	// Initialise pipeline stuff for each job, return outputname
 	void initialisePipeline(std::string &outputname, int job_counter);
@@ -875,7 +876,7 @@ public:
 	// Prepare the final (job submission or combined (mpi) command of possibly multiple lines)
 	// Returns true to go ahead, and false to cancel
 	bool prepareFinalCommand(std::string &outputname, std::vector<std::string> &commands, std::string &final_command,
-			bool do_makedir, std::string &warning_message, bool do_dash_for_python = false);
+			bool do_makedir, std::string &warning_message, bool do_dash_for_python = false, int nr_parallel_runs = 1);
 
 	// Initialise the generic RelionJob
 	void initialise(int job_type);

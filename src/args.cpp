@@ -170,6 +170,10 @@ void IOParser::setCommandLine(int _argc, char** _argv)
 		pipeline_control_outputname = getParameter(argc, argv, "--pipeline_control");
 	else
 		pipeline_control_outputname = "";
+	pipeline_control_task_id = checkParameter(argc, argv, "--pipeline_control_task_id") ?
+		textToInteger(getParameter(argc, argv, "--pipeline_control_task_id")) : 0;
+	pipeline_control_task_count = checkParameter(argc, argv, "--pipeline_control_task_count") ?
+		textToInteger(getParameter(argc, argv, "--pipeline_control_task_count")) : 1;
 }
 
 void IOParser::addOption(std::string option, std::string usage, std::string defaultvalue, bool hidden)

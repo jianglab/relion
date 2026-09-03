@@ -1371,6 +1371,7 @@ void JobWindow::initialiseClass2DWindow()
 	group2->begin();
 
 	place("nr_iter_em");
+	place("do_fast_subsets", TOGGLE_DEACTIVATE);
 
 	group2->end();
 
@@ -1391,6 +1392,8 @@ void JobWindow::initialiseClass2DWindow()
 
 	guientries["do_grad"].cb_menu_i(); // to make default effective
 
+	place("nr_parallel_runs", TOGGLE_DEACTIVATE);
+	place("random_seed", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
 	current_y += STEPY/2;

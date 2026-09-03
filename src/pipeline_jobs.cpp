@@ -19,6 +19,10 @@
  ***************************************************************************/
 #include "src/pipeline_jobs.h"
 #include <unistd.h>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <ctime>
 
 static std::string appendPathComponent(std::string path, const std::string &component)
 {
@@ -32,6 +36,35 @@ static std::string appendPathComponent(std::string path, const std::string &comp
 		return path + component.substr(1);
 	else
 		return path + component;
+}
+
+static bool parseStrictInteger(const std::string &text, long long &value)
+{
+	if (text.empty())
+		return false;
+	char *end = NULL;
+	errno = 0;
+	value = std::strtoll(text.c_str(), &end, 10);
+	if (errno == ERANGE || end == text.c_str())
+		return false;
+	while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
+		end++;
+	return *end == '\0';
+}
+
+static std::vector<std::string> splitPreservingEmpty(const std::string &text, char separator)
+{
+	std::vector<std::string> result;
+	std::string::size_type start = 0;
+	while (true)
+	{
+		std::string::size_type pos = text.find(separator, start);
+		result.push_back(text.substr(start, pos == std::string::npos ? pos : pos - start));
+		if (pos == std::string::npos)
+			break;
+		start = pos + 1;
+	}
+	return result;
 }
 
 static std::string getCurrentProjectDirectoryName()
@@ -669,7 +702,8 @@ void RelionJob::write(std::string fn)
 	fh.close();
 }
 
-bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string outputname, std::vector<std::string> commands, std::string &error_message)
+bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string outputname, std::vector<std::string> commands, std::string &error_message,
+                                        int nr_parallel_runs)
 {
 	// Open the standard job submission file
 	FileName fn_qsub = joboptions["qsubscript"].getString();
@@ -691,6 +725,45 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 	}
 	else
 	{
+		std::string dispatcher;
+		if (nr_parallel_runs > 1)
+		{
+			if ((int)commands.size() != nr_parallel_runs)
+			{
+				error_message = "Internal error: the number of Class2D replica commands does not match nr_parallel_runs.";
+				return false;
+			}
+
+			dispatcher = outputname + "run_replicas.sh";
+			std::ofstream fd(dispatcher.c_str(), std::ios::out);
+			if (!fd)
+			{
+				error_message = "Error writing Class2D replica dispatcher: " + dispatcher;
+				return false;
+			}
+			fd << "#!/bin/sh\n"
+			   << "task_id=${SLURM_ARRAY_TASK_ID:-}\n"
+			   << "rank=${SLURM_PROCID:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}\n"
+			   << "case \"$task_id\" in\n";
+			for (int i = 0; i < nr_parallel_runs; i++)
+			{
+				std::string run_name = "run" + integerToString(i + 1, 3);
+				fd << "  " << (i + 1) << ")\n"
+				   << "    if [ \"$rank\" = 0 ]; then echo \"Starting Class2D replica " << (i + 1) << " at $(date)\" >> " << outputname << "run.out; fi\n"
+				   << "    " << commands[i] << " >> " << outputname << run_name << ".out 2>> " << outputname << run_name << ".err\n"
+				   << "    status=$?\n"
+				   << "    if [ \"$rank\" = 0 ]; then echo \"Finished Class2D replica " << (i + 1) << " with status $status at $(date)\" >> " << outputname << "run.out; fi\n"
+				   << "    exit $status\n"
+				   << "    ;;\n";
+			}
+			fd << "  *)\n"
+			   << "    echo \"Invalid SLURM_ARRAY_TASK_ID: $task_id\" >> " << outputname << "run.err\n"
+			   << "    exit 2\n"
+			   << "    ;;\n"
+			   << "esac\n";
+			fd.close();
+		}
+
 		int nmpi = (joboptions.find("nr_mpi") != joboptions.end()) ? joboptions["nr_mpi"].getNumber(error_message) : 1;
 		if (error_message != "") return false;
 
@@ -722,8 +795,8 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 		replacing["XXXdedicatedXXX"] = floatToString(ndedi);
 		replacing["XXXnodesXXX"] = floatToString(nnodes);
 		replacing["XXXnameXXX"] = outputname;
-		replacing["XXXerrfileXXX"] = outputname + "run.err";
-		replacing["XXXoutfileXXX"] = outputname + "run.out";
+		replacing["XXXerrfileXXX"] = outputname + ((nr_parallel_runs > 1) ? "slurm_%A_%a.err" : "run.err");
+		replacing["XXXoutfileXXX"] = outputname + ((nr_parallel_runs > 1) ? "slurm_%A_%a.out" : "run.out");
 		replacing["XXXqueueXXX"] = joboptions["queuename"].getString();
 		char *extra_count_text = getenv("RELION_QSUB_EXTRA_COUNT");
 		const char extra_count_val = (extra_count_text ? atoi(extra_count_text) : 2);
@@ -761,6 +834,15 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 			}
 			else
 			{
+				if (nr_parallel_runs > 1)
+				{
+					std::string from = "XXXcommandXXX";
+					std::string to = "sh " + dispatcher;
+					line.replace(line.find(from), from.length(), to);
+					fo << line << std::endl;
+					continue;
+				}
+
 				// Append the commands
 				std::string ori_line = line;
 				for (int icom = 0; icom < commands.size(); icom++)
@@ -807,9 +889,22 @@ void RelionJob::initialisePipeline(std::string &outputname, int job_counter)
 }
 
 bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::string> &commands,
-                                    std::string &final_command, bool do_makedir, std::string &error_message, bool do_dash_for_python)
+                                    std::string &final_command, bool do_makedir, std::string &error_message,
+                                    bool do_dash_for_python, int nr_parallel_runs)
 {
-	int nr_mpi;
+	int nr_mpi = (joboptions.find("nr_mpi") != joboptions.end()) ? joboptions["nr_mpi"].getNumber(error_message) : 1;
+	if (error_message != "") return false;
+	if (nr_parallel_runs < 1 || (nr_parallel_runs > 1 && (int)commands.size() != nr_parallel_runs))
+	{
+		error_message = "Internal error: invalid number of parallel commands.";
+		return false;
+	}
+	if (nr_parallel_runs > 1 && joboptions["do_queue"].getBoolean() &&
+	    joboptions["qsub"].getString().find("sbatch") == std::string::npos)
+	{
+		error_message = "Parallel Class2D queue execution requires a Slurm sbatch submission command.";
+		return false;
+	}
 
 	// Create output directory if the outname contains a "/"
 	if (do_makedir)
@@ -830,6 +925,9 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 				commands[icom] += " --pipeline-control " + outputname;
 			else
 				commands[icom] += " --pipeline_control " + outputname;
+			if (nr_parallel_runs > 1)
+				commands[icom] += " --pipeline_control_task_id " + integerToString(icom + 1) +
+				                  " --pipeline_control_task_count " + integerToString(nr_parallel_runs);
 		}
 	}
 
@@ -839,9 +937,36 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 		// Make the submission script and write it to disc
 		std::string output_script = outputname + "run_submit.script";
 
-		if (!saveJobSubmissionScript(output_script, outputname, commands, error_message))
+		if (!saveJobSubmissionScript(output_script, outputname, commands, error_message, nr_parallel_runs))
 			return false;
-		final_command = joboptions["qsub"].getString() + " " + output_script + " &";
+		final_command = joboptions["qsub"].getString();
+		if (nr_parallel_runs > 1)
+			final_command += " --array=1-" + integerToString(nr_parallel_runs);
+		final_command += " " + output_script + " &";
+	}
+	else if (nr_parallel_runs > 1)
+	{
+		final_command = "";
+		for (size_t icom = 0; icom < commands.size(); icom++)
+		{
+			std::string one_command;
+			if (nr_mpi > 1 &&
+			    commands[icom].find("_mpi`") != std::string::npos &&
+			    commands[icom].find("relion_") != std::string::npos)
+			{
+				const char *default_mpirun = getenv("RELION_MPIRUN");
+				if (default_mpirun == NULL)
+					default_mpirun = DEFAULTMPIRUN;
+				one_command = std::string(default_mpirun) + " -n " + floatToString(nr_mpi) + " " + commands[icom];
+			}
+			else
+				one_command = commands[icom];
+
+			std::string run_name = "run" + integerToString((int)icom + 1, 3);
+			final_command += "( echo \"Starting Class2D replica " + integerToString((int)icom + 1) + " at $(date)\" >> " + outputname + "run.out; ";
+			final_command += one_command + " >> " + outputname + run_name + ".out 2>> " + outputname + run_name + ".err; ";
+			final_command += "status=$?; echo \"Finished Class2D replica " + integerToString((int)icom + 1) + " with status $status at $(date)\" >> " + outputname + "run.out; exit $status ) & ";
+		}
 	}
 	else
 	{
@@ -852,9 +977,6 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 		for (size_t icom = 0; icom < commands.size(); icom++)
 		{
 			// Is this a relion mpi program?
-			nr_mpi = (joboptions.find("nr_mpi") != joboptions.end()) ? joboptions["nr_mpi"].getNumber(error_message) : 1;
-			if (error_message != "") return false;
-
 			if (nr_mpi > 1 &&
 					(commands[icom]).find("_mpi`") != std::string::npos &&
 					(commands[icom]).find("relion_") != std::string::npos)
@@ -885,9 +1007,12 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 	char * my_warn = getenv("RELION_ERROR_LOCAL_MPI");
 	int my_nr_warn = (my_warn == NULL) ? DEFAULTWARNINGLOCALMPI : textToInteger(my_warn);
 
-	if (nr_mpi > my_nr_warn && !joboptions["do_queue"].getBoolean())
+	if (nr_mpi * nr_parallel_runs > my_nr_warn && !joboptions["do_queue"].getBoolean())
 	{
-		error_message = "You're submitting a local job with " + floatToString(nr_mpi) + " parallel MPI processes. That's more than allowed by the RELION_ERROR_LOCAL_MPI environment variable.";
+		if (nr_parallel_runs == 1)
+			error_message = "You're submitting a local job with " + floatToString(nr_mpi) + " parallel MPI processes. That's more than allowed by the RELION_ERROR_LOCAL_MPI environment variable.";
+		else
+			error_message = "You're submitting a local job with " + floatToString(nr_mpi * nr_parallel_runs) + " parallel MPI processes across all replicas. That's more than allowed by the RELION_ERROR_LOCAL_MPI environment variable.";
 		return false;
 	}
 	else
@@ -3458,10 +3583,13 @@ Therefore, the calculations will need to be stopped by the user if further itera
 Also note that upon restarting, the iteration number continues to be increased, starting from the final iteration in the previous run. \
 The number given here is the TOTAL number of iterations. For example, if 10 iterations have been performed previously and one restarts to perform \
 an additional 5 iterations (for example with a finer angular sampling), then the number given here should be 10+5=15.");
+	joboptions["do_fast_subsets"] = JobOption("Use fast subsets (for large data sets)?", false, "For EM Class2D jobs, use random subsets of K*100 particles for the first 5 iterations, K*300 for the next 5, at least 30% of the data for the next 5, and all particles thereafter. At least 20 EM iterations are required.");
 
 
 	joboptions["do_grad"] = JobOption("Use VDAM algorithm?", true, "If set to Yes, the faster VDAM algorithm will be used. This algorithm was introduced with relion-4.0. If set to No, then the slower EM algorithm needs to be used.");
 	joboptions["nr_iter_grad"] = JobOption("Number of VDAM mini-batches:", 200, 50, 500, 10, "Number of mini-batches to be processed using the VDAM algorithm. Using 200 has given good results for many data sets. Using 100 will run faster, at the expense of some quality in the results.");
+	joboptions["nr_parallel_runs"] = JobOption("Number of parallel runs:", 1, 1, 999, 1, "Run this many independent Class2D replicas in one pipeline job. Local replicas start concurrently; queued replicas use a Slurm job array.");
+	joboptions["random_seed"] = JobOption("Base random seed:", std::string("-1"), "Use -1 to choose and save an automatic seed when multiple replicas are generated. Replica N uses base seed + N - 1.");
 
 	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
@@ -3534,7 +3662,7 @@ All MPI salves will then read in the combined results. This reduces heavy load o
 This will affect the time it takes between the progress-bar in the expectation step reaching its end (the mouse gets to the cheese) and the start of the ensuing maximisation step. It will depend on your system setup which is most efficient.");
 
 	joboptions["use_gpu"] = JobOption("Use GPU acceleration?", false, "If set to Yes, the job will try to use GPU acceleration.");
-	joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string(""), "This argument is not necessary. If left empty, the job itself will try to allocate available GPU resources. You can override the default allocation by providing a list of which GPUs (0,1,2,3, etc) to use. MPI-processes are separated by ':', threads by ','. For example: '0,0:1,1:0,0:1,1'");
+	joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string(""), "This argument is not necessary. If left empty, the job itself will try to allocate available GPU resources. MPI-processes are separated by ':', threads by ','. For multiple Class2D replicas, separate one GPU mapping per replica with semicolons, for example '0;1;2' or '0:1;2:3'.");
 }
 
 bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::string> &commands,
@@ -3542,42 +3670,76 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 {
 	commands.clear();
 	initialisePipeline(outputname, job_counter);
-	std::string command;
-
+	std::string command_start;
 	if (joboptions["nr_mpi"].getNumber(error_message) > 1)
-		command="`which relion_refine_mpi`";
+		command_start = "`which relion_refine_mpi`";
 	else
-		command="`which relion_refine`";
+		command_start = "`which relion_refine`";
 	if (error_message != "") return false;
 
-	FileName fn_run = "run";
+	int nr_parallel_runs = 1;
+	long long base_seed = -1;
+	std::string continuation_root = "run";
 	if (is_continue)
 	{
-		if (joboptions["fn_cont"].getString() == "")
+		std::string fn_cont = joboptions["fn_cont"].getString();
+		if (fn_cont == "")
 		{
 			error_message = "ERROR: empty field for continuation STAR file...";
 			return false;
 		}
-		int pos_it = joboptions["fn_cont"].getString().rfind("_it");
-		int pos_op = joboptions["fn_cont"].getString().rfind("_optimiser");
-		if (pos_it < 0 || pos_op < 0)
+		std::string::size_type basename_pos = fn_cont.find_last_of("/\\");
+		std::string basename = (basename_pos == std::string::npos) ? fn_cont : fn_cont.substr(basename_pos + 1);
+		std::string::size_type pos_it = basename.rfind("_it");
+		std::string::size_type pos_op = basename.rfind("_optimiser");
+		if (pos_it == std::string::npos || pos_op == std::string::npos || pos_it == 0 || pos_it >= pos_op)
 		{
 			error_message = "Warning: invalid optimiser.star filename provided for continuation run!";
 			return false;
 		}
-		// SHWS 10dec2020: switch off using run_ctXX output for continue jobs, as this will affect Schedulers
-		//int it = (int)textToFloat((joboptions["fn_cont"].getString().substr(pos_it+3, 6)).c_str());
-		//fn_run += "_ct" + floatToString(it);
-		command += " --continue " + joboptions["fn_cont"].getString();
+		continuation_root = basename.substr(0, pos_it);
+		command_start += " --continue " + fn_cont;
 	}
+	else
+	{
+		long long parsed_runs;
+		if (!parseStrictInteger(joboptions["nr_parallel_runs"].getString(), parsed_runs) || parsed_runs < 1 || parsed_runs > 999)
+		{
+			error_message = "Number of parallel Class2D runs must be an integer between 1 and 999.";
+			return false;
+		}
+		nr_parallel_runs = (int)parsed_runs;
 
-	command += " --o " + outputname + fn_run;
+		if (!parseStrictInteger(joboptions["random_seed"].getString(), base_seed) || base_seed < -1 || base_seed == 0)
+		{
+			error_message = "Class2D random seed must be -1 or a positive integer.";
+			return false;
+		}
+		if (base_seed > INT_MAX || (base_seed > 0 && base_seed + nr_parallel_runs - 1 > INT_MAX))
+		{
+			error_message = "Class2D random seed is too large for all requested replicas.";
+			return false;
+		}
+		if (base_seed == -1 && nr_parallel_runs > 1)
+		{
+			base_seed = (long long)time(NULL);
+			if (base_seed < 1 || base_seed + nr_parallel_runs - 1 > INT_MAX)
+				base_seed = 1 + (base_seed % (INT_MAX - nr_parallel_runs));
+			joboptions["random_seed"].setString(integerToString((int)base_seed));
+		}
+		if (nr_parallel_runs > 1 && joboptions["other_args"].getString().find("--random_seed") != std::string::npos)
+		{
+			error_message = "Do not specify --random_seed in Other arguments when using parallel Class2D runs; use Base random seed instead.";
+			return false;
+		}
+	}
 
 	int my_classes = (int)joboptions["nr_classes"].getNumber(error_message);
 	if (error_message != "") return false;
 
 	// Optimisation
 	int my_iter;
+	std::string command_after_output;
 	if (joboptions["do_em"].getBoolean())
 	{
 		if (joboptions["do_grad"].getBoolean())
@@ -3586,21 +3748,31 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 			return false;
 		}
 
-		command += " --iter " + joboptions["nr_iter_em"].getString();
+		command_after_output += " --iter " + joboptions["nr_iter_em"].getString();
 
 		my_iter = (int)joboptions["nr_iter_em"].getNumber(error_message);
 		if (error_message != "") return false;
+		if (!is_continue && joboptions["do_fast_subsets"].getBoolean() && my_iter < 20)
+		{
+			error_message = "Fast subsets require at least 20 EM iterations.";
+			return false;
+		}
 	}
 	else if (joboptions["do_grad"].getBoolean())
 	{
+		if (!is_continue && joboptions["do_fast_subsets"].getBoolean())
+		{
+			error_message = "Fast subsets are only supported with the EM algorithm, not VDAM.";
+			return false;
+		}
 		if (joboptions["nr_mpi"].getNumber(error_message) > 1)
 		{
 			error_message = "Gradient refinement (running the VDAM algorithm) is not supported together with MPI.";
 			return false;
 		}
 
-		command += " --grad --class_inactivity_threshold 0.1 --grad_write_iter 10";
-		command += " --iter " + joboptions["nr_iter_grad"].getString();
+		command_after_output += " --grad --class_inactivity_threshold 0.1 --grad_write_iter 10";
+		command_after_output += " --iter " + joboptions["nr_iter_grad"].getString();
 
 		my_iter = (int)joboptions["nr_iter_grad"].getNumber(error_message);
 		if (error_message != "") return false;
@@ -3611,8 +3783,6 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 		return false;
 	}
 
-	outputNodes = getOutputNodesRefine(outputname + fn_run, "Class2D", my_iter, my_classes, 2, 1, is_tomo);
-
 	if (!is_continue)
 	{
 		if (joboptions["fn_img"].getString() == "")
@@ -3620,81 +3790,82 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 			error_message = "ERROR: empty field for input STAR file...";
 			return false;
 		}
-		command += " --i " + joboptions["fn_img"].getString();
+		command_after_output += " --i " + joboptions["fn_img"].getString();
 		Node node(joboptions["fn_img"].getString(), joboptions["fn_img"].node_type);
 		inputNodes.push_back(node);
 	}
 
 	// Always do compute stuff
 	if (!joboptions["do_combine_thru_disc"].getBoolean())
-		command += " --dont_combine_weights_via_disc";
+		command_after_output += " --dont_combine_weights_via_disc";
 	if (!joboptions["do_parallel_discio"].getBoolean())
-		command += " --no_parallel_disc_io";
+		command_after_output += " --no_parallel_disc_io";
 	if (joboptions["do_preread_images"].getBoolean())
-		command += " --preread_images " ;
-	else if (joboptions["scratch_dir"].getString() != "")
-		command += " --scratch_dir " +  joboptions["scratch_dir"].getString();
+		command_after_output += " --preread_images " ;
+
+	std::string command_after_scratch;
 	if (joboptions["cache_dir"].getString() != "")
-		command += " --cache_dir " +  joboptions["cache_dir"].getString()
+		command_after_scratch += " --cache_dir " +  joboptions["cache_dir"].getString()
 				   + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
-	command += " --pool " + joboptions["nr_pool"].getString();
+	command_after_scratch += " --pool " + joboptions["nr_pool"].getString();
 	// Takanori observed bad 2D classifications with pad1, so use pad2 always. Memory isnt a problem here anyway.
-	command += " --pad 2 ";
+	command_after_scratch += " --pad 2 ";
 
 	// CTF stuff
 	if (!is_continue)
 	{
 		if (joboptions["do_ctf_correction"].getBoolean())
 		{
-			command += " --ctf ";
+			command_after_scratch += " --ctf ";
 			if (joboptions["ctf_intact_first_peak"].getBoolean())
-				command += " --ctf_intact_first_peak ";
+				command_after_scratch += " --ctf_intact_first_peak ";
 		}
 	}
 
-	command += " --tau2_fudge " + joboptions["tau_fudge"].getString();
-	command += " --particle_diameter " + joboptions["particle_diameter"].getString();
+	command_after_scratch += " --tau2_fudge " + joboptions["tau_fudge"].getString();
+	command_after_scratch += " --particle_diameter " + joboptions["particle_diameter"].getString();
 	if (!is_continue)
 	{
-
-		command += " --K " + joboptions["nr_classes"].getString();
+		if (joboptions["do_fast_subsets"].getBoolean())
+			command_after_scratch += " --fast_subsets ";
+		command_after_scratch += " --K " + joboptions["nr_classes"].getString();
 		// Always flatten the solvent
-		command += " --flatten_solvent ";
+		command_after_scratch += " --flatten_solvent ";
 		if (joboptions["do_zero_mask"].getBoolean())
-			command += " --zero_mask ";
+			command_after_scratch += " --zero_mask ";
 		if (joboptions["highres_limit"].getNumber(error_message) > 0)
-			command += " --strict_highres_exp " + joboptions["highres_limit"].getString();
+			command_after_scratch += " --strict_highres_exp " + joboptions["highres_limit"].getString();
 		if (error_message != "") return false;
 
 	}
 
 	if (joboptions["do_center"].getBoolean())
 	{
-		command += " --center_classes ";
+		command_after_scratch += " --center_classes ";
 	}
 	// Sampling
 	int iover = 1;
-	command += " --oversampling " + floatToString((float)iover);
+	command_after_scratch += " --oversampling " + floatToString((float)iover);
 
 	if (!joboptions["dont_skip_align"].getBoolean())
 	{
-		command += " --skip_align ";
+		command_after_scratch += " --skip_align ";
 	}
 	else
 	{
 		// The sampling given in the GUI will be the oversampled one!
-		command += " --psi_step " + floatToString(joboptions["psi_sampling"].getNumber(error_message) * pow(2., iover));
+		command_after_scratch += " --psi_step " + floatToString(joboptions["psi_sampling"].getNumber(error_message) * pow(2., iover));
 		if (error_message != "") return false;
 
 		// Offset range
-		command += " --offset_range " + joboptions["offset_range"].getString();
+		command_after_scratch += " --offset_range " + joboptions["offset_range"].getString();
 		// The sampling given in the GUI will be the oversampled one!
-		command += " --offset_step " + floatToString(joboptions["offset_step"].getNumber(error_message) * pow(2., iover));
+		command_after_scratch += " --offset_step " + floatToString(joboptions["offset_step"].getNumber(error_message) * pow(2., iover));
 		if (error_message != "") return false;
 
 		if (joboptions["allow_coarser"].getBoolean())
 		{
-			command += " --allow_coarser_sampling";
+			command_after_scratch += " --allow_coarser_sampling";
 		}
 
 	}
@@ -3704,46 +3875,92 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 	{
 		label += ".helical";
 
-		command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
-        command += " --no_init_blobs";
+		command_after_scratch += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
+        command_after_scratch += " --no_init_blobs";
 
 		if (joboptions["dont_skip_align"].getBoolean())
 		{
 			if (joboptions["do_bimodal_psi"].getBoolean())
-				command += " --bimodal_psi";
+				command_after_scratch += " --bimodal_psi";
 
 			RFLOAT val = joboptions["range_psi"].getNumber(error_message);
 			if (error_message != "") return false;
 
 			val = (val < 0.) ? (0.) : (val);
 			val = (val > 90.) ? (90.) : (val);
-			command += " --sigma_psi " + floatToString(val / 3.);
+			command_after_scratch += " --sigma_psi " + floatToString(val / 3.);
 
 			if (joboptions["do_restrict_xoff"].getBoolean())
 			{
-				command += " --helix --helical_rise_initial " + joboptions["helical_rise"].getString();
+				command_after_scratch += " --helix --helical_rise_initial " + joboptions["helical_rise"].getString();
 			}
 		}
 	}
 
 	// Always do norm and scale correction
 	if (!is_continue)
-		command += " --norm --scale ";
+		command_after_scratch += " --norm --scale ";
 
 	// Running stuff
-	command += " --j " + joboptions["nr_threads"].getString();
+	command_after_scratch += " --j " + joboptions["nr_threads"].getString();
 
-	// GPU-stuff
-	if (joboptions["use_gpu"].getBoolean())
+	std::vector<std::string> gpu_groups(nr_parallel_runs, "");
+	if (joboptions["use_gpu"].getBoolean() && joboptions["gpu_ids"].getString() != "")
 	{
-		command += " --gpu \"" + joboptions["gpu_ids"].getString() +"\"";
+		gpu_groups = splitPreservingEmpty(joboptions["gpu_ids"].getString(), ';');
+		if (is_continue && gpu_groups.size() > 1)
+		{
+			long long selected_run = -1;
+			if (continuation_root.size() == 6 && continuation_root.substr(0, 3) == "run")
+				parseStrictInteger(continuation_root.substr(3), selected_run);
+			if (selected_run < 1 || selected_run > (long long)gpu_groups.size())
+			{
+				error_message = "Cannot select a GPU group for continuation root " + continuation_root + ".";
+				return false;
+			}
+			std::string selected_group = gpu_groups[selected_run - 1];
+			gpu_groups.assign(1, selected_group);
+		}
+		if ((int)gpu_groups.size() != nr_parallel_runs)
+		{
+			error_message = "The number of semicolon-separated GPU groups must match the number of parallel Class2D runs.";
+			return false;
+		}
+		for (size_t i = 0; i < gpu_groups.size(); i++)
+		{
+			if (gpu_groups[i].empty())
+			{
+				error_message = "GPU groups may not be empty; leave the entire GPU field empty for automatic mapping.";
+				return false;
+			}
+		}
 	}
 
-	// Other arguments
-	command += " " + joboptions["other_args"].getString();
+	for (int i = 0; i < nr_parallel_runs; i++)
+	{
+		std::string run_name = is_continue ? continuation_root :
+			((nr_parallel_runs == 1) ? "run" : "run" + integerToString(i + 1, 3));
+		std::string command = command_start + " --o " + outputname + run_name + command_after_output;
+		if (!joboptions["do_preread_images"].getBoolean() && joboptions["scratch_dir"].getString() != "")
+		{
+			std::string scratch = joboptions["scratch_dir"].getString();
+			if (nr_parallel_runs > 1 || (is_continue && continuation_root != "run"))
+				scratch = appendPathComponent(scratch, run_name);
+			command += " --scratch_dir " + scratch;
+		}
+		command += command_after_scratch;
+		if (joboptions["use_gpu"].getBoolean())
+			command += " --gpu \"" + gpu_groups[i] + "\"";
+		if (!is_continue && base_seed > 0)
+			command += " --random_seed " + integerToString((int)(base_seed + i));
+		command += " " + joboptions["other_args"].getString();
+		commands.push_back(command);
 
-	commands.push_back(command);
-	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
+		std::vector<Node> run_nodes = getOutputNodesRefine(outputname + run_name, "Class2D", my_iter, my_classes, 2, 1, is_tomo);
+		outputNodes.insert(outputNodes.end(), run_nodes.begin(), run_nodes.end());
+	}
+
+	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message, false, nr_parallel_runs);
 }
 
 // Constructor for initial model job

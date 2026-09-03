@@ -29,6 +29,8 @@
 
 // pipeliner
 extern std::string pipeline_control_outputname;
+extern int pipeline_control_task_id;
+extern int pipeline_control_task_count;
 #define RELION_JOB_EXIT_SUCCESS "RELION_JOB_EXIT_SUCCESS"
 #define RELION_JOB_EXIT_FAILURE "RELION_JOB_EXIT_FAILURE"
 #define RELION_JOB_EXIT_ABORTED "RELION_JOB_EXIT_ABORTED"
@@ -45,5 +47,7 @@ bool is_under_pipeline_control();
 bool pipeline_control_check_abort_job();
 
 void pipeline_control_delete_exit_files();
+
+void pipeline_control_delete_task_exit_files(const std::string &outputname, int task_count);
 
 #endif /* PIPELINE_CONTROL_H_ */

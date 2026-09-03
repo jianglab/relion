@@ -651,6 +651,13 @@ bool PipeLine::runJob(RelionJob &_job, int &current_job, bool only_schedule, boo
 	std::remove((_job.outputName+RELION_JOB_EXIT_ABORTED).c_str());
 	std::remove((_job.outputName+RELION_JOB_EXIT_SUCCESS).c_str());
 	std::remove((_job.outputName+RELION_JOB_EXIT_FAILURE).c_str());
+	if (_job.joboptions.find("nr_parallel_runs") != _job.joboptions.end())
+	{
+		std::string task_count_error;
+		int task_count = (int)_job.joboptions["nr_parallel_runs"].getNumber(task_count_error);
+		if (task_count_error == "" && task_count > 1)
+			pipeline_control_delete_task_exit_files(_job.outputName, task_count);
+	}
 
 	// For continuation of relion_refine jobs, remove the original output nodes from the list
 	if (!only_schedule && is_main_continue)
