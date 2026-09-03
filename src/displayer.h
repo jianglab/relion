@@ -67,6 +67,14 @@
 
 #define DEFAULTPDFVIEWER "evince"
 
+enum ScaleBarPosition
+{
+	SCALE_BAR_BOTTOM_LEFT = 0,
+	SCALE_BAR_BOTTOM_RIGHT,
+	SCALE_BAR_TOP_LEFT,
+	SCALE_BAR_TOP_RIGHT
+};
+
 static bool has_dragged;
 static int predrag_xc;
 static int predrag_yc;
@@ -111,13 +119,19 @@ public:
 	int nr_panels;     // how many panels are shown (1-3)
 	bool show_z, show_y, show_x;
 
+	// Optional physical scale bar overlay
+	bool show_scale_bar;
+	RFLOAT scale_bar_length;
+	RFLOAT scale_bar_angpix;
+	ScaleBarPosition scale_bar_position;
+
 	// For getting back close the original image values from the uchar ones...
 	RFLOAT minval;
 	RFLOAT maxval;
 	RFLOAT scale;
 
 	// Constructor with an image and its metadata
-	DisplayBox(int X, int Y, int W, int H, const char *L=0) : Fl_Box(X,Y,W,H,L) { img_data = NULL; img_label = ""; MDimg.clear(); is_3d_volume = false; panel_width = 0; panel_height = 0; nr_panels = 0; show_z = show_y = show_x = true; }
+	DisplayBox(int X, int Y, int W, int H, const char *L=0) : Fl_Box(X,Y,W,H,L) { img_data = NULL; img_label = ""; MDimg.clear(); is_3d_volume = false; panel_width = 0; panel_height = 0; nr_panels = 0; show_z = show_y = show_x = true; show_scale_bar = false; scale_bar_length = 0.; scale_bar_angpix = 0.; scale_bar_position = SCALE_BAR_BOTTOM_LEFT; }
 
 	void setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, int ipos, RFLOAT minval, RFLOAT maxval,
 	             RFLOAT _scale, bool do_relion_scale = false, RFLOAT helical_rise_pixels = 0.,
@@ -128,6 +142,8 @@ public:
                  RFLOAT _scale, bool do_relion_scale = false);
     void setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &mask_img, int _ipos,
                          RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale, bool do_relion_scale);
+
+	void setScaleBar(RFLOAT length, RFLOAT angpix, ScaleBarPosition position);
 
 	// Destructor
 	~DisplayBox()
@@ -173,8 +189,13 @@ public:
 	               int _nr_regroup = -1, bool do_recenter = false, bool _is_data = false, MetaDataTable *MDgroups = NULL,
 	               bool do_allow_save = false, FileName fn_selected_imgs="", FileName fn_selected_parts="", int max_nr_parts_per_class = -1,
 	               RFLOAT central_z_thickness = 0.,
-	               bool _show_z = true, bool _show_y = true, bool _show_x = true);
-	int fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale);
+	               bool _show_z = true, bool _show_y = true, bool _show_x = true,
+	               bool _show_scale_bar = false, RFLOAT _scale_bar_length = 0., RFLOAT _scale_bar_angpix = 0.,
+	               ScaleBarPosition _scale_bar_position = SCALE_BAR_BOTTOM_LEFT);
+	int fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale,
+	                           bool _show_scale_bar = false, RFLOAT _scale_bar_length = 0., RFLOAT _scale_bar_angpix = 0.,
+	                           ScaleBarPosition _scale_bar_position = SCALE_BAR_BOTTOM_LEFT,
+	                           RFLOAT _central_z_thickness = 0., bool _show_z = true, bool _show_y = true, bool _show_x = true);
 	int fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _coord_scale,
 	                           int _particle_radius, bool do_startend = false, bool do_lines = false, FileName _fn_coords = "",
 	                           FileName _fn_color = "", FileName _fn_mic= "", FileName _color_label = "", RFLOAT _color_blue_value = 0., RFLOAT _color_red_value = 1.,
@@ -201,6 +222,10 @@ public:
 	int yoff;
 	RFLOAT scale; // stored for dynamic reflow on resize
 
+	// Scale bar settings supplied by the pre-display control panel
+	RFLOAT scale_bar_length, scale_bar_angpix;
+	ScaleBarPosition scale_bar_position;
+
 	// To get positions in scrolled canvas...
 	Fl_Scroll *scroll;
 
@@ -220,14 +245,20 @@ public:
 	RFLOAT minimum_pick_fom;
 
 	// Constructor with w x h size of the window and a title
-	basisViewerCanvas(int X,int Y, int W, int H, const char* title=0) : Fl_Widget(X,Y,W, H, title) { }
+	basisViewerCanvas(int X,int Y, int W, int H, const char* title=0) : Fl_Widget(X,Y,W, H, title)
+	{
+		scale_bar_length = 0.;
+		scale_bar_angpix = 0.;
+		scale_bar_position = SCALE_BAR_BOTTOM_LEFT;
+	}
 
 	void SetScroll(Fl_Scroll *val) { scroll = val; }
 
 	void fill(MetaDataTable &MDin, ObservationModel *obsModel, EMDLabel display_label, EMDLabel text_label, bool _do_apply_orient, RFLOAT _minval, RFLOAT _maxval,
 	          RFLOAT _sigma_contrast, RFLOAT _scale, int _ncol, bool do_recenter = false, long int max_images = -1,
 	          RFLOAT lowpass = -1.0, RFLOAT highpass = -1.0);
-    void fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale = 1.);
+    void fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale = 1.,
+              RFLOAT central_z_thickness_pixels = 0., bool _show_z = true, bool _show_y = true, bool _show_x = true);
     void fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _fom_min, RFLOAT _fom_max, RFLOAT _sigma_contrast, RFLOAT _scale = 1.);
     void fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &mask_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale);
 
@@ -315,6 +346,7 @@ private:
 	void printMetaData(int ipos);
 	void showAverage(bool selected, bool show_stddev=false);
 	void showOriginalImage(int ipos);
+	void showImageWithScaleBar(int ipos);
 	void showFourierAmplitudes(int ipos);
 	void showFourierPhaseAngles(int ipos);
 	void showHelicalLayerLineProfile(int ipos);
@@ -567,11 +599,12 @@ public:
 
 	// Input for the display parameters
 	Fl_Input *black_input, *white_input, *sigma_contrast_input, *scale_input, *lowpass_input, *highpass_input, *angpix_input;
+	Fl_Input *scale_bar_length_input;
 	Fl_Input *col_input, *ori_scale_input, *max_nr_images_input, *max_parts_per_class_input;
 	Fl_Check_Button *sort_button, *reverse_sort_button, *apply_orient_button, *display_label_button;
 	Fl_Check_Button *show_z_button, *show_y_button, *show_x_button;
 	Fl_Input *central_z_thickness_input;
-	Fl_Choice *display_choice, *sort_choice, *colour_scheme_choice;
+	Fl_Choice *display_choice, *sort_choice, *colour_scheme_choice, *scale_bar_position_choice;
 
 	// Constructor with w x h size of the window and a title
 	displayerGuiWindow(int W, int H, const char* title=0): Fl_Window(W, H, title),	sort_button(NULL),
@@ -717,6 +750,14 @@ public:
 
 	// Flag to show colour scalebar image
 	bool do_colourbar;
+
+	// Show a physical scale bar overlay (used by the multiviewer context menu)
+	bool show_scale_bar;
+	RFLOAT scale_bar_length;
+	ScaleBarPosition scale_bar_position;
+
+	// Show a 3D map as the same combined central sections used for 3D classes
+	bool show_3d_sections;
 
 	// data.star metadata (for do_class)
 	MetaDataTable MDdata;

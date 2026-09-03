@@ -123,6 +123,45 @@ static std::string stripTrailingFloatZeros(const std::string &s)
     return s.substr(0, end + 1);
 }
 
+static const char *scaleBarPositionToString(ScaleBarPosition position)
+{
+	switch (position)
+	{
+	case SCALE_BAR_BOTTOM_RIGHT: return "bottom-right";
+	case SCALE_BAR_TOP_LEFT: return "top-left";
+	case SCALE_BAR_TOP_RIGHT: return "top-right";
+	case SCALE_BAR_BOTTOM_LEFT:
+	default: return "bottom-left";
+	}
+}
+
+static ScaleBarPosition stringToScaleBarPosition(const std::string &position)
+{
+	if (position == "bottom-right") return SCALE_BAR_BOTTOM_RIGHT;
+	if (position == "top-left") return SCALE_BAR_TOP_LEFT;
+	if (position == "top-right") return SCALE_BAR_TOP_RIGHT;
+	return SCALE_BAR_BOTTOM_LEFT;
+}
+
+static RFLOAT getScaleBarPixelSize(const MetaDataTable &metadata, const ObservationModel *obs_model, RFLOAT fallback)
+{
+	RFLOAT angpix = fallback;
+	if (obs_model != NULL && obs_model->opticsMdt.numberOfObjects() > 0)
+	{
+		int optics_group = 0;
+		if (metadata.containsLabel(EMDL_IMAGE_OPTICS_GROUP))
+		{
+			metadata.getValue(EMDL_IMAGE_OPTICS_GROUP, optics_group);
+			optics_group--;
+		}
+		if (optics_group >= 0 && optics_group < obs_model->opticsMdt.numberOfObjects())
+			angpix = obs_model->getPixelSize(optics_group);
+	}
+	if (metadata.containsLabel(EMDL_MLMODEL_PIXEL_SIZE))
+		metadata.getValue(EMDL_MLMODEL_PIXEL_SIZE, angpix);
+	return angpix;
+}
+
 /************************************************************************/
 void DisplayBox::draw()
 {
@@ -147,7 +186,7 @@ void DisplayBox::draw()
         depth = (colour_scheme) ? 3 : 1;
         fl_draw_image((const uchar *)img_data, xpos, ypos, (short)xsize_data, (short)ysize_data, depth);
     }
-	if (is_3d_volume && img_label != "")
+	if (is_3d_volume)
 	{
 		fl_color(FL_WHITE);
 		int panel_w_display = xsize_data / nr_panels;
@@ -155,12 +194,44 @@ void DisplayBox::draw()
 		if (show_z) { fl_draw("Z", xpos + col * panel_w_display + panel_w_display / 2 - 5, ypos + fl_height()); col++; }
 		if (show_y) { fl_draw("Y", xpos + col * panel_w_display + panel_w_display / 2 - 5, ypos + fl_height()); col++; }
 		if (show_x) { fl_draw("X", xpos + col * panel_w_display + panel_w_display / 2 - 5, ypos + fl_height()); col++; }
-		fl_draw(img_label.c_str(), xpos, ypos + fl_height() + fl_height() + 2);
+		if (img_label != "")
+			fl_draw(img_label.c_str(), xpos, ypos + fl_height() + fl_height() + 2);
 	}
 	else if (img_label != "")
 	{
 		fl_color(FL_WHITE);
 		fl_draw(img_label.c_str(), xpos, ypos + fl_height());
+	}
+	if (show_scale_bar && scale_bar_length > 0. && scale_bar_angpix > 0.)
+	{
+		const int bar_length_pixels = ROUND(scale_bar_length * scale / scale_bar_angpix);
+		if (bar_length_pixels > 0 && bar_length_pixels <= xsize_data - 4)
+		{
+			const int margin = XMIPP_MIN(12, XMIPP_MAX(2, (xsize_data - bar_length_pixels) / 2));
+			const bool on_right = scale_bar_position == SCALE_BAR_BOTTOM_RIGHT || scale_bar_position == SCALE_BAR_TOP_RIGHT;
+			const bool on_top = scale_bar_position == SCALE_BAR_TOP_LEFT || scale_bar_position == SCALE_BAR_TOP_RIGHT;
+			const int x1 = on_right ? xpos + xsize_data - margin - bar_length_pixels : xpos + margin;
+			const int x2 = x1 + bar_length_pixels;
+			const int bar_y = on_top ? ypos + margin + 4 : ypos + ysize_data - margin - 4;
+
+			// A dark outline keeps the white bar legible on both light and dark images.
+			fl_color(FL_BLACK);
+			fl_line_style(FL_SOLID, 7);
+			fl_line(x1, bar_y, x2, bar_y);
+			fl_color(FL_WHITE);
+			fl_line_style(FL_SOLID, 4);
+			fl_line(x1, bar_y, x2, bar_y);
+
+			std::string length_label = stripTrailingFloatZeros(floatToString(scale_bar_length)) + " A";
+			const int label_width = ROUND(fl_width(length_label.c_str()));
+			const int centered_label_x = x1 + (bar_length_pixels - label_width) / 2;
+			const int label_x = XMIPP_MAX(xpos + 2, XMIPP_MIN(centered_label_x, xpos + xsize_data - label_width - 2));
+			const int label_y = on_top ? bar_y + fl_height() + 3 : bar_y - 6;
+			fl_color(FL_BLACK);
+			fl_draw(length_label.c_str(), label_x + 1, label_y + 1);
+			fl_color(FL_WHITE);
+			fl_draw(length_label.c_str(), label_x, label_y);
+		}
 	}
 	/* Draw a red rectangle around the particle if it is selected */
 	if (selected >= 1 && selected <= 6)
@@ -179,6 +250,15 @@ void DisplayBox::draw()
 	fl_line(x2, y1, x1, y1);
 
 	//fl_pop_clip();
+}
+
+void DisplayBox::setScaleBar(RFLOAT length, RFLOAT angpix, ScaleBarPosition position)
+{
+	show_scale_bar = length > 0. && angpix > 0.;
+	scale_bar_length = length;
+	scale_bar_angpix = angpix;
+	scale_bar_position = position;
+	redraw();
 }
 
 unsigned char rgbToGrey(const unsigned char red, const unsigned char green, const unsigned char blue)
@@ -663,7 +743,9 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
                                   MetaDataTable *_MDdata, int _nr_regroup, bool _do_recenter,  bool _is_data, MetaDataTable *_MDgroups,
                                   bool do_allow_save, FileName fn_selected_imgs, FileName fn_selected_parts, int max_nr_parts_per_class,
                                    RFLOAT _central_z_thickness,
-                                  bool _show_z, bool _show_y, bool _show_x)
+                                  bool _show_z, bool _show_y, bool _show_x,
+                                  bool _show_scale_bar, RFLOAT _scale_bar_length, RFLOAT _scale_bar_angpix,
+                                  ScaleBarPosition _scale_bar_position)
 {
 	// Scroll bars
 	Fl_Scroll scroll(0, 0, w(), h());
@@ -701,6 +783,9 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		canvas.sigma_contrast = _sigma_contrast;
 		canvas.minval = _minval;
 		canvas.maxval = _maxval;
+		canvas.scale_bar_length = _scale_bar_length;
+		canvas.scale_bar_angpix = _scale_bar_angpix;
+		canvas.scale_bar_position = _scale_bar_position;
 		canvas.do_allow_save = do_allow_save;
 		canvas.fn_selected_imgs= fn_selected_imgs;
 		canvas.fn_selected_parts = fn_selected_parts;
@@ -710,6 +795,14 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		canvas.show_y = _show_y;
 		canvas.show_x = _show_x;
 		canvas.fill(MDin, obsModel, display_label, text_label, _do_apply_orient, _minval, _maxval, _sigma_contrast, _scale, ncol_use, _do_recenter, max_nr_images, lowpass, highpass);
+		if (_show_scale_bar)
+		{
+			for (int ibox = 0; ibox < canvas.boxes.size(); ibox++)
+			{
+				RFLOAT box_angpix = getScaleBarPixelSize(canvas.boxes[ibox]->MDimg, obsModel, _scale_bar_angpix);
+				canvas.boxes[ibox]->setScaleBar(_scale_bar_length, box_angpix, _scale_bar_position);
+			}
+		}
 		canvas.nr_regroups = _nr_regroup;
 		canvas.do_recenter = _do_recenter;
 		canvas.do_apply_orient = _do_apply_orient;
@@ -754,7 +847,16 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		int ysize_canvas = CEIL(YSIZE(img())*_scale);
 		singleViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
 		canvas.SetScroll(&scroll);
+		canvas.scale_bar_length = _scale_bar_length;
+		canvas.scale_bar_angpix = _scale_bar_angpix;
+		canvas.scale_bar_position = _scale_bar_position;
 		canvas.fill(MDin, obsModel, display_label, text_label, _do_apply_orient, _minval, _maxval, _sigma_contrast, _scale, 1);
+		if (_show_scale_bar && !canvas.boxes.empty())
+		{
+			RFLOAT box_angpix = getScaleBarPixelSize(canvas.boxes[0]->MDimg, obsModel, _scale_bar_angpix);
+			canvas.scale_bar_angpix = box_angpix;
+			canvas.boxes[0]->setScaleBar(_scale_bar_length, box_angpix, _scale_bar_position);
+		}
 		canvas.do_read_whole_stacks = false;
 		resizable(*this);
 		show();
@@ -832,17 +934,38 @@ int basisViewerWindow::fillMaskerViewerCanvas(MultidimArray<RFLOAT> image, Multi
     return Fl::run();
 }
 
-int basisViewerWindow::fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale)
+int basisViewerWindow::fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale,
+                                              bool _show_scale_bar, RFLOAT _scale_bar_length, RFLOAT _scale_bar_angpix,
+                                              ScaleBarPosition _scale_bar_position,
+                                              RFLOAT _central_z_thickness, bool _show_z, bool _show_y, bool _show_x)
 {
 	// Scroll bars
 	Fl_Scroll scroll(0, 0, w(), h());
 
 	// Pre-set the canvas to the correct size
-	int xsize_canvas = CEIL(XSIZE(image)*_scale);
-	int ysize_canvas = CEIL(YSIZE(image)*_scale);
+	int display_width = XSIZE(image);
+	int display_height = YSIZE(image);
+	if (ZSIZE(image) > 1)
+	{
+		int panel_size = XMIPP_MAX(XSIZE(image), XMIPP_MAX(YSIZE(image), ZSIZE(image)));
+		if (panel_size % 2 != 0) panel_size++;
+		int nr_sections = (_show_z ? 1 : 0) + (_show_y ? 1 : 0) + (_show_x ? 1 : 0);
+		display_width = nr_sections * panel_size;
+		display_height = panel_size;
+	}
+	int xsize_canvas = CEIL(display_width * _scale);
+	int ysize_canvas = CEIL(display_height * _scale);
 	singleViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
 	canvas.SetScroll(&scroll);
-	canvas.fill(image, _minval, _maxval, _sigma_contrast, _scale);
+	canvas.scale_bar_length = _scale_bar_length;
+	canvas.scale_bar_angpix = _scale_bar_angpix;
+	canvas.scale_bar_position = _scale_bar_position;
+	RFLOAT z_thickness_pixels = 0.;
+	if (_central_z_thickness > 0. && _scale_bar_angpix > 0.)
+		z_thickness_pixels = _central_z_thickness / _scale_bar_angpix;
+	canvas.fill(image, _minval, _maxval, _sigma_contrast, _scale, z_thickness_pixels, _show_z, _show_y, _show_x);
+	if (_show_scale_bar && !canvas.boxes.empty())
+		canvas.boxes[0]->setScaleBar(_scale_bar_length, _scale_bar_angpix, _scale_bar_position);
 	canvas.do_read_whole_stacks = false;
 	resizable(*this);
 	show();
@@ -1067,19 +1190,31 @@ void basisViewerCanvas::fill(MetaDataTable &MDin, ObservationModel *obsModel, EM
 		progress_bar(nr_imgs);
 }
 
-void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale)
+void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale,
+                             RFLOAT central_z_thickness_pixels, bool _show_z, bool _show_y, bool _show_x)
 {
 	xoff = yoff = 0;
 	nrow = ncol = 1;
 	getImageContrast(image, _minval, _maxval, _sigma_contrast);
-	xsize_box = CEIL(_scale * XSIZE(image));
-	ysize_box = CEIL(_scale * YSIZE(image));
+	int display_width = XSIZE(image);
+	int display_height = YSIZE(image);
+	if (ZSIZE(image) > 1)
+	{
+		int panel_size = XMIPP_MAX(XSIZE(image), XMIPP_MAX(YSIZE(image), ZSIZE(image)));
+		if (panel_size % 2 != 0) panel_size++;
+		int nr_sections = (_show_z ? 1 : 0) + (_show_y ? 1 : 0) + (_show_x ? 1 : 0);
+		display_width = nr_sections * panel_size;
+		display_height = panel_size;
+	}
+	xsize_box = CEIL(_scale * display_width);
+	ysize_box = CEIL(_scale * display_height);
 	DisplayBox* my_box = new DisplayBox(0, 0, xsize_box, ysize_box, "dummy");
 	MetaDataTable MDtmp;
 	MDtmp.addObject();
 	//FileName fn_tmp = "dummy";
 	//MDtmp.setValue(EMDL_IMAGE_NAME, fn_tmp);
-	my_box->setData(image, MDtmp.getObject(), 0, _minval, _maxval, _scale, true);
+	my_box->setData(image, MDtmp.getObject(), 0, _minval, _maxval, _scale, true,
+	                central_z_thickness_pixels, _show_z, _show_y, _show_x);
 	my_box->redraw();
 	boxes.push_back(my_box);
 }
@@ -1211,20 +1346,21 @@ int multiViewerCanvas::handle(int ev)
 						{ "Select all classes above" },
 						{ "Show metadata this class" },
 						{ "Show original image" },
+						{ "Show image with scale bar" },
 						{ "Save image as PNG" },
 						{ "Show Fourier amplitudes (2x)" },
 						{ "Show Fourier phase angles (2x)" },
 						{ "Show helical layer line profile" },
 						{ "Show particles from selected classes" },
 						{ "Set selection type" },
-						{ "Save selected classes" }, // idx = 14; change below when re-ordered!!
+						{ "Save selected classes" }, // idx = 15; change below when re-ordered!!
 						{ "Quit" },
 						{ 0 }
 					};
 
 					if (!do_allow_save)
 					{
-						rclick_menu[14].deactivate();
+						rclick_menu[15].deactivate();
 					}
 
 				    const Fl_Menu_Item *m = rclick_menu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
@@ -1246,6 +1382,8 @@ int multiViewerCanvas::handle(int ev)
 						printMetaData(ipos);
 					else if ( strcmp(m->label(), "Show original image") == 0 )
 						showOriginalImage(ipos);
+					else if ( strcmp(m->label(), "Show image with scale bar") == 0 )
+						showImageWithScaleBar(ipos);
 					else if ( strcmp(m->label(), "Save image as PNG") == 0 )
 						saveImage(ipos);
 					else if ( strcmp(m->label(), "Show Fourier amplitudes (2x)") == 0 )
@@ -1285,19 +1423,20 @@ int multiViewerCanvas::handle(int ev)
 						{ "Show average of selection" },
 						{ "Show stddev of selection" },
 						{ "Show original image" },
+						{ "Show image with scale bar" },
 						{ "Save image as PNG" },
 						{ "Show Fourier amplitudes (2x)" },
 						{ "Show Fourier phase angles (2x)" },
 						{ "Show helical layer line profile" },
 						{ "Set selection type" },
 						{ "Show metadata" },
-						{ "Save STAR with selected images" }, // idx = 15; change below when re-ordered!!
+						{ "Save STAR with selected images" }, // idx = 16; change below when re-ordered!!
 						{ "Quit" },
 						{ 0 }
 					};
 					if (!do_allow_save)
 					{
-						rclick_menu[15].deactivate();
+						rclick_menu[16].deactivate();
 					}
 
 					const Fl_Menu_Item *m = rclick_menu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
@@ -1321,6 +1460,8 @@ int multiViewerCanvas::handle(int ev)
 						showAverage(SELECTED, true);
 					else if ( strcmp(m->label(), "Show original image") == 0 )
 						showOriginalImage(ipos);
+					else if ( strcmp(m->label(), "Show image with scale bar") == 0 )
+						showImageWithScaleBar(ipos);
 					else if ( strcmp(m->label(), "Save image as PNG") == 0 )
 						saveImage(ipos);
 					else if ( strcmp(m->label(), "Show Fourier amplitudes (2x)") == 0 )
@@ -1599,6 +1740,61 @@ void multiViewerCanvas::showOriginalImage(int ipos)
 		win.fillSingleViewerCanvas(img(), boxes[ipos]->minval, boxes[ipos]->maxval, 0., ori_scale);
 	}
     */
+}
+
+void multiViewerCanvas::showImageWithScaleBar(int ipos)
+{
+	FileName fn_img;
+	boxes[ipos]->MDimg.getValue(display_label, fn_img);
+	Image<RFLOAT> img;
+	img.read(fn_img, false);
+
+	RFLOAT selected_angpix = getScaleBarPixelSize(boxes[ipos]->MDimg, obsModel, scale_bar_angpix);
+	if (selected_angpix <= 0.)
+		selected_angpix = img.samplingRateX();
+	if (selected_angpix <= 0.)
+	{
+		fl_message("Cannot show a scale bar because the pixel size is not available.");
+		return;
+	}
+	if (scale_bar_length <= 0.)
+	{
+		fl_message("Scale bar length must be larger than zero.");
+		return;
+	}
+
+	std::string cl = "relion_display  --i " + fn_img + " --scale " + floatToString(ori_scale);
+	cl += " --sigma_contrast " + floatToString(sigma_contrast);
+	cl += " --black " + floatToString(minval);
+	cl += " --white " + floatToString(maxval);
+	cl += " --angpix " + floatToString(selected_angpix);
+	cl += " --show_scale_bar --scale_bar_length " + floatToString(scale_bar_length);
+	cl += " --scale_bar_position " + std::string(scaleBarPositionToString(scale_bar_position));
+	if (ZSIZE(img()) > 1)
+	{
+		if (!show_z && !show_y && !show_x)
+		{
+			fl_message("Cannot show combined 3D sections because X, Y and Z are all hidden.");
+			return;
+		}
+		cl += " --show_3d_sections";
+		cl += " --central_z_thickness " + floatToString(central_z_thickness);
+		if (!show_z) cl += " --hide_z";
+		if (!show_y) cl += " --hide_y";
+		if (!show_x) cl += " --hide_x";
+	}
+
+	switch (colour_scheme)
+	{
+	case (BLACKGREYREDSCALE): { cl += " --colour_fire"; break; }
+	case (BLUEGREYWHITESCALE): { cl += " --colour_ice"; break; }
+	case (BLUEGREYREDSCALE): { cl += " --colour_fire-n-ice"; break; }
+	case (RAINBOWSCALE): { cl += " --colour_rainbow"; break; }
+	case (CYANBLACKYELLOWSCALE): { cl += " --colour_difference"; break; }
+	}
+	cl += " &";
+
+	int res = system(cl.c_str());
 }
 
 void basisViewerCanvas::saveImage(int ipos)
@@ -1925,7 +2121,9 @@ void multiViewerCanvas::showSelectedParticles(int save_selected)
 	if (nparts > 0)
 	{
 		basisViewerWindow win(MULTIVIEW_WINDOW_WIDTH, MULTIVIEW_WINDOW_HEIGHT, "Particles in the selected classes");
-		win.fillCanvas(MULTIVIEWER, MDpart, obsModel, EMDL_IMAGE_NAME, text_label, do_read_whole_stacks, do_apply_orient, 0., 0., 0., boxes[0]->scale, ori_scale, ncol, multi_max_nr_images);
+		win.fillCanvas(MULTIVIEWER, MDpart, obsModel, EMDL_IMAGE_NAME, text_label, do_read_whole_stacks, do_apply_orient, 0., 0., 0., boxes[0]->scale, ori_scale, ncol, multi_max_nr_images,
+		               -1., -1., false, NULL, -1, false, false, NULL, false, "", "", -1, 0., true, true, true,
+		               false, scale_bar_length, scale_bar_angpix, scale_bar_position);
 	}
 	else
 		std::cout <<" No classes selected. First select one or more classes..." << std::endl;
@@ -2151,6 +2349,7 @@ int singleViewerCanvas::handle(int ev)
 	{
 		Fl_Menu_Item rclick_menu[] = {
 			{ "Show metadata" },
+			{ "Show image with scale bar" },
 			{ "Save image as PNG" },
 			{ "Help" },
 			{ "Quit" },
@@ -2161,6 +2360,16 @@ int singleViewerCanvas::handle(int ev)
 			return 0;
 		if ( strcmp(m->label(), "Show metadata") == 0 )
 			printMetaData();
+		else if ( strcmp(m->label(), "Show image with scale bar") == 0 )
+		{
+			if (scale_bar_length <= 0. || scale_bar_angpix <= 0.)
+				fl_message("Cannot show the scale bar: check its length and the image pixel size.");
+			else
+			{
+				boxes[0]->setScaleBar(scale_bar_length, scale_bar_angpix, scale_bar_position);
+				boxes[0]->redraw();
+			}
+		}
 		else if ( strcmp(m->label(), "Save image as PNG") == 0 )
 			saveImage();
 		else if ( strcmp(m->label(), "Help") == 0 )
@@ -2922,7 +3131,7 @@ int displayerGuiWindow::fill(FileName &_fn_in)
 	y += ROUND(1.5*ystep);
 
 	// General box
-	Fl_Box *box1 = new Fl_Box(15, y-ROUND(0.25*ystep), width - 15, ROUND(2.5*ystep), "");
+	Fl_Box *box1 = new Fl_Box(15, y-ROUND(0.25*ystep), width - 15, ROUND(3.5*ystep), "");
 	box1->color(GUI_BACKGROUND_COLOR);
 	box1->box(FL_DOWN_BOX);
 
@@ -2952,6 +3161,19 @@ int displayerGuiWindow::fill(FileName &_fn_in)
 	colour_scheme_choice->add("difference", 0, 0,0, FL_MENU_VALUE);
 	colour_scheme_choice->picked(colour_scheme_choice->menu());
 	colour_scheme_choice->color(GUI_INPUT_COLOR);
+	y += ystep;
+
+	scale_bar_length_input = new Fl_Input(x, y, inputwidth, height, "Scale bar length (A):");
+	scale_bar_length_input->value("100");
+	scale_bar_length_input->color(GUI_INPUT_COLOR);
+
+	scale_bar_position_choice = new Fl_Choice(335, y, 135, height, "Bar position:");
+	scale_bar_position_choice->add("bottom-left", 0, 0, 0, FL_MENU_VALUE);
+	scale_bar_position_choice->add("bottom-right", 0, 0, 0, FL_MENU_VALUE);
+	scale_bar_position_choice->add("top-left", 0, 0, 0, FL_MENU_VALUE);
+	scale_bar_position_choice->add("top-right", 0, 0, 0, FL_MENU_VALUE);
+	scale_bar_position_choice->picked(scale_bar_position_choice->menu());
+	scale_bar_position_choice->color(GUI_INPUT_COLOR);
 
 	y += ROUND(1.75*ystep);
 
@@ -3120,6 +3342,10 @@ void displayerGuiWindow::readLastSettings()
 			colour_scheme_choice->value(textToInteger(value));
 		else if (label == sigma_contrast_input->label())
 			sigma_contrast_input->value(value.c_str());
+		else if (label == scale_bar_length_input->label())
+			scale_bar_length_input->value(value.c_str());
+		else if (label == scale_bar_position_choice->label())
+			scale_bar_position_choice->value(textToInteger(value));
 		else if (is_multi && label == col_input->label())
 			col_input->value(value.c_str());
 		else if (is_multi && label == ori_scale_input->label())
@@ -3155,6 +3381,8 @@ void displayerGuiWindow::writeLastSettings()
 	fh << white_input->label() << " = " << white_input->value() << std::endl;
 	fh << colour_scheme_choice->label() << " = " << colour_scheme_choice->value() << std::endl;
 	fh << sigma_contrast_input->label() << " = " << sigma_contrast_input->value() << std::endl;
+	fh << scale_bar_length_input->label() << " = " << scale_bar_length_input->value() << std::endl;
+	fh << scale_bar_position_choice->label() << " = " << scale_bar_position_choice->value() << std::endl;
 	if (is_multi)
 	{
 		fh << col_input->label() << " = " << col_input->value() << std::endl;
@@ -3194,6 +3422,8 @@ void displayerGuiWindow::cb_display_i()
 	cl += " --black " + (std::string)black_input->value();
 	cl += " --white " + (std::string)white_input->value();
 	cl += " --sigma_contrast " + (std::string)sigma_contrast_input->value();
+	cl += " --scale_bar_length " + (std::string)scale_bar_length_input->value();
+	cl += " --scale_bar_position " + (std::string)scale_bar_position_choice->mvalue()->label();
 
 	// Get the colour scheme
 	const Fl_Menu_Item* m3 = colour_scheme_choice->mvalue();
@@ -3385,6 +3615,14 @@ void Displayer::read(int argc, char **argv)
 	else if (parser.checkOption("--colour_difference", "Show images in cyan-blue-black-red-yellow colour scheme (for difference images)?")) colour_scheme = CYANBLACKYELLOWSCALE;
 	else colour_scheme = GREYSCALE;
 	do_colourbar = parser.checkOption("--colour_bar", "Show colourbar image?");
+	show_scale_bar = parser.checkOption("--show_scale_bar", "Show a physical scale bar overlay");
+	show_3d_sections = parser.checkOption("--show_3d_sections", "Show a 3D map as combined central X/Y/Z sections");
+	scale_bar_length = textToFloat(parser.getOption("--scale_bar_length", "Scale bar length in Angstrom", "100"));
+	std::string scale_bar_position_string = parser.getOption("--scale_bar_position", "Scale bar position: bottom-left, bottom-right, top-left or top-right", "bottom-left");
+	if (scale_bar_position_string != "bottom-left" && scale_bar_position_string != "bottom-right" &&
+	    scale_bar_position_string != "top-left" && scale_bar_position_string != "top-right")
+		REPORT_ERROR("Invalid --scale_bar_position: " + scale_bar_position_string);
+	scale_bar_position = stringToScaleBarPosition(scale_bar_position_string);
 	do_ignore_optics = parser.checkOption("--ignore_optics", "Ignore information about optics groups in input STAR file?");
 
 	int disp_section  = parser.addSection("Multiviewer options");
@@ -3544,6 +3782,8 @@ void Displayer::initialise()
 
 	if (show_fourier_amplitudes && show_fourier_phase_angles)
 		REPORT_ERROR("Displayer::initialise ERROR: cannot display Fourier amplitudes and phase angles at the same time!");
+	if (show_scale_bar && scale_bar_length <= 0.)
+		REPORT_ERROR("Displayer::initialise ERROR: --scale_bar_length must be larger than zero.");
 	if (show_fourier_amplitudes || show_fourier_phase_angles)
 	{
 		if (do_pick || do_pick_startend || do_pick_lines)
@@ -3584,7 +3824,7 @@ int Displayer::runGui()
 	}
 
 	// make a bigger window for STAR files...
-	int windowheight = fn_in.isStarFile() ? 350 : 300;
+	int windowheight = fn_in.isStarFile() ? 410 : 330;
 
 	displayerGuiWindow win(500, windowheight, "Relion display GUI");
 	win.is_class = false;
@@ -3810,17 +4050,33 @@ void Displayer::run()
 		win.fillCanvas(MULTIVIEWER, MDin, &obsModel, display_label, text_label, do_read_whole_stacks, do_apply_orient, minval, maxval, sigma_contrast, scale, ori_scale, ncol,
 				max_nr_images,  lowpass, highpass, do_class, &MDdata, nr_regroups, do_recenter, fn_in.contains("_data.star"), &MDgroups,
 				do_allow_save, fn_selected_imgs, fn_selected_parts, max_nr_parts_per_class, central_z_thickness,
-				show_z, show_y, show_x);
+				show_z, show_y, show_x, show_scale_bar, scale_bar_length, angpix, scale_bar_position);
 	}
 	else
 	{
 		// Attempt to read a single-file image
 		Image<RFLOAT> img;
 		img.read(fn_in, false); // dont read data yet: only header to get size
+		RFLOAT display_angpix = (angpix > 0.) ? angpix : img.samplingRateX();
 
 		MDin.clear();
+		// A 3D class opened from the context menu should retain the combined
+		// central-section presentation of the parent class viewer.
+		if (show_3d_sections && ZSIZE(img()) > 1)
+		{
+			if (!show_z && !show_y && !show_x)
+				REPORT_ERROR("Displayer::run() ERROR: cannot hide all three central sections.");
+			img.read(fn_in);
+			int panel_size = XMIPP_MAX(XSIZE(img()), XMIPP_MAX(YSIZE(img()), ZSIZE(img())));
+			if (panel_size % 2 != 0) panel_size++;
+			int nr_sections = (show_z ? 1 : 0) + (show_y ? 1 : 0) + (show_x ? 1 : 0);
+			basisViewerWindow win(CEIL(scale * nr_sections * panel_size), CEIL(scale * panel_size), fn_in.c_str());
+			win.fillSingleViewerCanvas(img(), minval, maxval, sigma_contrast, scale,
+			                           show_scale_bar, scale_bar_length, display_angpix, scale_bar_position,
+			                           central_z_thickness, show_z, show_y, show_x);
+		}
 		// display stacks
-		if (NSIZE(img()) > 1)
+		else if (NSIZE(img()) > 1)
 		{
 			for (int n = 0; n < NSIZE(img()); n++)
 			{
@@ -3831,7 +4087,9 @@ void Displayer::run()
 				MDin.setValue(EMDL_IMAGE_OPTICS_GROUP, 1);
 			}
 			basisViewerWindow win(MULTIVIEW_WINDOW_WIDTH, MULTIVIEW_WINDOW_HEIGHT, fn_in.c_str());
-			win.fillCanvas(MULTIVIEWER, MDin, &obsModel, EMDL_IMAGE_NAME, text_label, true, false, minval, maxval, sigma_contrast, scale, ori_scale, ncol, max_nr_images, lowpass, highpass);
+			win.fillCanvas(MULTIVIEWER, MDin, &obsModel, EMDL_IMAGE_NAME, text_label, true, false, minval, maxval, sigma_contrast, scale, ori_scale, ncol, max_nr_images, lowpass, highpass,
+			               false, NULL, -1, false, false, NULL, false, "", "", -1, 0., true, true, true,
+			               show_scale_bar, scale_bar_length, display_angpix, scale_bar_position);
 		}
 		else if (ZSIZE(img()) > 1)
 		{
@@ -3861,7 +4119,9 @@ void Displayer::run()
 			}
 
 			basisViewerWindow win(MULTIVIEW_WINDOW_WIDTH, MULTIVIEW_WINDOW_HEIGHT, fn_in.c_str());
-			win.fillCanvas(MULTIVIEWER, MDin, &obsModel, EMDL_IMAGE_NAME, text_label, true, false, minval, maxval, sigma_contrast, scale, ori_scale, ncol, max_nr_images, lowpass, highpass);
+			win.fillCanvas(MULTIVIEWER, MDin, &obsModel, EMDL_IMAGE_NAME, text_label, true, false, minval, maxval, sigma_contrast, scale, ori_scale, ncol, max_nr_images, lowpass, highpass,
+			               false, NULL, -1, false, false, NULL, false, "", "", -1, 0., true, true, true,
+			               show_scale_bar, scale_bar_length, display_angpix, scale_bar_position);
 		}
 		else
 		{
@@ -3882,16 +4142,16 @@ void Displayer::run()
 			if (show_fourier_amplitudes)
 			{
 				amplitudeOrPhaseMap(img(), img(), AMPLITUDE_MAP);
-				win.fillSingleViewerCanvas(img(), minval, maxval, sigma_contrast, scale);
+				win.fillSingleViewerCanvas(img(), minval, maxval, sigma_contrast, scale, show_scale_bar, scale_bar_length, display_angpix, scale_bar_position);
 			}
 			else if (show_fourier_phase_angles)
 			{
 				amplitudeOrPhaseMap(img(), img(), PHASE_MAP);
-				win.fillSingleViewerCanvas(img(), -180., 180., 0., scale);
+				win.fillSingleViewerCanvas(img(), -180., 180., 0., scale, show_scale_bar, scale_bar_length, display_angpix, scale_bar_position);
 			}
 			else
 			{
-				win.fillSingleViewerCanvas(img(), minval, maxval, sigma_contrast, scale);
+				win.fillSingleViewerCanvas(img(), minval, maxval, sigma_contrast, scale, show_scale_bar, scale_bar_length, display_angpix, scale_bar_position);
 			}
 		}
 	}
