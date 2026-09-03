@@ -70,9 +70,18 @@
 enum ScaleBarPosition
 {
 	SCALE_BAR_BOTTOM_LEFT = 0,
+	SCALE_BAR_BOTTOM_CENTER,
 	SCALE_BAR_BOTTOM_RIGHT,
 	SCALE_BAR_TOP_LEFT,
+	SCALE_BAR_TOP_CENTER,
 	SCALE_BAR_TOP_RIGHT
+};
+
+enum ScaleBarUnit
+{
+	SCALE_BAR_ANGSTROM = 0,
+	SCALE_BAR_NANOMETER,
+	SCALE_BAR_MICROMETER
 };
 
 static bool has_dragged;
@@ -124,6 +133,7 @@ public:
 	RFLOAT scale_bar_length;
 	RFLOAT scale_bar_angpix;
 	ScaleBarPosition scale_bar_position;
+	ScaleBarUnit scale_bar_unit;
 
 	// For getting back close the original image values from the uchar ones...
 	RFLOAT minval;
@@ -131,7 +141,7 @@ public:
 	RFLOAT scale;
 
 	// Constructor with an image and its metadata
-	DisplayBox(int X, int Y, int W, int H, const char *L=0) : Fl_Box(X,Y,W,H,L) { img_data = NULL; img_label = ""; MDimg.clear(); is_3d_volume = false; panel_width = 0; panel_height = 0; nr_panels = 0; show_z = show_y = show_x = true; show_scale_bar = false; scale_bar_length = 0.; scale_bar_angpix = 0.; scale_bar_position = SCALE_BAR_BOTTOM_LEFT; }
+	DisplayBox(int X, int Y, int W, int H, const char *L=0) : Fl_Box(X,Y,W,H,L) { img_data = NULL; img_label = ""; MDimg.clear(); is_3d_volume = false; panel_width = 0; panel_height = 0; nr_panels = 0; show_z = show_y = show_x = true; show_scale_bar = false; scale_bar_length = 0.; scale_bar_angpix = 0.; scale_bar_position = SCALE_BAR_BOTTOM_LEFT; scale_bar_unit = SCALE_BAR_ANGSTROM; }
 
 	void setData(MultidimArray<RFLOAT> &img, MetaDataContainer *MDCin, int ipos, RFLOAT minval, RFLOAT maxval,
 	             RFLOAT _scale, bool do_relion_scale = false, RFLOAT helical_rise_pixels = 0.,
@@ -143,7 +153,8 @@ public:
     void setData(MultidimArray<RFLOAT> &img, MultidimArray<RFLOAT> &mask_img, int _ipos,
                          RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale, bool do_relion_scale);
 
-	void setScaleBar(RFLOAT length, RFLOAT angpix, ScaleBarPosition position);
+	void setScaleBar(RFLOAT length, ScaleBarUnit unit, RFLOAT angpix, ScaleBarPosition position);
+	void drawScaleBar(int xpos, int ypos);
 
 	// Destructor
 	~DisplayBox()
@@ -191,10 +202,10 @@ public:
 	               RFLOAT central_z_thickness = 0.,
 	               bool _show_z = true, bool _show_y = true, bool _show_x = true,
 	               bool _show_scale_bar = false, RFLOAT _scale_bar_length = 0., RFLOAT _scale_bar_angpix = 0.,
-	               ScaleBarPosition _scale_bar_position = SCALE_BAR_BOTTOM_LEFT);
+	               ScaleBarPosition _scale_bar_position = SCALE_BAR_BOTTOM_LEFT, ScaleBarUnit _scale_bar_unit = SCALE_BAR_ANGSTROM);
 	int fillSingleViewerCanvas(MultidimArray<RFLOAT> image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale,
 	                           bool _show_scale_bar = false, RFLOAT _scale_bar_length = 0., RFLOAT _scale_bar_angpix = 0.,
-	                           ScaleBarPosition _scale_bar_position = SCALE_BAR_BOTTOM_LEFT,
+	                           ScaleBarPosition _scale_bar_position = SCALE_BAR_BOTTOM_LEFT, ScaleBarUnit _scale_bar_unit = SCALE_BAR_ANGSTROM,
 	                           RFLOAT _central_z_thickness = 0., bool _show_z = true, bool _show_y = true, bool _show_x = true);
 	int fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _coord_scale,
 	                           int _particle_radius, bool do_startend = false, bool do_lines = false, FileName _fn_coords = "",
@@ -211,6 +222,7 @@ protected:
 
 	void draw();
 	void saveImage(int ipos=0);
+	void editScaleBar(DisplayBox *box = NULL);
 
 public:
 
@@ -225,6 +237,7 @@ public:
 	// Scale bar settings supplied by the pre-display control panel
 	RFLOAT scale_bar_length, scale_bar_angpix;
 	ScaleBarPosition scale_bar_position;
+	ScaleBarUnit scale_bar_unit;
 
 	// To get positions in scrolled canvas...
 	Fl_Scroll *scroll;
@@ -250,6 +263,7 @@ public:
 		scale_bar_length = 0.;
 		scale_bar_angpix = 0.;
 		scale_bar_position = SCALE_BAR_BOTTOM_LEFT;
+		scale_bar_unit = SCALE_BAR_ANGSTROM;
 	}
 
 	void SetScroll(Fl_Scroll *val) { scroll = val; }
@@ -392,6 +406,24 @@ public:
 		T->hide();
 	}
 
+};
+
+class popupScaleBarWindow : public Fl_Window
+{
+	Fl_Float_Input *length_input;
+	Fl_Choice *unit_choice, *position_choice;
+
+public:
+	bool accepted;
+	RFLOAT length;
+	ScaleBarUnit unit;
+	ScaleBarPosition position;
+
+	popupScaleBarWindow(int W, int H, const char* title=0) : Fl_Window(W, H, title), accepted(false) {}
+	int fill(RFLOAT current_length, ScaleBarUnit current_unit, ScaleBarPosition current_position);
+
+	static void cb_apply(Fl_Widget*, void*);
+	static void cb_cancel(Fl_Widget*, void*);
 };
 
 class singleViewerCanvas : public basisViewerCanvas
@@ -604,7 +636,7 @@ public:
 	Fl_Check_Button *sort_button, *reverse_sort_button, *apply_orient_button, *display_label_button;
 	Fl_Check_Button *show_z_button, *show_y_button, *show_x_button;
 	Fl_Input *central_z_thickness_input;
-	Fl_Choice *display_choice, *sort_choice, *colour_scheme_choice, *scale_bar_position_choice;
+	Fl_Choice *display_choice, *sort_choice, *colour_scheme_choice, *scale_bar_position_choice, *scale_bar_unit_choice;
 
 	// Constructor with w x h size of the window and a title
 	displayerGuiWindow(int W, int H, const char* title=0): Fl_Window(W, H, title),	sort_button(NULL),
@@ -755,6 +787,7 @@ public:
 	bool show_scale_bar;
 	RFLOAT scale_bar_length;
 	ScaleBarPosition scale_bar_position;
+	ScaleBarUnit scale_bar_unit;
 
 	// Show a 3D map as the same combined central sections used for 3D classes
 	bool show_3d_sections;
