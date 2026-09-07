@@ -3794,6 +3794,8 @@ void accDoExpectationOneParticle(MlClass *myInstance, unsigned long part_id_sort
 	// Decide which classes to integrate over (for random class assignment in 1st iteration)
 	sp.iclass_min = 0;
 	sp.iclass_max = baseMLO->mymodel.nr_classes - 1;
+	if (baseMLO->do_fix_classes)
+		sp.iclass_min = sp.iclass_max = baseMLO->fixedClassFromMetadata(part_id_sorted - baseMLO->exp_my_first_part_id);
 	// low-pass filter again and generate the seeds
 	if (baseMLO->do_generate_seeds)
 	{

@@ -565,6 +565,9 @@ public:
 	/* Flag to indicate orientational (i.e. rotational AND translational) searches will be skipped */
 	bool do_skip_align;
 
+	/* Keep every particle in the class supplied by its input data STAR */
+	bool do_fix_classes;
+
 	/* Flag to indicate rotational searches will be skipped */
 	bool do_skip_rotate;
 
@@ -878,6 +881,7 @@ public:
             intact_ctf_first_peak(0),
             do_join_random_halves(0),
             do_skip_align(0),
+            do_fix_classes(0),
             do_calculate_initial_sigma_noise(0),
             fix_sigma_offset(0),
             do_firstiter_cc(0),
@@ -991,6 +995,9 @@ public:
 
 	/// Interpret command line
 	void read(int argc, char **argv, int rank = 0);
+
+	/// Return the zero-based fixed class stored in the current expectation metadata pool
+	int fixedClassFromMetadata(long int metadata_offset) const;
 
 	/// Interpret command line for the initial start of a run
 	void parseInitial(int argc, char **argv);

@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include <unistd.h>
+#include <sys/stat.h>
 
 static bool generateCommand(RelionJob &job, std::string &command)
 {
@@ -370,6 +371,76 @@ TEST_CASE("Pipeline control aggregates replica completion with status precedence
 	pipeline_control_outputname = old_outputname;
 	pipeline_control_task_id = old_task_id;
 	pipeline_control_task_count = old_task_count;
+}
+
+// ---------------------------------------------------------------------------
+// Class2D consensus
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Class2DConsensus: generates preparation and one frozen-class refinement", "[pipeline][consensus]")
+{
+	const std::string directory = "class2d_consensus_source_" + integerToString((int)std::clock()) + "/";
+	REQUIRE(::mkdir(directory.c_str(), 0700) == 0);
+	RelionJob source = makeClass2DJob();
+	source.joboptions["nr_parallel_runs"].setString("3");
+	source.joboptions["nr_classes"].setString("7");
+	source.joboptions["psi_sampling"].setString("5");
+	source.write(directory);
+
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_CLASS2D_CONSENSUS);
+	job.joboptions["fn_optimiser"].setString(directory + "run001_it025_optimiser.star");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("2");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+	REQUIRE(generateCommands(job, commands, final_command, error_message));
+	REQUIRE(commands.size() == 2);
+	REQUIRE(commands[0].find("relion_class2d_consensus") != std::string::npos);
+	REQUIRE(commands[0].find("--nr_runs 3") != std::string::npos);
+	REQUIRE(commands[0].find("--pipeline_control") == std::string::npos);
+	REQUIRE(commands[1].find("relion_refine") != std::string::npos);
+	REQUIRE(commands[1].find("--iter 1") != std::string::npos);
+	REQUIRE(commands[1].find("--fix_classes") != std::string::npos);
+	REQUIRE(commands[1].find("--K 7") != std::string::npos);
+	REQUIRE(commands[1].find("--psi_step 10") != std::string::npos);
+	REQUIRE(commands[1].find("--pipeline_control") != std::string::npos);
+	REQUIRE(final_command.find(" && ") != std::string::npos);
+	REQUIRE(job.inputNodes.size() == 3);
+	REQUIRE(job.inputNodes[2].name.find("run003_it025_optimiser.star") != std::string::npos);
+	REQUIRE(job.outputNodes.size() == 3);
+	REQUIRE(job.outputNodes[0].name.find("consensus_data.star") != std::string::npos);
+	REQUIRE(job.outputNodes[2].name.find("run_it001_optimiser.star") != std::string::npos);
+
+	std::remove((directory + "job.star").c_str());
+	::rmdir(directory.c_str());
+}
+
+TEST_CASE("Class2DConsensus: rejects reserved refinement overrides", "[pipeline][consensus]")
+{
+	const std::string directory = "class2d_consensus_reserved_" + integerToString((int)std::clock()) + "/";
+	REQUIRE(::mkdir(directory.c_str(), 0700) == 0);
+	RelionJob source = makeClass2DJob();
+	source.joboptions["nr_parallel_runs"].setString("2");
+	source.joboptions["nr_classes"].setString("3");
+	source.write(directory);
+
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_CLASS2D_CONSENSUS);
+	job.joboptions["fn_optimiser"].setString(directory + "run001_it025_optimiser.star");
+	job.joboptions["other_args"].setString("--iter 4");
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+	REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
+	REQUIRE(error_message.find("--iter") != std::string::npos);
+
+	std::remove((directory + "job.star").c_str());
+	::rmdir(directory.c_str());
 }
 
 // ---------------------------------------------------------------------------

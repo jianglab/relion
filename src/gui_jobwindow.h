@@ -122,6 +122,7 @@ private:
 	void initialiseSelectWindow();
 	void initialiseSelect2DWindow();
 	void initialiseCoOccurrenceWindow();
+	void initialiseClass2DConsensusWindow();
 	void initialiseClass2DWindow();
 	void initialiseInimodelWindow();
 	void initialiseClass3DWindow();

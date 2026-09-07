@@ -1205,6 +1205,7 @@ bool PipeLine::markAsFinishedJob(int this_job, std::string &error_message, bool 
 
 	// For relion_refine jobs, add last iteration optimiser.star, data.star, model.star and class???.mrc to the pipeline
 	if (processList[this_job].type == PROC_2DCLASS ||
+		processList[this_job].type == PROC_CLASS2D_CONSENSUS ||
 		processList[this_job].type == PROC_3DCLASS ||
 		processList[this_job].type == PROC_3DAUTO  ||
 		processList[this_job].type == PROC_INIMODEL )
@@ -1544,6 +1545,7 @@ bool PipeLine::cleanupJob(int this_job, bool do_harsh, std::string &error_messag
 		}
 	} // end if extract
 	else if (processList[this_job].type == PROC_2DCLASS ||
+	         processList[this_job].type == PROC_CLASS2D_CONSENSUS ||
 	         processList[this_job].type == PROC_3DCLASS ||
 	         processList[this_job].type == PROC_3DAUTO ||
 	         processList[this_job].type == PROC_INIMODEL ||

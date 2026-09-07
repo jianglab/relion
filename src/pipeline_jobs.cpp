@@ -67,6 +67,20 @@ static std::vector<std::string> splitPreservingEmpty(const std::string &text, ch
 	return result;
 }
 
+static bool containsCommandLineOption(const std::string &arguments, const std::string &option)
+{
+	std::string::size_type position = 0;
+	while ((position = arguments.find(option, position)) != std::string::npos)
+	{
+		const bool valid_before = position == 0 || arguments[position - 1] == ' ' || arguments[position - 1] == '\t';
+		const std::string::size_type after = position + option.size();
+		const bool valid_after = after == arguments.size() || arguments[after] == ' ' || arguments[after] == '\t' || arguments[after] == '=';
+		if (valid_before && valid_after) return true;
+		position = after;
+	}
+	return false;
+}
+
 static std::string getCurrentProjectDirectoryName()
 {
 	char cwd[4096];
@@ -623,6 +637,7 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		    type != PROC_EXTRACT &&
 		    type != PROC_CLASSSELECT &&
 		    type != PROC_SELECT2D &&
+		    type != PROC_CLASS2D_CONSENSUS &&
 		    type != PROC_2DCLASS &&
 		    type != PROC_3DCLASS &&
 		    type != PROC_3DAUTO &&
@@ -703,8 +718,12 @@ void RelionJob::write(std::string fn)
 }
 
 bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string outputname, std::vector<std::string> commands, std::string &error_message,
-                                        int nr_parallel_runs)
+                                        int nr_parallel_runs, bool stop_on_failure)
 {
+	if (stop_on_failure)
+		for (size_t command = 0; command + 1 < commands.size(); ++command)
+			commands[command] += " || exit $?";
+
 	// Open the standard job submission file
 	FileName fn_qsub = joboptions["qsubscript"].getString();
 
@@ -890,7 +909,7 @@ void RelionJob::initialisePipeline(std::string &outputname, int job_counter)
 
 bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::string> &commands,
                                     std::string &final_command, bool do_makedir, std::string &error_message,
-                                    bool do_dash_for_python, int nr_parallel_runs)
+                                    bool do_dash_for_python, int nr_parallel_runs, bool pipeline_control_last_only)
 {
 	int nr_mpi = (joboptions.find("nr_mpi") != joboptions.end()) ? joboptions["nr_mpi"].getNumber(error_message) : 1;
 	if (error_message != "") return false;
@@ -919,7 +938,8 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 	// Add the --pipeline_control argument to all relion_ programs
 	for (int icom = 0; icom < commands.size(); icom++)
 	{
-		if ((commands[icom]).find("relion_") != std::string::npos)
+		if ((!pipeline_control_last_only || icom == commands.size() - 1) &&
+			(commands[icom]).find("relion_") != std::string::npos)
 		{
 			if (do_dash_for_python)
 				commands[icom] += " --pipeline-control " + outputname;
@@ -937,7 +957,7 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 		// Make the submission script and write it to disc
 		std::string output_script = outputname + "run_submit.script";
 
-		if (!saveJobSubmissionScript(output_script, outputname, commands, error_message, nr_parallel_runs))
+		if (!saveJobSubmissionScript(output_script, outputname, commands, error_message, nr_parallel_runs, pipeline_control_last_only))
 			return false;
 		final_command = joboptions["qsub"].getString();
 		if (nr_parallel_runs > 1)
@@ -1074,6 +1094,11 @@ void RelionJob::initialise(int _job_type)
 	{
 		has_mpi = has_thread = false;
 		initialiseCoOccurrenceJob();
+	}
+	else if (type == PROC_CLASS2D_CONSENSUS)
+	{
+		has_mpi = has_thread = true;
+		initialiseClass2DConsensusJob();
 	}
 	else if (type == PROC_2DCLASS)
 	{
@@ -1384,6 +1409,10 @@ bool RelionJob::getCommands(std::string &outputname, std::vector<std::string> &c
 	else if (type == PROC_COOCCURRENCE)
 	{
 		result = getCommandsCoOccurrenceJob(outputname, commands, final_command, do_makedir, job_counter, error_message);
+	}
+	else if (type == PROC_CLASS2D_CONSENSUS)
+	{
+		result = getCommandsClass2DConsensusJob(outputname, commands, final_command, do_makedir, job_counter, error_message);
 	}
 	else if (type == PROC_2DCLASS)
 	{
@@ -3543,6 +3572,154 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 	commands.push_back(ff_command);
 
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
+}
+
+void RelionJob::initialiseClass2DConsensusJob()
+{
+	hidden_name = ".gui_class2d_consensus";
+	joboptions["fn_optimiser"] = JobOption("Parallel Class2D optimiser:", LABEL_CLASS2D_OPT, 1, "", "STAR Files (*_optimiser.star)",
+		"Select any runNNN_itXXX_optimiser.star from a completed parallel Class2D job. All sibling replicas at the same iteration will be included automatically.");
+
+	joboptions["nr_pool"] = JobOption("Number of pooled particles:", 3, 1, 16, 1, "Number of particles read together per refinement thread.");
+	joboptions["do_parallel_discio"] = JobOption("Use parallel disc I/O?", true, "Let all MPI followers read particle images directly.");
+	joboptions["do_preread_images"] = JobOption("Pre-read all particles into RAM?", false, "Read particle images into memory before the frozen-class refinement.");
+	const char *default_scratch = getenv("RELION_SCRATCH_DIR");
+	if (default_scratch == NULL) default_scratch = DEFAULTSCRATCHDIR;
+	joboptions["scratch_dir"] = JobOption("Copy particles to scratch directory:", std::string(default_scratch), "Use fast local storage for the frozen-class refinement.");
+	const char *default_cache = getenv("RELION_CACHE_DIRECTORY");
+	if (default_cache == NULL) default_cache = "";
+	joboptions["cache_dir"] = JobOption("Local SSD cache directory:", std::string(default_cache), "Persistent particle-stack cache used by the frozen-class refinement.");
+	joboptions["cache_copy_threads"] = JobOption("Cache copy threads:", std::string("4"), "Number of parallel cache copy threads.");
+	joboptions["do_combine_thru_disc"] = JobOption("Combine iterations through disc?", false, "Combine MPI weighted sums through disk instead of the network.");
+	joboptions["use_gpu"] = JobOption("Use GPU acceleration?", false, "Use the configured accelerator for the frozen-class refinement.");
+	joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string(""), "MPI processes are separated by ':' and threads by ','. Leave empty for automatic mapping.");
+}
+
+bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vector<std::string> &commands,
+		std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)
+{
+	commands.clear();
+	initialisePipeline(outputname, job_counter);
+	const std::string optimiser = joboptions["fn_optimiser"].getString();
+	if (optimiser.empty())
+	{
+		error_message = "ERROR: provide an optimiser from a parallel Class2D job.";
+		return false;
+	}
+	const std::string::size_type slash = optimiser.find_last_of("/\\");
+	const std::string directory = slash == std::string::npos ? "" : optimiser.substr(0, slash + 1);
+	const std::string basename = slash == std::string::npos ? optimiser : optimiser.substr(slash + 1);
+	const std::string::size_type iteration_pos = basename.find("_it");
+	const std::string optimiser_suffix = "_optimiser.star";
+	const std::string::size_type optimiser_pos = basename.find(optimiser_suffix);
+	if (basename.size() < 6 || basename.substr(0, 3) != "run" || iteration_pos != 6 ||
+		optimiser_pos == std::string::npos || optimiser_pos <= iteration_pos + 3 ||
+		optimiser_pos + optimiser_suffix.size() != basename.size())
+	{
+		error_message = "ERROR: expected a runNNN_itXXX_optimiser.star input.";
+		return false;
+	}
+	long long selected_run = 0, selected_iteration = 0;
+	if (!parseStrictInteger(basename.substr(3, 3), selected_run) || selected_run < 1 ||
+		!parseStrictInteger(basename.substr(iteration_pos + 3, optimiser_pos - iteration_pos - 3), selected_iteration) || selected_iteration < 1)
+	{
+		error_message = "ERROR: invalid replica or iteration number in optimiser filename.";
+		return false;
+	}
+
+	RelionJob source_job;
+	source_job.clear();
+	bool source_continue = false;
+	if (!source_job.read(directory + "job.star", source_continue, true) || source_job.type != PROC_2DCLASS)
+	{
+		error_message = "ERROR: cannot read the source parallel Class2D job.star.";
+		return false;
+	}
+	long long nr_runs_value = 0;
+	if (!parseStrictInteger(source_job.joboptions["nr_parallel_runs"].getString(), nr_runs_value) || nr_runs_value < 2 || nr_runs_value > 999)
+	{
+		error_message = "ERROR: source Class2D job does not contain at least two parallel replicas.";
+		return false;
+	}
+	if (selected_run > nr_runs_value)
+	{
+		error_message = "ERROR: selected optimiser run number exceeds the source replica count.";
+		return false;
+	}
+	const int nr_runs = (int)nr_runs_value;
+	const int nr_classes = (int)source_job.joboptions["nr_classes"].getNumber(error_message);
+	if (error_message != "" || nr_classes < 2) return false;
+
+	const std::string replica_suffix = basename.substr(6);
+	for (int run = 0; run < nr_runs; ++run)
+		inputNodes.push_back(Node(directory + "run" + integerToString(run + 1, 3) + replica_suffix,
+			joboptions["fn_optimiser"].node_type));
+	commands.push_back("`which relion_class2d_consensus` --i " + optimiser +
+		" --nr_runs " + integerToString(nr_runs) + " --o " + outputname + "consensus --j " + joboptions["nr_threads"].getString());
+
+	std::string refine = joboptions["nr_mpi"].getNumber(error_message) > 1 ? "`which relion_refine_mpi`" : "`which relion_refine`";
+	if (error_message != "") return false;
+	refine += " --i " + outputname + "consensus_data.star";
+	refine += " --ref " + outputname + "consensus_references.star";
+	refine += " --o " + outputname + "run --K " + integerToString(nr_classes);
+	refine += " --iter 1 --fix_classes --flatten_solvent --norm --scale --pad 2 --oversampling 1";
+
+	if (source_job.joboptions["do_ctf_correction"].getBoolean())
+	{
+		refine += " --ctf";
+		if (source_job.joboptions["ctf_intact_first_peak"].getBoolean()) refine += " --ctf_intact_first_peak";
+	}
+	refine += " --tau2_fudge " + source_job.joboptions["tau_fudge"].getString();
+	refine += " --particle_diameter " + source_job.joboptions["particle_diameter"].getString();
+	if (source_job.joboptions["do_zero_mask"].getBoolean()) refine += " --zero_mask";
+	if (source_job.joboptions["highres_limit"].getNumber(error_message) > 0)
+		refine += " --strict_highres_exp " + source_job.joboptions["highres_limit"].getString();
+	if (error_message != "") return false;
+	if (source_job.joboptions["do_center"].getBoolean()) refine += " --center_classes";
+	refine += " --psi_step " + floatToString(source_job.joboptions["psi_sampling"].getNumber(error_message) * 2.);
+	refine += " --offset_range " + source_job.joboptions["offset_range"].getString();
+	refine += " --offset_step " + floatToString(source_job.joboptions["offset_step"].getNumber(error_message) * 2.);
+	if (error_message != "") return false;
+	if (source_job.joboptions["allow_coarser"].getBoolean()) refine += " --allow_coarser_sampling";
+
+	if (source_job.joboptions["do_helix"].getBoolean())
+	{
+		label += ".helical";
+		refine += " --helical_outer_diameter " + source_job.joboptions["helical_tube_outer_diameter"].getString();
+		refine += " --no_init_blobs";
+		if (source_job.joboptions["do_bimodal_psi"].getBoolean()) refine += " --bimodal_psi";
+		refine += " --sigma_psi " + floatToString(source_job.joboptions["range_psi"].getNumber(error_message) / 3.);
+		if (source_job.joboptions["do_restrict_xoff"].getBoolean())
+			refine += " --helix --helical_rise_initial " + source_job.joboptions["helical_rise"].getString();
+		if (error_message != "") return false;
+	}
+
+	if (!joboptions["do_combine_thru_disc"].getBoolean()) refine += " --dont_combine_weights_via_disc";
+	if (!joboptions["do_parallel_discio"].getBoolean()) refine += " --no_parallel_disc_io";
+	if (joboptions["do_preread_images"].getBoolean()) refine += " --preread_images";
+	else if (!joboptions["scratch_dir"].getString().empty()) refine += " --scratch_dir " + joboptions["scratch_dir"].getString();
+	if (!joboptions["cache_dir"].getString().empty())
+		refine += " --cache_dir " + joboptions["cache_dir"].getString() + " --cache_copy_threads " + joboptions["cache_copy_threads"].getString();
+	refine += " --pool " + joboptions["nr_pool"].getString();
+	refine += " --j " + joboptions["nr_threads"].getString();
+	if (joboptions["use_gpu"].getBoolean()) refine += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";
+
+	const std::string other = joboptions["other_args"].getString();
+	const char *reserved[] = {"--i", "--ref", "--o", "--K", "--iter", "--continue", "--grad", "--fix_classes",
+		"--skip_align", "--skip_rotate", "--firstiter_cc", "--auto_refine", "--split_random_halves"};
+	for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); ++i)
+		if (containsCommandLineOption(other, reserved[i]))
+		{
+			error_message = "ERROR: Additional arguments may not override " + std::string(reserved[i]) + ".";
+			return false;
+		}
+	refine += " " + other;
+	commands.push_back(refine);
+
+	outputNodes.push_back(Node(outputname + "consensus_data.star", LABEL_CLASS2D_PARTS));
+	std::vector<Node> final_nodes = getOutputNodesRefine(outputname + "run", "Class2D", 1, nr_classes, 2, 1, false);
+	outputNodes.insert(outputNodes.end(), final_nodes.begin(), final_nodes.end());
+	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message, false, 1, true);
 }
 
 void RelionJob::initialiseClass2DJob()

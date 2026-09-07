@@ -73,3 +73,16 @@ TEST_CASE("MlOptimiser: exp_imgs guard with non-NULL prefetcher never clears", "
     bool should_clear = (false) && exp_imgs.empty();
     REQUIRE_FALSE(should_clear);
 }
+
+TEST_CASE("MlOptimiser: fixed classes are read from expectation metadata", "[ml_optimiser]")
+{
+	MlOptimiser optimiser;
+	optimiser.mymodel.nr_classes = 3;
+	optimiser.exp_metadata.resize(2, METADATA_LINE_LENGTH_BEFORE_BODIES);
+	DIRECT_A2D_ELEM(optimiser.exp_metadata, 0, METADATA_CLASS) = 1;
+	DIRECT_A2D_ELEM(optimiser.exp_metadata, 1, METADATA_CLASS) = 3;
+	REQUIRE(optimiser.fixedClassFromMetadata(0) == 0);
+	REQUIRE(optimiser.fixedClassFromMetadata(1) == 2);
+	DIRECT_A2D_ELEM(optimiser.exp_metadata, 1, METADATA_CLASS) = 4;
+	REQUIRE_THROWS(optimiser.fixedClassFromMetadata(1));
+}

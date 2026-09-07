@@ -126,6 +126,16 @@ void MlOptimiser::usage()
     parser.writeUsage(std::cout);
 }
 
+int MlOptimiser::fixedClassFromMetadata(long int metadata_offset) const
+{
+	if (metadata_offset < 0 || metadata_offset >= YSIZE(exp_metadata))
+		REPORT_ERROR("BUG: fixed class metadata offset is outside the current expectation pool");
+	const int class_number = ROUND(DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_CLASS));
+	if (class_number < 1 || class_number > mymodel.nr_classes)
+		REPORT_ERROR("ERROR: fixed rlnClassNumber is outside the input reference range");
+	return class_number - 1;
+}
+
 void MlOptimiser::read(int argc, char **argv, int rank)
 {
 //#define DEBUG_READ
@@ -425,6 +435,9 @@ void MlOptimiser::parseContinue(int argc, char **argv)
         do_skip_align = true;
     else
         do_skip_align = false; // do_skip_align should normally be false...
+
+	if (parser.checkOption("--fix_classes", "Keep every particle in its input class while refining orientations and translations?"))
+		do_fix_classes = true;
 
     if (parser.checkOption("--skip_rotate", "Skip rotational assignment (only translate and classify)?"))
         do_skip_rotate = true;
@@ -788,6 +801,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
         }
     }
     do_skip_align = parser.checkOption("--skip_align", "Skip orientational assignment (only classify)?");
+    do_fix_classes = parser.checkOption("--fix_classes", "Keep every particle in its input class while refining orientations and translations?");
     do_skip_rotate = parser.checkOption("--skip_rotate", "Skip rotational assignment (only translate and classify)?");
     do_bimodal_psi = parser.checkOption("--bimodal_psi", "Do bimodal searches of psi angle?"); // Oct07,2015 - Shaoda, bimodal psi
     do_skip_maximization = false;
@@ -1194,6 +1208,9 @@ void MlOptimiser::read(FileName fn_in, int rank, bool do_prevent_preread)
         !MD.getValue(EMDL_OPTIMISER_MAX_NR_POOL, nr_pool)  )
         REPORT_ERROR("MlOptimiser::readStar: incorrect optimiser_general table");
 
+	if (!MD.getValue(EMDL_OPTIMISER_DO_FIX_CLASSES, do_fix_classes))
+		do_fix_classes = false;
+
     // Backward compatibility with RELION-1.4
     if (!MD.getValue(EMDL_OPTIMISER_LOCAL_SYMMETRY_FILENAME, fn_local_symmetry))
         fn_local_symmetry = "None";
@@ -1509,6 +1526,7 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
         MD.setValue(EMDL_OPTIMISER_BEST_RESOL_THUS_FAR,best_resol_thus_far);
         MD.setValue(EMDL_OPTIMISER_NR_ITER_WO_HIDDEN_VAR_CHANGES, nr_iter_wo_large_hidden_variable_changes);
         MD.setValue(EMDL_OPTIMISER_DO_SKIP_ALIGN, do_skip_align);
+        MD.setValue(EMDL_OPTIMISER_DO_FIX_CLASSES, do_fix_classes);
         MD.setValue(EMDL_OPTIMISER_DO_SKIP_ROTATE, do_skip_rotate);
         MD.setValue(EMDL_OPTIMISER_ACCURACY_ROT, acc_rot);
         MD.setValue(EMDL_OPTIMISER_ACCURACY_TRANS_ANGSTROM, acc_trans);
@@ -2148,6 +2166,25 @@ void MlOptimiser::initialiseGeneral(int rank)
                 ref_angpix, gradient_refine, grad_pseudo_halfsets, do_trust_ref_size, (rank==0));
 
     }
+
+	if (do_fix_classes)
+	{
+		if (do_grad || gradient_refine)
+			REPORT_ERROR("ERROR: --fix_classes is only supported by EM refinement");
+		if (mymodel.ref_dim != 2 || mymodel.data_dim != 2 || mydata.is_tomo)
+			REPORT_ERROR("ERROR: --fix_classes currently supports only non-tomographic 2D refinement");
+		if (mymodel.nr_classes < 2)
+			REPORT_ERROR("ERROR: --fix_classes requires at least two input references");
+		if (do_generate_seeds)
+			REPORT_ERROR("ERROR: --fix_classes requires explicit input references through --ref");
+		for (long int particle = 0; particle < mydata.MDimg.numberOfObjects(); ++particle)
+		{
+			int class_number = 0;
+			if (!mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, class_number, particle) ||
+				class_number < 1 || class_number > mymodel.nr_classes)
+				REPORT_ERROR("ERROR: --fix_classes found an rlnClassNumber outside the input reference range");
+		}
+	}
 
     if (do_ctf_correction && mydata.hasCtfCorrected())
     {
@@ -4540,6 +4577,8 @@ void MlOptimiser::expectationOneParticle(long int part_id_sorted, int thread_id)
     // Decide which classes to integrate over (for random class assignment in 1st iteration)
     int exp_iclass_min = 0;
     int exp_iclass_max = mymodel.nr_classes - 1;
+	if (do_fix_classes)
+		exp_iclass_min = exp_iclass_max = fixedClassFromMetadata(part_id_sorted - exp_my_first_part_id);
     // low-pass filter again and generate the seeds
     if (do_generate_seeds)
     {

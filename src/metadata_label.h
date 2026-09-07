@@ -411,6 +411,7 @@ enum EMDLabel
 	EMDL_OPTIMISER_DO_SOLVENT_FLATTEN,
 	EMDL_OPTIMISER_DO_SOLVENT_FSC,
 	EMDL_OPTIMISER_DO_SKIP_ALIGN,
+	EMDL_OPTIMISER_DO_FIX_CLASSES,
 	EMDL_OPTIMISER_DO_SKIP_ROTATE,
 	EMDL_OPTIMISER_DO_SPLIT_RANDOM_HALVES,
 	EMDL_OPTIMISER_DO_ZERO_MASK,
@@ -500,6 +501,9 @@ enum EMDLabel
 	EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM,
 	EMDL_PARTICLE_SELECTION_TYPE,
 	EMDL_PARTICLE_CLASS,
+	EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY,
+	EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY,
+	EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT,
 	EMDL_PARTICLE_DLL,
 	EMDL_PARTICLE_ID,
 	EMDL_PARTICLE_FOM,
@@ -514,6 +518,15 @@ enum EMDLabel
 	EMDL_PARTICLE_MOVIE_RUNNING_AVG,
 	EMDL_PARTICLE_PMAX,
 	EMDL_PARTICLE_NUMBER,
+	EMDL_CLASS2D_CONSENSUS_RUN_NUMBER,
+	EMDL_CLASS2D_CONSENSUS_SOURCE_OPTIMISER,
+	EMDL_CLASS2D_CONSENSUS_ANCHOR_RUN,
+	EMDL_CLASS2D_CONSENSUS_ADJUSTED_RAND,
+	EMDL_CLASS2D_CONSENSUS_MAPPED_AGREEMENT,
+	EMDL_CLASS2D_CONSENSUS_LOG_LIKELIHOOD,
+	EMDL_CLASS2D_CONSENSUS_ITERATIONS,
+	EMDL_CLASS2D_CONSENSUS_SOURCE_CLASS,
+	EMDL_CLASS2D_CONSENSUS_CONDITIONAL_PROBABILITY,
 
 	EMDL_PIPELINE_JOB_COUNTER,
 	EMDL_PIPELINE_NODE_NAME,
@@ -1148,6 +1161,7 @@ private:
 		EMDL::addLabel(EMDL_OPTIMISER_DO_SOLVENT_FLATTEN, EMDL_BOOL, "rlnDoSolventFlattening", "Flag to indicate that the references should be masked to set their solvent areas to a constant density");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_SOLVENT_FSC, EMDL_BOOL, "rlnDoSolventFscCorrection", "Flag to indicate that the FSCs should be solvent-corrected during refinement");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_SKIP_ALIGN, EMDL_BOOL, "rlnDoSkipAlign", "Flag to indicate that orientational (i.e. rotational and translational) searches will be omitted from the refinement, only marginalisation over classes will take place");
+		EMDL::addLabel(EMDL_OPTIMISER_DO_FIX_CLASSES, EMDL_BOOL, "rlnDoFixClasses", "Flag to keep each particle in its input class while marginalising over orientations and translations");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_SKIP_ROTATE, EMDL_BOOL, "rlnDoSkipRotate", "Flag to indicate that rotational searches will be omitted from the refinement, only marginalisation over classes and translations will take place");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_SPLIT_RANDOM_HALVES, EMDL_BOOL, "rlnDoSplitRandomHalves", "Flag to indicate that the data should be split into two completely separate, random halves");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_ZERO_MASK, EMDL_BOOL, "rlnDoZeroMask", "Flag to indicate that the surrounding solvent area in the experimental particles will be masked to zeros (by default random noise will be used");
@@ -1238,6 +1252,9 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH, EMDL_DOUBLE, "rlnHelicalTrackLength", "Distance (in pix) from the position of this helical segment to the starting point of the tube");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, EMDL_DOUBLE, "rlnHelicalTrackLengthAngst", "Distance (in A) from the position of this helical segment to the starting point of the tube");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS, EMDL_INT, "rlnClassNumber", "Class number for which a particle has its highest probability");
+		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY, EMDL_DOUBLE, "rlnClass2DConsensusProbability", "Posterior probability of the assigned Class2D consensus class");
+		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, EMDL_DOUBLE, "rlnClass2DConsensusEntropy", "Normalised entropy of the Class2D consensus posterior distribution");
+		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT, EMDL_DOUBLE, "rlnClass2DConsensusAgreement", "Fraction of label-mapped Class2D replicas agreeing with the consensus class");
 		EMDL::addLabel(EMDL_PARTICLE_SELECTION_TYPE, EMDL_INT, "rlnParticleSelectionType", "Selection type for manually picked particles");
 		EMDL::addLabel(EMDL_PARTICLE_DLL, EMDL_DOUBLE, "rlnLogLikeliContribution", "Contribution of a particle to the log-likelihood target function");
 		EMDL::addLabel(EMDL_PARTICLE_ID, EMDL_INT, "rlnParticleId", "ID (i.e. a unique number) for a particle");
@@ -1254,6 +1271,15 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_MOVIE_RUNNING_AVG, EMDL_INT, "rlnMovieFramesRunningAverage", "Number of movie frames inside the running average that will be used for movie-refinement");
 		EMDL::addLabel(EMDL_PARTICLE_PMAX, EMDL_DOUBLE, "rlnMaxValueProbDistribution", "Maximum value of the (normalised) probability function for a particle"); /**< particle, Maximum value of probability distribution */
 		EMDL::addLabel(EMDL_PARTICLE_NUMBER, EMDL_INT, "rlnParticleNumber", "Number of particles");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_RUN_NUMBER, EMDL_INT, "rlnClass2DConsensusRunNumber", "One-based source Class2D replica number");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_OPTIMISER, EMDL_STRING, "rlnClass2DConsensusSourceOptimiser", "Source Class2D replica optimiser STAR file");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ANCHOR_RUN, EMDL_INT, "rlnClass2DConsensusAnchorRun", "One-based Class2D replica used to define consensus class numbering and initial references");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ADJUSTED_RAND, EMDL_DOUBLE, "rlnClass2DConsensusAdjustedRandIndex", "Adjusted Rand index between a Class2D replica and the consensus");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_MAPPED_AGREEMENT, EMDL_DOUBLE, "rlnClass2DConsensusMappedAgreement", "Fraction of a Class2D replica agreeing with the consensus after optimal label mapping");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_LOG_LIKELIHOOD, EMDL_DOUBLE, "rlnClass2DConsensusLogLikelihood", "Categorical latent-class consensus log likelihood");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ITERATIONS, EMDL_INT, "rlnClass2DConsensusIterations", "Number of categorical consensus EM iterations");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASS, EMDL_INT, "rlnClass2DConsensusSourceClass", "One-based class number observed in a source Class2D replica");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_CONDITIONAL_PROBABILITY, EMDL_DOUBLE, "rlnClass2DConsensusConditionalProbability", "Probability of a source class conditional on a consensus class");
 
 		EMDL::addLabel(EMDL_PIPELINE_JOB_COUNTER, EMDL_INT, "rlnPipeLineJobCounter", "Number of the last job in the pipeline");
 		EMDL::addLabel(EMDL_PIPELINE_NODE_NAME, EMDL_STRING , "rlnPipeLineNodeName", "Name of a Node in the pipeline");

@@ -386,6 +386,11 @@ void JobWindow::initialise(int my_job_type, bool _is_tomo)
 		myjob.initialise(my_job_type);
 		initialiseCoOccurrenceWindow();
 	}
+	else if (my_job_type == PROC_CLASS2D_CONSENSUS)
+	{
+		myjob.initialise(my_job_type);
+		initialiseClass2DConsensusWindow();
+	}
 	else if (my_job_type == PROC_2DCLASS)
 	{
 		myjob.initialise(my_job_type);
@@ -1317,6 +1322,41 @@ void JobWindow::initialiseCoOccurrenceWindow()
 	// This job launches an interactive local GUI program.
 	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;
 	myjob.joboptions["do_queue"].setString("No");
+}
+
+void JobWindow::initialiseClass2DConsensusWindow()
+{
+	setupTabs(2);
+
+	tab1->begin();
+	tab1->label("I/O");
+	resetHeight();
+	place("fn_optimiser", TOGGLE_DEACTIVATE);
+	tab1->end();
+
+	tab2->begin();
+	tab2->label("Compute");
+	resetHeight();
+	place("do_parallel_discio");
+	place("nr_pool");
+	group5 = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group5->end();
+	place("do_preread_images", TOGGLE_LEAVE_ACTIVE, group5, true);
+	group5->begin();
+	place("scratch_dir");
+	place("cache_dir");
+	place("cache_copy_threads");
+	group5->end();
+	place("do_combine_thru_disc");
+	current_y += STEPY/2;
+	group6 = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group6->end();
+	place("use_gpu", TOGGLE_LEAVE_ACTIVE, group6);
+	group6->begin();
+	place("gpu_ids", TOGGLE_LEAVE_ACTIVE);
+	group6->end();
+	guientries["use_gpu"].cb_menu_i();
+	tab2->end();
 }
 
 void JobWindow::initialiseClass2DWindow()
