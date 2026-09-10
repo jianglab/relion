@@ -3785,7 +3785,7 @@ In such cases, values in the range of 7-12 Angstroms have proven useful.");
 	joboptions["dont_skip_align"] = JobOption("Perform image alignment?", true, "If set to No, then rather than \
 performing both alignment and classification, only classification will be performed. This allows the use of very focused masks.\
 This requires that the optimal orientations of all particles are already stored in the input STAR file. ");
-	joboptions["psi_sampling"] = JobOption("In-plane angular sampling:", 6., 0.5, 20, 0.5, "The sampling rate for the in-plane rotation angle (psi) in degrees. \
+	joboptions["psi_sampling"] = JobOption("In-plane angular sampling:", 2., 0.5, 20, 0.5, "The sampling rate for the in-plane rotation angle (psi) in degrees. \
 Using fine values will slow down the program. Recommended value for most 2D refinements: 5 degrees.\n\n \
 If auto-sampling is used, this will be the value for the first iteration(s) only, and the sampling rate will be increased automatically after that.");
 	joboptions["offset_range"] = JobOption("Offset search range (pix):", 5, 0, 30, 1, "Probabilities will be calculated only for translations \
@@ -4555,21 +4555,21 @@ in the previous iteration will get higher weights than those further away.\n\nTh
 rot, tilt and psi angles in the first few iterations (global searches for orientations) in 3D helical reconstruction. \
 Values of 9 or 15 degrees are commonly used. Higher values are recommended for more flexible structures and more memory and computation time will be used. \
 A range of 15 degrees means sigma = 5 degrees.\n\nThese options will be invalid if you choose to perform local angular searches or not to perform image alignment on 'Sampling' tab.");
-	joboptions["range_tilt"] = JobOption("Angular search range - tilt (deg):", std::string("15"), "Local angular searches will be performed \
+	joboptions["range_tilt"] = JobOption("Angular search range - tilt (deg):", std::string("5"), "Local angular searches will be performed \
 within +/- the given amount (in degrees) from the optimal orientation in the previous iteration. \
 A Gaussian prior (also see previous option) will be applied, so that orientations closer to the optimal orientation \
 in the previous iteration will get higher weights than those further away.\n\nThese ranges will only be applied to the \
 rot, tilt and psi angles in the first few iterations (global searches for orientations) in 3D helical reconstruction. \
 Values of 9 or 15 degrees are commonly used. Higher values are recommended for more flexible structures and more memory and computation time will be used. \
 A range of 15 degrees means sigma = 5 degrees.\n\nThese options will be invalid if you choose to perform local angular searches or not to perform image alignment on 'Sampling' tab.");
-	joboptions["range_psi"] = JobOption("Angular search range - psi (deg):", std::string("10"), "Local angular searches will be performed \
+	joboptions["range_psi"] = JobOption("Angular search range - psi (deg):", std::string("5"), "Local angular searches will be performed \
 within +/- the given amount (in degrees) from the optimal orientation in the previous iteration. \
 A Gaussian prior (also see previous option) will be applied, so that orientations closer to the optimal orientation \
 in the previous iteration will get higher weights than those further away.\n\nThese ranges will only be applied to the \
 rot, tilt and psi angles in the first few iterations (global searches for orientations) in 3D helical reconstruction. \
 Values of 9 or 15 degrees are commonly used. Higher values are recommended for more flexible structures and more memory and computation time will be used. \
 A range of 15 degrees means sigma = 5 degrees.\n\nThese options will be invalid if you choose to perform local angular searches or not to perform image alignment on 'Sampling' tab.");
-	joboptions["helical_nr_asu"] = JobOption("Number of unique asymmetrical units:", 1, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box. If the inter-box distance (set in segment picking step) \
+	joboptions["helical_nr_asu"] = JobOption("Number of unique asymmetrical units:", 3, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box. If the inter-box distance (set in segment picking step) \
 is 100 Angstroms and the estimated helical rise is ~20 Angstroms, then set this value to 100 / 20 = 5 (nearest integer). This integer should not be less than 1. The correct value is essential in measuring the \
 signal to noise ratio in helical reconstruction.");
 	joboptions["helical_twist_initial"] =  JobOption("Initial helical twist (deg):", std::string("0"),"Initial helical symmetry. Set helical twist (in degrees) to positive value if it is a right-handed helix. \
