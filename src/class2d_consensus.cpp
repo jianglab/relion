@@ -425,11 +425,9 @@ Class2DConsensusResult Class2DConsensus::fit(
 		result.entropy[particle] = pattern_entropy[pattern];
 	}
 
-	std::vector<long int> map_counts(nr_classes, 0);
-	for (size_t particle = 0; particle < nr_particles; ++particle) map_counts[result.assignment[particle]]++;
-	for (int k = 0; k < nr_classes; ++k)
-		if (map_counts[k] == 0)
-			throw std::runtime_error("Class2D consensus produced an empty class");
+	// MAP assignments need not occupy every class, even if all input classes
+	// are occupied. Keep empty slots so labels still index the anchor references;
+	// their smoothed posterior mass and confusion probabilities remain valid.
 
 	result.run_adjusted_rand.resize(runs.size());
 	result.run_mapped_agreement.resize(runs.size());

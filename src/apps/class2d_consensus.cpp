@@ -169,8 +169,19 @@ public:
 		}
 
 		if (verb > 0)
+		{
+			for (int run = 0; run < nr_runs; ++run)
+			{
+				std::vector<long int> counts(nr_classes, 0);
+				for (size_t particle = 0; particle < assignments[run].size(); ++particle)
+					counts[assignments[run][particle]]++;
+				std::cout << "Replica run" << integerToString(run + 1, 3) << ": "
+				          << std::count(counts.begin(), counts.end(), 0)
+				          << " of " << nr_classes << " classes have no assigned particles." << std::endl;
+			}
 			std::cout << "Fitting categorical consensus for " << nr_particles << " particles, "
 			          << nr_runs << " replicas and " << nr_classes << " classes..." << std::endl;
+		}
 		Class2DConsensusResult result;
 		try
 		{
@@ -180,6 +191,13 @@ public:
 		{
 			REPORT_ERROR(error.what());
 		}
+		std::vector<int> class_counts(nr_classes, 0);
+		for (size_t particle = 0; particle < result.assignment.size(); ++particle)
+			class_counts[result.assignment[particle]]++;
+		if (verb > 0)
+			std::cout << "Consensus: " << std::count(class_counts.begin(), class_counts.end(), 0)
+			          << " of " << nr_classes << " classes have no assigned particles; retaining all class slots for refinement."
+			          << std::endl;
 
 		ObservationModel anchor_observation;
 		MetaDataTable anchor_particles;
@@ -230,8 +248,6 @@ public:
 
 		MetaDataTable class_table;
 		class_table.setName("consensus_classes");
-		std::vector<int> class_counts(nr_classes, 0);
-		for (size_t particle = 0; particle < result.assignment.size(); ++particle) class_counts[result.assignment[particle]]++;
 		for (int k = 0; k < nr_classes; ++k)
 		{
 			class_table.addObject();

@@ -21,6 +21,8 @@ struct Class2DConsensusResult
 class Class2DConsensus
 {
 public:
+	// nr_classes is the number of class slots, including unoccupied classes.
+	// Returned assignments retain this label space and may leave slots empty.
 	static Class2DConsensusResult fit(
 		const std::vector<std::vector<int> > &run_assignments,
 		int nr_classes,
