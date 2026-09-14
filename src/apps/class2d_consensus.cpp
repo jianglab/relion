@@ -4,6 +4,7 @@
 
 #include "src/args.h"
 #include "src/class2d_consensus.h"
+#include "src/class2d_consensus_metadata.h"
 #include "src/filename.h"
 #include "src/jaz/single_particle/obs_model.h"
 #include "src/macros.h"
@@ -25,6 +26,7 @@ public:
 	IOParser parser;
 	FileName input_optimiser, output_root;
 	int nr_runs, nr_threads, verb;
+	bool reset_alignments;
 
 	void read(int argc, char **argv)
 	{
@@ -35,6 +37,7 @@ public:
 		output_root = parser.getOption("--o", "Output root name", "consensus");
 		nr_runs = textToInteger(parser.getOption("--nr_runs", "Number of parallel Class2D replicas"));
 		nr_threads = textToInteger(parser.getOption("--j", "Number of threads reserved for consensus preparation", "1"));
+		reset_alignments = parser.checkOption("--reset_alignments", "Zero particle angles and origin shifts before refinement; preserve priors, which helical initialisation and configured prior searches may still use");
 		verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 		if (parser.checkForErrors(verb))
 			REPORT_ERROR("Errors encountered on the command line");
@@ -212,6 +215,7 @@ public:
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, result.entropy[particle], row);
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT, result.agreement[particle], row);
 		}
+		if (reset_alignments) resetClass2DConsensusAlignments(anchor_particles);
 		anchor_observation.save(anchor_particles, output_root + "_data.star", "particles");
 
 		MetaDataTable references;

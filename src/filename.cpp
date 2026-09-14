@@ -43,6 +43,8 @@
  ***************************************************************************/
 
 #include "src/filename.h"
+#include <iomanip>
+#include <sstream>
 #include "src/funcs.h"
 #include <unistd.h>
 
@@ -52,14 +54,10 @@ void FileName::compose(const std::string &str, long int no, const std::string &e
 	*this = (FileName) str;
 	if (no != -1)
 	{
-
-		char aux_str[numberlength+1];
-		std::string tmp_fileformat;
-		tmp_fileformat = (std::string) "%0" +
-		                 integerToString(numberlength)+
-		                 (std::string)"d";
-		sprintf(aux_str, tmp_fileformat.c_str(), no);
-		*this += aux_str;
+		// Width is a minimum: iterations can exceed the usual three digits.
+		std::ostringstream number;
+		number << std::internal << std::setfill('0') << std::setw(numberlength) << no;
+		*this += number.str();
 	}
 
 	if (ext != "")

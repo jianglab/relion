@@ -1326,7 +1326,7 @@ void JobWindow::initialiseCoOccurrenceWindow()
 
 void JobWindow::initialiseClass2DConsensusWindow()
 {
-	setupTabs(2);
+	setupTabs(3);
 
 	tab1->begin();
 	tab1->label("I/O");
@@ -1335,7 +1335,14 @@ void JobWindow::initialiseClass2DConsensusWindow()
 	tab1->end();
 
 	tab2->begin();
-	tab2->label("Compute");
+	tab2->label("Optimisation");
+	resetHeight();
+	place("nr_iter");
+	place("do_reset_alignments");
+	tab2->end();
+
+	tab3->begin();
+	tab3->label("Compute");
 	resetHeight();
 	place("do_parallel_discio");
 	place("nr_pool");
@@ -1356,7 +1363,7 @@ void JobWindow::initialiseClass2DConsensusWindow()
 	place("gpu_ids", TOGGLE_LEAVE_ACTIVE);
 	group6->end();
 	guientries["use_gpu"].cb_menu_i();
-	tab2->end();
+	tab3->end();
 }
 
 void JobWindow::initialiseClass2DWindow()

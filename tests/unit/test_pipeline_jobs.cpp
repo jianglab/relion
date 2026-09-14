@@ -87,6 +87,7 @@ static RelionJob makeClass2DJob()
 	RelionJob job;
 	job.clear();
 	job.initialise(PROC_2DCLASS);
+	job.label = get_proc_label(job.type);
 	job.joboptions["fn_img"].setString("particles.star");
 	job.joboptions["do_em"].setString("Yes");
 	job.joboptions["do_grad"].setString("No");
@@ -377,7 +378,7 @@ TEST_CASE("Pipeline control aggregates replica completion with status precedence
 // Class2D consensus
 // ---------------------------------------------------------------------------
 
-TEST_CASE("Class2DConsensus: generates preparation and one frozen-class refinement", "[pipeline][consensus]")
+TEST_CASE("Class2DConsensus: generates preparation and configurable frozen-class refinement", "[pipeline][consensus]")
 {
 	const std::string directory = "class2d_consensus_source_" + integerToString((int)std::clock()) + "/";
 	REQUIRE(::mkdir(directory.c_str(), 0700) == 0);
@@ -396,15 +397,35 @@ TEST_CASE("Class2DConsensus: generates preparation and one frozen-class refineme
 	job.joboptions["do_queue"].setString("No");
 	job.joboptions["scratch_dir"].setString("");
 
+	REQUIRE(job.joboptions["nr_iter"].getString() == "25");
+	REQUIRE(job.joboptions["do_reset_alignments"].getBoolean());
+	int iterations = 25;
+	std::string iteration_suffix = "025";
+	bool reset_alignments = true;
+	SECTION("defaults") {}
+	SECTION("one iteration") { iterations = 1; iteration_suffix = "001"; }
+	SECTION("custom iteration count") { iterations = 7; iteration_suffix = "007"; }
+	SECTION("above the GUI slider range") { iterations = 51; iteration_suffix = "051"; }
+	SECTION("more than three digits") { iterations = 1000; iteration_suffix = "1000"; }
+	SECTION("largest representable iteration count") { iterations = INT_MAX; iteration_suffix = std::to_string(INT_MAX); }
+	SECTION("retain anchor alignments")
+	{
+		reset_alignments = false;
+		job.joboptions["do_reset_alignments"].setString("No");
+	}
+	job.joboptions["nr_iter"].setString(integerToString(iterations));
+
 	std::vector<std::string> commands;
 	std::string final_command, error_message;
 	REQUIRE(generateCommands(job, commands, final_command, error_message));
 	REQUIRE(commands.size() == 2);
 	REQUIRE(commands[0].find("relion_class2d_consensus") != std::string::npos);
 	REQUIRE(commands[0].find("--nr_runs 3") != std::string::npos);
+	REQUIRE((commands[0].find(" --reset_alignments") != std::string::npos) == reset_alignments);
 	REQUIRE(commands[0].find("--pipeline_control") == std::string::npos);
 	REQUIRE(commands[1].find("relion_refine") != std::string::npos);
-	REQUIRE(commands[1].find("--iter 1") != std::string::npos);
+	REQUIRE(commands[1].find("--iter " + integerToString(iterations) + " ") != std::string::npos);
+	REQUIRE(commands[1].find("--reset_alignments") == std::string::npos);
 	REQUIRE(commands[1].find("--fix_classes") != std::string::npos);
 	REQUIRE(commands[1].find("--K 7") != std::string::npos);
 	REQUIRE(commands[1].find("--psi_step 10") != std::string::npos);
@@ -414,10 +435,60 @@ TEST_CASE("Class2DConsensus: generates preparation and one frozen-class refineme
 	REQUIRE(job.inputNodes[2].name.find("run003_it025_optimiser.star") != std::string::npos);
 	REQUIRE(job.outputNodes.size() == 3);
 	REQUIRE(job.outputNodes[0].name.find("consensus_data.star") != std::string::npos);
-	REQUIRE(job.outputNodes[2].name.find("run_it001_optimiser.star") != std::string::npos);
+	REQUIRE(job.outputNodes[1].name.find("run_it" + iteration_suffix + "_data.star") != std::string::npos);
+	REQUIRE(job.outputNodes[2].name.find("run_it" + iteration_suffix + "_optimiser.star") != std::string::npos);
 
 	std::remove((directory + "job.star").c_str());
 	::rmdir(directory.c_str());
+}
+
+TEST_CASE("Class2DConsensus: rejects invalid refinement iteration counts", "[pipeline][consensus]")
+{
+	const char *invalid[] = {"", "0", "-1", "2.5", "25x", "1e2", "2147483648", "9999999999999999999999"};
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_CLASS2D_CONSENSUS);
+	for (const char *iterations : invalid)
+	{
+		INFO("Iteration input: " << iterations);
+		job.joboptions["nr_iter"].setString(iterations);
+		std::vector<std::string> commands;
+		std::string final_command, error_message;
+		REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(error_message.find("iterations must be a positive integer") != std::string::npos);
+	}
+}
+
+TEST_CASE("Class2DConsensus: refinement options survive saved jobs and default in older jobs", "[pipeline][consensus]")
+{
+	const std::string filename = "class2d_consensus_options_" + integerToString((int)std::clock()) + ".star";
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_CLASS2D_CONSENSUS);
+	std::string expected_iterations = "25";
+	bool expected_reset = true;
+	SECTION("default options round trip") {}
+	SECTION("custom options round trip")
+	{
+		expected_iterations = "51";
+		expected_reset = false;
+		job.joboptions["nr_iter"].setString(expected_iterations);
+		job.joboptions["do_reset_alignments"].setString("No");
+	}
+	SECTION("old job missing new options")
+	{
+		job.joboptions.erase("nr_iter");
+		job.joboptions.erase("do_reset_alignments");
+	}
+	job.label = get_proc_label(job.type);
+	job.write(filename);
+	RelionJob restored;
+	restored.clear();
+	bool is_continue = false;
+	REQUIRE(restored.read(filename, is_continue, true));
+	REQUIRE(restored.joboptions["nr_iter"].getString() == expected_iterations);
+	REQUIRE(restored.joboptions["do_reset_alignments"].getBoolean() == expected_reset);
+	std::remove(filename.c_str());
 }
 
 TEST_CASE("Class2DConsensus: rejects reserved refinement overrides", "[pipeline][consensus]")

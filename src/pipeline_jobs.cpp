@@ -3579,6 +3579,10 @@ void RelionJob::initialiseClass2DConsensusJob()
 	hidden_name = ".gui_class2d_consensus";
 	joboptions["fn_optimiser"] = JobOption("Parallel Class2D optimiser:", LABEL_CLASS2D_OPT, 1, "", "STAR Files (*_optimiser.star)",
 		"Select any runNNN_itXXX_optimiser.star from a completed parallel Class2D job. All sibling replicas at the same iteration will be included automatically.");
+	joboptions["nr_iter"] = JobOption("Number of refinement iterations:", 25, 1, 50, 1,
+		"Number of EM iterations to refine consensus class averages, keeping every particle in its assigned consensus class. Any positive integer is accepted, including values above the slider range.");
+	joboptions["do_reset_alignments"] = JobOption("Reset 2D alignments?", true,
+		"Zero particle angles and origin shifts in consensus_data.star before refinement. Priors are preserved: helical initialisation and configured prior searches may still use them. If set to No, keep the anchor replica's alignments. Initial references come from the anchor replica in either case.");
 
 	joboptions["nr_pool"] = JobOption("Number of pooled particles:", 3, 1, 16, 1, "Number of particles read together per refinement thread.");
 	joboptions["do_parallel_discio"] = JobOption("Use parallel disc I/O?", true, "Let all MPI followers read particle images directly.");
@@ -3600,6 +3604,13 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 {
 	commands.clear();
 	initialisePipeline(outputname, job_counter);
+	long long nr_iter_value = 0;
+	if (!parseStrictInteger(joboptions["nr_iter"].getString(), nr_iter_value) || nr_iter_value < 1 || nr_iter_value > INT_MAX)
+	{
+		error_message = "ERROR: number of consensus refinement iterations must be a positive integer no greater than " + integerToString(INT_MAX) + ".";
+		return false;
+	}
+	const int nr_iter = (int)nr_iter_value;
 	const std::string optimiser = joboptions["fn_optimiser"].getString();
 	if (optimiser.empty())
 	{
@@ -3656,13 +3667,14 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 			joboptions["fn_optimiser"].node_type));
 	commands.push_back("`which relion_class2d_consensus` --i " + optimiser +
 		" --nr_runs " + integerToString(nr_runs) + " --o " + outputname + "consensus --j " + joboptions["nr_threads"].getString());
+	if (joboptions["do_reset_alignments"].getBoolean()) commands.back() += " --reset_alignments";
 
 	std::string refine = joboptions["nr_mpi"].getNumber(error_message) > 1 ? "`which relion_refine_mpi`" : "`which relion_refine`";
 	if (error_message != "") return false;
 	refine += " --i " + outputname + "consensus_data.star";
 	refine += " --ref " + outputname + "consensus_references.star";
 	refine += " --o " + outputname + "run --K " + integerToString(nr_classes);
-	refine += " --iter 1 --fix_classes --flatten_solvent --norm --scale --pad 2 --oversampling 1";
+	refine += " --iter " + integerToString(nr_iter) + " --fix_classes --flatten_solvent --norm --scale --pad 2 --oversampling 1";
 
 	if (source_job.joboptions["do_ctf_correction"].getBoolean())
 	{
@@ -3717,7 +3729,7 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 	commands.push_back(refine);
 
 	outputNodes.push_back(Node(outputname + "consensus_data.star", LABEL_CLASS2D_PARTS));
-	std::vector<Node> final_nodes = getOutputNodesRefine(outputname + "run", "Class2D", 1, nr_classes, 2, 1, false);
+	std::vector<Node> final_nodes = getOutputNodesRefine(outputname + "run", "Class2D", nr_iter, nr_classes, 2, 1, false);
 	outputNodes.insert(outputNodes.end(), final_nodes.begin(), final_nodes.end());
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message, false, 1, true);
 }
