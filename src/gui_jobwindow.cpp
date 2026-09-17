@@ -328,7 +328,11 @@ void JobWindow::updateMyJob()
 	{
 		if (guientries.find(it->first) == guientries.end())
 		{
-			std::cerr << "ERROR: cannot find " << it->first << " in the defined joboptions!" <<std::endl;
+			// Retained only for reading old consensus jobs; fresh initialization
+			// always resets alignments, so this option has no GUI control.
+			if (myjob.type == PROC_CLASS2D_CONSENSUS && it->first == "do_reset_alignments")
+				continue;
+			std::cerr << "ERROR: cannot find " << it->first << " in the defined GUI entries!" <<std::endl;
 			REPORT_ERROR("Stopping now...");
 		}
 
