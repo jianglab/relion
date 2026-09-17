@@ -765,7 +765,10 @@ will still yield good performance and possibly a more stable execution. \n" << s
 	// Only the first follower calculates the sigma2_noise spectra (and if fn_ref == None, later sets initial guesses for Iref)
 	if (node->rank == 1) MlOptimiser::initialiseSigma2Noise();
 
-        MlOptimiser::initialiseReferences();
+        // Fresh fixed-class references must be finalized only where they were
+        // reconstructed, then broadcast; other ranks still have zero images.
+        const bool fresh_fixed = do_fix_classes && fn_ref == "None" && iter == 0;
+        if (!fresh_fixed || node->rank == 1) MlOptimiser::initialiseReferences();
 
 	// Now the first follower broadcasts resulting sigma2_noise to everyone else
 	for (int i = 0; i < mymodel.sigma2_noise.size(); i++)
@@ -774,6 +777,8 @@ will still yield good performance and possibly a more stable execution. \n" << s
 							   MULTIDIM_SIZE(mymodel.sigma2_noise[i]), MY_MPI_DOUBLE, 1, MPI_COMM_WORLD);
 	}
 
+        if (fresh_fixed)
+            node->relion_MPI_Bcast(mymodel.pdf_class.data(), mymodel.pdf_class.size(), MY_MPI_DOUBLE, 1, MPI_COMM_WORLD);
 	// Also broadcast Iref if that was set in initialiseSigma2Noise
         if (fn_ref == "None")
         {

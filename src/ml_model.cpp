@@ -1582,6 +1582,14 @@ void MlModel::initialiseDataVersusPrior(bool fix_tau)
 	{
 		// Initialise output arrays to correct size
 		tau2_class[iclass].resize(ori_size /2 + 1);
+		// An unoccupied class has no evidence. Avoid 0/0 in noise bins and
+		// keep empty fresh reference slots finite, including their diagnostics.
+		if (nr_bodies == 1 && pdf_class[iclass] == 0.)
+		{
+			if (!fix_tau) tau2_class[iclass].initZeros();
+			data_vs_prior_class[iclass].initZeros(ori_size /2 + 1);
+			continue;
+		}
 
 		// Get the power spectrum of the reference
 		MultidimArray<RFLOAT> spectrum(ori_size /2 + 1);

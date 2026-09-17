@@ -5,6 +5,36 @@
 #include <cstdio>
 #include <ctime>
 
+TEST_CASE("Class2DConsensus: independent-count diagnostics survive STAR round trip", "[consensus][metadata]")
+{
+	MetaDataTable diagnostics;
+	diagnostics.setName("consensus_general");
+	diagnostics.setIsList(true);
+	diagnostics.addObject();
+	diagnostics.setValue(EMDL_MLMODEL_NR_CLASSES, 150);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES, 100);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, 148);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_PATTERNS, 10000L);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_MAPPING_MODE, std::string("consensus_to_source"));
+	const FileName filename = "consensus_dimensions_" + integerToString((int)std::clock()) + ".star";
+	diagnostics.write(filename);
+	diagnostics.read(filename, "consensus_general");
+	int classes = 0;
+	long int patterns = 0;
+	std::string mode;
+	REQUIRE(diagnostics.getValue(EMDL_MLMODEL_NR_CLASSES, classes));
+	REQUIRE(classes == 150);
+	REQUIRE(diagnostics.getValue(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES, classes));
+	REQUIRE(classes == 100);
+	REQUIRE(diagnostics.getValue(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, classes));
+	REQUIRE(classes == 148);
+	REQUIRE(diagnostics.getValue(EMDL_CLASS2D_CONSENSUS_PATTERNS, patterns));
+	REQUIRE(patterns == 10000);
+	REQUIRE(diagnostics.getValue(EMDL_CLASS2D_CONSENSUS_MAPPING_MODE, mode));
+	REQUIRE(mode == "consensus_to_source");
+	std::remove(filename.c_str());
+}
+
 TEST_CASE("Class2DConsensus: reset clears alignments and preserves particle metadata", "[consensus][metadata]")
 {
 	bool have_alignments = true, have_zoff = false;

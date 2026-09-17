@@ -32,6 +32,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_pipeline_jobs.cpp
     test_class2d_consensus.cpp
     test_class2d_consensus_metadata.cpp
+    test_fixed_class_initialisation.cpp
     test_select_2d_classes.cpp
     test_filament_consistency.cpp
     test_prefetch.cpp

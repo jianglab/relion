@@ -3579,10 +3579,14 @@ void RelionJob::initialiseClass2DConsensusJob()
 	hidden_name = ".gui_class2d_consensus";
 	joboptions["fn_optimiser"] = JobOption("Parallel Class2D optimiser:", LABEL_CLASS2D_OPT, 1, "", "STAR Files (*_optimiser.star)",
 		"Select any runNNN_itXXX_optimiser.star from a completed parallel Class2D job. All sibling replicas at the same iteration will be included automatically.");
+	joboptions["nr_classes"] = JobOption("Number of consensus classes:", 0, 0, 200, 1,
+		"0 inherits the source model class count; otherwise enter an integer at least 2. The number of occupied classes can be smaller. Identical source label patterns cannot be subdivided.");
+	joboptions["random_seed"] = JobOption("Initialization random seed:", std::string("1"),
+		"Positive integer seed for fresh images constructed from consensus members. No upstream images or fitted poses initialize refinement; supported priors are preserved.");
 	joboptions["nr_iter"] = JobOption("Number of refinement iterations:", 25, 1, 50, 1,
 		"Number of EM iterations to refine consensus class averages, keeping every particle in its assigned consensus class. Any positive integer is accepted, including values above the slider range.");
-	joboptions["do_reset_alignments"] = JobOption("Reset 2D alignments?", true,
-		"Zero particle angles and origin shifts in consensus_data.star before refinement. Priors are preserved: helical initialisation and configured prior searches may still use them. If set to No, keep the anchor replica's alignments. Initial references come from the anchor replica in either case.");
+	joboptions["do_reset_alignments"] = JobOption("Legacy reset alignments (ignored):", true,
+		"Accepted for old job files. Fresh initialization always resets fitted poses and preserves supported priors.");
 
 	joboptions["nr_pool"] = JobOption("Number of pooled particles:", 3, 1, 16, 1, "Number of particles read together per refinement thread.");
 	joboptions["do_parallel_discio"] = JobOption("Use parallel disc I/O?", true, "Let all MPI followers read particle images directly.");
@@ -3611,6 +3615,18 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 		return false;
 	}
 	const int nr_iter = (int)nr_iter_value;
+	long long requested_classes = 0, seed = 0;
+	if (!parseStrictInteger(joboptions["nr_classes"].getString(), requested_classes) ||
+		requested_classes < 0 || requested_classes == 1 || requested_classes > INT_MAX)
+	{
+		error_message = "ERROR: consensus classes must be 0 (inherit) or an integer at least 2, no greater than INT_MAX.";
+		return false;
+	}
+	if (!parseStrictInteger(joboptions["random_seed"].getString(), seed) || seed < 1 || seed > INT_MAX)
+	{
+		error_message = "ERROR: initialization random seed must be a positive integer no greater than INT_MAX.";
+		return false;
+	}
 	const std::string optimiser = joboptions["fn_optimiser"].getString();
 	if (optimiser.empty())
 	{
@@ -3658,22 +3674,41 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 		return false;
 	}
 	const int nr_runs = (int)nr_runs_value;
-	const int nr_classes = (int)source_job.joboptions["nr_classes"].getNumber(error_message);
-	if (error_message != "" || nr_classes < 2) return false;
+	int source_classes = 0;
+	try
+	{
+		MetaDataTable source_optimiser, source_model;
+		source_optimiser.read(optimiser, "optimiser_general");
+		FileName model;
+		if (!source_optimiser.getValue(EMDL_OPTIMISER_MODEL_STARFILE, model))
+			REPORT_ERROR("Missing model path in source optimiser");
+		source_model.read(model, "model_general");
+		int dimension = 0;
+		if (!source_model.getValue(EMDL_MLMODEL_NR_CLASSES, source_classes) || source_classes < 2 ||
+			!source_model.getValue(EMDL_MLMODEL_DIMENSIONALITY, dimension) || dimension != 2)
+			REPORT_ERROR("Invalid class count or dimensionality in source model");
+	}
+	catch (RelionError &error)
+	{
+		error_message = "ERROR: cannot read the completed source 2D model: " + error.msg;
+		return false;
+	}
+	const int nr_classes = requested_classes == 0 ? source_classes : (int)requested_classes;
 
 	const std::string replica_suffix = basename.substr(6);
 	for (int run = 0; run < nr_runs; ++run)
 		inputNodes.push_back(Node(directory + "run" + integerToString(run + 1, 3) + replica_suffix,
 			joboptions["fn_optimiser"].node_type));
 	commands.push_back("`which relion_class2d_consensus` --i " + optimiser +
-		" --nr_runs " + integerToString(nr_runs) + " --o " + outputname + "consensus --j " + joboptions["nr_threads"].getString());
-	if (joboptions["do_reset_alignments"].getBoolean()) commands.back() += " --reset_alignments";
+		" --nr_runs " + integerToString(nr_runs) + " --K " + integerToString(nr_classes) + " --o " + outputname + "consensus --j " + joboptions["nr_threads"].getString());
+	if (!joboptions["do_reset_alignments"].getBoolean())
+		commands.back() += " --legacy_keep_alignments";
 
 	std::string refine = joboptions["nr_mpi"].getNumber(error_message) > 1 ? "`which relion_refine_mpi`" : "`which relion_refine`";
 	if (error_message != "") return false;
 	refine += " --i " + outputname + "consensus_data.star";
-	refine += " --ref " + outputname + "consensus_references.star";
 	refine += " --o " + outputname + "run --K " + integerToString(nr_classes);
+	refine += " --random_seed " + integerToString((int)seed);
 	refine += " --iter " + integerToString(nr_iter) + " --fix_classes --flatten_solvent --norm --scale --pad 2 --oversampling 1";
 
 	if (source_job.joboptions["do_ctf_correction"].getBoolean())
@@ -3718,7 +3753,7 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 
 	const std::string other = joboptions["other_args"].getString();
 	const char *reserved[] = {"--i", "--ref", "--o", "--K", "--iter", "--continue", "--grad", "--fix_classes",
-		"--skip_align", "--skip_rotate", "--firstiter_cc", "--auto_refine", "--split_random_halves"};
+		"--random_seed", "--som", "--sigma", "--skip_align", "--skip_rotate", "--firstiter_cc", "--auto_refine", "--split_random_halves"};
 	for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); ++i)
 		if (containsCommandLineOption(other, reserved[i]))
 		{

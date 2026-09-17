@@ -86,3 +86,29 @@ TEST_CASE("MlOptimiser: fixed classes are read from expectation metadata", "[ml_
 	DIRECT_A2D_ELEM(optimiser.exp_metadata, 1, METADATA_CLASS) = 4;
 	REQUIRE_THROWS(optimiser.fixedClassFromMetadata(1));
 }
+
+TEST_CASE("MlModel: empty class evidence stays finite in zero-noise bins", "[ml_optimiser][consensus]")
+{
+	MlModel model;
+	model.nr_classes = 2;
+	model.nr_bodies = model.nr_groups = model.nr_optics_groups = 1;
+	model.ori_size = 8;
+	model.ref_dim = model.data_dim = 2;
+	model.padding_factor = 2.;
+	model.interpolator = TRILINEAR;
+	model.r_min_nn = 0;
+	model.initialise();
+	model.pdf_class = {1., 0.};
+	model.nr_particles_per_group[0] = 10;
+	model.sigma2_noise[0].resize(5);
+	model.sigma2_noise[0].initConstant(1.);
+	DIRECT_A1D_ELEM(model.sigma2_noise[0], 0) = 0.;
+	model.tau2_fudge_factor = 1.;
+	for (auto &reference : model.Iref) reference.initZeros(8, 8);
+	model.initialiseDataVersusPrior(false);
+	for (int i = 0; i < 5; ++i)
+	{
+		REQUIRE(DIRECT_A1D_ELEM(model.tau2_class[1], i) == 0.);
+		REQUIRE(DIRECT_A1D_ELEM(model.data_vs_prior_class[1], i) == 0.);
+	}
+}

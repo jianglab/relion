@@ -15,6 +15,8 @@
 #include <fstream>
 #include <iostream>
 #include <regex>
+#include <climits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -25,8 +27,7 @@ class Class2DConsensusProgram
 public:
 	IOParser parser;
 	FileName input_optimiser, output_root;
-	int nr_runs, nr_threads, verb;
-	bool reset_alignments;
+	int nr_runs, nr_threads, verb, requested_classes;
 
 	void read(int argc, char **argv)
 	{
@@ -37,7 +38,20 @@ public:
 		output_root = parser.getOption("--o", "Output root name", "consensus");
 		nr_runs = textToInteger(parser.getOption("--nr_runs", "Number of parallel Class2D replicas"));
 		nr_threads = textToInteger(parser.getOption("--j", "Number of threads reserved for consensus preparation", "1"));
-		reset_alignments = parser.checkOption("--reset_alignments", "Zero particle angles and origin shifts before refinement; preserve priors, which helical initialisation and configured prior searches may still use");
+		const std::string count = parser.getOption("--K", "Consensus classes (0 inherits the source count)", "0");
+		if (count.empty() || count.find_first_not_of("0123456789") != std::string::npos)
+			REPORT_ERROR("Consensus class count must be 0 or an integer at least 2");
+		try
+		{
+			const long long value = std::stoll(count);
+			if (value == 1 || value > INT_MAX) REPORT_ERROR("Invalid consensus class count");
+			requested_classes = (int)value;
+		}
+		catch (const std::exception &) { REPORT_ERROR("Invalid consensus class count"); }
+		if (parser.checkOption("--legacy_keep_alignments", "Report an ignored legacy keep-alignments setting"))
+			std::cout << "Legacy keep-alignments setting ignored: fresh initialization always resets fitted poses." << std::endl;
+		// Accepted for scripts from older versions. Fresh preparation always resets poses.
+		parser.checkOption("--reset_alignments", "Legacy option: fresh initialization always resets fitted poses");
 		verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 		if (parser.checkForErrors(verb))
 			REPORT_ERROR("Errors encountered on the command line");
@@ -104,10 +118,11 @@ public:
 		for (int run = 0; run < nr_runs; ++run)
 			readOptimiser(optimiser_files[run], data_files[run], model_files[run]);
 
-		const int nr_classes = readClassCount(model_files[0]);
-		if (nr_classes < 2) REPORT_ERROR("Class2D consensus requires at least two classes");
+		const int source_classes = readClassCount(model_files[0]);
+		const int nr_classes = requested_classes == 0 ? source_classes : requested_classes;
+		if (source_classes < 2) REPORT_ERROR("Class2D consensus requires at least two classes");
 		for (int run = 1; run < nr_runs; ++run)
-			if (readClassCount(model_files[run]) != nr_classes)
+			if (readClassCount(model_files[run]) != source_classes)
 				REPORT_ERROR("All Class2D replicas must have the same number of classes");
 
 		std::vector<std::vector<int> > assignments(nr_runs);
@@ -138,7 +153,7 @@ public:
 					particles.getValue(EMDL_PARTICLE_CLASS, class_number, particle);
 					if (!canonical_index.insert(std::make_pair((std::string)image_name, particle)).second)
 						REPORT_ERROR("Duplicate rlnImageName in " + data_files[run] + ": " + image_name);
-					if (class_number < 1 || class_number > nr_classes)
+					if (class_number < 1 || class_number > source_classes)
 						REPORT_ERROR("Invalid rlnClassNumber in " + data_files[run]);
 					assignments[run][particle] = class_number - 1;
 				}
@@ -164,7 +179,7 @@ public:
 					std::unordered_map<std::string, long int>::const_iterator found = canonical_index.find(image_name);
 					if (found == canonical_index.end()) REPORT_ERROR("Particle sets differ between Class2D replicas");
 					if (seen[found->second]) REPORT_ERROR("Duplicate rlnImageName in " + data_files[run] + ": " + image_name);
-					if (class_number < 1 || class_number > nr_classes) REPORT_ERROR("Invalid rlnClassNumber in " + data_files[run]);
+					if (class_number < 1 || class_number > source_classes) REPORT_ERROR("Invalid rlnClassNumber in " + data_files[run]);
 					seen[found->second] = true;
 					assignments[run][found->second] = class_number - 1;
 				}
@@ -175,25 +190,41 @@ public:
 		{
 			for (int run = 0; run < nr_runs; ++run)
 			{
-				std::vector<long int> counts(nr_classes, 0);
+				std::vector<long int> counts(source_classes, 0);
 				for (size_t particle = 0; particle < assignments[run].size(); ++particle)
 					counts[assignments[run][particle]]++;
 				std::cout << "Replica run" << integerToString(run + 1, 3) << ": "
 				          << std::count(counts.begin(), counts.end(), 0)
-				          << " of " << nr_classes << " classes have no assigned particles." << std::endl;
+				          << " of " << source_classes << " source classes have no assigned particles." << std::endl;
 			}
 			std::cout << "Fitting categorical consensus for " << nr_particles << " particles, "
-			          << nr_runs << " replicas and " << nr_classes << " classes..." << std::endl;
+			          << nr_runs << " replicas, " << source_classes << " source classes and " << nr_classes << " consensus classes..." << std::endl;
+		}
+		// Stable identities, rather than STAR row order, break unequal-count ties.
+		if (nr_classes != source_classes)
+		{
+			std::vector<std::pair<std::string, long int> > identities(canonical_index.begin(), canonical_index.end());
+			std::sort(identities.begin(), identities.end());
+			for (int run = 0; run < nr_runs; ++run)
+			{
+				std::vector<int> ordered(nr_particles);
+				for (long int i = 0; i < nr_particles; ++i) ordered[i] = assignments[run][identities[i].second];
+				assignments[run].swap(ordered);
+			}
+			for (long int i = 0; i < nr_particles; ++i) canonical_index[identities[i].first] = i;
 		}
 		Class2DConsensusResult result;
 		try
 		{
-			result = Class2DConsensus::fit(assignments, nr_classes, 200, 1.e-6, 1.0, nr_threads);
+			result = Class2DConsensus::fitWithClassCount(assignments, source_classes, nr_classes, 200, 1.e-6, 1.0, nr_threads);
 		}
 		catch (const std::exception &error)
 		{
 			REPORT_ERROR(error.what());
 		}
+		if ((size_t)nr_classes > result.nr_patterns && verb > 0)
+			std::cout << "WARNING: requested classes exceed the " << result.nr_patterns
+			          << " distinct label patterns; identical patterns cannot be subdivided." << std::endl;
 		std::vector<int> class_counts(nr_classes, 0);
 		for (size_t particle = 0; particle < result.assignment.size(); ++particle)
 			class_counts[result.assignment[particle]]++;
@@ -215,15 +246,8 @@ public:
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, result.entropy[particle], row);
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT, result.agreement[particle], row);
 		}
-		if (reset_alignments) resetClass2DConsensusAlignments(anchor_particles);
+		resetClass2DConsensusAlignments(anchor_particles);
 		anchor_observation.save(anchor_particles, output_root + "_data.star", "particles");
-
-		MetaDataTable references;
-		references.read(model_files[result.anchor_run], "model_classes");
-		if ((int)references.numberOfObjects() != nr_classes || !references.containsLabel(EMDL_MLMODEL_REF_IMAGE))
-			REPORT_ERROR("Anchor model has an invalid model_classes table");
-		references.setName("model_classes");
-		references.write(output_root + "_references.star");
 
 		std::ofstream diagnostics((output_root + "_diagnostics.star").c_str());
 		if (!diagnostics) REPORT_ERROR("Cannot write consensus diagnostics STAR");
@@ -232,6 +256,9 @@ public:
 		general.setName("consensus_general");
 		general.addObject();
 		general.setValue(EMDL_MLMODEL_NR_CLASSES, nr_classes);
+		general.setValue(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES, source_classes);
+		general.setValue(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, nr_classes - (int)std::count(class_counts.begin(), class_counts.end(), 0));
+		general.setValue(EMDL_CLASS2D_CONSENSUS_PATTERNS, (long int)result.nr_patterns);
 		general.setValue(EMDL_PARTICLE_NUMBER, (int)nr_particles);
 		general.setValue(EMDL_CLASS2D_CONSENSUS_ANCHOR_RUN, result.anchor_run + 1);
 		general.setValue(EMDL_CLASS2D_CONSENSUS_LOG_LIKELIHOOD, result.log_likelihood);
@@ -244,6 +271,9 @@ public:
 		{
 			run_table.addObject();
 			run_table.setValue(EMDL_CLASS2D_CONSENSUS_RUN_NUMBER, run + 1);
+			run_table.setValue(EMDL_CLASS2D_CONSENSUS_MAPPING_MODE,
+				std::string(source_classes == nr_classes ? "one_to_one" :
+				(source_classes > nr_classes ? "source_to_consensus" : "consensus_to_source")));
 			run_table.setValue(EMDL_CLASS2D_CONSENSUS_SOURCE_OPTIMISER, optimiser_files[run]);
 			run_table.setValue(EMDL_CLASS2D_CONSENSUS_ADJUSTED_RAND, result.run_adjusted_rand[run]);
 			run_table.setValue(EMDL_CLASS2D_CONSENSUS_MAPPED_AGREEMENT, result.run_mapped_agreement[run]);
@@ -265,13 +295,13 @@ public:
 		confusion_table.setName("consensus_confusion");
 		for (int run = 0; run < nr_runs; ++run)
 			for (int consensus_class = 0; consensus_class < nr_classes; ++consensus_class)
-				for (int source_class = 0; source_class < nr_classes; ++source_class)
+				for (int source_class = 0; source_class < source_classes; ++source_class)
 				{
 					confusion_table.addObject();
 					confusion_table.setValue(EMDL_CLASS2D_CONSENSUS_RUN_NUMBER, run + 1);
 					confusion_table.setValue(EMDL_PARTICLE_CLASS, consensus_class + 1);
 					confusion_table.setValue(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASS, source_class + 1);
-					const size_t index = ((size_t)run * nr_classes + consensus_class) * nr_classes + source_class;
+					const size_t index = ((size_t)run * nr_classes + consensus_class) * source_classes + source_class;
 					confusion_table.setValue(EMDL_CLASS2D_CONSENSUS_CONDITIONAL_PROBABILITY, result.confusion[index]);
 				}
 		confusion_table.write(diagnostics);
@@ -281,7 +311,7 @@ public:
 		{
 			std::cout << "Consensus anchor: run" << integerToString(result.anchor_run + 1, 3) << std::endl;
 			std::cout << "Written " << output_root << "_data.star, " << output_root
-			          << "_references.star and " << output_root << "_diagnostics.star" << std::endl;
+			          << "_diagnostics.star; refinement initializes fresh images from consensus members" << std::endl;
 		}
 	}
 };

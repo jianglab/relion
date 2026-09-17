@@ -45,6 +45,8 @@
 #include "src/macros.h"
 #include "src/error.h"
 #include "src/ml_optimiser.h"
+#include "src/fixed_class_initialisation.h"
+#include "src/class2d_consensus_metadata.h"
 #include "src/spatial_frequency_grid.h"
 #include "src/cache_manager.h"
 #include "src/cache_init.h"
@@ -2174,15 +2176,30 @@ void MlOptimiser::initialiseGeneral(int rank)
 		if (mymodel.ref_dim != 2 || mymodel.data_dim != 2 || mydata.is_tomo)
 			REPORT_ERROR("ERROR: --fix_classes currently supports only non-tomographic 2D refinement");
 		if (mymodel.nr_classes < 2)
-			REPORT_ERROR("ERROR: --fix_classes requires at least two input references");
+			REPORT_ERROR("ERROR: --fix_classes requires at least two class slots");
 		if (do_generate_seeds)
-			REPORT_ERROR("ERROR: --fix_classes requires explicit input references through --ref");
+			REPORT_ERROR("ERROR: --fix_classes requires a reference STAR or fresh initialization without --ref; a single shared reference is not supported");
+		if (do_som) REPORT_ERROR("ERROR: --fix_classes cannot be combined with SOM classification");
+		const bool fresh = do_fix_classes && fn_ref == "None" && iter == 0;
+		if (fresh)
+		{
+			if (random_seed == 0 || random_seed < -1)
+				REPORT_ERROR("ERROR: fresh fixed-class initialization requires a positive random seed or -1 for automatic selection");
+			resetClass2DConsensusAlignments(mydata.MDimg);
+			mymodel.pdf_class.assign(mymodel.nr_classes, 0.);
+		}
 		for (long int particle = 0; particle < mydata.MDimg.numberOfObjects(); ++particle)
 		{
 			int class_number = 0;
 			if (!mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, class_number, particle) ||
 				class_number < 1 || class_number > mymodel.nr_classes)
-				REPORT_ERROR("ERROR: --fix_classes found an rlnClassNumber outside the input reference range");
+				REPORT_ERROR("ERROR: --fix_classes found an rlnClassNumber outside the class range");
+			if (fresh) mymodel.pdf_class[class_number - 1] += 1.;
+		}
+		if (fresh)
+		{
+			for (auto &mass : mymodel.pdf_class) mass /= mydata.MDimg.numberOfObjects();
+			if (verb > 0) std::cout << " Fresh fixed-class initialization: up to 100 members per occupied class; fitted poses reset, supported priors preserved." << std::endl;
 		}
 	}
 
@@ -2719,6 +2736,12 @@ void MlOptimiser::initialiseSigma2Noise()
 {
 
     // Get noise spectra
+    if (do_fix_classes && fn_ref == "None" && iter == 0 && fn_sigma != "")
+    {
+        MultidimArray<RFLOAT> Mavg;
+        calculateSumOfPowerSpectraAndAverageImage(Mavg);
+        setSigmaNoiseEstimatesAndSetAverageImage(Mavg);
+    }
     if (fn_sigma != "")
     {
         // Read in sigma_noise spectrum from file DEVELOPMENTAL!!! FOR DEBUGGING ONLY....
@@ -2796,7 +2819,7 @@ void MlOptimiser::initialiseReferences()
         // Low-pass filter the initial references
         initialLowPassFilterReferences();
 
-        if (do_init_blobs && fn_ref == "None" && !(mydata.is_tomo || mymodel.data_dim == 3))
+        if (do_init_blobs && !do_fix_classes && fn_ref == "None" && !(mydata.is_tomo || mymodel.data_dim == 3))
         {
             bool is_helical_segment =
                     (do_helical_refine) || ((mymodel.ref_dim == 2) && (helical_tube_outer_diameter > 0.));
@@ -2849,9 +2872,10 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
     // It is therefore no longer done in parallel over MPI
     int total_nr_particles_todo = minimum_nr_particles_sigma2_noise * mymodel.nr_optics_groups;
     int barstep;
+    const bool fresh_fixed = do_fix_classes && fn_ref == "None" && iter == 0;
 
     // Check that we always have at least 5 particles per class if no references are provided
-    if (fn_ref == "None") total_nr_particles_todo = XMIPP_MAX(mymodel.nr_classes*5, total_nr_particles_todo);
+    if (fn_ref == "None" && !fresh_fixed) total_nr_particles_todo = XMIPP_MAX(mymodel.nr_classes*5, total_nr_particles_todo);
 
     if (myverb > 0)
     {
@@ -2894,6 +2918,21 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
     }
     wsum_model.initZeros();
 
+    // Seed membership selection is independent of optics-group noise quotas.
+    std::vector<char> seed_particle;
+    if (fresh_fixed)
+    {
+        FixedClassSeedSelection selection(mymodel.nr_classes, random_seed);
+        for (long int particle = 0; particle < mydata.numberOfParticles(); ++particle)
+        {
+            int class_number = 0;
+            if (!mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, class_number, particle))
+                REPORT_ERROR("Missing rlnClassNumber during fresh fixed-class initialization");
+            selection.add(mydata.particles[particle].name, particle, class_number);
+        }
+        seed_particle.assign(mydata.numberOfParticles(), false);
+        for (long int particle : selection.takeIndices()) seed_particle[particle] = true;
+    }
     bool is_done_all_optics_groups = false;
     for (long int part_id_sorted = 0; part_id_sorted < mydata.numberOfParticles(); part_id_sorted++)
     {
@@ -2901,8 +2940,9 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
         long int part_id = mydata.sorted_idx[part_id_sorted];
         long int optics_group = mydata.getOpticsGroup(part_id);
 
-        if (nr_particles_done_per_optics_group[optics_group] >= minimum_nr_particles_sigma2_noise)
-            continue;
+        const bool use_for_noise = nr_particles_done_per_optics_group[optics_group] < minimum_nr_particles_sigma2_noise;
+        const bool use_for_seed = fresh_fixed && seed_particle[part_id];
+        if (!use_for_noise && !use_for_seed) continue;
 
         // Extract the relevant MetaDataTable row from MDimg
         MDimg = mydata.getMetaDataParticle(part_id);
@@ -3047,7 +3087,7 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
                                                   LAST_XMIPP_INDEX(mymodel.ori_size), LAST_XMIPP_INDEX(mymodel.ori_size), LAST_XMIPP_INDEX(mymodel.ori_size));
                 }
             }
-            Mavg += img();
+            if (use_for_noise) Mavg += img();
 
             // Calculate the power spectrum of this particle
             MultidimArray<RFLOAT> ind_spectrum, count;
@@ -3069,10 +3109,13 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
             ind_spectrum /= count;
 
             // Resize the power_class spectrum to the correct size and keep sum
-            wsum_model.sigma2_noise[optics_group] += ind_spectrum;
-            wsum_model.sumw_group[optics_group] += 1.;
+            if (use_for_noise)
+            {
+                wsum_model.sigma2_noise[optics_group] += ind_spectrum;
+                wsum_model.sumw_group[optics_group] += 1.;
+            }
 
-            if (fn_ref == "None")
+            if (fn_ref == "None" && (!fresh_fixed || use_for_seed))
             {
 
                 MultidimArray<RFLOAT> Fctf, Fweight;
@@ -3096,6 +3139,13 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
                 }
                 // SHWS 25Aug2022: make sure all classes have particles in them, their order has been randomised already
                 int iclass  = part_id_sorted % mymodel.nr_classes;
+                if (fresh_fixed)
+                {
+                    MDimg.getValue(EMDL_PARTICLE_CLASS, iclass);
+                    --iclass;
+                    // Independent from sampling and from upstream fitted poses.
+                    if (!is_helical_segment) psi = fixedClassInitialPsi(mydata.particles[part_id].name, random_seed);
+                }
                 Matrix2D<RFLOAT> A;
                 Euler_angles2matrix(rot, tilt, psi, A, false);
 
@@ -3153,8 +3203,11 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
             }
 
             // Keep track how many particles have been done
-            nr_particles_done++;
-            nr_particles_done_per_optics_group[optics_group]++;
+            if (use_for_noise)
+            {
+                nr_particles_done++;
+                nr_particles_done_per_optics_group[optics_group]++;
+            }
 
             // If we now reach a full optics_group, check whether all optics groups are full, and if so, exit)
             if (nr_particles_done_per_optics_group[optics_group] >= minimum_nr_particles_sigma2_noise)
@@ -3168,12 +3221,14 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
 
         } // end loop img_id
 
-        if (is_done_all_optics_groups)
+        if (is_done_all_optics_groups && !fresh_fixed)
         {
             break;
         }
 
-        if (myverb > 0 && nr_particles_done % barstep == 0)
+        if (fresh_fixed && pipeline_control_check_abort_job())
+            REPORT_ERROR("Fresh fixed-class initialization aborted");
+        if (myverb > 0 && use_for_noise && nr_particles_done % barstep == 0)
         {
             progress_bar(nr_particles_done);
             // Abort through the pipeline_control system
@@ -3216,6 +3271,11 @@ void MlOptimiser::setSigmaNoiseEstimatesAndSetAverageImage(MultidimArray<RFLOAT>
         for (int iclass = 0; iclass < mymodel.nr_classes * mymodel.nr_bodies; iclass++)
         {
 
+            if (do_fix_classes && mymodel.pdf_class[iclass] == 0.)
+            {
+                mymodel.Iref[iclass].initZeros();
+                continue;
+            }
             MultidimArray<RFLOAT> dummy;
             (wsum_model.BPref[iclass]).reconstruct(mymodel.Iref[iclass], gridding_nr_iter, false, dummy);
                         refs_are_ctf_corrected = true;
@@ -5242,6 +5302,7 @@ void MlOptimiser::centerClasses()
     // Shift all classes to their center-of-mass, and store all center-of-mass in coms vector
     for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
     {
+        if (do_fix_classes && mymodel.pdf_class[iclass] == 0.) continue;
         Matrix1D< RFLOAT > my_com;
         mymodel.Iref[iclass].centerOfMass(my_com);
         // Maximum number of pixels to shift center-of-mass is the current search range of translations
@@ -5338,6 +5399,7 @@ void MlOptimiser::alignClasses()
     for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
     {
         if (iclass == iclass_ref) continue;
+        if (do_fix_classes && mymodel.pdf_class[iclass] == 0.) continue;
 
         std::cout << "  Aligning class " << iclass + 1 << " to class " << iclass_ref + 1 << " ..." << std::endl;
 

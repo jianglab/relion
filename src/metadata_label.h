@@ -527,6 +527,10 @@ enum EMDLabel
 	EMDL_CLASS2D_CONSENSUS_ITERATIONS,
 	EMDL_CLASS2D_CONSENSUS_SOURCE_CLASS,
 	EMDL_CLASS2D_CONSENSUS_CONDITIONAL_PROBABILITY,
+	EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES,
+	EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES,
+	EMDL_CLASS2D_CONSENSUS_PATTERNS,
+	EMDL_CLASS2D_CONSENSUS_MAPPING_MODE,
 
 	EMDL_PIPELINE_JOB_COUNTER,
 	EMDL_PIPELINE_NODE_NAME,
@@ -1271,9 +1275,13 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_MOVIE_RUNNING_AVG, EMDL_INT, "rlnMovieFramesRunningAverage", "Number of movie frames inside the running average that will be used for movie-refinement");
 		EMDL::addLabel(EMDL_PARTICLE_PMAX, EMDL_DOUBLE, "rlnMaxValueProbDistribution", "Maximum value of the (normalised) probability function for a particle"); /**< particle, Maximum value of probability distribution */
 		EMDL::addLabel(EMDL_PARTICLE_NUMBER, EMDL_INT, "rlnParticleNumber", "Number of particles");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES, EMDL_INT, "rlnClass2DConsensusSourceClasses", "Number of classes in each source replica");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, EMDL_INT, "rlnClass2DConsensusOccupiedClasses", "Number of consensus classes with MAP-assigned particles");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_PATTERNS, EMDL_INT, "rlnClass2DConsensusPatterns", "Number of distinct cross-run assignment patterns");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_MAPPING_MODE, EMDL_STRING, "rlnClass2DConsensusMappingMode", "Agreement mapping: one_to_one, source_to_consensus, or consensus_to_source; not classification accuracy");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_RUN_NUMBER, EMDL_INT, "rlnClass2DConsensusRunNumber", "One-based source Class2D replica number");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_OPTIMISER, EMDL_STRING, "rlnClass2DConsensusSourceOptimiser", "Source Class2D replica optimiser STAR file");
-		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ANCHOR_RUN, EMDL_INT, "rlnClass2DConsensusAnchorRun", "One-based Class2D replica used to define consensus class numbering and initial references");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ANCHOR_RUN, EMDL_INT, "rlnClass2DConsensusAnchorRun", "One-based Class2D replica retained for provenance and equal-count class numbering");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ADJUSTED_RAND, EMDL_DOUBLE, "rlnClass2DConsensusAdjustedRandIndex", "Adjusted Rand index between a Class2D replica and the consensus");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_MAPPED_AGREEMENT, EMDL_DOUBLE, "rlnClass2DConsensusMappedAgreement", "Fraction of a Class2D replica agreeing with the consensus after optimal label mapping");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_LOG_LIKELIHOOD, EMDL_DOUBLE, "rlnClass2DConsensusLogLikelihood", "Categorical latent-class consensus log likelihood");
