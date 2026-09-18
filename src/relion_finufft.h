@@ -67,6 +67,9 @@ void setFinufftThreadCount(int nthreads);
 
 #endif // RELION_USE_FINUFFT
 
+#include "src/finufft_central_slice.h"
+
+
 #ifndef RELION_USE_FINUFFT
 inline void setFinufftThreadCount(int) {}
 #endif

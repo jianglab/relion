@@ -49,6 +49,10 @@ public:
 	// Calculate average spectral SNRs?
 	bool do_ssnr;
 
+	// Interpolator for the reference projections: FINUFFT by default, TRILINEAR
+	// when RELION_INTERPOLATION=linear
+	int projector_interpolator;
+
 	// Write in half-precision 16 bit floating point numbers (MRC mode 12)
 	bool write_float16;
 

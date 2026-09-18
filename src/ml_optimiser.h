@@ -577,6 +577,31 @@ public:
 	/* Flag to only sample tilt angles (from -180->180), ignore rot angles: temporary fix for DNA-origami frames */
 	bool do_only_sample_tilt;
 
+	// Memory budget (MB, per thread) for the batch of reference slices that the
+	// NUFFT projector pre-computes in getAllSquaredDifferences().  Bigger batches
+	// spread FINUFFT's internal FFT over more slices.  RELION_FINUFFT_BATCH_MB.
+	int finufft_batch_budget_mb;
+
+	/* Shared reference-projection cache for the NUFFT projector.
+	 *
+	 * Under a *global* angular search (NOPRIOR, single body, non-tomo) the
+	 * orientation that a given (idir, ipsi, iover_rot) index stands for is the
+	 * same for every particle, and the only other thing the projection depends on
+	 * is the optics group.  So the whole set of reference slices can be computed
+	 * once per iteration and reused by every particle - which is what makes the
+	 * NUFFT projector affordable, since its cost is then paid once rather than
+	 * once per particle.
+	 *
+	 * Keyed by (iclass, optics_group, ipass).  Entries are added under a critical
+	 * section; std::map keeps existing elements at stable addresses across
+	 * inserts, so a pointer handed out earlier stays valid.
+	 */
+	std::map<long int, std::vector<MultidimArray<Complex > > > refproj_cache;
+	int refproj_cache_iter;
+	size_t refproj_cache_bytes;
+	// Total memory budget (MB) for the above.  RELION_FINUFFT_CACHE_MB.
+	int refproj_cache_budget_mb;
+
 	/* Flag to use bimodal prior distributions on psi (2D classification of helical segments) */
 	bool do_bimodal_psi;
 
@@ -815,6 +840,10 @@ public:
 public:
 
 	MlOptimiser():
+            refproj_cache_iter(-1),
+            refproj_cache_bytes(0),
+            refproj_cache_budget_mb(0),
+            finufft_batch_budget_mb(0),
             do_zero_mask(0),
             do_write_unmasked_refs(0),
             do_generate_seeds(0),
@@ -1191,6 +1220,18 @@ public:
 			int exp_itrans_min, int exp_itrans_max, MultidimArray<bool> &exp_Mcoarse_significant);
 
 	// Get squared differences for all iclass, idir, ipsi and itrans...
+	/* The shared set of reference projections for one (class, optics group, pass),
+	 * or NULL when it cannot be used or does not fit in the budget - in which case
+	 * the caller falls back to projecting per particle.  Indexed by
+	 * ((idir - idir_min) * nr_psi + (ipsi - ipsi_min)) * nr_oversampled_rot + iover_rot.
+	 */
+	const std::vector<MultidimArray<Complex > >* getCachedReferenceProjections(
+			int iclass, int optics_group, int ipass,
+			long int idir_min, long int idir_max,
+			long int ipsi_min, long int ipsi_max,
+			long int nr_oversampled_rot, int current_oversampling,
+			long int slice_xdim, long int slice_ydim, long int slice_zdim);
+
 	void getAllSquaredDifferences(long int part_id, int ibody,
 			int exp_ipass, int exp_current_oversampling, int metadata_offset,
 			int exp_idir_min, int exp_idir_max, int exp_ipsi_min, int exp_ipsi_max,

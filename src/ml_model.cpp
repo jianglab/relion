@@ -1541,6 +1541,12 @@ void MlModel::setFourierTransformMaps(bool update_tau2_spectra, int nr_threads, 
 		if(PPrefRank.size() > 1)
 			do_heavy = PPrefRank[iclass];
 
+		// The forward projectors may use a different interpolator than the
+		// backprojectors (RELION_INTERPOLATION=nufft).  Set it here rather than at
+		// construction, so that it survives every route that fills PPref
+		// (initialise(), read() and the multi-body push_back()s).
+		PPref[iclass].interpolator = projector_interpolator;
+
 		if (update_tau2_spectra && iclass < nr_classes * nr_bodies)
 		{
 			PPref[iclass].computeFourierTransformMap(Irefp, tau2_class[iclass], current_size, nr_threads, true, do_heavy, min_ires, fourier_mask, do_gpu);

@@ -83,6 +83,13 @@ public:
 	// Fourier space interpolator
 	int interpolator;
 
+	// Interpolator used by the *forward* projectors (PPref) only.  Normally equal
+	// to `interpolator`; set to FINUFFT by --projector_finufft to extract central
+	// slices with an exact type-2 NUFFT instead of the trilinear stencil.  The
+	// backprojectors keep using `interpolator`.  Runtime-only: not stored in the
+	// model star file, so it must be given again when continuing a run.
+	int projector_interpolator;
+
 	// Minimum number of shells to perform linear interpolation
 	int r_min_nn;
 
@@ -256,6 +263,7 @@ public:
 		LL(0),
 		padding_factor(0.),
 		interpolator(0),
+		projector_interpolator(TRILINEAR),
 		r_min_nn(0),
 		ave_Pmax(0),
 		avg_norm_correction(0),
@@ -311,6 +319,7 @@ public:
 			LL = MD.LL;
 			padding_factor = MD.padding_factor;
 			interpolator = MD.interpolator;
+			projector_interpolator = MD.projector_interpolator;
 			r_min_nn = MD.r_min_nn;
 			ave_Pmax = MD.ave_Pmax;
 			avg_norm_correction = MD.avg_norm_correction;

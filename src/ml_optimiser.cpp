@@ -166,6 +166,22 @@ void MlOptimiser::read(int argc, char **argv, int rank)
     }
 }
 
+// Default for --finufft_batch_mb, overridable with RELION_FINUFFT_BATCH_MB
+static std::string getFinufftBatchBudgetDefault()
+{
+    const char *env = getenv("RELION_FINUFFT_BATCH_MB");
+    if (env != NULL && strlen(env) > 0) return std::string(env);
+    return std::string("512");
+}
+
+// Default for --finufft_cache_mb, overridable with RELION_FINUFFT_CACHE_MB
+static std::string getFinufftCacheBudgetDefault()
+{
+    const char *env = getenv("RELION_FINUFFT_CACHE_MB");
+    if (env != NULL && strlen(env) > 0) return std::string(env);
+    return std::string("4096");
+}
+
 void MlOptimiser::parseContinue(int argc, char **argv)
 {
 #ifdef DEBUG
@@ -613,6 +629,12 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     do_use_all_data = checkParameter(argc, argv, "--use_all_data");
     do_always_cc  = checkParameter(argc, argv, "--always_cc");
     do_only_sample_tilt  = checkParameter(argc, argv, "--only_sample_tilt");
+    // Not stored in the model star file, so these have to be given again on --continue
+    Projector::applyFinufftEnvDefaults();
+    Projector::finufft_mode_crop = textToFloat(getParameter(argc, argv, "--finufft_mode_crop", Projector::finufftModeCropAsString()));
+    Projector::finufft_tol = textToDouble(getParameter(argc, argv, "--finufft_tol", Projector::finufftTolAsString()));
+    finufft_batch_budget_mb = textToInteger(getParameter(argc, argv, "--finufft_batch_mb", getFinufftBatchBudgetDefault()));
+    refproj_cache_budget_mb = textToInteger(getParameter(argc, argv, "--finufft_cache_mb", getFinufftCacheBudgetDefault()));
     minimum_angular_sampling = textToFloat(getParameter(argc, argv, "--minimum_angular_sampling", "0"));
     maximum_angular_sampling = textToFloat(getParameter(argc, argv, "--maximum_angular_sampling", "0"));
     asymmetric_padding = parser.checkOption("--asymmetric_padding", "", "false", true);
@@ -1031,6 +1053,14 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     ref_angpix = textToFloat(parser.getOption("--ref_angpix", "Pixel size (in A) for the input reference (default is to read from header)", "-1."));
     mymodel.interpolator = (parser.checkOption("--NN", "Perform nearest-neighbour instead of linear Fourier-space interpolation?")) ? NEAREST_NEIGHBOUR : TRILINEAR;
     mymodel.r_min_nn = textToInteger(parser.getOption("--r_min_nn", "Minimum number of Fourier shells to perform linear Fourier-space interpolation", "10"));
+    // Reference central slices use NUFFT by default; RELION_INTERPOLATION=linear
+    // selects the classic trilinear interpolation.  Seed the NUFFT tuning knobs
+    // from the environment first, so an explicit command-line value still wins.
+    Projector::applyFinufftEnvDefaults();
+    Projector::finufft_mode_crop = textToFloat(parser.getOption("--finufft_mode_crop", "Size of the NUFFT mode array as a multiple of the box size (higher is more accurate and much more expensive)", Projector::finufftModeCropAsString()));
+    Projector::finufft_tol = textToDouble(parser.getOption("--finufft_tol", "Requested relative accuracy of the NUFFT central-slice transforms", Projector::finufftTolAsString()));
+    finufft_batch_budget_mb = textToInteger(parser.getOption("--finufft_batch_mb", "Memory budget (MB, per thread) for the batch of pre-computed NUFFT reference slices", getFinufftBatchBudgetDefault()));
+    refproj_cache_budget_mb = textToInteger(parser.getOption("--finufft_cache_mb", "Memory budget (MB) for the shared, once-per-iteration cache of NUFFT reference projections (0 disables it)", getFinufftCacheBudgetDefault()));
     verb = textToInteger(parser.getOption("--verb", "Verbosity (1=normal, 0=silent)", "1"));
     random_seed = textToInteger(parser.getOption("--random_seed", "Number for the random seed generator", "-1"));
     max_coarse_size = textToInteger(parser.getOption("--coarse_size", "Maximum image size for the first pass of the adaptive sampling approach", "-1"));
@@ -2134,6 +2164,13 @@ void MlOptimiser::initialiseGeneral(int rank)
 
     if (do_always_cc)
         do_calculate_initial_sigma_noise = false;
+
+    // The forward projectors may use a different interpolator than the backprojectors.
+    // Do this after the model has been read (so --continue picks up the right
+    // default) and after the accelerator options have been settled.
+    mymodel.projector_interpolator = Projector::resolveForwardInterpolator(do_gpu || do_sycl || do_cpu, verb);
+    if (mymodel.projector_interpolator != FINUFFT)
+        mymodel.projector_interpolator = mymodel.interpolator;   // honours --NN
 
 
     if (do_shifts_onthefly && (do_gpu || do_sycl || do_cpu))
@@ -7496,6 +7533,133 @@ bool MlOptimiser::isSignificantAnyImageAnyTranslation(long int iorient, int exp_
 }
 
 
+
+const std::vector<MultidimArray<Complex > >* MlOptimiser::getCachedReferenceProjections(
+        int iclass, int optics_group, int ipass,
+        long int idir_min, long int idir_max,
+        long int ipsi_min, long int ipsi_max,
+        long int nr_oversampled_rot, int current_oversampling,
+        long int slice_xdim, long int slice_ydim, long int slice_zdim)
+{
+    // Only worth doing for the NUFFT projector, whose cost per slice is orders of
+    // magnitude above the trilinear stencil's.
+    if (mymodel.projector_interpolator != FINUFFT) return NULL;
+    if (refproj_cache_budget_mb <= 0) return NULL;
+
+    // Every condition below is one under which the orientation behind a given
+    // (idir, ipsi, iover_rot) index is *not* the same for every particle:
+    //  - multi-body: the Euler matrix is composed with the particle's own Aori
+    //  - tomography: composed with the per-image tilt-series rotation
+    //  - orientational priors: idir/ipsi index into a per-particle subset
+    //    (HealpixSampling::getOrientations redirects through
+    //     pointer_dir_nonzeroprior / pointer_psi_nonzeroprior)
+    //  - skipped alignment/rotation: the angles come from the particle metadata
+    if (mymodel.nr_bodies > 1) return NULL;
+    if (mydata.is_tomo) return NULL;
+    if (mymodel.orientational_prior_mode != NOPRIOR) return NULL;
+    if (do_skip_align || do_skip_rotate) return NULL;
+
+    const long int nr_dir = idir_max - idir_min + 1;
+    const long int nr_psi = ipsi_max - ipsi_min + 1;
+    if (nr_dir <= 0 || nr_psi <= 0 || nr_oversampled_rot <= 0) return NULL;
+
+    const long int nr_slices = nr_dir * nr_psi * nr_oversampled_rot;
+    const size_t slice_elems = (size_t)slice_xdim * (size_t)slice_ydim * (size_t)slice_zdim;
+    const size_t need = (size_t)nr_slices * slice_elems * sizeof(Complex);
+    const size_t budget = (size_t)refproj_cache_budget_mb * 1024u * 1024u;
+
+    const long int key = ((long int)iclass * (long int)mydata.obsModel.numberOfOpticsGroups()
+                          + (long int)optics_group) * 2 + (long int)ipass;
+
+    const std::vector<MultidimArray<Complex > > *result = NULL;
+
+    #pragma omp critical(RELION_refproj_cache)
+    {
+        // The references change every iteration, and so may the image size
+        if (refproj_cache_iter != iter)
+        {
+            refproj_cache.clear();
+            refproj_cache_bytes = 0;
+            refproj_cache_iter = iter;
+        }
+
+        std::map<long int, std::vector<MultidimArray<Complex > > >::iterator it = refproj_cache.find(key);
+
+        if (it != refproj_cache.end())
+        {
+            // Guard against anything that would make the stored slices the wrong
+            // shape or the wrong length; falling back is always safe.
+            const std::vector<MultidimArray<Complex > > &have = it->second;
+            if ((long int)have.size() == nr_slices && nr_slices > 0
+                && (long int)XSIZE(have[0]) == slice_xdim
+                && (long int)YSIZE(have[0]) == slice_ydim
+                && (long int)ZSIZE(have[0]) == slice_zdim)
+            {
+                result = &have;
+            }
+        }
+        else if (need <= budget && refproj_cache_bytes + need <= budget)
+        {
+            std::vector<MultidimArray<Complex > > &slices = refproj_cache[key];
+            slices.resize(nr_slices);
+
+            std::vector<Matrix2D<RFLOAT> > As(nr_slices);
+            std::vector<RFLOAT> my_rot, my_tilt, my_psi;
+            // Deliberately empty: this path is only taken when there are no priors
+            std::vector<int> no_dir_ptr, no_psi_ptr;
+            std::vector<RFLOAT> no_dir_prior, no_psi_prior;
+
+            long int n = 0;
+            for (long int idir = idir_min; idir <= idir_max; idir++)
+            for (long int ipsi = ipsi_min; ipsi <= ipsi_max; ipsi++)
+            {
+                sampling.getOrientations(idir, ipsi, current_oversampling, my_rot, my_tilt, my_psi,
+                        no_dir_ptr, no_dir_prior, no_psi_ptr, no_psi_prior);
+
+                for (long int iover_rot = 0; iover_rot < nr_oversampled_rot; iover_rot++, n++)
+                {
+                    Euler_angles2matrix(my_rot[iover_rot], my_tilt[iover_rot], my_psi[iover_rot], As[n], false);
+                    As[n] = mydata.obsModel.applyAnisoMag(As[n], optics_group);
+                    As[n] = mydata.obsModel.applyScaleDifference(As[n], optics_group, mymodel.ori_size, mymodel.pixel_size);
+                    slices[n].resize(slice_zdim, slice_ydim, slice_xdim);
+                    slices[n].initZeros();
+                }
+            }
+
+            // Project in chunks: one batched FINUFFT call holds coordinate and
+            // output buffers for every query point at once, so an unbounded batch
+            // would need more transient memory than the cache itself.
+            const size_t max_points_per_call = 4000000;
+            const long int chunk = XMIPP_MAX((long int)1,
+                    (long int)(max_points_per_call / XMIPP_MAX((size_t)1, slice_elems)));
+
+            Projector &myproj = mymodel.PPref[iclass];
+            for (long int first = 0; first < nr_slices; first += chunk)
+            {
+                const long int last = XMIPP_MIN(nr_slices - 1, first + chunk - 1);
+                std::vector<Matrix2D<RFLOAT> > chunk_A(As.begin() + first, As.begin() + last + 1);
+                std::vector<MultidimArray<Complex > *> chunk_out(last - first + 1);
+                for (long int i = 0; i <= last - first; i++)
+                    chunk_out[i] = &slices[first + i];
+
+                myproj.get2DFourierTransformMany(chunk_out, chunk_A);
+            }
+
+            refproj_cache_bytes += need;
+            result = &slices;
+
+            if (verb > 0 && refproj_cache.size() == 1)
+            {
+                std::cout << " Caching " << nr_slices << " shared NUFFT reference projections per class"
+                          << " (" << (need / (1024 * 1024)) << " MB); they are the same for every particle"
+                          << " under a global angular search." << std::endl;
+            }
+        }
+    }
+
+    return result;
+}
+
 void MlOptimiser::getAllSquaredDifferences(long int part_id, int ibody,
         int exp_ipass, int exp_current_oversampling, int metadata_offset,
         int exp_idir_min, int exp_idir_max, int exp_ipsi_min, int exp_ipsi_max,
@@ -7586,8 +7750,112 @@ void MlOptimiser::getAllSquaredDifferences(long int part_id, int ibody,
             if (do_shifts_onthefly)
                 Fimg_otfshift.resize(Frefctf);
 
+            // A single FINUFFT type-2 call costs one FFT of FINUFFT's internal
+            // upsampled grid however few points it evaluates, so projecting one
+            // orientation at a time would be hopeless: the whole point of the
+            // batched interface is to spread that one FFT over as many slices as
+            // will fit in memory.  Directions are therefore processed in blocks,
+            // and every slice the loops below will ask for in the current block is
+            // pre-projected in one call.  The cache is keyed on
+            // (idir, ipsi, iover_rot, img_id) rather than on iteration order, so if
+            // this enumeration ever drifts out of step with the main loop the cost
+            // is a fallback projection, not a wrong answer.
+            // First choice: the shared, once-per-iteration cache.  Under a global
+            // angular search every particle asks for exactly the same projections,
+            // so the NUFFT cost is paid once for the whole job rather than once per
+            // particle.  NULL means it does not apply here (local searches,
+            // multi-body, tomography) or does not fit in --finufft_cache_mb, and we
+            // fall back to the per-particle batching below.
+            const std::vector<MultidimArray<Complex > > *shared_refproj =
+                    getCachedReferenceProjections(exp_iclass, optics_group, exp_ipass,
+                            exp_idir_min, exp_idir_max, exp_ipsi_min, exp_ipsi_max,
+                            exp_nr_oversampled_rot, exp_current_oversampling,
+                            XSIZE(exp_local_Minvsigma2), YSIZE(exp_local_Minvsigma2), ZSIZE(exp_local_Minvsigma2));
+
+            const bool do_finufft_batch = (mymodel.projector_interpolator == FINUFFT) && (shared_refproj == NULL);
+            const long int nr_ipsi_batch = exp_ipsi_max - exp_ipsi_min + 1;
+            const long int nr_per_dir = nr_ipsi_batch * exp_nr_oversampled_rot * exp_nr_images;
+            long int nr_dir_per_batch = 1;
+            std::vector<MultidimArray<Complex > > finufft_batch_slices;
+            std::vector<long int> finufft_batch_index;
+            long int finufft_block_first_dir = -1;
+
+            if (do_finufft_batch)
+            {
+                const size_t slice_bytes = MULTIDIM_SIZE(exp_local_Minvsigma2) * sizeof(Complex);
+                const size_t budget = (size_t)finufft_batch_budget_mb * 1024u * 1024u;
+                const size_t per_dir_bytes = XMIPP_MAX((size_t)1, (size_t)nr_per_dir * slice_bytes);
+                nr_dir_per_batch = (long int)XMIPP_MAX((size_t)1, budget / per_dir_bytes);
+                nr_dir_per_batch = XMIPP_MIN(nr_dir_per_batch, exp_idir_max - exp_idir_min + 1);
+            }
+
             for (long int idir = exp_idir_min, iorient = 0; idir <= exp_idir_max; idir++)
             {
+                if (do_finufft_batch && (finufft_block_first_dir < 0 || idir >= finufft_block_first_dir + nr_dir_per_batch))
+                {
+                    finufft_block_first_dir = idir;
+                    const long int block_last_dir = XMIPP_MIN(exp_idir_max, idir + nr_dir_per_batch - 1);
+
+                    finufft_batch_slices.clear();
+                    finufft_batch_index.assign((size_t)nr_dir_per_batch * nr_per_dir, -1);
+
+                    std::vector<Matrix2D<RFLOAT> > batch_A;
+                    std::vector<long int> batch_key;
+                    std::vector<RFLOAT> batch_rot, batch_tilt, batch_psi;
+
+                    for (long int jdir = idir; jdir <= block_last_dir; jdir++)
+                    for (long int ipsi = exp_ipsi_min; ipsi <= exp_ipsi_max; ipsi++)
+                    {
+                        const long int my_iorient = (jdir - exp_idir_min) * nr_ipsi_batch + (ipsi - exp_ipsi_min);
+                        const long int my_iorientclass = exp_iclass * exp_nr_dir * exp_nr_psi + my_iorient;
+
+                        RFLOAT my_pdf;
+                        if (do_skip_align || do_skip_rotate)
+                            my_pdf = mymodel.pdf_class[exp_iclass];
+                        else if (mymodel.orientational_prior_mode == NOPRIOR)
+                            my_pdf = DIRECT_MULTIDIM_ELEM(mymodel.pdf_direction[exp_iclass], jdir);
+                        else
+                            my_pdf = exp_directions_prior[jdir] * exp_psi_prior[ipsi];
+
+                        const bool my_proceed = (exp_ipass == 0) ? true :
+                            isSignificantAnyImageAnyTranslation(my_iorientclass, exp_itrans_min, exp_itrans_max, exp_Mcoarse_significant);
+
+                        if (!(my_proceed && my_pdf > 0.)) continue;
+
+                        sampling.getOrientations(jdir, ipsi, exp_current_oversampling, batch_rot, batch_tilt, batch_psi,
+                                exp_pointer_dir_nonzeroprior, exp_directions_prior, exp_pointer_psi_nonzeroprior, exp_psi_prior);
+
+                        for (long int iover_rot = 0; iover_rot < exp_nr_oversampled_rot; iover_rot++)
+                        for (int img_id = 0; img_id < exp_nr_images; img_id++)
+                        {
+                            Matrix2D<RFLOAT> Abatch;
+                            Euler_angles2matrix(batch_rot[iover_rot], batch_tilt[iover_rot], batch_psi[iover_rot], Abatch, false);
+                            if (mymodel.nr_bodies > 1)
+                                Abatch = Aori * (mymodel.orient_bodies[ibody]).transpose() * A_rot90 * Abatch * mymodel.orient_bodies[ibody];
+                            if (mydata.is_tomo) Abatch = mydata.getRotationMatrix(part_id, img_id) * Abatch;
+                            Abatch = mydata.obsModel.applyAnisoMag(Abatch, optics_group);
+                            Abatch = mydata.obsModel.applyScaleDifference(Abatch, optics_group, mymodel.ori_size, mymodel.pixel_size);
+
+                            batch_A.push_back(Abatch);
+                            batch_key.push_back(((jdir - idir) * nr_per_dir)
+                                    + (((ipsi - exp_ipsi_min) * exp_nr_oversampled_rot + iover_rot) * exp_nr_images) + img_id);
+                        }
+                    }
+
+                    if (!batch_A.empty())
+                    {
+                        finufft_batch_slices.resize(batch_A.size());
+                        for (size_t ib = 0; ib < batch_A.size(); ib++)
+                        {
+                            finufft_batch_slices[ib].resize(exp_local_Minvsigma2);
+                            finufft_batch_slices[ib].initZeros();
+                            finufft_batch_index[batch_key[ib]] = (long int)ib;
+                        }
+                        Projector &myproj = (mymodel.nr_bodies > 1) ? mymodel.PPref[ibody] : mymodel.PPref[exp_iclass];
+                        myproj.get2DFourierTransformMany(finufft_batch_slices, batch_A);
+                    }
+                }
+
                 for (long int ipsi = exp_ipsi_min; ipsi <= exp_ipsi_max; ipsi++, iorient++)
                 {
                     long int iorientclass = exp_iclass * exp_nr_dir * exp_nr_psi + iorient;
@@ -7654,20 +7922,58 @@ void MlOptimiser::getAllSquaredDifferences(long int part_id, int ibody,
 
 
                                 // For multi-body refinements, A are only 'residual' orientations, Abody is the complete Euler matrix
+                                // Where this slice comes from, in order of preference:
+                                // the shared per-iteration cache, then the
+                                // per-direction batch, then a direct projection.
+                                // The two caches are keyed on the orientation
+                                // indices rather than on iteration order, so a
+                                // mismatch costs a fallback projection, never a
+                                // wrong answer.
+                                const MultidimArray<Complex > *my_cached_ref = NULL;
+                                if (shared_refproj != NULL)
+                                {
+                                    const long int shared_key = (((idir - exp_idir_min) * nr_ipsi_batch
+                                            + (ipsi - exp_ipsi_min)) * exp_nr_oversampled_rot) + iover_rot;
+                                    if (shared_key >= 0 && shared_key < (long int)shared_refproj->size())
+                                        my_cached_ref = &((*shared_refproj)[shared_key]);
+                                }
+                                else if (do_finufft_batch)
+                                {
+                                    const long int my_finufft_key = ((idir - finufft_block_first_dir) * nr_per_dir)
+                                            + (((ipsi - exp_ipsi_min) * exp_nr_oversampled_rot + iover_rot) * exp_nr_images) + img_id;
+                                    if (my_finufft_key >= 0 && my_finufft_key < (long int)finufft_batch_index.size())
+                                    {
+                                        const long int idx = finufft_batch_index[my_finufft_key];
+                                        if (idx >= 0) my_cached_ref = &finufft_batch_slices[idx];
+                                    }
+                                }
+
                                 if (mymodel.nr_bodies > 1)
                                 {
                                     Abody =  Aori * (mymodel.orient_bodies[ibody]).transpose() * A_rot90 * A * mymodel.orient_bodies[ibody];
                                     if (mydata.is_tomo) Abody = mydata.getRotationMatrix(part_id, img_id) * Abody;
                                     Abody = mydata.obsModel.applyAnisoMag(Abody, optics_group);
                                     Abody = mydata.obsModel.applyScaleDifference(Abody, optics_group, mymodel.ori_size, mymodel.pixel_size);
-                                    (mymodel.PPref[ibody]).get2DFourierTransform(Fref, Abody);
+                                    if (my_cached_ref != NULL)
+                                        Fref = *my_cached_ref;
+                                    else
+                                    {
+                                        if (do_finufft_batch) Fref.initZeros();
+                                        (mymodel.PPref[ibody]).get2DFourierTransform(Fref, Abody);
+                                    }
                                 }
                                 else
                                 {
                                     if (mydata.is_tomo) A = mydata.getRotationMatrix(part_id, img_id) * A;
                                     A = mydata.obsModel.applyAnisoMag(A, optics_group);
                                     A = mydata.obsModel.applyScaleDifference(A, optics_group, mymodel.ori_size, mymodel.pixel_size);
-                                    (mymodel.PPref[exp_iclass]).get2DFourierTransform(Fref, A);
+                                    if (my_cached_ref != NULL)
+                                        Fref = *my_cached_ref;
+                                    else
+                                    {
+                                        if (do_finufft_batch) Fref.initZeros();
+                                        (mymodel.PPref[exp_iclass]).get2DFourierTransform(Fref, A);
+                                    }
                                 }
 
 #ifdef TIMING
@@ -8768,9 +9074,23 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
     // wsum_sigma2_offset is just a RFLOAT
     thr_wsum_sigma2_offset = 0.;
 
+    const long int nr_ipsi_cache = exp_ipsi_max - exp_ipsi_min + 1;
+
     // Loop from iclass_min to iclass_max to deal with seed generation in first iteration
     for (int exp_iclass = exp_iclass_min; exp_iclass <= exp_iclass_max; exp_iclass++)
     {
+        // The same shared, once-per-iteration projections that
+        // getAllSquaredDifferences() built for the fine pass serve this loop too:
+        // it visits a subset of the same orientations at the same oversampling.
+        // NULL (including whenever the slice shape does not match, e.g. under
+        // --strict_highres_exp) simply means projecting per particle as before.
+        const std::vector<MultidimArray<Complex > > *shared_refproj =
+                (do_skip_maximization) ? NULL :
+                getCachedReferenceProjections(exp_iclass, optics_group, 1,
+                        exp_idir_min, exp_idir_max, exp_ipsi_min, exp_ipsi_max,
+                        exp_nr_oversampled_rot, adaptive_oversampling,
+                        XSIZE(Fref), YSIZE(Fref), ZSIZE(Fref));
+
         for (long int idir = exp_idir_min, iorient = 0; idir <= exp_idir_max; idir++)
         {
             for (long int ipsi = exp_ipsi_min; ipsi <= exp_ipsi_max; ipsi++, iorient++)
@@ -8823,7 +9143,15 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
                             // Project the reference map (into Fref)
                             if (!do_skip_maximization)
                             {
-                                if (mymodel.nr_bodies > 1)
+                                const long int shared_key = (((idir - exp_idir_min) * nr_ipsi_cache
+                                        + (ipsi - exp_ipsi_min)) * exp_nr_oversampled_rot) + iover_rot;
+
+                                if (shared_refproj != NULL && shared_key >= 0
+                                    && shared_key < (long int)shared_refproj->size())
+                                {
+                                    Fref = (*shared_refproj)[shared_key];
+                                }
+                                else if (mymodel.nr_bodies > 1)
                                 {
                                     mymodel.PPref[ibody].get2DFourierTransform(Fref, Abody);
                                 }
@@ -9904,6 +10232,13 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                 } // end for img_id
             } // end if do_ctf
 
+            // The unperturbed projection F1 depends only on (iclass, part_id, img_id):
+            // its angles come from the particle metadata, not from the search below.
+            // Re-projecting it on every step of the while loops is pure waste, and
+            // with the NUFFT projector it is what makes this routine expensive.
+            // Cached here and copied out, because the CTF is applied to F1 in place.
+            std::vector<MultidimArray<Complex > > F1_cache(mydata.numberOfImagesInParticle(part_id));
+
             // Search 2 times: ang and off
             // Don't estimate rotational accuracies if we're doing do_skip_rotate
             int imode_start = (do_skip_rotate) ? 1 : 0;
@@ -9971,18 +10306,23 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                     for (int img_id = 0; img_id < mydata.numberOfImagesInParticle(part_id); img_id++)
                     {
 
-                        if (mymodel.data_dim == 2)
-                            F1.initZeros(current_image_size, current_image_size/ 2 + 1);
-                        else
-                            F1.initZeros(current_image_size, current_image_size, current_image_size/ 2 + 1);
+                        // Get the FT of the first image (once per img_id; see F1_cache)
+                        if (NZYXSIZE(F1_cache[img_id]) == 0)
+                        {
+                            MultidimArray<Complex > &F1c = F1_cache[img_id];
+                            if (mymodel.data_dim == 2)
+                                F1c.initZeros(current_image_size, current_image_size/ 2 + 1);
+                            else
+                                F1c.initZeros(current_image_size, current_image_size, current_image_size/ 2 + 1);
 
-                        // Get the FT of the first image
-                        Euler_angles2matrix(rot1, tilt1, psi1, A1, false);
+                            Euler_angles2matrix(rot1, tilt1, psi1, A1, false);
 
-                        if (mydata.is_tomo) A1 = mydata.getRotationMatrix(part_id, img_id) * A1;
-                        A1 = mydata.obsModel.applyAnisoMag(A1, optics_group);
-                        A1 = mydata.obsModel.applyScaleDifference(A1, optics_group, mymodel.ori_size, mymodel.pixel_size);
-                        (mymodel.PPref[iclass]).get2DFourierTransform(F1, A1);
+                            if (mydata.is_tomo) A1 = mydata.getRotationMatrix(part_id, img_id) * A1;
+                            A1 = mydata.obsModel.applyAnisoMag(A1, optics_group);
+                            A1 = mydata.obsModel.applyScaleDifference(A1, optics_group, mymodel.ori_size, mymodel.pixel_size);
+                            (mymodel.PPref[iclass]).get2DFourierTransform(F1c, A1);
+                        }
+                        F1 = F1_cache[img_id];
 
                         // Apply the angular or shift error
                         RFLOAT rot2 = rot1;

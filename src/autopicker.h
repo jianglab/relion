@@ -268,6 +268,10 @@ public:
 	// use GPU hardware?
 	bool do_gpu;
 
+	// Interpolator for the forward projectors that make the templates: FINUFFT by
+	// default, TRILINEAR when RELION_INTERPOLATION=linear or --gpu is in use
+	int projector_interpolator;
+
 	// Which GPU devices to use?
 	std::string gpu_ids;
 

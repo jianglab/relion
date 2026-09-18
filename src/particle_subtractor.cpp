@@ -41,6 +41,12 @@ void ParticleSubtractor::read(int argc, char **argv)
 	ZZ(new_center) = textToInteger(parser.getOption("--center_z", "Z-coordinate of 3D coordinate, which will be projected to center the subtracted particles.", "9999"));
 	boxsize = textToInteger(parser.getOption("--new_box", "Output size of the subtracted particles", "-1"));
 
+	// The reference is projected with NUFFT central slices by default;
+	// RELION_INTERPOLATION=linear selects the classic trilinear interpolation.
+	Projector::applyFinufftEnvDefaults();
+	Projector::finufft_mode_crop = textToFloat(parser.getOption("--finufft_mode_crop", "Size of the NUFFT mode array as a multiple of the box size", Projector::finufftModeCropAsString()));
+	Projector::finufft_tol = textToDouble(parser.getOption("--finufft_tol", "Requested relative accuracy of the NUFFT central-slice transforms", Projector::finufftTolAsString()));
+
 	verb = 1;
 	// Check for errors in the command-line option
 	if (parser.checkForErrors())
@@ -232,6 +238,8 @@ void ParticleSubtractor::initialise(int _rank, int _size)
 	}
 
 	// Now set up the Projectors inside the model
+	projector_interpolator = Projector::resolveForwardInterpolator(false, verb);
+	opt.mymodel.projector_interpolator = (projector_interpolator == FINUFFT) ? FINUFFT : opt.mymodel.interpolator;
 	opt.mymodel.setFourierTransformMaps(false); // false means ignore tau2_class
 
 	// ensure even boxsize of subtracted images

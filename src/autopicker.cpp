@@ -184,6 +184,12 @@ if(do_gpu)
 	workFrac = textToFloat(parser.getOption("--shrink", "Reduce micrograph to this fraction size, during correlation calc (saves memory and time)", "1.0"));
 	LoG_max_search = textToFloat(parser.getOption("--Log_max_search", "Maximum diameter in LoG-picking multi-scale approach is this many times the min/max diameter", "5."));
 	extra_padding = textToInteger(parser.getOption("--extra_pad", "Number of pixels for additional padding of the original micrograph", "0"));
+	// Templates are made with NUFFT central slices by default;
+	// RELION_INTERPOLATION=linear selects the classic trilinear interpolation.
+	Projector::applyFinufftEnvDefaults();
+	Projector::finufft_mode_crop = textToFloat(parser.getOption("--finufft_mode_crop", "Size of the NUFFT mode array as a multiple of the box size", Projector::finufftModeCropAsString()));
+	Projector::finufft_tol = textToDouble(parser.getOption("--finufft_tol", "Requested relative accuracy of the NUFFT central-slice transforms", Projector::finufftTolAsString()));
+	projector_interpolator = Projector::resolveForwardInterpolator(do_gpu, verb);
 
 	// Check for errors in the command-line option
 	if (parser.checkForErrors())
@@ -523,7 +529,7 @@ void AutoPicker::initialise(int rank)
 			}
 
 			int my_ori_size = XSIZE(Istk());
-			Projector projector(my_ori_size, TRILINEAR, padding);
+			Projector projector(my_ori_size, projector_interpolator, padding);
 			MultidimArray<RFLOAT> dummy;
    			int lowpass_size = 2 * CEIL(my_ori_size * angpix_ref / lowpass);
 			projector.computeFourierTransformMap(Istk(), dummy, lowpass_size);
@@ -914,7 +920,7 @@ void AutoPicker::initialise(int rank)
 			if (verb > 0)
 				init_progress_bar(Mrefs.size());
 
-			Projector PP(micrograph_size, TRILINEAR, padding);
+			Projector PP(micrograph_size, projector_interpolator, padding);
 			MultidimArray<RFLOAT> dummy;
 
 			for (int iref = 0; iref < Mrefs.size(); iref++)

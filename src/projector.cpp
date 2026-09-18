@@ -18,6 +18,13 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/projector.h"
+#include "src/finufft_central_slice.h"
+#include "src/strings.h"
+#include <cstdlib>
+#include <cstring>
+#include <cctype>
+#include <sstream>
+#include <iomanip>
 #include <src/jaz/gravis/t3Vector.h>
 #include <src/time.h>
 #include <src/jaz/image/buffered_image.h>
@@ -55,6 +62,91 @@
 #endif
 
 using namespace gravis;
+
+// Static configuration of the FINUFFT projector; overridden from the environment
+// and then from the command line.
+float Projector::finufft_mode_crop = 1.0f;
+double Projector::finufft_tol = 1e-6;
+double Projector::finufft_upsampfac = 1.25;
+
+void Projector::applyFinufftEnvDefaults()
+{
+	const char *crop = getenv("RELION_FINUFFT_MODE_CROP");
+	if (crop != NULL && strlen(crop) > 0)
+	{
+		const float v = textToFloat(crop);
+		if (v <= 0.)
+			REPORT_ERROR("RELION_FINUFFT_MODE_CROP must be positive.");
+		finufft_mode_crop = v;
+	}
+
+	const char *ups = getenv("RELION_FINUFFT_UPSAMPFAC");
+	if (ups != NULL && strlen(ups) > 0)
+	{
+		const double v = textToDouble(ups);
+		if (v != 0. && (v < 1.06 || v > 4.))
+			REPORT_ERROR("RELION_FINUFFT_UPSAMPFAC must be 0 (let FINUFFT choose) or between 1.06 and 4.");
+		finufft_upsampfac = v;
+	}
+
+	const char *tol = getenv("RELION_FINUFFT_TOL");
+	if (tol != NULL && strlen(tol) > 0)
+	{
+		const double v = textToDouble(tol);
+		if (v <= 0. || v >= 1.)
+			REPORT_ERROR("RELION_FINUFFT_TOL must lie strictly between 0 and 1.");
+		finufft_tol = v;
+	}
+}
+
+std::string Projector::finufftModeCropAsString()
+{
+	std::ostringstream os;
+	os << std::setprecision(10) << finufft_mode_crop;
+	return os.str();
+}
+
+std::string Projector::finufftTolAsString()
+{
+	std::ostringstream os;
+	os << std::setprecision(12) << finufft_tol;
+	return os.str();
+}
+
+int Projector::resolveForwardInterpolator(bool accelerator_in_use, int verb)
+{
+	const char *env = getenv("RELION_INTERPOLATION");
+
+	std::string want = (env != NULL) ? std::string(env) : std::string("");
+	for (size_t i = 0; i < want.size(); i++)
+		want[i] = (char)tolower((unsigned char)want[i]);
+
+	// The default is deliberately the classic interpolation.  The NUFFT projector
+	// is much more accurate but is new, CPU-only, and considerably slower, so it
+	// stays opt-in until it has been validated on real projects; the intention is
+	// to make it the default once that has happened.
+	if (want.empty() || want == "linear" || want == "trilinear" || want == "bilinear")
+		return TRILINEAR;
+
+	if (want != "nufft" && want != "finufft")
+		REPORT_ERROR("RELION_INTERPOLATION=\"" + want + "\" is not understood. Use \"linear\" (the default) or \"nufft\".");
+
+	// From here on NUFFT was asked for explicitly, so anything that prevents it is
+	// an error rather than a silent fallback.
+	if (!haveFinufftSupport())
+		REPORT_ERROR("RELION_INTERPOLATION asked for NUFFT reference interpolation, but this RELION was built without FINUFFT support. Re-configure with -DRELION_USE_FINUFFT=ON, or unset RELION_INTERPOLATION.");
+
+	if (accelerator_in_use)
+		REPORT_ERROR("RELION_INTERPOLATION asked for NUFFT reference interpolation, which is a CPU-only code path and cannot be combined with --gpu, --sycl or --cpu. Unset RELION_INTERPOLATION, or drop the accelerator option.");
+
+	if (verb > 0)
+	{
+		std::cout << " Using exact NUFFT central-slice extraction for the reference projections"
+		          << " (mode crop " << finufft_mode_crop << ", tolerance " << finufft_tol
+		          << ", upsampfac " << finufft_upsampfac << ")." << std::endl;
+	}
+	return FINUFFT;
+}
 
 void Projector::initialiseData(int current_size)
 {
@@ -132,6 +224,9 @@ void Projector::computeFourierTransformMap(
 	padoridim += padoridim%2;
 	// Re-calculate padding factor
 	padding_factor = (float)padoridim/(float)ori_size;
+	// Remember the size of the periodic real-space box that `data` samples; the
+	// FINUFFT interpolator needs it to scale its query positions.
+	padded_real_size = padoridim;
 
 	// Initialize data array of the oversampled transform
 	ref_dim = vol_in.getDim();
@@ -297,7 +392,11 @@ void Projector::computeFourierTransformMap(
 	// Divide by the inverse Fourier transform of the interpolator in Fourier-space
 	// 10feb11: at least in 2D case, this seems to be the wrong thing to do!!!
 	// TODO: check what is best for subtomo!
-	if (do_gridding)// && data_dim != 3)
+	// The FINUFFT interpolator evaluates the exact band-limited interpolant, so it
+	// convolves the map with nothing and there is no interpolator transfer function
+	// to divide out.  Applying the trilinear sinc^2 pre-correction here would be an
+	// unmatched sharpening of the reference.
+	if (do_gridding && interpolator != FINUFFT)// && data_dim != 3)
 	{
 		if(do_heavy)
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
@@ -312,6 +411,10 @@ void Projector::computeFourierTransformMap(
 			griddingCorrect(vol_in);
 		else
 			vol_in.setXmippOrigin();
+	}
+	else
+	{
+		vol_in.setXmippOrigin();
 	}
 
 	TIMING_TOC(TIMING_GRID);
@@ -586,6 +689,10 @@ void Projector::computeFourierTransformMap(
 	}
 #endif
 
+	// Build the conjugate-domain mode array that the FINUFFT interpolator evaluates
+	if (do_heavy && interpolator == FINUFFT)
+		prepareFinufft();
+
 #ifdef PROJ_TIMING
 	proj_timer.printTimes(false);
 #endif
@@ -596,6 +703,11 @@ void Projector::griddingCorrect(MultidimArray<RFLOAT> &vol_in)
 {
 	// Correct real-space map by dividing it by the Fourier transform of the interpolator(s)
 	vol_in.setXmippOrigin();
+
+	// FINUFFT has no interpolation kernel to correct for; see computeFourierTransformMap()
+	if (interpolator == FINUFFT)
+		return;
+
 	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol_in)
 	{
 		RFLOAT r = sqrt((RFLOAT)(k*k+i*i+j*j));
@@ -627,11 +739,354 @@ void Projector::griddingCorrect(MultidimArray<RFLOAT> &vol_in)
 	}
 }
 
+
+// ===========================================================================
+//  FINUFFT central-slice extraction
+// ===========================================================================
+//
+// The trilinear branches below approximate the value of `data` at the rotated,
+// non-integer position (xp, yp, zp) with an 8-point stencil.  The FINUFFT
+// branches instead evaluate the exact band-limited interpolant of `data`, using
+// the real-space mode array built by prepareFinufft().  See src/relion_finufft.h
+// for the derivation; the short version is that the mode array is the *inverse*
+// DFT of `data`, so the half-Hermitian storage of `data` needs no sign-splitting
+// of the query points.
+//
+// Because a FINUFFT type-2 call costs one FFT of its internal upsampled grid
+// regardless of how many points it evaluates, the query points are collected
+// first and evaluated in a single call.  get2DFourierTransformMany() extends
+// that over many orientations at once, which is where the real saving is.
+
+namespace
+{
+
+struct FinufftQueryPoints
+{
+	std::vector<RFLOAT> qx, qy, qz;
+	// Where each evaluated sample goes.  The output arrays must not be resized
+	// between collection and scattering.
+	std::vector<Complex*> dst;
+
+	size_t size() const { return dst.size(); }
+};
+
+void collectProjectPoints(const Projector& proj, MultidimArray<Complex>& f2d,
+		Matrix2D<RFLOAT>& A, FinufftQueryPoints& pts)
+{
+	Matrix2D<RFLOAT> Ainv = A.inv();
+	Ainv *= (RFLOAT)proj.padding_factor;
+
+	const int r_max_out = XSIZE(f2d) - 1;
+	const int r_max_out_2 = r_max_out * r_max_out;
+
+	const int r_max_ref = proj.r_max * proj.padding_factor;
+	const int r_max_ref_2 = r_max_ref * r_max_ref;
+
+	for (int i = 0; i < YSIZE(f2d); i++)
+	{
+		const int y = (i <= r_max_out) ? i : i - YSIZE(f2d);
+		const int y2 = y * y;
+
+		const int x_max = FLOOR(sqrt((RFLOAT)(r_max_out_2 - y2)));
+
+		for (int x = 0; x <= x_max; x++)
+		{
+			const RFLOAT xp = Ainv(0,0) * x + Ainv(0,1) * y;
+			const RFLOAT yp = Ainv(1,0) * x + Ainv(1,1) * y;
+			const RFLOAT zp = Ainv(2,0) * x + Ainv(2,1) * y;
+
+			const RFLOAT r_ref_2 = xp*xp + yp*yp + zp*zp;
+			if (r_ref_2 > r_max_ref_2) continue;
+
+			pts.qx.push_back(xp);
+			pts.qy.push_back(yp);
+			pts.qz.push_back(zp);
+			pts.dst.push_back(&DIRECT_A2D_ELEM(f2d, i, x));
+		}
+	}
+}
+
+void collectRotate2DPoints(const Projector& proj, MultidimArray<Complex>& f2d,
+		Matrix2D<RFLOAT>& A, FinufftQueryPoints& pts)
+{
+	Matrix2D<RFLOAT> Ainv = A.inv();
+	Ainv *= (RFLOAT)proj.padding_factor;
+
+	const int r_max_out = XSIZE(f2d) - 1;
+	const int r_max_out_2 = r_max_out * r_max_out;
+
+	const int r_max_ref = proj.r_max * proj.padding_factor;
+	const int r_max_ref_2 = r_max_ref * r_max_ref;
+
+	for (int i = 0; i < YSIZE(f2d); i++)
+	{
+		const int y = (i <= r_max_out) ? i : i - YSIZE(f2d);
+		const int y2 = y * y;
+
+		const int x_max = FLOOR(sqrt((RFLOAT)(r_max_out_2 - y2)));
+
+		for (int x = 0; x <= x_max; x++)
+		{
+			const RFLOAT xp = Ainv(0,0) * x + Ainv(0,1) * y;
+			const RFLOAT yp = Ainv(1,0) * x + Ainv(1,1) * y;
+
+			const int r_ref_2 = xp*xp + yp*yp;
+			if (r_ref_2 > r_max_ref_2) continue;
+
+			pts.qx.push_back(xp);
+			pts.qy.push_back(yp);
+			pts.dst.push_back(&DIRECT_A2D_ELEM(f2d, i, x));
+		}
+	}
+}
+
+void collectRotate3DPoints(const Projector& proj, MultidimArray<Complex>& f3d,
+		Matrix2D<RFLOAT>& A, FinufftQueryPoints& pts)
+{
+	Matrix2D<RFLOAT> Ainv = A.inv();
+	Ainv *= (RFLOAT)proj.padding_factor;
+
+	const int r_max_out = XSIZE(f3d) - 1;
+	const int r_max_out_2 = r_max_out * r_max_out;
+
+	const int r_max_ref = proj.r_max * proj.padding_factor;
+	const int r_max_ref_2 = r_max_ref * r_max_ref;
+
+	for (int k = 0; k < ZSIZE(f3d); k++)
+	{
+		const int z = (k <= r_max_out) ? k : k - ZSIZE(f3d);
+		const int z2 = z * z;
+
+		for (int i = 0; i < YSIZE(f3d); i++)
+		{
+			const int y = (i <= r_max_out) ? i : i - YSIZE(f3d);
+			const int yz2 = y * y + z2;
+
+			if (yz2 > r_max_out_2) continue;
+
+			const int x_max = FLOOR(sqrt((RFLOAT)(r_max_out_2 - yz2)));
+
+			for (int x = 0; x <= x_max; x++)
+			{
+				const RFLOAT xp = Ainv(0,0) * x + Ainv(0,1) * y + Ainv(0,2) * z;
+				const RFLOAT yp = Ainv(1,0) * x + Ainv(1,1) * y + Ainv(1,2) * z;
+				const RFLOAT zp = Ainv(2,0) * x + Ainv(2,1) * y + Ainv(2,2) * z;
+
+				const int r_ref_2 = xp*xp + yp*yp + zp*zp;
+				if (r_ref_2 > r_max_ref_2) continue;
+
+				pts.qx.push_back(xp);
+				pts.qy.push_back(yp);
+				pts.qz.push_back(zp);
+				pts.dst.push_back(&DIRECT_A3D_ELEM(f3d, k, i, x));
+			}
+		}
+	}
+}
+
+void collectProject2Dto1DPoints(const Projector& proj, MultidimArray<Complex>& f1d,
+		Matrix2D<RFLOAT>& A, FinufftQueryPoints& pts)
+{
+	Matrix2D<RFLOAT> Ainv = A.inv();
+	Ainv *= (RFLOAT)proj.padding_factor;
+
+	const int r_max_out = XSIZE(f1d) - 1;
+
+	const int r_max_ref = proj.r_max * proj.padding_factor;
+	const int r_max_ref_2 = r_max_ref * r_max_ref;
+
+	for (int x = 0; x <= r_max_out; x++)
+	{
+		const RFLOAT xp = Ainv(0,0) * x;
+		const RFLOAT yp = Ainv(1,0) * x;
+
+		const RFLOAT r_ref_2 = xp*xp + yp*yp;
+		if (r_ref_2 > r_max_ref_2) continue;
+
+		pts.qx.push_back(xp);
+		pts.qy.push_back(yp);
+		pts.dst.push_back(&DIRECT_A1D_ELEM(f1d, x));
+	}
+}
+
+// Mirrors the dispatch in Projector::get2DFourierTransform()
+void collectFinufftPoints(const Projector& proj, MultidimArray<Complex>& img_out,
+		Matrix2D<RFLOAT>& A, FinufftQueryPoints& pts)
+{
+	if (proj.data_dim == 3)
+		collectRotate3DPoints(proj, img_out, A, pts);
+	else if (proj.data_dim == 1)
+		collectProject2Dto1DPoints(proj, img_out, A, pts);
+	else if (proj.ref_dim == 2)
+		collectRotate2DPoints(proj, img_out, A, pts);
+	else
+		collectProjectPoints(proj, img_out, A, pts);
+}
+
+void evaluateAndScatter(const Projector& proj, FinufftQueryPoints& pts)
+{
+	const size_t n = pts.size();
+	if (n == 0) return;
+
+	if (!proj.finufft_modes.isPrepared())
+	{
+		REPORT_ERROR("Projector: interpolator == FINUFFT but the mode array has not been built. "
+		             "computeFourierTransformMap() (or prepareFinufft()) must be called first.");
+	}
+
+	std::vector<Complex> samples(n);
+	evaluateNonuniformFourierSamplesFromFourierVolume3D(
+		proj.finufft_modes,
+		pts.qx.data(), pts.qy.data(),
+		(proj.finufft_modes.dim == 3) ? pts.qz.data() : NULL,
+		n, samples.data(), Projector::finufft_tol, Projector::finufft_upsampfac);
+
+	for (size_t i = 0; i < n; i++)
+		*(pts.dst[i]) = samples[i];
+}
+
+} // anonymous namespace
+
+void Projector::prepareFinufft()
+{
+	finufft_modes.clear();
+
+	if (interpolator != FINUFFT) return;
+
+	if (!haveFinufftSupport())
+		REPORT_ERROR("Projector::prepareFinufft: this RELION was built without FINUFFT support. Re-configure with -DRELION_USE_FINUFFT=ON.");
+
+	if (ref_dim != 2 && ref_dim != 3)
+		REPORT_ERROR("Projector::prepareFinufft: the reference dimension must be 2 or 3.");
+	if (NZYXSIZE(data) == 0)
+		REPORT_ERROR("Projector::prepareFinufft: the data array is empty.");
+
+	// Size of the periodic real-space box that `data` samples
+	int P = padded_real_size;
+	if (P <= 0)
+	{
+		P = ROUND(padding_factor * ori_size);
+		P += P % 2;
+		padded_real_size = P;
+	}
+
+	// How much of that box to keep.  The real-space volume is supported inside
+	// the original unpadded box (up to the ringing of the spherical band-limit
+	// applied to `data`), so cropping costs very little accuracy but shrinks both
+	// the mode array and FINUFFT's internal FFT by (P/mode_size)^dim.
+	int M = ROUND(finufft_mode_crop * ori_size);
+	M += M % 2;
+	if (M > P) M = P;
+	if (M < 4) M = 4;
+
+	const int R = ROUND(r_max * padding_factor);
+	const int my_rmax2 = R * R;
+
+	finufft_modes.dim = ref_dim;
+	finufft_modes.mode_size = M;
+	finufft_modes.padded_size = P;
+
+	FourierTransformer transformer;
+
+	if (ref_dim == 3)
+	{
+		MultidimArray<RFLOAT> V(P, P, P);
+		transformer.setReal(V);
+		MultidimArray<Complex>& Faux = transformer.getFourierReference();
+
+		// Projector-centered half volume -> FFTW-ordered half volume
+		decenter(data, Faux, my_rmax2);
+
+		// Unnormalised inverse DFT: V[r] = sum_n data[n] exp(+2 pi i n.r / P)
+		transformer.inverseFourierTransform();
+
+		finufft_modes.modes.resize((size_t)M * (size_t)M * (size_t)M);
+		for (int t3 = 0; t3 < M; t3++)
+		{
+			const int r3 = t3 - M/2;
+			const int m3 = (r3 < 0) ? r3 + P : r3;
+			for (int t2 = 0; t2 < M; t2++)
+			{
+				const int r2 = t2 - M/2;
+				const int m2 = (r2 < 0) ? r2 + P : r2;
+				for (int t1 = 0; t1 < M; t1++)
+				{
+					const int r1 = t1 - M/2;
+					const int m1 = (r1 < 0) ? r1 + P : r1;
+					finufft_modes.modes[((size_t)t3 * M + t2) * M + t1] =
+						std::complex<RFLOAT>(DIRECT_A3D_ELEM(V, m3, m2, m1), (RFLOAT)0);
+				}
+			}
+		}
+	}
+	else // ref_dim == 2
+	{
+		MultidimArray<RFLOAT> V(P, P);
+		transformer.setReal(V);
+		MultidimArray<Complex>& Faux = transformer.getFourierReference();
+
+		decenter(data, Faux, my_rmax2);
+		transformer.inverseFourierTransform();
+
+		finufft_modes.modes.resize((size_t)M * (size_t)M);
+		for (int t2 = 0; t2 < M; t2++)
+		{
+			const int r2 = t2 - M/2;
+			const int m2 = (r2 < 0) ? r2 + P : r2;
+			for (int t1 = 0; t1 < M; t1++)
+			{
+				const int r1 = t1 - M/2;
+				const int m1 = (r1 < 0) ? r1 + P : r1;
+				finufft_modes.modes[(size_t)t2 * M + t1] =
+					std::complex<RFLOAT>(DIRECT_A2D_ELEM(V, m2, m1), (RFLOAT)0);
+			}
+		}
+	}
+}
+
+void Projector::get2DFourierTransformMany(std::vector<MultidimArray<Complex > > &img_out,
+                                          std::vector<Matrix2D<RFLOAT> > &A)
+{
+	std::vector<MultidimArray<Complex > *> ptrs(img_out.size());
+	for (size_t i = 0; i < img_out.size(); i++)
+		ptrs[i] = &img_out[i];
+
+	get2DFourierTransformMany(ptrs, A);
+}
+
+void Projector::get2DFourierTransformMany(std::vector<MultidimArray<Complex > *> &img_out,
+                                          std::vector<Matrix2D<RFLOAT> > &A)
+{
+	if (img_out.size() != A.size())
+		REPORT_ERROR("Projector::get2DFourierTransformMany: img_out and A must have the same length.");
+
+	if (interpolator != FINUFFT)
+	{
+		for (size_t i = 0; i < A.size(); i++)
+			get2DFourierTransform(*img_out[i], A[i]);
+		return;
+	}
+
+	FinufftQueryPoints pts;
+	for (size_t i = 0; i < A.size(); i++)
+		collectFinufftPoints(*this, *img_out[i], A[i], pts);
+
+	evaluateAndScatter(*this, pts);
+}
+
 void Projector::project(MultidimArray<Complex > &f2d, Matrix2D<RFLOAT> &A)
 {
 	// f2d should already be in the right size (ori_size,orihalfdim)
 	// AND the points outside r_max should already be zero...
 	// f2d.initZeros();
+
+	if (interpolator == FINUFFT)
+	{
+		FinufftQueryPoints pts;
+		collectProjectPoints(*this, f2d, A, pts);
+		evaluateAndScatter(*this, pts);
+		return;
+	}
 
 	// Use the inverse matrix
 
@@ -920,6 +1375,14 @@ void Projector::project2Dto1D(MultidimArray<Complex > &f1d, Matrix2D<RFLOAT> &A)
 	// AND the points outside r_max should already be zero...
 	// f1d.initZeros();
 
+	if (interpolator == FINUFFT)
+	{
+		FinufftQueryPoints pts;
+		collectProject2Dto1DPoints(*this, f1d, A, pts);
+		evaluateAndScatter(*this, pts);
+		return;
+	}
+
 	Matrix2D<RFLOAT> Ainv = A.inv();
 	Ainv *= (RFLOAT)padding_factor;  // take scaling into account directly
 
@@ -1012,6 +1475,14 @@ void Projector::rotate2D(MultidimArray<Complex > &f2d, Matrix2D<RFLOAT> &A)
 	// f2d should already be in the right size (ori_size,orihalfdim)
 	// AND the points outside max_r should already be zero...
 	// f2d.initZeros();
+
+	if (interpolator == FINUFFT)
+	{
+		FinufftQueryPoints pts;
+		collectRotate2DPoints(*this, f2d, A, pts);
+		evaluateAndScatter(*this, pts);
+		return;
+	}
 
 	// Use the inverse matrix
 	Matrix2D<RFLOAT> Ainv = A.inv();
@@ -1126,6 +1597,14 @@ void Projector::rotate3D(MultidimArray<Complex > &f3d, Matrix2D<RFLOAT> &A)
 	// f3d should already be in the right size (ori_size,orihalfdim)
 	// AND the points outside max_r should already be zero
 	// f3d.initZeros();
+
+	if (interpolator == FINUFFT)
+	{
+		FinufftQueryPoints pts;
+		collectRotate3DPoints(*this, f3d, A, pts);
+		evaluateAndScatter(*this, pts);
+		return;
+	}
 
 	// Use the inverse matrix
 	Matrix2D<RFLOAT> Ainv = A.inv();

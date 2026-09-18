@@ -23,6 +23,7 @@
 #include "src/fftw.h"
 #include "src/multidim_array.h"
 #include "src/image.h"
+#include "src/finufft_central_slice.h"
 
 #include <src/jaz/single_particle/volume.h>
 #include <src/jaz/gravis/t2Vector.h>
@@ -61,6 +62,10 @@ extern void scale(RFLOAT *img, size_t sz, RFLOAT val, deviceStream_t stream = 0)
 #define NEAREST_NEIGHBOUR 0
 #define TRILINEAR 1
 #define CONVOLUTE_BLOB 2
+// Exact band-limited interpolation of the gridded Fourier volume, evaluated
+// with a FINUFFT type-2 transform (forward projection only; BackProjector
+// still uses TRILINEAR).  See src/relion_finufft.h for the maths.
+#define FINUFFT 3
 
 #define FORWARD_PROJECTION 0
 #define BACKWARD_PROJECTION 1
@@ -97,6 +102,63 @@ public:
 
 	// Dimension of the projections (1 or 2 or 3)
 	int data_dim;
+
+	// Only used when interpolator == FINUFFT: the conjugate-domain (real-space)
+	// representation of `data` that serves as the FINUFFT type-2 mode array.
+	// Built by prepareFinufft(), which computeFourierTransformMap() calls.
+	FinufftProjectorModes finufft_modes;
+
+	// Size of the periodic real-space box that `data` samples ("padoridim").
+	// Recorded by computeFourierTransformMap(); 0 when not yet known.
+	int padded_real_size;
+
+	// --- Static configuration of the FINUFFT projector (set from the command line) ---
+
+	// Number of retained real-space samples per dimension, as a multiple of
+	// ori_size.  1.0 keeps exactly the unpadded box (cheapest); 2.0 keeps the
+	// whole padded box, which makes the interpolation of `data` exact at the
+	// price of 8x the memory and a 64x larger internal FFT inside FINUFFT.
+	static float finufft_mode_crop;
+
+	// Requested relative accuracy of the FINUFFT transform.
+	static double finufft_tol;
+
+	// FINUFFT's internal upsampling factor.  Its FFT is
+	// (finufft_upsampfac * mode_size)^dim, so 1.25 does roughly a quarter of the
+	// FFT work of 2.0 in 3D at the price of a wider spreading kernel; that FFT
+	// dominates the cost here, so 1.25 is the default.  0 lets FINUFFT choose.
+	static double finufft_upsampfac;
+
+	/* Which interpolator the FORWARD projectors should use.
+	 *
+	 * The default is FINUFFT (exact band-limited central slices).  Set the
+	 * environment variable
+	 *
+	 *     RELION_INTERPOLATION=linear
+	 *
+	 * to get the classic trilinear/bilinear resampling back; "nufft" (or leaving
+	 * the variable unset) selects FINUFFT.  Backprojection is not affected and
+	 * always uses TRILINEAR.
+	 *
+	 * FINUFFT is a CPU-only path, so accelerated runs fall back to TRILINEAR:
+	 * pass accelerator_in_use = true for those.  The fallback is silent-ish (a
+	 * one-line note when verb > 0) unless the user asked for NUFFT explicitly via
+	 * the environment variable, in which case it is an error.
+	 */
+	static int resolveForwardInterpolator(bool accelerator_in_use, int verb = 1);
+
+	/* Seed finufft_mode_crop / finufft_tol from RELION_FINUFFT_MODE_CROP and
+	 * RELION_FINUFFT_TOL.  Call this before parsing the command line, so that an
+	 * explicit --finufft_mode_crop / --finufft_tol still wins.
+	 */
+	static void applyFinufftEnvDefaults();
+
+	/* The current values of the two knobs above, formatted for use as the default
+	 * string of a command-line option (so that --finufft_* overrides the
+	 * environment rather than the other way round).
+	 */
+	static std::string finufftModeCropAsString();
+	static std::string finufftTolAsString();
 
 public:
 
@@ -179,6 +241,8 @@ public:
 			padding_factor = op.padding_factor;
 			ref_dim = op.ref_dim;
 			data_dim  = op.data_dim;
+			padded_real_size = op.padded_real_size;
+			finufft_modes = op.finufft_modes;
 		}
 		return *this;
 	}
@@ -204,6 +268,8 @@ public:
 		data.clear();
 		r_max = r_min_nn = interpolator = ref_dim = data_dim = pad_size = 0;
 		padding_factor = 0.;
+		padded_real_size = 0;
+		finufft_modes.clear();
 	}
 
 	/*
@@ -297,6 +363,34 @@ public:
 	* Get a 2D slice from the 3D map (forward projection)
 	*/
 	void project(MultidimArray<Complex > &img_out, Matrix2D<RFLOAT> &A);
+
+	/*
+	* Build the FINUFFT mode array from the current contents of `data`.
+	* A no-op unless interpolator == FINUFFT.  Called at the end of
+	* computeFourierTransformMap(); call it explicitly after filling `data`
+	* by any other route.
+	*/
+	void prepareFinufft();
+
+	/*
+	* Batched equivalent of calling get2DFourierTransform() once per entry of A.
+	* All slices are evaluated against the same mode array in a single FINUFFT
+	* call, which is what makes the FINUFFT interpolator affordable: FINUFFT's
+	* per-call cost is dominated by one FFT of its internal upsampled grid,
+	* independent of how many points are evaluated.
+	*
+	* img_out must already have the right number of entries, each sized and
+	* zeroed as for get2DFourierTransform().  Falls back to a plain loop for
+	* every interpolator other than FINUFFT.
+	*/
+	void get2DFourierTransformMany(std::vector<MultidimArray<Complex > > &img_out,
+	                               std::vector<Matrix2D<RFLOAT> > &A);
+
+	/* As above, but writing into caller-owned arrays, so a caller that already
+	 * holds the destinations does not have to copy them in and out.
+	 */
+	void get2DFourierTransformMany(std::vector<MultidimArray<Complex > *> &img_out,
+	                               std::vector<Matrix2D<RFLOAT> > &A);
 
 	/*
 	* Get the two gradients (real and imaginary) of that slice.

@@ -294,6 +294,119 @@ void evaluateNonuniformFourierSamples2D(
 
 #endif // RELION_USE_FINUFFT
 
+// ---- Exact central-slice extraction from a gridded Fourier volume ----
+
+bool haveFinufftSupport()
+{
+#ifdef RELION_USE_FINUFFT
+	return true;
+#else
+	return false;
+#endif
+}
+
+void evaluateNonuniformFourierSamplesFromFourierVolume3D(
+	const FinufftProjectorModes& modes,
+	const RFLOAT* qx, const RFLOAT* qy, const RFLOAT* qz,
+	size_t n_points,
+	Complex* samples_out,
+	double tol,
+	double upsampfac)
+{
+#ifndef RELION_USE_FINUFFT
+	REPORT_ERROR("evaluateNonuniformFourierSamplesFromFourierVolume3D: this RELION was built without FINUFFT support. Re-configure with -DRELION_USE_FINUFFT=ON.");
+#else
+	if (n_points == 0) return;
+
+	if (!modes.isPrepared())
+		REPORT_ERROR("evaluateNonuniformFourierSamplesFromFourierVolume3D: mode array has not been prepared.");
+	if (modes.dim != 2 && modes.dim != 3)
+		REPORT_ERROR("evaluateNonuniformFourierSamplesFromFourierVolume3D: dim must be 2 or 3.");
+	if (modes.padded_size <= 0 || modes.mode_size <= 0)
+		REPORT_ERROR("evaluateNonuniformFourierSamplesFromFourierVolume3D: invalid mode array geometry.");
+	if (modes.dim == 3 && qz == NULL)
+		REPORT_ERROR("evaluateNonuniformFourierSamplesFromFourierVolume3D: qz is required for a 3D reference.");
+
+	const int dim = modes.dim;
+	const int M = modes.mode_size;
+	const int P = modes.padded_size;
+
+	// The query positions are logical indices of the padded Fourier grid; FINUFFT
+	// wants them as angles in [-pi, pi).  |q| <= P/2 is guaranteed by the caller's
+	// r_max test, so no wrapping is needed.
+	const RFLOAT ang = (RFLOAT)(2.0 * PI / (double)P);
+
+	thread_local std::vector<RFLOAT> tls_x, tls_y, tls_z;
+	thread_local std::vector<std::complex<RFLOAT> > tls_out;
+
+	tls_x.resize(n_points);
+	tls_y.resize(n_points);
+	tls_out.resize(n_points);
+	if (dim == 3) tls_z.resize(n_points);
+
+	for (size_t i = 0; i < n_points; i++)
+	{
+		tls_x[i] = ang * qx[i];
+		tls_y[i] = ang * qy[i];
+	}
+	if (dim == 3)
+	{
+		for (size_t i = 0; i < n_points; i++) tls_z[i] = ang * qz[i];
+	}
+
+	// The plan only depends on the mode-array geometry and the tolerance, not on
+	// the query points, so it can be reused across orientations.  Keep it
+	// thread_local: project() is called from OpenMP worker threads.
+	typedef std::pair<std::pair<int, int>, std::pair<long long, long long> > PlanKey;
+	thread_local std::map<PlanKey, FinufftPlanGuard> tls_plan_cache;
+
+	const long long tol_key = (long long)(std::log10(tol) * 1000.0);
+	const long long ups_key = (long long)(upsampfac * 1000.0);
+	const PlanKey key(std::make_pair(dim, M), std::make_pair(tol_key, ups_key));
+
+	auto plan_it = tls_plan_cache.find(key);
+	if (plan_it == tls_plan_cache.end())
+	{
+		FinufftPlanGuard guard;
+		finufft_opts opts;
+		finufft_default_opts(&opts);
+		opts.modeord = 0;                     // CMCL order: index 0 == mode -M/2
+		opts.nthreads = tls_finufft_nthreads; // avoid nesting inside RELION's OpenMP
+		if (upsampfac > 0.0) opts.upsampfac = upsampfac;
+
+		int64_t n_modes[3] = {M, M, (dim == 3) ? M : 1};
+
+		// isign = -1 together with x_j = +2*pi*q/P realises exp(-2*pi*i*q.r/P)
+		int ier = FINUFFT_MAKEPLAN(2, dim, n_modes, -1, 1, tol, &guard.plan, &opts);
+		if (ier > 1) handleFinufftError(ier, "finufft_makeplan type2 (Fourier volume)");
+
+		plan_it = tls_plan_cache.emplace(key, std::move(guard)).first;
+	}
+
+	int ier = FINUFFT_SETPTS(plan_it->second.plan,
+		(int64_t)n_points,
+		tls_x.data(), tls_y.data(), (dim == 3) ? tls_z.data() : NULL,
+		0, NULL, NULL, NULL);
+	if (ier > 1) handleFinufftError(ier, "finufft_setpts type2 (Fourier volume)");
+
+	ier = FINUFFT_EXECUTE(plan_it->second.plan,
+		tls_out.data(),
+		const_cast<std::complex<RFLOAT>*>(modes.modes.data()));
+	if (ier > 1) handleFinufftError(ier, "finufft_execute type2 (Fourier volume)");
+
+	// V was built as the *unnormalised* inverse DFT of the Fourier volume, so the
+	// interpolant carries a 1/P^dim factor.
+	double dnorm = 1.0 / ((double)P * (double)P);
+	if (dim == 3) dnorm /= (double)P;
+	const RFLOAT norm = (RFLOAT)dnorm;
+
+	for (size_t i = 0; i < n_points; i++)
+	{
+		samples_out[i] = Complex(tls_out[i].real() * norm, tls_out[i].imag() * norm);
+	}
+#endif
+}
+
 // ---- MultidimArray bilinear helpers ----
 
 Complex sampleComplexFromFftwHalfBilinear(
