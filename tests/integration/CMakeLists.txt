@@ -23,7 +23,14 @@ foreach(tag reconstruction ewald reconstruct_crash cryosparc_import mpi_prefetch
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     )
     set_property(TEST integration_${tag} PROPERTY LABELS integration integration_${tag})
-    set_property(TEST integration_${tag} PROPERTY ENVIRONMENT "RELION_BIN_DIR=${CMAKE_BINARY_DIR}/bin")
+    # PYTEST_DISABLE_PLUGIN_AUTOLOAD: these tests drive RELION binaries through
+    # subprocess and need no third-party pytest plugin, but an unrelated broken
+    # plugin in the environment takes the whole suite down during plugin loading,
+    # before any test is even collected.  (Seen with napari's plugin, which uses
+    # pydantic v1's ModelMetaclass, against pydantic v2.)  Add plugins explicitly
+    # with -p here if the suite ever needs one.
+    set_property(TEST integration_${tag} PROPERTY ENVIRONMENT
+        "RELION_BIN_DIR=${CMAKE_BINARY_DIR}/bin;PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 endforeach()
 
 # Aggregate test to run all integration tests
@@ -33,7 +40,8 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_property(TEST integration_all PROPERTY LABELS integration)
-set_property(TEST integration_all PROPERTY ENVIRONMENT "RELION_BIN_DIR=${CMAKE_BINARY_DIR}/bin")
+set_property(TEST integration_all PROPERTY ENVIRONMENT
+    "RELION_BIN_DIR=${CMAKE_BINARY_DIR}/bin;PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 
 message(STATUS "  → Integration test framework ready")
 message(STATUS "  → Run: ctest -L integration [--verbose]")

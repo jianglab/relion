@@ -114,7 +114,12 @@ _rlnNormCorrection #10
     for run in range(3):
         prefix = f"run{run + 1:03}_it025"
         (directory / f"{prefix}_optimiser.star").write_text(
-            f"data_optimiser_general\n_rlnDataStarFile {prefix}_data.star\n_rlnModelStarFile {prefix}_model.star\n")
+            # rlnExperimentalDataStarFile is what relion_refine actually writes
+            # (EMDL_OPTIMISER_DATA_STARFILE); rlnDataStarFile is not a registered
+            # label, so RELION silently ignored it and the read below failed.
+            f"data_optimiser_general\n"
+            f"_rlnExperimentalDataStarFile {prefix}_data.star\n"
+            f"_rlnModelStarFile {prefix}_model.star\n")
         # Deliberately omit model_classes and all upstream average images.
         (directory / f"{prefix}_model.star").write_text(
             f"data_model_general\n_rlnNrClasses {source_classes}\n_rlnReferenceDimensionality 2\n")
@@ -137,7 +142,9 @@ def _prepare(binaries, directory, classes, output="consensus"):
 
 def _refine(binaries, directory, classes, output="run", data="consensus_data.star", prefix=None):
     command = prefix or [binaries["relion_refine"]]
-    _run(command + ["--i", data, "--o", output, "--K", str(classes),
+    # relion_refine takes the directory part of --o and requires it to exist
+    # (ml_optimiser.cpp: fn_out.beforeLastOf("/")), so a bare prefix is rejected.
+    _run(command + ["--i", data, "--o", f"./{output}", "--K", str(classes),
           "--fix_classes", "--iter", "1", "--random_seed", "1", "--ctf",
           "--particle_diameter", "24", "--ini_high", "10", "--psi_step", "90",
           "--offset_range", "1", "--offset_step", "1", "--oversampling", "0",
@@ -171,7 +178,7 @@ def test_fresh_consensus_and_continuation(tmp_path, consensus_binaries, source_c
     assert np.allclose(initial, _read_mrc(tmp_path / "again_it000_classes.mrcs"), atol=1e-6)
 
     _run([consensus_binaries["relion_refine"], "--continue", "run_it001_optimiser.star",
-          "--o", "continued", "--iter", "2", "--j", "1"], tmp_path)
+          "--o", "./continued", "--iter", "2", "--j", "1"], tmp_path)
     assert not (tmp_path / "continued_it000_classes.mrcs").exists()
     for row in _loop(tmp_path / "continued_it002_data.star", "particles"):
         assert row["rlnClassNumber"] == expected[row["rlnImageName"]]["rlnClassNumber"]

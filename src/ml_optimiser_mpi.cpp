@@ -3434,6 +3434,13 @@ void MlOptimiserMpi::alignHalves()
 	if (!do_split_random_halves || mymodel.nr_classes > 1)
 		return;
 
+	// alignMapToMap is a 3D search throughout - a 3D Projector, ZYZ Euler angles
+	// and 4x4 matrices - so it cannot be pointed at 2D references, where it aborts
+	// in applyGeometry with "2D transformation matrix is not 3x3".  Same guard as
+	// MlOptimiser::alignClasses().
+	if (mymodel.ref_dim != 3)
+		return;
+
 	// Determine search DOF from symmetry
 	int nr_freedom = 6;
 	if ((do_helical_refine) && (!ignore_helical_symmetry))

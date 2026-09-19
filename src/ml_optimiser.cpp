@@ -5381,6 +5381,14 @@ void MlOptimiser::alignClasses()
     if (mymodel.nr_classes <= 1)
         return;
 
+    // alignMapToMap is a 3D search throughout - a 3D Projector, ZYZ Euler angles
+    // and 4x4 matrices - so it cannot be pointed at 2D class averages.  Doing so
+    // aborted in applyGeometry with "2D transformation matrix is not 3x3" as soon
+    // as a non-zero rotation was found.  This matches the --align_classes help
+    // text, which already scopes the option to Class3D.
+    if (mymodel.ref_dim != 3)
+        return;
+
     // Identify the largest class
     int iclass_ref = 0;
     RFLOAT max_pdf = mymodel.pdf_class[0];
