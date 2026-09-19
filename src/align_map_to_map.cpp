@@ -22,6 +22,82 @@
 #include "src/fftw.h"
 #include "src/transformations.h"
 
+namespace
+{
+
+/* This search is full of exact ties, and which one of a tie is kept matters.
+ *
+ * With tilt == 0 the ZYZ angles rot and psi are both rotations about Z, so
+ * (rot, 0, psi) and (rot + d, 0, psi - d) are the *same* transformation and
+ * score exactly the same diff2.  A plain "diff2 < best_diff2" keeps whichever
+ * one the loops happened to reach first, which is the most negative rot in the
+ * search range.  For two identical maps that means returning (-3, 0, +3)
+ * instead of (0, 0, 0) - and because each refinement level re-centres its own
+ * search on that answer and again takes the first of the tie, every level walks
+ * the result one more step away from zero.
+ *
+ * So among rotations that score equally well, keep the smallest one.  mag2 is
+ * the squared magnitude of the angles being searched.
+ *
+ * This is deliberately applied to the rotation searches only.  The degeneracy
+ * being worked around is specific to the ZYZ angles; dx, dy and dz are
+ * independent with no such equivalence, so tie-breaking them would change which
+ * shift is reported without fixing anything.
+ */
+bool isBetterCandidate(double diff2, double best_diff2,
+                       double mag2, double best_mag2)
+{
+	const double tol = 1e-9 * (fabs(diff2) + fabs(best_diff2));
+	if (diff2 < best_diff2 - tol) return true;
+	if (diff2 > best_diff2 + tol) return false;
+	return mag2 < best_mag2;
+}
+
+} // anonymous namespace
+
+/* TODO (unresolved, found 2026-09-19): the sign conventions in this file are
+ * inconsistent between the coarse and the refinement stage, and the Cn rotation
+ * search does not work.  None of this is currently covered by a test.  Details,
+ * so that whoever next touches this code does not have to re-derive them:
+ *
+ * 1. Cn / helical (nr_freedom == 2) never recovers a rotation.  Feeding it a map
+ *    rotated about Z by 1, 2 or 3 degrees returns best_rot = 0 every time,
+ *    whereas the corresponding Z *shift* is recovered correctly (dz of 1, 2, 3
+ *    all come back exactly).  So the dz half of that search works and the rot
+ *    half does not.  This predates the tie-breaking added above - it reproduces
+ *    identically on the parent commit - so it is a separate, older defect.
+ *
+ * 2. The two stages disagree about the sign of the Cn result.  The coarse loop
+ *    stores the trial value as found (best_rot = rot, best_dz = dz); the
+ *    refinement stores its negation (lv_rot = -rot, lv_dz = -dz).  The
+ *    refinement always overwrites the coarse answer - lv_* is assigned
+ *    unconditionally at the end of every level, and lv_best starts at 1E99 so
+ *    some candidate always wins - so the negated convention is what callers
+ *    actually see.  The C1 branch negates translations in both stages and does
+ *    not negate rotations in either, so it is self-consistent; only Cn is not.
+ *
+ * 3. Because the coarse stage stores translations already negated, the
+ *    refinement re-centres its local search on the wrong side of zero: it scans
+ *    cur_dx + {-step, 0, +step} when the trial that actually matched was -cur_dx.
+ *    The search therefore explores a neighbourhood that cannot contain the
+ *    optimum.  It is masked today because those candidates all score worse than
+ *    the incumbent, so nothing updates and the coarse answer survives by
+ *    default - but it means the translation refinement contributes nothing, and
+ *    anything that makes a tied candidate win there (as a magnitude tie-break
+ *    on translations did, briefly) turns the masking off and produces a wrong
+ *    shift whenever |cur_dx| happens to equal the step size.
+ *
+ * Fixing 2 and 3 means settling the intended sign convention first.  Note that
+ * tests/unit/test_align_map_to_map.cpp documents the returned translation sign
+ * as "empirically" what the code does rather than what it should be, so the
+ * tests encode the current behaviour and cannot be used to confirm the
+ * convention is right.  The caller
+ * (MlOptimiser, aligning each 2D class to the largest class) feeds these values
+ * both to applyGeometry on the class map and to
+ * applyInverseOrientationAdjustment on every particle in the class, so a sign
+ * change there is a real change in output and needs validating end to end.
+ */
+
 void alignMapToMap(
     MultidimArray<RFLOAT> &vol_align,
     const MultidimArray<RFLOAT> &vol_ref,
@@ -124,6 +200,7 @@ void alignMapToMap(
     }
     else if (nr_freedom == 6)
     {
+        double best_ang_mag2 = 1E99;
         for (int irot = -search_range; irot <= search_range; irot++)
         {
             RFLOAT rot = irot * search_step_rot;
@@ -149,9 +226,11 @@ void alignMapToMap(
                         diff2 += d * d;
                     }
 
-                    if (diff2 < best_diff2)
+                    if (isBetterCandidate(diff2, best_diff2,
+                                         rot*rot + tilt*tilt + psi*psi, best_ang_mag2))
                     {
                         best_diff2 = diff2;
+                        best_ang_mag2 = rot*rot + tilt*tilt + psi*psi;
                         best_rot = rot;
                         best_tilt = tilt;
                         best_psi = psi;
@@ -264,6 +343,7 @@ void alignMapToMap(
             }
             else
             {
+                double lv_ang_mag2 = 1E99;
                 for (int irot = -fine_range; irot <= fine_range; irot++)
                 {
                     RFLOAT rot = cur_rot + irot * ang_step;
@@ -285,9 +365,11 @@ void alignMapToMap(
                                 double d = DIRECT_MULTIDIM_ELEM(rotated, n) - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
                                 diff2 += d * d;
                             }
-                            if (diff2 < lv_best)
+                            if (isBetterCandidate(diff2, lv_best,
+                                                 rot*rot + tilt*tilt + psi*psi, lv_ang_mag2))
                             {
                                 lv_best = diff2;
+                                lv_ang_mag2 = rot*rot + tilt*tilt + psi*psi;
                                 lv_rot = rot; lv_tilt = tilt; lv_psi = psi;
                             }
                         }
