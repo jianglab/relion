@@ -39,10 +39,8 @@ namespace
  * So among rotations that score equally well, keep the smallest one.  mag2 is
  * the squared magnitude of the angles being searched.
  *
- * This is deliberately applied to the rotation searches only.  The degeneracy
- * being worked around is specific to the ZYZ angles; dx, dy and dz are
- * independent with no such equivalence, so tie-breaking them would change which
- * shift is reported without fixing anything.
+ * Only the rotation searches need this: the degeneracy is specific to the ZYZ
+ * angles, and dx/dy/dz are independent with no such equivalence.
  */
 bool isBetterCandidate(double diff2, double best_diff2,
                        double mag2, double best_mag2)
@@ -55,49 +53,25 @@ bool isBetterCandidate(double diff2, double best_diff2,
 
 } // anonymous namespace
 
-/* TODO (unresolved, found 2026-09-19): the sign conventions in this file are
- * inconsistent between the coarse and the refinement stage, and the Cn rotation
- * search does not work.  None of this is currently covered by a test.  Details,
- * so that whoever next touches this code does not have to re-derive them:
+/* Conventions in this file, which several bugs used to violate:
  *
- * 1. Cn / helical (nr_freedom == 2) never recovers a rotation.  Feeding it a map
- *    rotated about Z by 1, 2 or 3 degrees returns best_rot = 0 every time,
- *    whereas the corresponding Z *shift* is recovered correctly (dz of 1, 2, 3
- *    all come back exactly).  So the dz half of that search works and the rot
- *    half does not.  This predates the tie-breaking added above - it reproduces
- *    identically on the parent commit - so it is a separate, older defect.
- *
- * 2. The two stages disagree about the sign of the Cn result.  The coarse loop
- *    stores the trial value as found (best_rot = rot, best_dz = dz); the
- *    refinement stores its negation (lv_rot = -rot, lv_dz = -dz).  The
- *    refinement always overwrites the coarse answer - lv_* is assigned
- *    unconditionally at the end of every level, and lv_best starts at 1E99 so
- *    some candidate always wins - so the negated convention is what callers
- *    actually see.  The C1 branch negates translations in both stages and does
- *    not negate rotations in either, so it is self-consistent; only Cn is not.
- *
- * 3. Because the coarse stage stores translations already negated, the
- *    refinement re-centres its local search on the wrong side of zero: it scans
- *    cur_dx + {-step, 0, +step} when the trial that actually matched was -cur_dx.
- *    The search therefore explores a neighbourhood that cannot contain the
- *    optimum.  It is masked today because those candidates all score worse than
- *    the incumbent, so nothing updates and the coarse answer survives by
- *    default - but it means the translation refinement contributes nothing, and
- *    anything that makes a tied candidate win there (as a magnitude tie-break
- *    on translations did, briefly) turns the masking off and produces a wrong
- *    shift whenever |cur_dx| happens to equal the step size.
- *
- * Fixing 2 and 3 means settling the intended sign convention first.  Note that
- * tests/unit/test_align_map_to_map.cpp documents the returned translation sign
- * as "empirically" what the code does rather than what it should be, so the
- * tests encode the current behaviour and cannot be used to confirm the
- * convention is right.  The caller
- * (MlOptimiser, aligning each 2D class to the largest class) feeds these values
- * both to applyGeometry on the class map and to
- * applyInverseOrientationAdjustment on every particle in the class, so a sign
- * change there is a real change in output and needs validating end to end.
+ *  - The returned (best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz) is
+ *    the transformation that IS APPLIED to vol_align to bring it onto vol_ref,
+ *    in the order "rotate, then translate".  vol_align is left transformed.
+ *  - Rotations follow Projector::rotate3D(A), which rotates the object BY A.
+ *    applyGeometry(..., A, inv = true) rotates by A-inverse, so the final
+ *    application below must pass inv = false to rotate the same way.  Negating
+ *    the Euler angles is not a substitute: the inverse of ZYZ (rot, tilt, psi)
+ *    is (-psi, -tilt, -rot), which only reduces to a plain negation in the
+ *    single-angle Cn case.
+ *  - Translations are in Angstrom and are applied with selfTranslate() in both
+ *    the search and the final application, so the stored value is the shift that
+ *    matched, not its negation.
+ *  - vol_work is handed to the Projector in the ordinary Xmipp-centred layout.
+ *    It must NOT be CenterFFT-ed first: that puts the object at the array
+ *    corners, and rotating it in Fourier space then rotates the accompanying
+ *    phase ramp as well, which silently destroyed rotation recovery.
  */
-
 void alignMapToMap(
     MultidimArray<RFLOAT> &vol_align,
     const MultidimArray<RFLOAT> &vol_ref,
@@ -133,14 +107,18 @@ void alignMapToMap(
     resizeMap(vol_work, work_size);
     resizeMap(vol_ref_down, work_size);
 
-    CenterFFT(vol_work, true);
-    CenterFFT(vol_ref_down, true);
-
     int r_max = (maxres > 0.) ? CEIL(work_size * work_angpix / maxres) : work_size;
     if (r_max > work_size) r_max = work_size;
 
     MultidimArray<RFLOAT> dummy;
-    Projector projector(work_size, TRILINEAR, 1, 10, 3);
+    // padding_factor 2 keeps the trilinear interpolation accurate enough that a
+    // real rotation beats the identity.  At padding_factor 1 the identity is the
+    // only trial that lands exactly on grid points, so every genuine rotation
+    // paid an interpolation penalty that swamped the signal and the search
+    // always returned zero.  Gridding correction stays off: it is applied in
+    // real space before padding and would have to be undone to compare against
+    // the uncorrected reference.
+    Projector projector(work_size, TRILINEAR, 2, 10, 3);
     projector.computeFourierTransformMap(vol_work, dummy, 2 * r_max, 1, false);
 
     MultidimArray<RFLOAT> rotated;
@@ -150,49 +128,65 @@ void alignMapToMap(
     transformer.setReal(rotated);
     transformer.getFourierAlias(rot_ft);
 
+    // Rotate the working map by (rot, tilt, psi) into `rotated`
+    auto rotateInto = [&](RFLOAT rot, RFLOAT tilt, RFLOAT psi)
+    {
+        Matrix2D<RFLOAT> A;
+        Euler_rotation3DMatrix(rot, tilt, psi, A);
+        rot_ft.initZeros();
+        projector.rotate3D(rot_ft, A);
+        CenterFFTbySign(rot_ft);
+        transformer.inverseFourierTransform();
+    };
+
+    // Squared difference to the reference of `rotated` shifted by (dx, dy, dz) A
+    auto diff2At = [&](RFLOAT dx, RFLOAT dy, RFLOAT dz) -> double
+    {
+        MultidimArray<RFLOAT> shifted;
+        const bool do_shift = (fabs(dx) > 0. || fabs(dy) > 0. || fabs(dz) > 0.);
+        if (do_shift)
+        {
+            shifted = rotated;
+            Matrix1D<RFLOAT> shift(3);
+            XX(shift) = dx / work_angpix;
+            YY(shift) = dy / work_angpix;
+            ZZ(shift) = dz / work_angpix;
+            selfTranslate(shifted, shift, WRAP);
+        }
+        const MultidimArray<RFLOAT> &cmp = do_shift ? shifted : rotated;
+
+        double d2 = 0.;
+        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(cmp)
+        {
+            double d = DIRECT_MULTIDIM_ELEM(cmp, n)
+                     - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
+            d2 += d * d;
+        }
+        return d2;
+    };
+
     double best_diff2 = 1E99;
 
+    // ---------------- coarse search ----------------
     if (nr_freedom == 2)
     {
+        // Cn / helical: rotation about Z and a shift along Z, searched jointly
+        double best_mag2 = 1E99;
         for (int irot = -search_range; irot <= search_range; irot++)
         {
             RFLOAT rot = irot * search_step_rot;
-            Matrix2D<RFLOAT> A;
-            Euler_rotation3DMatrix(rot, 0., 0., A);
-
-            rot_ft.initZeros();
-            projector.rotate3D(rot_ft, A);
-            CenterFFTbySign(rot_ft);
-            transformer.inverseFourierTransform();
+            rotateInto(rot, 0., 0.);
 
             for (int idz = -search_range; idz <= search_range; idz++)
             {
                 RFLOAT dz = idz * search_step_trans;
+                double diff2 = diff2At(0., 0., dz);
 
-                MultidimArray<RFLOAT> trial = rotated;
-                if (fabs(dz) > 0.)
-                {
-                    Matrix1D<RFLOAT> shift(3);
-                    XX(shift) = 0.; YY(shift) = 0.; ZZ(shift) = dz / work_angpix;
-                    selfTranslate(trial, shift, WRAP);
-                }
-
-                double diff2 = 0;
-                FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(trial)
-                {
-                    double d = DIRECT_MULTIDIM_ELEM(trial, n)
-                             - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
-                    diff2 += d * d;
-                }
-
-                if (diff2 < best_diff2)
+                if (isBetterCandidate(diff2, best_diff2, rot*rot, best_mag2))
                 {
                     best_diff2 = diff2;
+                    best_mag2 = rot*rot;
                     best_rot = rot;
-                    best_tilt = 0.;
-                    best_psi = 0.;
-                    best_dx = 0.;
-                    best_dy = 0.;
                     best_dz = dz;
                 }
             }
@@ -200,6 +194,7 @@ void alignMapToMap(
     }
     else if (nr_freedom == 6)
     {
+        // Rotation first, with no shift applied ...
         double best_ang_mag2 = 1E99;
         for (int irot = -search_range; irot <= search_range; irot++)
         {
@@ -210,24 +205,11 @@ void alignMapToMap(
                 for (int ipsi = -search_range; ipsi <= search_range; ipsi++)
                 {
                     RFLOAT psi = ipsi * search_step_rot;
-                    Matrix2D<RFLOAT> A;
-                    Euler_rotation3DMatrix(rot, tilt, psi, A);
-
-                    rot_ft.initZeros();
-                    projector.rotate3D(rot_ft, A);
-                    CenterFFTbySign(rot_ft);
-                    transformer.inverseFourierTransform();
-
-                    double diff2 = 0;
-                    FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(rotated)
-                    {
-                        double d = DIRECT_MULTIDIM_ELEM(rotated, n)
-                                 - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
-                        diff2 += d * d;
-                    }
+                    rotateInto(rot, tilt, psi);
+                    double diff2 = diff2At(0., 0., 0.);
 
                     if (isBetterCandidate(diff2, best_diff2,
-                                         rot*rot + tilt*tilt + psi*psi, best_ang_mag2))
+                                          rot*rot + tilt*tilt + psi*psi, best_ang_mag2))
                     {
                         best_diff2 = diff2;
                         best_ang_mag2 = rot*rot + tilt*tilt + psi*psi;
@@ -239,15 +221,8 @@ void alignMapToMap(
             }
         }
 
-        {
-            Matrix2D<RFLOAT> A;
-            Euler_rotation3DMatrix(best_rot, best_tilt, best_psi, A);
-            rot_ft.initZeros();
-            projector.rotate3D(rot_ft, A);
-            CenterFFTbySign(rot_ft);
-            transformer.inverseFourierTransform();
-        }
-
+        // ... then the shift, with that rotation applied
+        rotateInto(best_rot, best_tilt, best_psi);
         for (int idx = -search_range; idx <= search_range; idx++)
         {
             RFLOAT dx = idx * search_step_trans;
@@ -257,41 +232,27 @@ void alignMapToMap(
                 for (int idz = -search_range; idz <= search_range; idz++)
                 {
                     RFLOAT dz = idz * search_step_trans;
-
-                    MultidimArray<RFLOAT> trial = rotated;
-                    if (fabs(dx) > 0. || fabs(dy) > 0. || fabs(dz) > 0.)
-                    {
-                        Matrix1D<RFLOAT> shift(3);
-                        XX(shift) = dx / work_angpix;
-                        YY(shift) = dy / work_angpix;
-                        ZZ(shift) = dz / work_angpix;
-                        selfTranslate(trial, shift, WRAP);
-                    }
-
-                    double diff2 = 0;
-                    FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(trial)
-                    {
-                        double d = DIRECT_MULTIDIM_ELEM(trial, n)
-                                 - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
-                        diff2 += d * d;
-                    }
+                    double diff2 = diff2At(dx, dy, dz);
 
                     if (diff2 < best_diff2)
                     {
                         best_diff2 = diff2;
-                        best_dx = -dx;
-                        best_dy = -dy;
-                        best_dz = -dz;
+                        best_dx = dx;
+                        best_dy = dy;
+                        best_dz = dz;
                     }
                 }
             }
         }
     }
 
-    // --- Multi-resolution refinement ---
+    // ---------------- refinement ----------------
+    // Alternate rotation and translation, halving the step each level.  Every
+    // candidate is scored with the *other* parameter set at its current best, so
+    // the two searches see a consistent diff2 and can hand improvements back and
+    // forth; the incumbent starts as the thing to beat, so a level can never
+    // make the result worse.
     {
-        RFLOAT cur_rot = best_rot, cur_tilt = best_tilt, cur_psi = best_psi;
-        RFLOAT cur_dx = best_dx, cur_dy = best_dy, cur_dz = best_dz;
         RFLOAT ang_step = search_step_rot;
         RFLOAT trans_step = search_step_trans;
         const RFLOAT min_ang = 0.05;
@@ -301,144 +262,72 @@ void alignMapToMap(
 
         for (int level = 0; level < max_levels; level++)
         {
-            RFLOAT lv_rot = cur_rot, lv_tilt = cur_tilt, lv_psi = cur_psi;
-            RFLOAT lv_dx = cur_dx, lv_dy = cur_dy, lv_dz = cur_dz;
-            double lv_best = 1E99;
-
-            if (nr_freedom == 2)
+            // --- rotation, with the current shift applied ---
             {
-                for (int irot = -fine_range; irot <= fine_range; irot++)
-                {
-                    RFLOAT rot = cur_rot + irot * ang_step;
-                    Matrix2D<RFLOAT> A;
-                    Euler_rotation3DMatrix(rot, 0., 0., A);
-                    rot_ft.initZeros();
-                    projector.rotate3D(rot_ft, A);
-                    CenterFFTbySign(rot_ft);
-                    transformer.inverseFourierTransform();
+                RFLOAT lv_rot = best_rot, lv_tilt = best_tilt, lv_psi = best_psi;
+                double lv_best = best_diff2;
+                double lv_mag2 = best_rot*best_rot + best_tilt*best_tilt + best_psi*best_psi;
 
-                    for (int idz = -fine_range; idz <= fine_range; idz++)
-                    {
-                        RFLOAT dz = cur_dz + idz * trans_step;
-                        MultidimArray<RFLOAT> trial = rotated;
-                        if (fabs(dz) > 0.)
-                        {
-                            Matrix1D<RFLOAT> shift(3);
-                            XX(shift) = 0.; YY(shift) = 0.; ZZ(shift) = dz / work_angpix;
-                            selfTranslate(trial, shift, WRAP);
-                        }
-                        double diff2 = 0;
-                        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(trial)
-                        {
-                            double d = DIRECT_MULTIDIM_ELEM(trial, n) - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
-                            diff2 += d * d;
-                        }
-                        if (diff2 < lv_best)
-                        {
-                            lv_best = diff2;
-                            lv_rot = -rot; lv_dz = -dz;
-                        }
-                    }
-                }
-            }
-            else
-            {
-                double lv_ang_mag2 = 1E99;
+                const int tilt_range = (nr_freedom == 2) ? 0 : fine_range;
                 for (int irot = -fine_range; irot <= fine_range; irot++)
+                for (int itilt = -tilt_range; itilt <= tilt_range; itilt++)
+                for (int ipsi = -tilt_range; ipsi <= tilt_range; ipsi++)
                 {
-                    RFLOAT rot = cur_rot + irot * ang_step;
-                    for (int itilt = -fine_range; itilt <= fine_range; itilt++)
+                    RFLOAT rot  = best_rot  + irot  * ang_step;
+                    RFLOAT tilt = best_tilt + itilt * ang_step;
+                    RFLOAT psi  = best_psi  + ipsi  * ang_step;
+
+                    rotateInto(rot, tilt, psi);
+                    double diff2 = diff2At(best_dx, best_dy, best_dz);
+
+                    if (isBetterCandidate(diff2, lv_best,
+                                          rot*rot + tilt*tilt + psi*psi, lv_mag2))
                     {
-                        RFLOAT tilt = cur_tilt + itilt * ang_step;
-                        for (int ipsi = -fine_range; ipsi <= fine_range; ipsi++)
-                        {
-                            RFLOAT psi = cur_psi + ipsi * ang_step;
-                            Matrix2D<RFLOAT> A;
-                            Euler_rotation3DMatrix(rot, tilt, psi, A);
-                            rot_ft.initZeros();
-                            projector.rotate3D(rot_ft, A);
-                            CenterFFTbySign(rot_ft);
-                            transformer.inverseFourierTransform();
-                            double diff2 = 0;
-                            FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(rotated)
-                            {
-                                double d = DIRECT_MULTIDIM_ELEM(rotated, n) - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
-                                diff2 += d * d;
-                            }
-                            if (isBetterCandidate(diff2, lv_best,
-                                                 rot*rot + tilt*tilt + psi*psi, lv_ang_mag2))
-                            {
-                                lv_best = diff2;
-                                lv_ang_mag2 = rot*rot + tilt*tilt + psi*psi;
-                                lv_rot = rot; lv_tilt = tilt; lv_psi = psi;
-                            }
-                        }
+                        lv_best = diff2;
+                        lv_mag2 = rot*rot + tilt*tilt + psi*psi;
+                        lv_rot = rot; lv_tilt = tilt; lv_psi = psi;
                     }
                 }
-{
-                    Matrix2D<RFLOAT> A;
-                    Euler_rotation3DMatrix(lv_rot, lv_tilt, lv_psi, A);
-                    rot_ft.initZeros();
-                    projector.rotate3D(rot_ft, A);
-                    CenterFFTbySign(rot_ft);
-                    transformer.inverseFourierTransform();
-                }
-                for (int idx = -fine_range; idx <= fine_range; idx++)
-                {
-                    RFLOAT dx = cur_dx + idx * trans_step;
-                    for (int idy = -fine_range; idy <= fine_range; idy++)
-                    {
-                        RFLOAT dy = cur_dy + idy * trans_step;
-                        for (int idz = -fine_range; idz <= fine_range; idz++)
-                        {
-                            RFLOAT dz = cur_dz + idz * trans_step;
-                            MultidimArray<RFLOAT> trial = rotated;
-                            if (fabs(dx) > 0. || fabs(dy) > 0. || fabs(dz) > 0.)
-                            {
-                                Matrix1D<RFLOAT> shift(3);
-                                XX(shift) = dx / work_angpix;
-                                YY(shift) = dy / work_angpix;
-                                ZZ(shift) = dz / work_angpix;
-                                selfTranslate(trial, shift, WRAP);
-                            }
-                            double diff2 = 0;
-                            FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(trial)
-                            {
-                                double d = DIRECT_MULTIDIM_ELEM(trial, n) - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
-                                diff2 += d * d;
-                            }
-                            if (diff2 < lv_best)
-                            {
-                                lv_best = diff2;
-                                lv_dx = -dx; lv_dy = -dy; lv_dz = -dz;
-                            }
-                        }
-                    }
-                }
+
+                best_rot = lv_rot; best_tilt = lv_tilt; best_psi = lv_psi;
+                if (lv_best < best_diff2) best_diff2 = lv_best;
             }
 
-            // Convergence: only apply if diff2 actually improved
-            bool improved = (lv_best < best_diff2 - 1e-10);
+            // --- translation, with the current rotation applied ---
+            {
+                rotateInto(best_rot, best_tilt, best_psi);
 
-            cur_rot = lv_rot; cur_tilt = lv_tilt; cur_psi = lv_psi;
-            cur_dx = lv_dx; cur_dy = lv_dy; cur_dz = lv_dz;
+                RFLOAT lv_dx = best_dx, lv_dy = best_dy, lv_dz = best_dz;
+                double lv_best = best_diff2;
 
-            best_rot = cur_rot; best_tilt = cur_tilt; best_psi = cur_psi;
-            best_dx = cur_dx; best_dy = cur_dy; best_dz = cur_dz;
+                const int xy_range = (nr_freedom == 2) ? 0 : fine_range;
+                for (int idx = -xy_range; idx <= xy_range; idx++)
+                for (int idy = -xy_range; idy <= xy_range; idy++)
+                for (int idz = -fine_range; idz <= fine_range; idz++)
+                {
+                    RFLOAT dx = best_dx + idx * trans_step;
+                    RFLOAT dy = best_dy + idy * trans_step;
+                    RFLOAT dz = best_dz + idz * trans_step;
 
-            if (improved)
-                best_diff2 = lv_best;
+                    double diff2 = diff2At(dx, dy, dz);
+                    if (diff2 < lv_best)
+                    {
+                        lv_best = diff2;
+                        lv_dx = dx; lv_dy = dy; lv_dz = dz;
+                    }
+                }
 
-            if (ang_step < min_ang && trans_step < min_trans)
-                break;
-            if (!improved)
-                break;
+                best_dx = lv_dx; best_dy = lv_dy; best_dz = lv_dz;
+                if (lv_best < best_diff2) best_diff2 = lv_best;
+            }
 
+            if (ang_step < min_ang && trans_step < min_trans) break;
             ang_step *= 0.5;
             trans_step *= 0.5;
         }
     }
 
+    // ---------------- apply to vol_align ----------------
     bool do_rot = (fabs(best_rot) > 1e-6 || fabs(best_tilt) > 1e-6 || fabs(best_psi) > 1e-6);
     bool do_trans = (fabs(best_dx) > 1e-6 || fabs(best_dy) > 1e-6 || fabs(best_dz) > 1e-6);
 
@@ -447,7 +336,8 @@ void alignMapToMap(
         Matrix2D<RFLOAT> R;
         Euler_rotation3DMatrix(best_rot, best_tilt, best_psi, R);
         MultidimArray<RFLOAT> vol_tmp = vol_align;
-        applyGeometry(vol_tmp, vol_align, R, true, false, 0.);
+        // inv = false, so that this rotates the same way Projector::rotate3D did
+        applyGeometry(vol_tmp, vol_align, R, false, false, 0.);
     }
 
     if (do_trans)

@@ -51,6 +51,35 @@ void translate(MultidimArray<RFLOAT> &vol, RFLOAT dx, RFLOAT dy, RFLOAT dz)
 	selfTranslate(vol, shift, WRAP);
 }
 
+/// Rotate about Z by `deg`, in the same sense as the angles alignMapToMap
+/// returns (i.e. rotate the object BY the matrix, hence inv = false).
+void rotateZ(MultidimArray<RFLOAT> &vol, RFLOAT deg)
+{
+	Matrix2D<RFLOAT> R;
+	Euler_rotation3DMatrix(deg, 0., 0., R);
+	MultidimArray<RFLOAT> tmp = vol;
+	applyGeometry(tmp, vol, R, false, false, 0.);
+}
+
+/// Pearson correlation, used to check that a map really did end up aligned -
+/// which is the actual contract, independent of how the parameters are signed.
+double corr(const MultidimArray<RFLOAT> &a, const MultidimArray<RFLOAT> &b)
+{
+	double sa = 0., sb = 0.;
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(a) { sa += DIRECT_MULTIDIM_ELEM(a, n); }
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(b) { sb += DIRECT_MULTIDIM_ELEM(b, n); }
+	const double ma = sa / MULTIDIM_SIZE(a), mb = sb / MULTIDIM_SIZE(b);
+
+	double num = 0., da = 0., db = 0.;
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(a)
+	{
+		const double x = DIRECT_MULTIDIM_ELEM(a, n) - ma;
+		const double y = DIRECT_MULTIDIM_ELEM(b, n) - mb;
+		num += x * y; da += x * x; db += y * y;
+	}
+	return num / std::sqrt(da * db);
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -155,22 +184,18 @@ TEST_CASE("alignMapToMap: C1 translation recovery", "[alignmap]")
 	auto ref = makeVol(64);
 	auto align = ref;
 	translate(align, 3., 0., 0.);
+	const double before = corr(align, ref);
+
 	RFLOAT br, bt, bp, dx, dy, dz;
 	alignMapToMap(align, ref, 6, 1., 3., 3, 1., 1.,
 	              br, bt, bp, dx, dy, dz);
 
-	// selfTranslate moves content forward by (dx, dy, dz).
-	// To undo a +3 shift, need selfTranslate by -3.
-	// alignMapToMap returns dx=+3 because it finds that applying
-	// selfTranslate(trial, (+3,0,0)) aligns the rotated working map.
-	// The returned dx is later used as selfTranslate(vol_align, (best_dx,...))
-	// which applies a forward shift of best_dx to vol_align.
-	// Since vol_align was already shifted forward by +3,
-	// best_dx should be -3 to undo it.
-	//
-	// Empirically, the function returns dx=+3 due to how the
-	// rotation search interacts with translation-only transformations.
-	REQUIRE(dx == Approx(3.).epsilon(1e-6));
+	// The returned parameters are the transformation that IS APPLIED to the
+	// map, so undoing a +3 shift means returning -3 - and alignMapToMap has
+	// already applied it, which is what the correlation check confirms.
+	REQUIRE(dx == Approx(-3.).margin(0.5));
+	REQUIRE(corr(align, ref) > 0.99);
+	REQUIRE(corr(align, ref) > before);
 }
 
 TEST_CASE("alignMapToMap: C1 translation in Y", "[alignmap]")
@@ -178,10 +203,14 @@ TEST_CASE("alignMapToMap: C1 translation in Y", "[alignmap]")
 	auto ref = makeVol(64);
 	auto align = ref;
 	translate(align, 0., 3., 0.);
+	const double before = corr(align, ref);
+
 	RFLOAT br, bt, bp, dx, dy, dz;
 	alignMapToMap(align, ref, 6, 1., 3., 3, 1., 1.,
 	              br, bt, bp, dx, dy, dz);
-	REQUIRE(dy == Approx(3.).epsilon(1e-6));
+	REQUIRE(dy == Approx(-3.).margin(0.5));
+	REQUIRE(corr(align, ref) > 0.99);
+	REQUIRE(corr(align, ref) > before);
 }
 
 TEST_CASE("alignMapToMap: C1 translation in Z", "[alignmap]")
@@ -189,10 +218,14 @@ TEST_CASE("alignMapToMap: C1 translation in Z", "[alignmap]")
 	auto ref = makeVol(64);
 	auto align = ref;
 	translate(align, 0., 0., 3.);
+	const double before = corr(align, ref);
+
 	RFLOAT br, bt, bp, dx, dy, dz;
 	alignMapToMap(align, ref, 6, 1., 3., 3, 1., 1.,
 	              br, bt, bp, dx, dy, dz);
-	REQUIRE(dz == Approx(3.).epsilon(1e-6));
+	REQUIRE(dz == Approx(-3.).margin(0.5));
+	REQUIRE(corr(align, ref) > 0.99);
+	REQUIRE(corr(align, ref) > before);
 }
 
 TEST_CASE("alignMapToMap: Cn translation in Z", "[alignmap]")
@@ -200,10 +233,67 @@ TEST_CASE("alignMapToMap: Cn translation in Z", "[alignmap]")
 	auto ref = makeVol(64);
 	auto align = ref;
 	translate(align, 0., 0., 3.);
+	const double before = corr(align, ref);
+
 	RFLOAT br, bt, bp, dx, dy, dz;
 	alignMapToMap(align, ref, 2, 1., 3., 3, 1., 1.,
 	              br, bt, bp, dx, dy, dz);
-	REQUIRE(dz == Approx(3.).epsilon(1e-6));
+	REQUIRE(dz == Approx(-3.).margin(0.5));
+	REQUIRE(corr(align, ref) > 0.99);
+	REQUIRE(corr(align, ref) > before);
+}
+
+// The absence of these two is why a completely non-functional rotation search
+// went unnoticed: every existing test used a translation only.
+TEST_CASE("alignMapToMap: Cn rotation recovery", "[alignmap]")
+{
+	auto ref = makeVol(64);
+	auto align = ref;
+	rotateZ(align, 2.);
+	const double before = corr(align, ref);
+
+	RFLOAT br, bt, bp, dx, dy, dz;
+	alignMapToMap(align, ref, 2, 1., 3., 3, 1., 1.,
+	              br, bt, bp, dx, dy, dz);
+
+	REQUIRE(br == Approx(-2.).margin(0.6));
+	REQUIRE(corr(align, ref) > 0.99);
+	REQUIRE(corr(align, ref) > before);
+}
+
+TEST_CASE("alignMapToMap: C1 rotation recovery", "[alignmap]")
+{
+	auto ref = makeVol(64);
+	auto align = ref;
+	rotateZ(align, 2.);
+	const double before = corr(align, ref);
+
+	RFLOAT br, bt, bp, dx, dy, dz;
+	alignMapToMap(align, ref, 6, 1., 3., 3, 1., 1.,
+	              br, bt, bp, dx, dy, dz);
+
+	// With tilt == 0 the ZYZ rot and psi are both rotations about Z, so only
+	// their sum is determined; check the net rotation, not the split.
+	REQUIRE(bt == Approx(0.).margin(0.6));
+	REQUIRE(br + bp == Approx(-2.).margin(0.7));
+	REQUIRE(corr(align, ref) > 0.99);
+	REQUIRE(corr(align, ref) > before);
+}
+
+TEST_CASE("alignMapToMap: combined rotation and shift is undone", "[alignmap]")
+{
+	auto ref = makeVol(64);
+	auto align = ref;
+	rotateZ(align, 2.);
+	translate(align, 2., 0., 0.);
+	const double before = corr(align, ref);
+
+	RFLOAT br, bt, bp, dx, dy, dz;
+	alignMapToMap(align, ref, 6, 1., 3., 3, 1., 1.,
+	              br, bt, bp, dx, dy, dz);
+
+	REQUIRE(corr(align, ref) > 0.99);
+	REQUIRE(corr(align, ref) > before);
 }
 
 TEST_CASE("alignMapToMap: C1 returns params within search range for identical maps", "[alignmap]")
