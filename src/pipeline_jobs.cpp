@@ -4849,6 +4849,8 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 		command += " --center_classes ";
 	if (joboptions["do_align"].getBoolean())
 		command += " --align_classes ";
+	else
+		command += " --dont_align_classes ";
 
 	if (joboptions["fn_mask"].getString().length() > 0)
 	{
@@ -5394,6 +5396,8 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 	command += " --low_resol_join_halves " + joboptions["low_resol_join_halves"].getString();
 	if (joboptions["do_align_halves"].getBoolean())
 		command += " --align_halves ";
+	else
+		command += " --dont_align_halves ";
 	command += " --particle_diameter " + joboptions["particle_diameter"].getString();
 	if (!is_continue)
 	{

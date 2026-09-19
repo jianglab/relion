@@ -472,6 +472,22 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     else
         do_center_classes = false;
 
+    // Aligning all classes to the largest class is ON by default.  --align_classes
+    // is still accepted - the GUI emits it, and it now simply asks for the default -
+    // so existing job.star files and scripts keep working; --dont_align_classes is
+    // what turns it off.  Parsed identically here and in the other parse path, so
+    // that --continue behaves the same as a fresh run.
+    parser.checkOption("--align_classes", "Align all classes to the largest class at the last iteration (Class3D only; this is the default)");
+    do_align_classes = !parser.checkOption("--dont_align_classes", "Do not align all classes to the largest class at the last iteration");
+
+    // Aligning the two half-maps to each other is ON by default.  --align_halves is
+    // still accepted - the GUI emits it, and it now simply asks for the default -
+    // so existing job.star files and scripts keep working; --dont_align_halves is
+    // what turns it off.  Parsed identically here and in the other parse path, so
+    // that --continue behaves the same as a fresh run.
+    parser.checkOption("--align_halves", "Align half-maps to each other at every iteration (auto-refine only; this is the default)");
+    do_align_halves = !parser.checkOption("--dont_align_halves", "Do not align the two half-maps to each other at every iteration");
+
     if (parser.checkOption("--keep_priors_fixed", "Keep priors fixed, even for local angular searches?"))
         keep_angular_priors_fixed = true;
     else
@@ -711,8 +727,20 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     do_split_random_halves = parser.checkOption("--split_random_halves", "Refine two random halves of the data completely separately");
     low_resol_join_halves = textToFloat(parser.getOption("--low_resol_join_halves", "Resolution (in Angstrom) up to which the two random half-reconstructions will not be independent to prevent diverging orientations","-1"));
     do_center_classes = parser.checkOption("--center_classes", "Re-center classes based on their center-of-mass?");
-    do_align_classes = parser.checkOption("--align_classes", "Align all classes to the largest class (for Class3D)?");
-    do_align_halves = parser.checkOption("--align_halves", "Align half-maps to each other at every iteration (for auto-refine)?");
+    // Aligning all classes to the largest class is ON by default.  --align_classes
+    // is still accepted - the GUI emits it, and it now simply asks for the default -
+    // so existing job.star files and scripts keep working; --dont_align_classes is
+    // what turns it off.  Parsed identically here and in the other parse path, so
+    // that --continue behaves the same as a fresh run.
+    parser.checkOption("--align_classes", "Align all classes to the largest class at the last iteration (Class3D only; this is the default)");
+    do_align_classes = !parser.checkOption("--dont_align_classes", "Do not align all classes to the largest class at the last iteration");
+    // Aligning the two half-maps to each other is ON by default.  --align_halves is
+    // still accepted - the GUI emits it, and it now simply asks for the default -
+    // so existing job.star files and scripts keep working; --dont_align_halves is
+    // what turns it off.  Parsed identically here and in the other parse path, so
+    // that --continue behaves the same as a fresh run.
+    parser.checkOption("--align_halves", "Align half-maps to each other at every iteration (auto-refine only; this is the default)");
+    do_align_halves = !parser.checkOption("--dont_align_halves", "Do not align the two half-maps to each other at every iteration");
 
     // Initialisation
     int init_section = parser.addSection("Initialisation");

@@ -74,6 +74,73 @@ TEST_CASE("Class3D: cache_dir and cache_copy_threads options exist",
 	REQUIRE(job.joboptions.find("cache_copy_threads") != job.joboptions.end());
 }
 
+// ---------------------------------------------------------------------------
+// Class/half-map alignment flags
+//
+// These exist because the underlying bug was invisible: --align_classes and
+// --align_halves default to on, but unchecking the GUI box emitted nothing at
+// all, so the job kept aligning.  Assert that the negative flag is emitted, not
+// merely that the positive one is.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Class3D: align-classes checkbox emits a flag either way",
+          "[pipeline][class3d]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_3DCLASS);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["fn_ref"].setString("ref.mrc");
+	job.joboptions["do_em"].setString("Yes");
+	job.joboptions["do_grad"].setString("No");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+	REQUIRE(job.joboptions.find("do_align") != job.joboptions.end());
+	// Aligning classes to the largest is the default
+	REQUIRE(job.joboptions["do_align"].getBoolean());
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --align_classes ") != std::string::npos);
+	REQUIRE(command.find(" --dont_align_classes ") == std::string::npos);
+
+	job.joboptions["do_align"].setString("No");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --dont_align_classes ") != std::string::npos);
+}
+
+TEST_CASE("Refine3D: align-halves checkbox emits a flag either way",
+          "[pipeline][refine3d]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_3DAUTO);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["fn_ref"].setString("ref.mrc");
+	job.joboptions["nr_mpi"].setString("3");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+	REQUIRE(job.joboptions.find("do_align_halves") != job.joboptions.end());
+	// Aligning the two half-maps to each other is the default
+	REQUIRE(job.joboptions["do_align_halves"].getBoolean());
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --align_halves ") != std::string::npos);
+	REQUIRE(command.find(" --dont_align_halves ") == std::string::npos);
+
+	job.joboptions["do_align_halves"].setString("No");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --dont_align_halves ") != std::string::npos);
+}
+
 static bool generateCommands(RelionJob &job, std::vector<std::string> &commands,
 		std::string &final_command, std::string &error_message,
 		bool do_makedir = false, std::string outputname = "")
