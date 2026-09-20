@@ -27,6 +27,7 @@ set(RELION_UNIT_TEST_SOURCES
  test_ewald_ctf_weight.cpp
  test_relion_finufft.cpp
  test_finufft_projector.cpp
+ test_cryosparc_motion.cpp
  test_backprojector_nonuniform.cpp
  test_s2_vs_smode_consistency.cpp
     test_align_map_to_map.cpp
@@ -72,7 +73,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]
