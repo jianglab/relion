@@ -411,9 +411,11 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
   		// Recent submenu: placeholder only; items are built dynamically
   		// by rebuildRecentProjectsInMenu().
   		menubar->add("Project/Recent/(empty)", 0, 0, 0, FL_MENU_INVISIBLE);
-   		menubar->add("Project/Manage projects...", 0, cb_manage_projects, this);
-  		menubar->add("Project/Import project...", 0, cb_import_project, this);
+  		menubar->add("Project/Import RELION project...", 0, cb_import_project, this);
+  		menubar->add("Project/Import CryoSPARC project...", 0, cb_import_cryosparc_project, this);
+  		menubar->add("Project/Manage projects...", 0, cb_manage_projects, this);
   		menubar->add("Project/Manage cache...", 0, cb_cache_management, this);
+  		menubar->add("Project/Remove intermediate files...", 0, cb_remove_intermediates, this);
  	}
 	project_manager.load();
 	rebuildRecentProjectsInMenu();
@@ -3120,6 +3122,26 @@ void GuiMainWindow::cb_manage_projects_i()
 	delete w;
 }
 
+void GuiMainWindow::cb_remove_intermediates(Fl_Widget* o, void* v)
+{
+	GuiMainWindow* T = (GuiMainWindow*)v;
+	T->cb_remove_intermediates_i();
+}
+
+void GuiMainWindow::cb_remove_intermediates_i()
+{
+	// The GUI always runs from the project directory
+	char cwd[4096];
+	if (getcwd(cwd, sizeof(cwd)) == NULL)
+	{
+		fl_alert("Cannot determine the current project directory.");
+		return;
+	}
+
+	std::vector<std::string> paths(1, std::string(cwd));
+	runIntermediateCleanupDialog(paths);
+}
+
 void GuiMainWindow::cb_import_project(Fl_Widget* o, void* v)
 {
 	GuiMainWindow* T = (GuiMainWindow*)v;
@@ -3309,6 +3331,161 @@ void GuiMainWindow::cb_import_project_i()
 				      "  %d job directories symlinked\n\n"
 				      "Switch to the new project now?",
 				      linked);
+		int ret = fl_choice("%s", "No", "Yes", NULL, msg);
+		if (ret == 1)
+			switchToProject(destDir);
+		else
+			rebuildRecentProjectsInMenu();
+	}
+}
+
+void GuiMainWindow::cb_import_cryosparc_project(Fl_Widget* o, void* v)
+{
+	GuiMainWindow* T = (GuiMainWindow*)v;
+	T->cb_import_cryosparc_project_i();
+}
+
+/// True if `name` is a CryoSPARC job directory name: J followed by digits.
+static bool is_cryosparc_job_name(const std::string &name)
+{
+	if (name.size() < 2 || name[0] != 'J') return false;
+	for (size_t i = 1; i < name.size(); i++)
+		if (!std::isdigit((unsigned char)name[i])) return false;
+	return true;
+}
+
+/// True if the directory holds at least one CryoSPARC job (JNN/job.json).
+static bool looks_like_cryosparc_project(const std::string &dir)
+{
+	DIR *d = opendir(dir.c_str());
+	if (d == NULL) return false;
+
+	bool found = false;
+	struct dirent *entry;
+	while (!found && (entry = readdir(d)) != NULL)
+	{
+		const std::string name(entry->d_name);
+		if (!is_cryosparc_job_name(name)) continue;
+		if (exists(FileName(dir + "/" + name + "/job.json"))) found = true;
+	}
+	closedir(d);
+	return found;
+}
+
+/// True if the directory is itself one CryoSPARC job, i.e. a JNN directory
+/// holding a job.json. `job` then receives its name, e.g. "J48".
+static bool looks_like_cryosparc_job(const std::string &dir, std::string &job)
+{
+	const size_t slash = dir.find_last_of('/');
+	const std::string name = (slash == std::string::npos) ? dir : dir.substr(slash + 1);
+	if (!is_cryosparc_job_name(name)) return false;
+	if (!exists(FileName(dir + "/job.json"))) return false;
+	job = name;
+	return true;
+}
+
+void GuiMainWindow::cb_import_cryosparc_project_i()
+{
+	// 1. Choose what to import. The chosen directory decides the scope on its
+	//    own: a project root imports the whole project, a single JNN directory
+	//    imports that job together with the jobs it depends on, and anything
+	//    else is a mis-selection worth saying out loud rather than guessing at.
+	const char *src = fl_dir_chooser("Select a CryoSPARC project directory (imports all of it) "
+					 "or a single job directory (imports that job and the jobs "
+					 "it depends on)", ".");
+	if (!src || strlen(src) == 0) return;
+	std::string chosenDir(src);
+	while (chosenDir.size() > 1 && chosenDir.back() == '/')
+		chosenDir.pop_back();
+
+	std::string sourceDir, only_job, what;
+	if (looks_like_cryosparc_job(chosenDir, only_job))
+	{
+		// The importer works on the project, so hand it the job's parent
+		const size_t slash = chosenDir.find_last_of('/');
+		sourceDir = (slash == std::string::npos) ? "." :
+		            (slash == 0 ? "/" : chosenDir.substr(0, slash));
+		what = "CryoSPARC job " + only_job + " and the jobs it depends on";
+	}
+	else if (looks_like_cryosparc_project(chosenDir))
+	{
+		sourceDir = chosenDir;
+		what = "the CryoSPARC project";
+	}
+	else
+	{
+		fl_alert("The selected directory is neither a CryoSPARC project nor a CryoSPARC job:\n%s\n\n"
+			 "Select the project directory (the one containing J1, J2, ...) to import all of "
+			 "it, or one of its JNN job directories to import just that job and the jobs it "
+			 "depends on.", chosenDir.c_str());
+		return;
+	}
+
+	// 2. Choose/create the destination
+	const char *dest = fl_dir_chooser("Select or create the destination directory for the "
+					  "imported project", ".");
+	if (!dest || strlen(dest) == 0) return;
+	std::string destDir(dest);
+	while (destDir.size() > 1 && destDir.back() == '/')
+		destDir.pop_back();
+	FileName destFn(destDir);
+
+	if (sourceDir == destDir || chosenDir == destDir)
+	{
+		fl_alert("Source and destination must be different directories.");
+		return;
+	}
+
+	if (exists(destFn + "/.gui_projectdir") || exists(destFn + "/default_pipeline.star"))
+	{
+		int ret = fl_choice("The destination already contains a RELION project.\n"
+				    "Importing will add jobs to it and overwrite its pipeline.\n"
+				    "Continue anyway?", "Cancel", "Continue", NULL);
+		if (ret != 1) return;
+	}
+
+	if (!exists(destFn))
+	{
+		std::string cmd = "mkdir -p " + destFn;
+		if (system(cmd.c_str()) != 0)
+		{
+			fl_alert("Failed to create destination directory:\n%s", destDir.c_str());
+			return;
+		}
+	}
+
+	// 3. Run the importer, keeping its output for the user to inspect
+	const std::string logfile = destDir + "/import_cryosparc.log";
+	std::string command = "relion_import_cryosparc --i \"" + sourceDir +
+			      "\" --o \"" + destDir + "\"";
+	if (!only_job.empty()) command += " --job " + only_job;
+	command += " > \"" + logfile + "\" 2>&1";
+
+	// This can take a while on a large project; let the user know it started
+	std::cout << " Importing " << what << " from " << sourceDir << " ..." << std::endl;
+	const int res = system(command.c_str());
+
+	if (res != 0)
+	{
+		fl_alert("Importing the CryoSPARC project failed.\n"
+			 "See %s for details.", logfile.c_str());
+		return;
+	}
+
+	touch(destFn + "/.gui_projectdir");
+	system(("mkdir -p " + destFn + "/.TMP_runfiles").c_str());
+
+	// 4. Register it and offer to switch
+	project_manager.add(destFn, destFn.afterLastOf("/"));
+	project_manager.save();
+
+	{
+		char msg[1024];
+		std::snprintf(msg, sizeof(msg),
+			      "Imported %s.\n\n"
+			      "Details were written to:\n%s\n\n"
+			      "Switch to the new project now?",
+			      what.c_str(), logfile.c_str());
 		int ret = fl_choice("%s", "No", "Yes", NULL, msg);
 		if (ret == 1)
 			switchToProject(destDir);

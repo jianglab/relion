@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "gui_projects.h"
+#include "src/remove_intermediates.h"
 #include <fstream>
 #include <sstream>
 #include <ctime>
@@ -37,6 +38,9 @@
 #include <FL/Fl_Return_Button.H>
 #include <FL/Fl_Round_Button.H>
 #include <FL/fl_draw.H>
+#include <FL/Fl_Progress.H>
+#include <mutex>
+#include <thread>
 
 // ---------------------------------------------------------------------------
 // ProjectManager
@@ -344,12 +348,183 @@ long long compute_size_kb(const std::string &path)
 
 std::string format_size(long long bytes)
 {
+    // Negative means "still being measured": see ManageProjectsWindow::SizeScan
+    if (bytes < 0) return "...";
     double gb = (double)bytes / (1024.0 * 1024.0 * 1024.0);
     char buf[32];
     snprintf(buf, sizeof(buf), "%.2f GB", gb);
     return std::string(buf);
 }
 
+}
+
+// ---------------------------------------------------------------------------
+// Removing intermediate files
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/* The window shown while files are being deleted.
+ *
+ * Deleting tens of thousands of files takes long enough that a dialog saying
+ * what was done would be claiming a result that has not happened yet, so this
+ * says what is happening, refuses to close while it happens, and only then
+ * turns into the report of what was removed.
+ */
+struct CleanupProgressWindow {
+	Fl_Window   *win;
+	Fl_Box      *message;
+	Fl_Progress *bar;
+	Fl_Button   *close_btn;
+	std::string  text;          ///< owned, since Fl_Box does not copy its label
+	bool         busy;
+	size_t       done_before;   ///< files finished in earlier projects
+	size_t       grand_total;
+
+	CleanupProgressWindow(size_t total_files, const std::string &what)
+		: busy(true), done_before(0), grand_total(total_files)
+	{
+		win = new Fl_Window(480, 150, "Removing intermediate files");
+
+		text = "Deleting " + std::to_string(total_files) + " file(s) from\n" + what + " ...";
+		message = new Fl_Box(20, 15, 440, 55, text.c_str());
+		message->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_WRAP);
+
+		bar = new Fl_Progress(20, 75, 440, 22);
+		bar->minimum(0);
+		bar->maximum((float)(total_files > 0 ? total_files : 1));
+		bar->value(0);
+		bar->selection_color(FL_BLUE);
+
+		close_btn = new Fl_Button(390, 110, 70, 26, "Close");
+		close_btn->callback(cb_close, this);
+		close_btn->deactivate();
+
+		// The window manager's close button must not get around the above
+		win->callback(cb_close, this);
+		win->end();
+		win->set_modal();
+		win->show();
+		Fl::check();
+	}
+
+	~CleanupProgressWindow() { delete win; }
+
+	static void cb_close(Fl_Widget *, void *v)
+	{
+		CleanupProgressWindow *w = (CleanupProgressWindow *)v;
+		if (!w->busy) w->win->hide();
+	}
+
+	/// relion_cleanup::ProgressFn
+	static void onProgress(size_t done, size_t total, void *user_data)
+	{
+		CleanupProgressWindow *w = (CleanupProgressWindow *)user_data;
+
+		// `done` counts within one project; the bar counts across all of them
+		const size_t overall = w->done_before + done;
+		w->bar->value((float)overall);
+
+		char label[64];
+		snprintf(label, sizeof(label), "%zu / %zu", overall, w->grand_total);
+		w->bar->label(label);
+
+		Fl::check();   // repaint, and keep the GUI answering the window manager
+	}
+
+	/// Called after each project, so the next one's counts continue from here.
+	void projectDone(size_t files) { done_before += files; }
+
+	/// Turn into the report of what was done, and let the user dismiss it.
+	void finish(const std::string &report)
+	{
+		busy = false;
+		text = report;
+		message->label(text.c_str());
+		bar->hide();
+		close_btn->activate();
+		win->redraw();
+	}
+
+	void waitUntilClosed()
+	{
+		while (win->shown()) Fl::wait();
+	}
+};
+
+} // namespace
+
+bool runIntermediateCleanupDialog(const std::vector<std::string> &project_paths)
+{
+    if (project_paths.empty()) return false;
+
+    // Scanning walks every job directory, so say what is happening first
+    std::vector<relion_cleanup::Plan> plans;
+    long long total_bytes = 0;
+    size_t total_files = 0;
+    for (size_t i = 0; i < project_paths.size(); i++)
+    {
+        relion_cleanup::Plan plan = relion_cleanup::planIntermediateRemoval(project_paths[i]);
+        total_bytes += plan.total_bytes;
+        total_files += plan.remove.size();
+        plans.push_back(plan);
+    }
+
+    if (total_files == 0)
+    {
+        fl_message("No intermediate files to remove.\n\n"
+                   "Only the first and last iteration of each refinement are kept,\n"
+                   "and nothing else was found.");
+        return false;
+    }
+
+    std::string where = (project_paths.size() == 1)
+                      ? project_paths[0]
+                      : (std::to_string(project_paths.size()) + " projects");
+
+    char msg[1024];
+    snprintf(msg, sizeof(msg),
+             "Remove %zu intermediate file(s) from\n%s,\nfreeing %s?\n\n"
+             "The first and last iteration of every refinement are kept;\n"
+             "the rounds in between are deleted and cannot be recovered.",
+             total_files, where.c_str(),
+             relion_cleanup::humanSize(total_bytes).c_str());
+
+    int ret = fl_choice("%s", "Cancel", "Remove", NULL, msg);
+    if (ret != 1) return false;
+
+    CleanupProgressWindow progress(total_files, where);
+
+    long long freed = 0;
+    long removed = 0;
+    std::vector<std::string> errors;
+    for (size_t i = 0; i < plans.size(); i++)
+    {
+        long long f = 0;
+        removed += relion_cleanup::applyRemoval(plans[i], f, errors,
+                                                CleanupProgressWindow::onProgress, &progress);
+        progress.projectDone(plans[i].remove.size());
+        freed += f;
+    }
+
+    if (errors.empty())
+    {
+        snprintf(msg, sizeof(msg), "Deleted %ld file(s), freeing %s.",
+                 removed, relion_cleanup::humanSize(freed).c_str());
+    }
+    else
+    {
+        snprintf(msg, sizeof(msg),
+                 "Deleted %ld file(s), freeing %s.\n\n"
+                 "%zu file(s) could not be removed, the first being:\n%s",
+                 removed, relion_cleanup::humanSize(freed).c_str(),
+                 errors.size(), errors[0].c_str());
+    }
+
+    progress.finish(msg);
+    progress.waitUntilClosed();
+
+    return removed > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +573,7 @@ std::string ProjectTable::cellText(int row, int col) const
         return text;
     }
     case 1: return p.path;
-    case 2: return std::to_string(p.jobs);
+    case 2: return (p.jobs < 0) ? "..." : std::to_string(p.jobs);
     case 3: return format_size(p.size_bytes);
     case 4: return p.last_opened;
     default: return "";
@@ -439,8 +614,10 @@ void ProjectTable::onDoubleClick(int row)
 
 void ProjectTable::onSelectionChanged()
 {
+    // Not just the buttons: the name and path boxes below the table show the
+    // selected project, and are what Rename edits
     if (win_)
-        win_->updateButtonStates();
+        win_->onRowSelectionChanged();
 }
 
 void ProjectTable::onSortChanged(int col, bool asc)
@@ -452,6 +629,165 @@ void ProjectTable::onSortChanged(int col, bool asc)
 // ---------------------------------------------------------------------------
 // ManageProjectsWindow
 // ---------------------------------------------------------------------------
+
+/* Background measurement of project sizes.
+ *
+ * Workers take paths off a queue, run the du and the job count, and leave the
+ * answers in `ready` for the GUI thread to pick up on a timer. Nothing here
+ * touches FLTK: a worker only locks the mutex.
+ *
+ * The struct is held by shared_ptr and the workers are detached, so a window
+ * that closes mid-scan sets `cancelled` and walks away; the last worker to
+ * finish drops the struct. That matters because a du on a slow filesystem can
+ * outlive the dialog by a long way, and joining it would hang the GUI.
+ */
+struct ManageProjectsWindow::SizeScan {
+    struct Result {
+        std::string path;
+        long long   size_bytes;
+        int         jobs;
+    };
+
+    std::mutex mutex;
+    std::vector<std::string> queue;
+    size_t next;
+    std::vector<Result> ready;
+    int outstanding;
+    bool cancelled;
+
+    SizeScan() : next(0), outstanding(0), cancelled(false) {}
+};
+
+namespace {
+
+void sizeScanWorker(std::shared_ptr<ManageProjectsWindow::SizeScan> scan)
+{
+    for (;;)
+    {
+        std::string path;
+        {
+            std::lock_guard<std::mutex> guard(scan->mutex);
+            if (scan->cancelled || scan->next >= scan->queue.size())
+            {
+                scan->outstanding--;
+                return;
+            }
+            path = scan->queue[scan->next++];
+        }
+
+        ManageProjectsWindow::SizeScan::Result r;
+        r.path = path;
+        r.jobs = count_jobs(path);
+        r.size_bytes = compute_size_kb(path) * 1024;
+
+        {
+            std::lock_guard<std::mutex> guard(scan->mutex);
+            if (scan->cancelled)
+            {
+                scan->outstanding--;
+                return;
+            }
+            scan->ready.push_back(r);
+        }
+    }
+}
+
+} // namespace
+
+void ManageProjectsWindow::startSizeScan(const std::vector<std::string> &paths)
+{
+    cancelSizeScan();
+    if (paths.empty()) return;
+
+    scan_.reset(new SizeScan());
+    scan_->queue = paths;
+
+    // A handful of parallel du's hides the latency of any one slow project
+    // without hammering the filesystem
+    size_t n_workers = paths.size() < 4 ? paths.size() : 4;
+    {
+        std::lock_guard<std::mutex> guard(scan_->mutex);
+        scan_->outstanding = (int)n_workers;
+    }
+    for (size_t i = 0; i < n_workers; i++)
+    {
+        std::shared_ptr<SizeScan> s = scan_;
+        std::thread(sizeScanWorker, s).detach();
+    }
+
+    Fl::add_timeout(0.1, cb_size_poll, this);
+}
+
+void ManageProjectsWindow::cancelSizeScan()
+{
+    Fl::remove_timeout(cb_size_poll, this);
+    if (scan_)
+    {
+        std::lock_guard<std::mutex> guard(scan_->mutex);
+        scan_->cancelled = true;
+    }
+    scan_.reset();
+}
+
+void ManageProjectsWindow::cb_size_poll(void *v)
+{
+    ((ManageProjectsWindow *)v)->pollSizeScan();
+}
+
+void ManageProjectsWindow::pollSizeScan()
+{
+    if (!scan_) return;
+
+    std::vector<SizeScan::Result> results;
+    bool done;
+    {
+        std::lock_guard<std::mutex> guard(scan_->mutex);
+        results.swap(scan_->ready);
+        done = (scan_->outstanding <= 0);
+    }
+
+    for (size_t i = 0; i < results.size(); i++)
+    {
+        for (size_t p = 0; p < display_projects_.size(); p++)
+        {
+            if (display_projects_[p].path != results[i].path) continue;
+            display_projects_[p].jobs = results[i].jobs;
+            display_projects_[p].size_bytes = results[i].size_bytes;
+            break;
+        }
+    }
+
+    if (!results.empty())
+    {
+        // Rows are only re-sorted once everything is in: re-sorting on each
+        // arrival would shuffle the list under the user's cursor
+        table->redraw();
+    }
+
+    if (done)
+    {
+        scan_.reset();
+
+        // Jobs and Size are the columns whose order depended on what just
+        // arrived, so the list is sorted again - but not while the user holds a
+        // selection, since selection is by row and re-sorting would move it
+        const int sc = table->sortCol();
+        bool anything_selected = false;
+        for (int r = 0; r < table->rows() && !anything_selected; r++)
+            if (table->row_selected(r)) anything_selected = true;
+
+        if ((sc == 2 || sc == 3) && !anything_selected)
+        {
+            applySort();
+            table->syncRowCount();
+        }
+        table->redraw();
+    }
+    else
+    {
+        Fl::add_timeout(0.1, cb_size_poll, this);
+    }
+}
 
 ManageProjectsWindow::ManageProjectsWindow(int w, int h, const char *title)
     : Fl_Window(w, h, title)
@@ -536,6 +872,13 @@ ManageProjectsWindow::ManageProjectsWindow(int w, int h, const char *title)
     refresh_btn->deactivate();
     bx += 90 + pad;
 
+    cleanup_btn = new Fl_Button(bx, btn_y, 110, bh, " Cleanup ");
+    cleanup_btn->callback(cb_cleanup, this);
+    cleanup_btn->tooltip("Remove intermediate iteration files, keeping the first and "
+                         "last iteration of each refinement");
+    cleanup_btn->deactivate();
+    bx += 110 + pad;
+
     Fl_Button *close_btn = new Fl_Button(w - pad - 90, btn_y, 90, bh, " Close ");
     close_btn->callback(cb_close, this);
 
@@ -547,12 +890,21 @@ ManageProjectsWindow::ManageProjectsWindow(int w, int h, const char *title)
 void ManageProjectsWindow::refresh()
 {
     display_projects_ = pm.getAll();
+
+    std::vector<std::string> to_measure;
     for (auto &p : display_projects_)
     {
         if (p.exists())
         {
-            p.jobs = count_jobs(p.path);
-            p.size_bytes = compute_size_kb(p.path) * 1024;
+            // Shown as "..." until a worker reports the real numbers
+            p.jobs = -1;
+            p.size_bytes = -1;
+            to_measure.push_back(p.path);
+        }
+        else
+        {
+            p.jobs = 0;
+            p.size_bytes = 0;
         }
     }
     applySort();
@@ -561,15 +913,15 @@ void ManageProjectsWindow::refresh()
     name_input->value("");
     path_input->value("");
     updateButtonStates();
+
+    startSizeScan(to_measure);
 }
 
-void ManageProjectsWindow::cb_table(Fl_Widget *, void *v)
+ManageProjectsWindow::~ManageProjectsWindow()
 {
-    ManageProjectsWindow *w = (ManageProjectsWindow *)v;
-    Fl_Table::TableContext ctx = w->table->callback_context();
-
-    if (ctx != Fl_Table::CONTEXT_COL_HEADER)
-        w->onRowSelectionChanged();
+    // The timer would otherwise fire into a deleted window, and any worker
+    // still running would write into a vector that no longer exists
+    cancelSizeScan();
 }
 
 void ManageProjectsWindow::cb_open(Fl_Widget *, void *v)
@@ -590,6 +942,11 @@ void ManageProjectsWindow::cb_rename(Fl_Widget *, void *v)
 void ManageProjectsWindow::cb_refresh(Fl_Widget *, void *v)
 {
     ((ManageProjectsWindow *)v)->refreshSelected();
+}
+
+void ManageProjectsWindow::cb_cleanup(Fl_Widget *, void *v)
+{
+    ((ManageProjectsWindow *)v)->cleanupSelected();
 }
 
 void ManageProjectsWindow::cb_name_input(Fl_Widget *, void *v)
@@ -650,6 +1007,11 @@ void ManageProjectsWindow::updateButtonStates()
         refresh_btn->activate();
     else
         refresh_btn->deactivate();
+
+    if (selected_count > 0)
+        cleanup_btn->activate();
+    else
+        cleanup_btn->deactivate();
 }
 
 void ManageProjectsWindow::sortByColumn(int col, bool asc)
@@ -698,6 +1060,22 @@ void ManageProjectsWindow::openSelected()
 
     selected_open_path_ = display_projects_[row].path;
     hide();
+}
+
+void ManageProjectsWindow::cleanupSelected()
+{
+    std::vector<std::string> paths;
+    for (int r = 0; r < table->rows(); r++)
+    {
+        if (!table->row_selected(r)) continue;
+        if (r < 0 || r >= (int)display_projects_.size()) continue;
+        if (display_projects_[r].exists()) paths.push_back(display_projects_[r].path);
+    }
+    if (paths.empty()) return;
+
+    // The sizes in the table are now wrong, so re-read them either way
+    runIntermediateCleanupDialog(paths);
+    refresh();
 }
 
 void ManageProjectsWindow::removeSelected()
@@ -821,26 +1199,25 @@ void ManageProjectsWindow::renameSelected()
 
 void ManageProjectsWindow::refreshSelected()
 {
+    std::vector<std::string> to_measure;
     for (int r = 0; r < table->rows(); r++)
     {
-        if (table->row_selected(r))
+        if (!table->row_selected(r)) continue;
+        if (r < 0 || r >= (int)display_projects_.size()) continue;
+
+        ProjectManager::Project &p = display_projects_[r];
+        if (p.exists())
         {
-            if (r >= 0 && r < (int)display_projects_.size())
-            {
-                ProjectManager::Project &p = display_projects_[r];
-                if (p.exists())
-                {
-                    p.jobs = count_jobs(p.path);
-                    p.size_bytes = compute_size_kb(p.path) * 1024;
-                }
-                else
-                {
-                    p.jobs = 0;
-                    p.size_bytes = 0;
-                }
-            }
+            p.jobs = -1;
+            p.size_bytes = -1;
+            to_measure.push_back(p.path);
+        }
+        else
+        {
+            p.jobs = 0;
+            p.size_bytes = 0;
         }
     }
-    applySort();
-    table->syncRowCount();
+    table->redraw();
+    startSizeScan(to_measure);
 }

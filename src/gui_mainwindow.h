@@ -363,8 +363,12 @@ private:
     inline void cb_open_project_i();
     static void cb_manage_projects(Fl_Widget*, void*);
     inline void cb_manage_projects_i();
+    static void cb_remove_intermediates(Fl_Widget*, void*);
+    inline void cb_remove_intermediates_i();
     static void cb_import_project(Fl_Widget*, void*);
     inline void cb_import_project_i();
+    static void cb_import_cryosparc_project(Fl_Widget*, void*);
+    inline void cb_import_cryosparc_project_i();
     static void cb_recent_project(Fl_Widget*, void*);
     inline void cb_recent_project_i(int idx);
     void rebuildRecentProjectsInMenu();

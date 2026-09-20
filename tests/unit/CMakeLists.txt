@@ -39,6 +39,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_filament_consistency.cpp
     test_prefetch.cpp
     test_ml_optimiser.cpp
+    test_remove_intermediates.cpp
 )
 
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})
@@ -73,7 +74,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]

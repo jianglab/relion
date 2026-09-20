@@ -21,6 +21,7 @@
 #ifndef GUI_PROJECTS_H_
 #define GUI_PROJECTS_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 #include <FL/Fl_Window.H>
@@ -31,6 +32,14 @@
 #include "src/filename.h"
 
 class ManageProjectsWindow;
+
+/* Offer to delete a project's intermediate per-iteration files.
+ *
+ * Scans the project, shows what would go and how much space it would free, and
+ * deletes only if the user agrees. Returns true if anything was deleted, so a
+ * caller that displays project sizes knows to refresh them.
+ */
+bool runIntermediateCleanupDialog(const std::vector<std::string> &project_paths);
 
 class ProjectTable : public RelionTable
 {
@@ -86,6 +95,7 @@ class ManageProjectsWindow : public Fl_Window
 {
 public:
     ManageProjectsWindow(int w, int h, const char *title = "Manage Projects");
+    ~ManageProjectsWindow();
     void refresh();
 
     const std::vector<ProjectManager::Project>& getDisplayProjects() const { return display_projects_; }
@@ -93,6 +103,8 @@ public:
     const std::string& getOpenPath() const { return selected_open_path_; }
     const std::string& currentProjectPath() const { return current_project_path_; }
     void updateButtonStates();
+    /// Fill the name/path boxes from the selection, and update the buttons.
+    void onRowSelectionChanged();
     void openSelected();
     void sortByColumn(int col, bool asc);
 
@@ -108,19 +120,34 @@ private:
     Fl_Button *remove_btn;
     Fl_Button *rename_btn;
     Fl_Button *refresh_btn;
+    Fl_Button *cleanup_btn;
 
     static void cb_open(Fl_Widget *, void *v);
     static void cb_remove(Fl_Widget *, void *v);
     static void cb_rename(Fl_Widget *, void *v);
     static void cb_refresh(Fl_Widget *, void *v);
+    static void cb_cleanup(Fl_Widget *, void *v);
     static void cb_close(Fl_Widget *, void *v);
-    static void cb_table(Fl_Widget *, void *v);
     static void cb_name_input(Fl_Widget *, void *v);
 
     void removeSelected();
     void renameSelected();
     void refreshSelected();
-    void onRowSelectionChanged();
+    void cleanupSelected();
+
+    /* Measuring a project means du over the whole tree, which on a project
+     * with many jobs takes seconds. Doing that for every row before the window
+     * appears made opening the dialog feel broken, so the rows are shown at
+     * once with their sizes pending and filled in from worker threads as the
+     * measurements come back. */
+public:
+    struct SizeScan;   ///< public only so that the worker function can name it
+private:
+    std::shared_ptr<SizeScan> scan_;
+    void startSizeScan(const std::vector<std::string> &paths);
+    void pollSizeScan();
+    void cancelSizeScan();
+    static void cb_size_poll(void *v);
     void applySort();
 };
 
