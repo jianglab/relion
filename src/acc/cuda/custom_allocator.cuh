@@ -364,6 +364,21 @@ private:
 
 		a->free = true;
 
+		/* A free region must not carry a pending completion event.
+		 *
+		 * An exact-size match hands back the Alloc object itself rather than
+		 * splitting a larger one, so these fields survive into the next
+		 * allocation. Left set, _freeReadyAllocs() sees a live allocation whose
+		 * (stale, long-completed) event queries ready and frees it while it is
+		 * still in use, handing the same device memory to something else.
+		 */
+		a->freeWhenReady = false;
+		if (a->readyEvent != 0)
+		{
+			DEBUG_HANDLE_ERROR(cudaEventDestroy(a->readyEvent));
+			a->readyEvent = 0;
+		}
+
 		if (cache)
 		{
 			//Previous neighbor is free, concatenate
