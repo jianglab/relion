@@ -1,4 +1,5 @@
 #include "src/class2d_consensus.h"
+#include "src/class2d_consensus_nmf.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,6 +8,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <new>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -41,6 +43,26 @@ struct LabelPatternHash
 		return hash;
 	}
 };
+
+void compressPatterns(const std::vector<std::vector<int> > &runs,
+	std::vector<Pattern> &patterns, std::vector<size_t> &particle_pattern)
+{
+	const size_t nr_particles = runs[0].size();
+	std::unordered_map<std::vector<int>, size_t, LabelPatternHash> pattern_ids;
+	pattern_ids.reserve(nr_particles);
+	particle_pattern.resize(nr_particles);
+	for (size_t particle = 0; particle < nr_particles; ++particle)
+	{
+		std::vector<int> labels(runs.size());
+		for (size_t run = 0; run < runs.size(); ++run) labels[run] = runs[run][particle];
+		std::pair<std::unordered_map<std::vector<int>, size_t, LabelPatternHash>::iterator, bool> inserted =
+			pattern_ids.insert(std::make_pair(labels, patterns.size()));
+		if (inserted.second)
+			patterns.push_back(Pattern{labels, 0});
+		particle_pattern[particle] = inserted.first->second;
+		patterns[inserted.first->second].count += 1;
+	}
+}
 
 double choose2(double value)
 {
@@ -112,6 +134,50 @@ std::vector<int> maximumAssignment(const std::vector<double> &weights, int size)
 	for (int column = 1; column <= size; ++column)
 		assignment[p[column] - 1] = column - 1;
 	return assignment;
+}
+
+template <class Result>
+void assignmentDiagnostics(const std::vector<std::vector<int> > &runs,
+	int source_classes, int nr_classes, Result &result)
+{
+	const size_t nr_particles = runs[0].size();
+	result.run_adjusted_rand.resize(runs.size());
+	result.run_mapped_agreement.resize(runs.size());
+	result.agreement.assign(nr_particles, 0.);
+	for (size_t run = 0; run < runs.size(); ++run)
+	{
+		result.run_adjusted_rand[run] = Class2DConsensus::adjustedRandIndex(runs[run], result.assignment, source_classes, nr_classes);
+		const bool source_is_finer = source_classes >= nr_classes;
+		const int rows = std::max(source_classes, nr_classes), columns = std::min(source_classes, nr_classes);
+		const std::vector<int> &fine = source_is_finer ? runs[run] : result.assignment;
+		const std::vector<int> &coarse = source_is_finer ? result.assignment : runs[run];
+		std::vector<double> overlap((size_t)rows * columns, 0.);
+		for (size_t p = 0; p < nr_particles; ++p) overlap[(size_t)fine[p] * columns + coarse[p]] += 1.;
+		std::vector<int> mapping(rows);
+		if (rows == columns) mapping = maximumAssignment(overlap, rows);
+		else
+		{
+			std::vector<size_t> first_particle(columns, nr_particles);
+			for (size_t p = 0; p < nr_particles; ++p)
+				first_particle[coarse[p]] = std::min(first_particle[coarse[p]], p);
+			for (int row = 0; row < rows; ++row)
+			{
+				const size_t offset = (size_t)row * columns;
+				for (int column = 1; column < columns; ++column)
+				{
+					const int best = mapping[row];
+					if (overlap[offset + column] > overlap[offset + best] ||
+						(overlap[offset + column] == overlap[offset + best] && first_particle[column] < first_particle[best]))
+						mapping[row] = column;
+				}
+			}
+		}
+		long int matches = 0;
+		for (size_t p = 0; p < nr_particles; ++p)
+			if (mapping[fine[p]] == coarse[p]) { ++matches; result.agreement[p] += 1.; }
+		result.run_mapped_agreement[run] = (double)matches / nr_particles;
+	}
+	for (double &agreement : result.agreement) agreement /= runs.size();
 }
 
 size_t confusionIndex(int run, int consensus_class, int observed_class, int nr_classes, int source_classes)
@@ -347,21 +413,9 @@ Class2DConsensusResult Class2DConsensus::fitWithClassCount(
 		return mean_ari[lhs] > mean_ari[rhs];
 	});
 
-	std::unordered_map<std::vector<int>, size_t, LabelPatternHash> pattern_ids;
-	pattern_ids.reserve(nr_particles);
 	std::vector<Pattern> patterns;
-	std::vector<size_t> particle_pattern(nr_particles);
-	for (size_t particle = 0; particle < nr_particles; ++particle)
-	{
-		std::vector<int> labels(runs.size());
-		for (size_t run = 0; run < runs.size(); ++run) labels[run] = runs[run][particle];
-		std::pair<std::unordered_map<std::vector<int>, size_t, LabelPatternHash>::iterator, bool> inserted =
-			pattern_ids.insert(std::make_pair(labels, patterns.size()));
-		if (inserted.second)
-			patterns.push_back(Pattern{labels, 0});
-		particle_pattern[particle] = inserted.first->second;
-		patterns[inserted.first->second].count += 1;
-	}
+	std::vector<size_t> particle_pattern;
+	compressPatterns(runs, patterns, particle_pattern);
 
 	FitState best;
 	best.log_likelihood = -std::numeric_limits<double>::infinity();
@@ -483,43 +537,7 @@ Class2DConsensusResult Class2DConsensus::fitWithClassCount(
 
 	// Keep empty slots: smoothed posterior mass need not be zero when MAP
 	// occupancy is zero. For unequal counts, agreement measures coarsening.
-	result.run_adjusted_rand.resize(runs.size());
-	result.run_mapped_agreement.resize(runs.size());
-	result.agreement.assign(nr_particles, 0.);
-	for (size_t run = 0; run < runs.size(); ++run)
-	{
-		result.run_adjusted_rand[run] = adjustedRandIndex(runs[run], result.assignment, source_classes, nr_classes);
-		const bool source_is_finer = source_classes >= nr_classes;
-		const int rows = std::max(source_classes, nr_classes), columns = std::min(source_classes, nr_classes);
-		const std::vector<int> &fine = source_is_finer ? runs[run] : result.assignment;
-		const std::vector<int> &coarse = source_is_finer ? result.assignment : runs[run];
-		std::vector<double> overlap((size_t)rows * columns, 0.);
-		for (size_t p = 0; p < nr_particles; ++p) overlap[(size_t)fine[p] * columns + coarse[p]] += 1.;
-		std::vector<int> mapping(rows);
-		if (rows == columns) mapping = maximumAssignment(overlap, rows);
-		else
-		{
-			std::vector<size_t> first_particle(columns, nr_particles);
-			for (size_t p = 0; p < nr_particles; ++p)
-				first_particle[coarse[p]] = std::min(first_particle[coarse[p]], p);
-			for (int row = 0; row < rows; ++row)
-			{
-				const size_t offset = (size_t)row * columns;
-				for (int column = 1; column < columns; ++column)
-				{
-					const int best = mapping[row];
-					if (overlap[offset + column] > overlap[offset + best] ||
-						(overlap[offset + column] == overlap[offset + best] && first_particle[column] < first_particle[best]))
-						mapping[row] = column;
-				}
-			}
-		}
-		long int matches = 0;
-		for (size_t p = 0; p < nr_particles; ++p)
-			if (mapping[fine[p]] == coarse[p]) { ++matches; result.agreement[p] += 1.; }
-		result.run_mapped_agreement[run] = (double)matches / nr_particles;
-	}
-	for (double &agreement : result.agreement) agreement /= runs.size();
+	assignmentDiagnostics(runs, source_classes, nr_classes, result);
 	return result;
 }
 
@@ -529,4 +547,345 @@ Class2DConsensusResult Class2DConsensus::fit(
 {
 	return fitWithClassCount(runs, nr_classes, nr_classes, maximum_iterations,
 		relative_tolerance, pseudocount, nr_threads);
+}
+
+namespace class2d_nmf_detail
+{
+double profileGradient(const std::vector<double> &h, const std::vector<double> &s,
+    const std::vector<double> &t, int components, int features, int component, int feature)
+{
+	double gradient = -t[(size_t)component * features + feature];
+	for (int b = 0; b < components; ++b)
+		gradient += s[(size_t)component * components + b] * h[(size_t)b * features + feature];
+	return gradient;
+}
+
+void projectSimplex(std::vector<double> &values, std::vector<double> &scratch)
+{
+	scratch = values;
+	std::sort(scratch.begin(), scratch.end(), std::greater<double>());
+	double sum = 0., threshold = 0.;
+	for (size_t i = 0; i < scratch.size(); ++i)
+	{
+		sum += scratch[i];
+		const double candidate = (sum - 1.) / (i + 1);
+		if (scratch[i] > candidate) threshold = candidate;
+	}
+	for (double &value : values) value = std::max(0., value - threshold);
+}
+
+void gramMatrix(const std::vector<double> &h, int components, int features,
+                std::vector<double> &gram)
+{
+	gram.assign((size_t)components * components, 0.);
+	for (int a = 0; a < components; ++a)
+		for (int b = 0; b <= a; ++b)
+		{
+			double dot = 0.;
+			for (int j = 0; j < features; ++j)
+				dot += h[(size_t)a * features + j] * h[(size_t)b * features + j];
+			gram[(size_t)a * components + b] = gram[(size_t)b * components + a] = dot;
+		}
+}
+
+double patternObjectiveGradient(const std::vector<int> &labels, int source_classes,
+    const std::vector<double> &h, const std::vector<double> &gram,
+    const double *membership, int components, std::vector<double> &gradient)
+{
+	const size_t features = labels.size() * source_classes;
+	double residual = (double)labels.size();
+	gradient.resize(components);
+	for (int a = 0; a < components; ++a)
+	{
+		double cross = 0., quadratic = 0.;
+		for (size_t r = 0; r < labels.size(); ++r)
+			cross += h[(size_t)a * features + r * source_classes + labels[r]];
+		for (int b = 0; b < components; ++b)
+			quadratic += gram[(size_t)a * components + b] * membership[b];
+		gradient[a] = quadratic - cross;
+		residual += membership[a] * (quadratic - 2. * cross);
+	}
+	return .5 * residual;
+}
+}
+
+namespace
+{
+size_t nmfProduct(size_t a, size_t b)
+{
+	if (b && a > std::numeric_limits<size_t>::max() / b)
+		throw std::invalid_argument("Sparse NMF dimensions exceed the addressable size");
+	return a * b;
+}
+
+void nmfAdd(size_t &total, size_t count)
+{
+	if (total > std::numeric_limits<size_t>::max() - count)
+		throw std::invalid_argument("Sparse NMF workspace exceeds the addressable size");
+	total += count;
+}
+
+double nmfLipschitz(const std::vector<double> &gram, int c)
+{
+	double bound = 0.;
+	for (int a = 0; a < c; ++a)
+	{
+		double sum = 0.;
+		for (int b = 0; b < c; ++b) sum += std::fabs(gram[(size_t)a * c + b]);
+		bound = std::max(bound, sum);
+	}
+	if (!std::isfinite(bound) || bound <= 0.)
+		throw std::runtime_error("Sparse NMF encountered an invalid gradient step");
+	return bound;
+}
+
+double nmfObjective(const std::vector<Pattern> &patterns, const std::vector<double> &w,
+    const std::vector<double> &h, int k, int c, double particles, int threads)
+{
+	std::vector<double> gram;
+	class2d_nmf_detail::gramMatrix(h, c, (int)patterns[0].labels.size() * k, gram);
+	std::vector<double> sums(threads, 0.);
+	std::vector<std::vector<double> > gradients(threads, std::vector<double>(c));
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads)
+#endif
+	{
+		int thread = 0;
+#ifdef _OPENMP
+		thread = omp_get_thread_num();
+#endif
+		std::vector<double> &gradient = gradients[thread];
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+		for (long long p = 0; p < (long long)patterns.size(); ++p)
+			sums[thread] += (patterns[p].count / particles) *
+				class2d_nmf_detail::patternObjectiveGradient(patterns[p].labels, k, h, gram,
+					&w[(size_t)p * c], c, gradient);
+	}
+	double value = std::accumulate(sums.begin(), sums.end(), 0.) / patterns[0].labels.size();
+	if (!std::isfinite(value) || value < -1.e-10)
+		throw std::runtime_error("Sparse NMF encountered a non-finite or negative objective");
+	return std::max(0., value); // Cancellation near an exact reconstruction.
+}
+
+Class2DConsensusNmfResult fitSparseNmfImpl(const std::vector<std::vector<int> > &runs,
+    int k, int requested, const Class2DConsensusNmfOptions &options, int threads)
+{
+	if (runs.size() < 2 || runs[0].empty() || k < 2 || requested < 2 || threads < 1 ||
+		options.maximum_iterations < 1 || options.starts < 1 ||
+		!std::isfinite(options.tolerance) || options.tolerance <= 0.)
+		throw std::invalid_argument("Sparse NMF: invalid parameters");
+	const size_t n = runs[0].size();
+	const size_t feature_count = nmfProduct(runs.size(), (size_t)k);
+	if (feature_count > (size_t)std::numeric_limits<int>::max() ||
+		n > (size_t)std::numeric_limits<long int>::max())
+		throw std::invalid_argument("Sparse NMF: dimensions exceed supported index range");
+	const int d = (int)feature_count;
+	for (const auto &run : runs)
+	{
+		if (run.size() != n) throw std::invalid_argument("Sparse NMF: replicas have different particle counts");
+		for (int label : run)
+			if (label < 0 || label >= k) throw std::invalid_argument("Sparse NMF: class outside valid range");
+	}
+#ifndef _OPENMP
+	threads = 1;
+#endif
+	std::vector<Pattern> patterns;
+	std::vector<size_t> particle_pattern;
+	compressPatterns(runs, patterns, particle_pattern);
+	const int c = (int)std::min((size_t)requested, patterns.size());
+	threads = (int)std::min((size_t)threads, patterns.size());
+	const int starts = (int)std::min((size_t)options.starts, patterns.size());
+	const size_t pc = nmfProduct(patterns.size(), c), cd = nmfProduct(c, d), cc = nmfProduct(c, c);
+	// Conservative numeric-buffer bound, including summaries/output, but not
+	// input STAR tables, input labels, or the pattern hash table.
+	size_t doubles = pc;
+	nmfAdd(doubles, nmfProduct((size_t)threads + 4, cd));
+	nmfAdd(doubles, nmfProduct((size_t)threads + 4, cc));
+	nmfAdd(doubles, nmfProduct(3, nmfProduct(requested, d)));
+	nmfAdd(doubles, nmfProduct(k, k)); // Pairwise source ARI contingency table.
+	nmfAdd(doubles, nmfProduct(12, n));
+	nmfAdd(doubles, nmfProduct((size_t)threads + 4, 4 * (size_t)c + 2 * (size_t)k));
+	nmfAdd(doubles, nmfProduct(starts, (size_t)options.maximum_iterations + 1));
+	const size_t bytes = nmfProduct(doubles, sizeof(double));
+	if (options.report_workspace_bytes) options.report_workspace_bytes(bytes);
+
+	Class2DConsensusNmfResult result;
+	result.source_classes = k;
+	result.consensus_classes = requested;
+	result.fitted_components = c;
+	result.nr_patterns = patterns.size();
+	result.workspace_bytes = bytes;
+	result.objective = std::numeric_limits<double>::infinity();
+	std::vector<double> mean_ari(runs.size(), 0.);
+	for (size_t a = 0; a < runs.size(); ++a)
+		for (size_t b = a + 1; b < runs.size(); ++b)
+		{
+			const double ari = Class2DConsensus::adjustedRandIndex(runs[a], runs[b], k);
+			mean_ari[a] += ari; mean_ari[b] += ari;
+		}
+	result.anchor_run = std::max_element(mean_ari.begin(), mean_ari.end()) - mean_ari.begin();
+	std::vector<size_t> frequent(patterns.size());
+	std::iota(frequent.begin(), frequent.end(), 0);
+	std::stable_sort(frequent.begin(), frequent.end(), [&](size_t a, size_t b) { return patterns[a].count > patterns[b].count; });
+	std::vector<int> best_assignment;
+	std::vector<double> best_membership, best_entropy;
+	for (int start = 0; start < starts; ++start)
+	{
+		Class2DConsensusNmfStart status;
+		try
+		{
+			std::vector<double> w(pc, .05 / c), h(cd, 0.);
+			std::vector<int> distance(patterns.size(), (int)runs.size() + 1), nearest(patterns.size(), 0);
+			size_t seed = frequent[start];
+			for (int a = 0; a < c; ++a)
+			{
+				for (size_t r = 0; r < runs.size(); ++r) h[(size_t)a * d + r * k + patterns[seed].labels[r]] = 1.;
+				for (size_t p = 0; p < patterns.size(); ++p)
+				{
+					int dist = 0;
+					for (size_t r = 0; r < runs.size(); ++r) dist += patterns[p].labels[r] != patterns[seed].labels[r];
+					if (dist < distance[p]) { distance[p] = dist; nearest[p] = a; }
+				}
+				double score = -1.;
+				for (size_t p = 0; p < patterns.size(); ++p)
+					if ((double)patterns[p].count * distance[p] > score)
+					{ score = (double)patterns[p].count * distance[p]; seed = p; }
+			}
+			for (size_t p = 0; p < patterns.size(); ++p) w[p * c + nearest[p]] += .95;
+			status.objective_history.push_back(nmfObjective(patterns, w, h, k, c, (double)n, threads));
+			int stable = 0;
+			std::vector<double> gram, s(cc), t(cd), next_h(cd);
+			std::vector<std::vector<double> > thread_s(threads, std::vector<double>(cc)), thread_t(threads, std::vector<double>(cd));
+			std::vector<std::vector<double> > gradients(threads, std::vector<double>(c)), rows(threads, std::vector<double>(c)), scratches(threads, std::vector<double>(c));
+			for (int iteration = 0; iteration < options.maximum_iterations; ++iteration)
+			{
+				class2d_nmf_detail::gramMatrix(h, c, d, gram);
+				const double step_w = 1. / nmfLipschitz(gram, c);
+				std::vector<double> changes(threads, 0.);
+				// Clear all buffers even when OpenMP dynamically uses fewer threads.
+				for (int thread = 0; thread < threads; ++thread)
+				{
+					std::fill(thread_s[thread].begin(), thread_s[thread].end(), 0.);
+					std::fill(thread_t[thread].begin(), thread_t[thread].end(), 0.);
+				}
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads)
+#endif
+				{
+					int thread = 0;
+#ifdef _OPENMP
+					thread = omp_get_thread_num();
+#endif
+					std::vector<double> &gradient = gradients[thread], &row = rows[thread], &scratch = scratches[thread];
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+					for (long long p = 0; p < (long long)patterns.size(); ++p)
+					{
+						double *wp = &w[(size_t)p * c];
+						class2d_nmf_detail::patternObjectiveGradient(patterns[p].labels, k, h, gram, wp, c, gradient);
+						for (int a = 0; a < c; ++a) row[a] = wp[a] - step_w * gradient[a];
+						class2d_nmf_detail::projectSimplex(row, scratch);
+						for (int a = 0; a < c; ++a)
+						{ changes[thread] = std::max(changes[thread], std::fabs(row[a] - wp[a])); wp[a] = row[a]; }
+						const double weight = (double)patterns[p].count / n;
+						for (int a = 0; a < c; ++a)
+						{
+							const double mass = weight * wp[a];
+							for (int b = 0; b < c; ++b) thread_s[thread][(size_t)a * c + b] += mass * wp[b];
+							for (size_t r = 0; r < runs.size(); ++r) thread_t[thread][(size_t)a * d + r * k + patterns[p].labels[r]] += mass;
+						}
+					}
+				}
+				std::fill(s.begin(), s.end(), 0.); std::fill(t.begin(), t.end(), 0.);
+				for (int thread = 0; thread < threads; ++thread)
+				{
+					for (size_t i = 0; i < cc; ++i) s[i] += thread_s[thread][i];
+					for (size_t i = 0; i < cd; ++i) t[i] += thread_t[thread][i];
+				}
+				const double step_h = 1. / nmfLipschitz(s, c);
+				double change = *std::max_element(changes.begin(), changes.end());
+				std::vector<double> block(k), scratch(k);
+				for (int a = 0; a < c; ++a)
+					for (size_t r = 0; r < runs.size(); ++r)
+					{
+						for (int j = 0; j < k; ++j)
+						{
+							const size_t index = (size_t)a * d + r * k + j;
+							const double gradient = class2d_nmf_detail::profileGradient(h, s, t, c, d, a, (int)r * k + j);
+							block[j] = h[index] - step_h * gradient;
+						}
+						class2d_nmf_detail::projectSimplex(block, scratch);
+						for (int j = 0; j < k; ++j)
+						{
+							const size_t index = (size_t)a * d + r * k + j;
+							change = std::max(change, std::fabs(block[j] - h[index])); next_h[index] = block[j];
+						}
+					}
+				h.swap(next_h);
+				const double objective = nmfObjective(patterns, w, h, k, c, (double)n, threads);
+				const double previous = status.objective_history.back();
+				if (objective > previous + 1.e-10 * std::max(1., previous))
+					throw std::runtime_error("Sparse NMF objective increased beyond roundoff tolerance");
+				status.objective_history.push_back(objective);
+				stable = (std::fabs(previous - objective) / std::max(1., previous) < options.tolerance && change < options.tolerance) ? stable + 1 : 0;
+				if (stable >= 3) { status.converged = true; status.termination = "converged"; break; }
+			}
+			const double objective = status.objective_history.back();
+			if (objective < result.objective - 1.e-12)
+			{
+				result.objective = objective; result.selected_start = start;
+				result.iterations = (int)status.objective_history.size() - 1; result.converged = status.converged;
+				best_assignment.resize(patterns.size()); best_membership.resize(patterns.size()); best_entropy.resize(patterns.size());
+				std::vector<int> canonical(requested, -1);
+				int next = 0;
+				for (size_t p = 0; p < patterns.size(); ++p)
+				{
+					int assigned = 0;
+					for (int a = 1; a < c; ++a) if (w[p * c + a] > w[p * c + assigned] + 1.e-12) assigned = a;
+					if (canonical[assigned] < 0) canonical[assigned] = next++;
+					best_assignment[p] = assigned; best_membership[p] = w[p * c + assigned];
+					double entropy = 0.;
+					for (int a = 0; a < c; ++a) if (w[p * c + a] > 0.) entropy -= w[p * c + a] * std::log(w[p * c + a]);
+					best_entropy[p] = std::max(0., std::min(1., entropy / std::log((double)requested)));
+				}
+				for (int &label : canonical) if (label < 0) label = next++;
+				result.class_membership_mass.assign(requested, 0.);
+				for (size_t p = 0; p < patterns.size(); ++p)
+				{
+					best_assignment[p] = canonical[best_assignment[p]];
+					for (int a = 0; a < c; ++a) result.class_membership_mass[canonical[a]] += patterns[p].count * w[p * c + a];
+				}
+				result.components.assign(nmfProduct(requested, d), 1. / k);
+				for (int a = 0; a < c; ++a)
+					for (size_t r = 0; r < runs.size(); ++r)
+						for (int j = 0; j < k; ++j)
+							result.components[(r * requested + canonical[a]) * k + j] = h[(size_t)a * d + r * k + j];
+			}
+		}
+		catch (const std::runtime_error &error) { status.converged = false; status.termination = error.what(); }
+		result.starts.push_back(std::move(status));
+	}
+	if (!std::isfinite(result.objective)) throw std::runtime_error("Sparse NMF: all starts failed numerically");
+	result.assignment.resize(n); result.membership.resize(n); result.entropy.resize(n);
+	for (size_t p = 0; p < n; ++p)
+	{
+		result.assignment[p] = best_assignment[particle_pattern[p]];
+		result.membership[p] = best_membership[particle_pattern[p]];
+		result.entropy[p] = best_entropy[particle_pattern[p]];
+	}
+	assignmentDiagnostics(runs, k, requested, result);
+	return result;
+}
+}
+
+Class2DConsensusNmfResult Class2DConsensus::fitSparseNmf(
+    const std::vector<std::vector<int> > &runs, int source_classes, int consensus_classes,
+    const Class2DConsensusNmfOptions &options, int nr_threads)
+{
+	try { return fitSparseNmfImpl(runs, source_classes, consensus_classes, options, nr_threads); }
+	catch (const std::bad_alloc &) { throw std::runtime_error("Sparse NMF allocation failed; reduce the consensus class count or use categorical EM"); }
+	catch (const std::length_error &) { throw std::runtime_error("Sparse NMF dimensions exceed the maximum allocatable container size"); }
 }

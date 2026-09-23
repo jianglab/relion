@@ -28,6 +28,22 @@ public:
 	IOParser parser;
 	FileName input_optimiser, output_root;
 	int nr_runs, nr_threads, verb, requested_classes;
+	std::string method;
+	Class2DConsensusNmfOptions nmf_options;
+
+	static int positiveInteger(const std::string &value, const std::string &option)
+	{
+		try
+		{
+			if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
+				throw std::invalid_argument("integer");
+			const long long number = std::stoll(value);
+			if (number < 1 || number > INT_MAX) throw std::invalid_argument("range");
+			return (int)number;
+		}
+		catch (const std::exception &) { REPORT_ERROR(option + " must be a positive integer no greater than INT_MAX"); }
+		return 0;
+	}
 
 	void read(int argc, char **argv)
 	{
@@ -36,6 +52,22 @@ public:
 		(void)section;
 		input_optimiser = parser.getOption("--i", "Any runNNN_itXXX_optimiser.star from a parallel Class2D job");
 		output_root = parser.getOption("--o", "Output root name", "consensus");
+		method = parser.getOption("--method", "Consensus assignment: categorical_em or sparse_nmf", "categorical_em");
+		if (method != "categorical_em" && method != "sparse_nmf") REPORT_ERROR("Unknown consensus assignment method: " + method);
+		const bool nmf_explicit = checkParameter(argc, argv, "--nmf_max_iter") ||
+			checkParameter(argc, argv, "--nmf_tol") || checkParameter(argc, argv, "--nmf_starts");
+		nmf_options.maximum_iterations = positiveInteger(parser.getOption("--nmf_max_iter", "Sparse NMF iteration limit", "500"), "--nmf_max_iter");
+		nmf_options.starts = positiveInteger(parser.getOption("--nmf_starts", "Sparse NMF deterministic starts", "3"), "--nmf_starts");
+		const std::string tolerance = parser.getOption("--nmf_tol", "Sparse NMF objective and factor-change tolerance", "1e-6");
+		try
+		{
+			size_t consumed = 0;
+			nmf_options.tolerance = std::stod(tolerance, &consumed);
+			if (consumed != tolerance.size() || !std::isfinite(nmf_options.tolerance) || nmf_options.tolerance <= 0.)
+				throw std::invalid_argument("tolerance");
+		}
+		catch (const std::exception &) { REPORT_ERROR("--nmf_tol must be finite and positive"); }
+		if (nmf_explicit && method != "sparse_nmf") REPORT_ERROR("NMF tuning options require --method sparse_nmf");
 		nr_runs = textToInteger(parser.getOption("--nr_runs", "Number of parallel Class2D replicas"));
 		nr_threads = textToInteger(parser.getOption("--j", "Number of threads reserved for consensus preparation", "1"));
 		const std::string count = parser.getOption("--K", "Consensus classes (0 inherits the source count)", "0");
@@ -197,11 +229,11 @@ public:
 				          << std::count(counts.begin(), counts.end(), 0)
 				          << " of " << source_classes << " source classes have no assigned particles." << std::endl;
 			}
-			std::cout << "Fitting categorical consensus for " << nr_particles << " particles, "
+			std::cout << "Fitting " << method << " consensus for " << nr_particles << " particles, "
 			          << nr_runs << " replicas, " << source_classes << " source classes and " << nr_classes << " consensus classes..." << std::endl;
 		}
-		// Stable identities, rather than STAR row order, break unequal-count ties.
-		if (nr_classes != source_classes)
+		// Stable identities break NMF and unequal-count categorical ties.
+		if (method == "sparse_nmf" || nr_classes != source_classes)
 		{
 			std::vector<std::pair<std::string, long int> > identities(canonical_index.begin(), canonical_index.end());
 			std::sort(identities.begin(), identities.end());
@@ -213,10 +245,30 @@ public:
 			}
 			for (long int i = 0; i < nr_particles; ++i) canonical_index[identities[i].first] = i;
 		}
-		Class2DConsensusResult result;
+		Class2DConsensusResult result{};
+		Class2DConsensusNmfResult nmf;
+		const bool sparse_nmf = method == "sparse_nmf";
 		try
 		{
-			result = Class2DConsensus::fitWithClassCount(assignments, source_classes, nr_classes, 200, 1.e-6, 1.0, nr_threads);
+			if (sparse_nmf)
+			{
+				nmf_options.report_workspace_bytes = [&](size_t bytes)
+				{
+					if (verb > 0) std::cout << "Sparse NMF numeric factors/workspace estimate: " << bytes
+						<< " bytes (excludes input STAR tables, labels and pattern indexing)." << std::endl;
+				};
+				nmf = Class2DConsensus::fitSparseNmf(assignments, source_classes, nr_classes, nmf_options, nr_threads);
+				result.assignment = std::move(nmf.assignment);
+				result.entropy = std::move(nmf.entropy);
+				result.agreement = std::move(nmf.agreement);
+				result.run_adjusted_rand = std::move(nmf.run_adjusted_rand);
+				result.run_mapped_agreement = std::move(nmf.run_mapped_agreement);
+				result.nr_patterns = nmf.nr_patterns;
+				result.anchor_run = nmf.anchor_run;
+				result.iterations = nmf.iterations;
+				if (!nmf.converged && verb > 0) std::cout << "WARNING: selected NMF start reached its iteration limit without convergence." << std::endl;
+			}
+			else result = Class2DConsensus::fitWithClassCount(assignments, source_classes, nr_classes, 200, 1.e-6, 1.0, nr_threads);
 		}
 		catch (const std::exception &error)
 		{
@@ -236,13 +288,15 @@ public:
 		ObservationModel anchor_observation;
 		MetaDataTable anchor_particles;
 		ObservationModel::loadSafely(data_files[result.anchor_run], anchor_observation, anchor_particles, "particles", 0);
+		setClass2DConsensusMethod(anchor_particles, sparse_nmf);
 		for (long int row = 0; row < anchor_particles.numberOfObjects(); ++row)
 		{
 			FileName image_name;
 			anchor_particles.getValue(EMDL_IMAGE_NAME, image_name, row);
 			const long int particle = canonical_index.find(image_name)->second;
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS, result.assignment[particle] + 1, row);
-			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY, result.probability[particle], row);
+			anchor_particles.setValue(sparse_nmf ? EMDL_CLASS2D_CONSENSUS_MEMBERSHIP : EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY,
+				sparse_nmf ? nmf.membership[particle] : result.probability[particle], row);
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, result.entropy[particle], row);
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT, result.agreement[particle], row);
 		}
@@ -261,7 +315,19 @@ public:
 		general.setValue(EMDL_CLASS2D_CONSENSUS_PATTERNS, (long int)result.nr_patterns);
 		general.setValue(EMDL_PARTICLE_NUMBER, (int)nr_particles);
 		general.setValue(EMDL_CLASS2D_CONSENSUS_ANCHOR_RUN, result.anchor_run + 1);
-		general.setValue(EMDL_CLASS2D_CONSENSUS_LOG_LIKELIHOOD, result.log_likelihood);
+		general.setValue(EMDL_CLASS2D_CONSENSUS_METHOD, method);
+		if (sparse_nmf)
+		{
+			general.setValue(EMDL_CLASS2D_CONSENSUS_OBJECTIVE, nmf.objective);
+			general.setValue(EMDL_CLASS2D_CONSENSUS_SELECTED_START, nmf.selected_start + 1);
+			general.setValue(EMDL_CLASS2D_CONSENSUS_FITTED_COMPONENTS, nmf.fitted_components);
+			general.setValue(EMDL_CLASS2D_CONSENSUS_CONVERGED, nmf.converged);
+			general.setValue(EMDL_CLASS2D_CONSENSUS_TERMINATION, nmf.starts[nmf.selected_start].termination);
+			general.setValue(EMDL_CLASS2D_CONSENSUS_MAX_ITERATIONS, nmf_options.maximum_iterations);
+			general.setValue(EMDL_CLASS2D_CONSENSUS_TOLERANCE, nmf_options.tolerance);
+			general.setValue(EMDL_CLASS2D_CONSENSUS_STARTS, nmf_options.starts);
+		}
+		else general.setValue(EMDL_CLASS2D_CONSENSUS_LOG_LIKELIHOOD, result.log_likelihood);
 		general.setValue(EMDL_CLASS2D_CONSENSUS_ITERATIONS, result.iterations);
 		general.write(diagnostics);
 
@@ -287,12 +353,12 @@ public:
 			class_table.addObject();
 			class_table.setValue(EMDL_PARTICLE_CLASS, k + 1);
 			class_table.setValue(EMDL_PARTICLE_NUMBER, class_counts[k]);
-			class_table.setValue(EMDL_MLMODEL_PDF_CLASS, result.class_posterior_mass[k] / nr_particles);
+			class_table.setValue(EMDL_MLMODEL_PDF_CLASS, (sparse_nmf ? nmf.class_membership_mass[k] : result.class_posterior_mass[k]) / nr_particles);
 		}
 		class_table.write(diagnostics);
 
 		MetaDataTable confusion_table;
-		confusion_table.setName("consensus_confusion");
+		confusion_table.setName(sparse_nmf ? "consensus_nmf_components" : "consensus_confusion");
 		for (int run = 0; run < nr_runs; ++run)
 			for (int consensus_class = 0; consensus_class < nr_classes; ++consensus_class)
 				for (int source_class = 0; source_class < source_classes; ++source_class)
@@ -302,9 +368,34 @@ public:
 					confusion_table.setValue(EMDL_PARTICLE_CLASS, consensus_class + 1);
 					confusion_table.setValue(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASS, source_class + 1);
 					const size_t index = ((size_t)run * nr_classes + consensus_class) * source_classes + source_class;
-					confusion_table.setValue(EMDL_CLASS2D_CONSENSUS_CONDITIONAL_PROBABILITY, result.confusion[index]);
+					confusion_table.setValue(sparse_nmf ? EMDL_CLASS2D_CONSENSUS_COMPONENT_VALUE : EMDL_CLASS2D_CONSENSUS_CONDITIONAL_PROBABILITY,
+						sparse_nmf ? nmf.components[index] : result.confusion[index]);
 				}
 		confusion_table.write(diagnostics);
+		if (sparse_nmf)
+		{
+			MetaDataTable start_table, history;
+			start_table.setName("consensus_nmf_starts");
+			history.setName("consensus_nmf_history");
+			for (size_t start = 0; start < nmf.starts.size(); ++start)
+			{
+				const Class2DConsensusNmfStart &status = nmf.starts[start];
+				start_table.addObject();
+				start_table.setValue(EMDL_CLASS2D_CONSENSUS_START, (int)start + 1);
+				start_table.setValue(EMDL_CLASS2D_CONSENSUS_CONVERGED, status.converged);
+				start_table.setValue(EMDL_CLASS2D_CONSENSUS_TERMINATION, status.termination);
+				start_table.setValue(EMDL_CLASS2D_CONSENSUS_ITERATIONS, std::max(0, (int)status.objective_history.size() - 1));
+				for (size_t iteration = 0; iteration < status.objective_history.size(); ++iteration)
+				{
+					history.addObject();
+					history.setValue(EMDL_CLASS2D_CONSENSUS_START, (int)start + 1);
+					history.setValue(EMDL_CLASS2D_CONSENSUS_ITERATIONS, (int)iteration);
+					history.setValue(EMDL_CLASS2D_CONSENSUS_OBJECTIVE, status.objective_history[iteration]);
+				}
+			}
+			start_table.write(diagnostics);
+			history.write(diagnostics);
+		}
 		diagnostics.close();
 
 		if (verb > 0)

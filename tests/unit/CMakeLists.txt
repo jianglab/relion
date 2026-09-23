@@ -33,6 +33,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_align_map_to_map.cpp
     test_pipeline_jobs.cpp
     test_class2d_consensus.cpp
+    test_class2d_consensus_nmf.cpp
     test_class2d_consensus_metadata.cpp
     test_fixed_class_initialisation.cpp
     test_select_2d_classes.cpp

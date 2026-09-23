@@ -3,6 +3,16 @@
 
 #include "src/metadata_table.h"
 
+inline void setClass2DConsensusMethod(MetaDataTable &particles, bool sparse_nmf)
+{
+	// Do not carry an earlier method's confidence into a new consensus job.
+	const EMDLabel stale = sparse_nmf ? EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY : EMDL_CLASS2D_CONSENSUS_MEMBERSHIP;
+	if (particles.containsLabel(stale)) particles.deactivateLabel(stale);
+	for (long int row = 0; row < particles.numberOfObjects(); ++row)
+		particles.setValue(EMDL_CLASS2D_CONSENSUS_METHOD,
+			std::string(sparse_nmf ? "sparse_nmf" : "categorical_em"), row);
+}
+
 // Keep preparation-specific metadata handling separate from categorical fitting.
 // Priors remain intact for RELION's normal helical initialisation/prior searches.
 inline void resetClass2DConsensusAlignments(MetaDataTable &particles)

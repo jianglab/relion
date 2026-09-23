@@ -53,6 +53,7 @@ TEST_CASE("Class2DConsensus: reset clears alignments and preserves particle meta
 		EMDL_CTF_DEFOCUSU, EMDL_CTF_DEFOCUSV, EMDL_CTF_DEFOCUS_ANGLE,
 		EMDL_IMAGE_COORD_X, EMDL_IMAGE_COORD_Y, EMDL_IMAGE_NORM_CORRECTION,
 		EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY,
+		EMDL_CLASS2D_CONSENSUS_MEMBERSHIP,
 		EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY,
 		EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT
 	};
@@ -114,4 +115,54 @@ TEST_CASE("Class2DConsensus: reset clears alignments and preserves particle meta
 			REQUIRE(optics_group == row + 1);
 		}
 	}
+}
+
+TEST_CASE("Class2DConsensus: method and NMF diagnostics round trip without stale confidence", "[consensus][metadata]")
+{
+	bool sparse_nmf = true;
+	SECTION("NMF") {}
+	SECTION("categorical EM") { sparse_nmf = false; }
+	MetaDataTable particles;
+	particles.setName("particles");
+	particles.addObject();
+	particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY, .9);
+	particles.setValue(EMDL_CLASS2D_CONSENSUS_MEMBERSHIP, .7);
+	setClass2DConsensusMethod(particles, sparse_nmf);
+	resetClass2DConsensusAlignments(particles);
+	const FileName filename = "consensus_nmf_metadata_" + integerToString((int)std::clock()) + ".star";
+	particles.write(filename);
+	particles.read(filename, "particles");
+	std::string method;
+	REQUIRE(particles.getValue(EMDL_CLASS2D_CONSENSUS_METHOD, method));
+	REQUIRE(method == (sparse_nmf ? "sparse_nmf" : "categorical_em"));
+	REQUIRE(particles.containsLabel(EMDL_CLASS2D_CONSENSUS_MEMBERSHIP) == sparse_nmf);
+	REQUIRE(particles.containsLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY) == !sparse_nmf);
+	std::remove(filename.c_str());
+
+	MetaDataTable diagnostics;
+	diagnostics.setName("consensus_general");
+	diagnostics.setIsList(true);
+	diagnostics.addObject();
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_OBJECTIVE, .0125);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_CONVERGED, true);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_TERMINATION, std::string("converged"));
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_SELECTED_START, 2);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_FITTED_COMPONENTS, 7);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_MAX_ITERATIONS, 500);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_STARTS, 3);
+	diagnostics.setValue(EMDL_CLASS2D_CONSENSUS_TOLERANCE, 1.e-6);
+	diagnostics.write(filename);
+	diagnostics.read(filename, "consensus_general");
+	double objective, tolerance;
+	bool converged;
+	int selected;
+	REQUIRE(diagnostics.getValue(EMDL_CLASS2D_CONSENSUS_OBJECTIVE, objective));
+	REQUIRE(objective == Approx(.0125));
+	REQUIRE(diagnostics.getValue(EMDL_CLASS2D_CONSENSUS_TOLERANCE, tolerance));
+	REQUIRE(tolerance == Approx(1.e-6));
+	REQUIRE(diagnostics.getValue(EMDL_CLASS2D_CONSENSUS_CONVERGED, converged));
+	REQUIRE(converged);
+	REQUIRE(diagnostics.getValue(EMDL_CLASS2D_CONSENSUS_SELECTED_START, selected));
+	REQUIRE(selected == 2);
+	std::remove(filename.c_str());
 }
