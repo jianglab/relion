@@ -486,7 +486,10 @@ TEST_CASE("Class2DConsensus: generates preparation and configurable frozen-class
 	std::string iteration_suffix = "025";
 	bool legacy_keep = false;
 	int classes = 9;
+	std::string method = "categorical_em";
+	REQUIRE(job.joboptions["consensus_method"].getString() == "Categorical EM");
 	SECTION("defaults") {}
+	SECTION("sparse NMF") { method = "sparse_nmf"; job.joboptions["consensus_method"].setString("Sparse NMF (experimental)"); }
 	SECTION("one iteration") { iterations = 1; iteration_suffix = "001"; }
 	SECTION("custom iteration count") { iterations = 7; iteration_suffix = "007"; }
 	SECTION("above the GUI slider range") { iterations = 51; iteration_suffix = "051"; }
@@ -505,6 +508,9 @@ TEST_CASE("Class2DConsensus: generates preparation and configurable frozen-class
 	std::string final_command, error_message;
 	REQUIRE(generateCommands(job, commands, final_command, error_message));
 	REQUIRE(commands.size() == 2);
+	REQUIRE(commands[0].find(" --method " + method) != std::string::npos);
+	REQUIRE(commands[1].find("--method") == std::string::npos);
+	REQUIRE(commands[1].find("--nmf_") == std::string::npos);
 	REQUIRE(commands[0].find("relion_class2d_consensus") != std::string::npos);
 	REQUIRE(commands[0].find("--nr_runs 3") != std::string::npos);
 	REQUIRE((commands[0].find(" --legacy_keep_alignments") != std::string::npos) == legacy_keep);
@@ -581,10 +587,13 @@ TEST_CASE("Class2DConsensus: refinement options survive saved jobs and default i
 	job.initialise(PROC_CLASS2D_CONSENSUS);
 	std::string expected_iterations = "25";
 	bool expected_reset = true;
+	std::string expected_method = "Categorical EM";
 	SECTION("default options round trip") {}
 	SECTION("custom options round trip")
 	{
 		expected_iterations = "51";
+		expected_method = "Sparse NMF (experimental)";
+		job.joboptions["consensus_method"].setString(expected_method);
 		expected_reset = false;
 		job.joboptions["nr_classes"].setString("12");
 		job.joboptions["random_seed"].setString("17");
@@ -593,6 +602,7 @@ TEST_CASE("Class2DConsensus: refinement options survive saved jobs and default i
 	}
 	SECTION("old job missing new options")
 	{
+		job.joboptions.erase("consensus_method");
 		job.joboptions.erase("nr_classes");
 		job.joboptions.erase("random_seed");
 		job.joboptions.erase("nr_iter");
@@ -604,6 +614,7 @@ TEST_CASE("Class2DConsensus: refinement options survive saved jobs and default i
 	restored.clear();
 	bool is_continue = false;
 	REQUIRE(restored.read(filename, is_continue, true));
+	REQUIRE(restored.joboptions["consensus_method"].getString() == expected_method);
 	REQUIRE(restored.joboptions["nr_iter"].getString() == expected_iterations);
 	REQUIRE(restored.joboptions["nr_classes"].getString() == (expected_reset ? "0" : "12"));
 	REQUIRE(restored.joboptions["random_seed"].getString() == (expected_reset ? "1" : "17"));
@@ -682,4 +693,16 @@ TEST_CASE("Select2D: requires an optimiser input", "[pipeline][select2d]")
 
 	std::string command;
 	REQUIRE_FALSE(generateCommand(job, command));
+}
+
+TEST_CASE("Class2DConsensus: rejects unknown assignment methods", "[pipeline][consensus]")
+{
+    RelionJob job;
+    job.clear();
+    job.initialise(PROC_CLASS2D_CONSENSUS);
+    job.joboptions["consensus_method"].setString("invalid");
+    std::vector<std::string> commands;
+    std::string final_command, error_message;
+    REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
+    REQUIRE(error_message.find("unknown consensus assignment method") != std::string::npos);
 }

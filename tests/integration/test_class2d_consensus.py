@@ -130,12 +130,27 @@ _rlnNormCorrection #10
         (directory / f"{prefix}_data.star").write_text(optics + "\n".join(rows) + "\n")
 
 
-def _prepare(binaries, directory, classes, output="consensus"):
+def _prepare(binaries, directory, classes, output="consensus", method="categorical_em"):
     _run([binaries["relion_class2d_consensus"], "--i", "run001_it025_optimiser.star",
-          "--nr_runs", "3", "--K", str(classes), "--o", output], directory)
+          "--nr_runs", "3", "--K", str(classes), "--o", output, "--method", method], directory)
     assert not (directory / f"{output}_references.star").exists()
     rows = _loop(directory / f"{output}_data.star", "particles")
     assert len(rows) == 64
+    confidence = "rlnClass2DConsensusMembership" if method == "sparse_nmf" else "rlnClass2DConsensusProbability"
+    stale = "rlnClass2DConsensusProbability" if method == "sparse_nmf" else "rlnClass2DConsensusMembership"
+    assert all(row["rlnClass2DConsensusMethod"] == method and confidence in row and stale not in row for row in rows)
+    diagnostics = (directory / f"{output}_diagnostics.star").read_text()
+    if method == "sparse_nmf":
+        assert "rlnClass2DConsensusLogLikelihood" not in diagnostics
+        assert "data_consensus_confusion" not in diagnostics
+        components = _loop(directory / f"{output}_diagnostics.star", "consensus_nmf_components")
+        blocks = {}
+        for row in components:
+            key = (row["rlnClass2DConsensusRunNumber"], row["rlnClassNumber"])
+            blocks[key] = blocks.get(key, 0.) + float(row["rlnClass2DConsensusComponentValue"])
+        assert len(blocks) == 3 * classes
+        assert all(value == pytest.approx(1., abs=1e-5) for value in blocks.values())
+        assert _loop(directory / f"{output}_diagnostics.star", "consensus_nmf_history")
     assert all(float(row["rlnAnglePsi"]) == 0 for row in rows)
     return {row["rlnImageName"]: row for row in rows}
 
@@ -151,14 +166,17 @@ def _refine(binaries, directory, classes, output="run", data="consensus_data.sta
           "--j", "1", "--dont_check_norm"], directory)
 
 
+@pytest.mark.parametrize("method", ["categorical_em", "sparse_nmf"])
 @pytest.mark.parametrize("source_classes,classes", [(4, 2), (4, 4), (2, 5)])
-def test_fresh_consensus_and_continuation(tmp_path, consensus_binaries, source_classes, classes):
+def test_fresh_consensus_and_continuation(tmp_path, consensus_binaries, source_classes, classes, method):
     _sources(tmp_path, source_classes)
-    expected = _prepare(consensus_binaries, tmp_path, classes)
+    expected = _prepare(consensus_binaries, tmp_path, classes, method=method)
     _refine(consensus_binaries, tmp_path, classes)
     for row in _loop(tmp_path / "run_it001_data.star", "particles"):
         original = expected[row["rlnImageName"]]
-        for label in ("rlnClassNumber", "rlnClass2DConsensusProbability", "rlnClass2DConsensusEntropy"):
+        assert row["rlnClass2DConsensusMethod"] == method
+        confidence = "rlnClass2DConsensusMembership" if method == "sparse_nmf" else "rlnClass2DConsensusProbability"
+        for label in ("rlnClassNumber", confidence, "rlnClass2DConsensusEntropy", "rlnClass2DConsensusAgreement"):
             assert float(row[label]) == pytest.approx(float(original[label]), abs=1e-5)
     initial = _read_mrc(tmp_path / "run_it000_classes.mrcs")
     refined = _read_mrc(tmp_path / "run_it001_classes.mrcs")
@@ -173,7 +191,7 @@ def test_fresh_consensus_and_continuation(tmp_path, consensus_binaries, source_c
 
     # Fresh images are reproducible and independent of upstream fitted poses.
     _sources(tmp_path, source_classes, pose=149)
-    _prepare(consensus_binaries, tmp_path, classes, "repeat")
+    _prepare(consensus_binaries, tmp_path, classes, "repeat", method=method)
     _refine(consensus_binaries, tmp_path, classes, "again", "repeat_data.star")
     assert np.allclose(initial, _read_mrc(tmp_path / "again_it000_classes.mrcs"), atol=1e-6)
 
@@ -181,15 +199,19 @@ def test_fresh_consensus_and_continuation(tmp_path, consensus_binaries, source_c
           "--o", "./continued", "--iter", "2", "--j", "1"], tmp_path)
     assert not (tmp_path / "continued_it000_classes.mrcs").exists()
     for row in _loop(tmp_path / "continued_it002_data.star", "particles"):
-        assert row["rlnClassNumber"] == expected[row["rlnImageName"]]["rlnClassNumber"]
+        original = expected[row["rlnImageName"]]
+        assert row["rlnClassNumber"] == original["rlnClassNumber"]
+        assert row["rlnClass2DConsensusMethod"] == method
+        assert float(row[confidence]) == pytest.approx(float(original[confidence]), abs=1e-5)
 
 
+@pytest.mark.parametrize("method", ["categorical_em", "sparse_nmf"])
 @pytest.mark.parametrize("backend", ["mpi", "gpu"])
-def test_fresh_initialization_backends(tmp_path, consensus_binaries, backend):
+def test_fresh_initialization_backends(tmp_path, consensus_binaries, backend, method):
     if os.environ.get("RELION_TEST_" + backend.upper()) != "1":
         pytest.skip(f"Set RELION_TEST_{backend.upper()}=1 to exercise this backend")
     _sources(tmp_path)
-    expected = _prepare(consensus_binaries, tmp_path, 3)
+    expected = _prepare(consensus_binaries, tmp_path, 3, method=method)
     _refine(consensus_binaries, tmp_path, 3)
     if backend == "mpi":
         prefix = ["mpirun", "-n", "2", str(consensus_binaries["directory"] / "relion_refine_mpi")]
@@ -200,3 +222,41 @@ def test_fresh_initialization_backends(tmp_path, consensus_binaries, backend):
                        _read_mrc(tmp_path / f"{backend}_it000_classes.mrcs"), atol=1e-5)
     for row in _loop(tmp_path / f"{backend}_it001_data.star", "particles"):
         assert row["rlnClassNumber"] == expected[row["rlnImageName"]]["rlnClassNumber"]
+
+
+@pytest.mark.parametrize("arguments,message", [
+    (["--method", "unknown"], "Unknown consensus assignment method"),
+    (["--nmf_starts", "2"], "NMF tuning options require"),
+    (["--method", "sparse_nmf", "--nmf_starts", "0"], "--nmf_starts must be a positive integer"),
+    (["--method", "sparse_nmf", "--nmf_starts", "3.5"], "--nmf_starts must be a positive integer"),
+    (["--method", "sparse_nmf", "--nmf_max_iter", "-1"], "--nmf_max_iter must be a positive integer"),
+    (["--method", "sparse_nmf", "--nmf_tol", "nan"], "--nmf_tol must be finite and positive"),
+    (["--method", "sparse_nmf", "--nmf_tol", "1e-6junk"], "--nmf_tol must be finite and positive"),
+])
+def test_invalid_consensus_options(tmp_path, consensus_binaries, arguments, message):
+    result = subprocess.run([consensus_binaries["relion_class2d_consensus"],
+                             "--i", "missing.star", "--nr_runs", "3", *arguments],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert not (tmp_path / "consensus_data.star").exists()
+    assert message in result.stdout + result.stderr
+
+
+def test_nmf_row_order_and_label_permutations(tmp_path, consensus_binaries):
+    _sources(tmp_path)
+    original = _prepare(consensus_binaries, tmp_path, 4, method="sparse_nmf")
+    for run in range(3):
+        path = tmp_path / f"run{run+1:03}_it025_data.star"
+        text = path.read_text()
+        header, rows = text.split("_rlnNormCorrection #10\n")
+        changed = []
+        for row in rows.splitlines():
+            fields = row.split()
+            fields[2] = str((4 - int(fields[2]) + run) % 4 + 1)
+            changed.append(" ".join(fields))
+        path.write_text(header + "_rlnNormCorrection #10\n" + "\n".join(reversed(changed)) + "\n")
+    permuted = _prepare(consensus_binaries, tmp_path, 4, "permuted", method="sparse_nmf")
+    for identity, row in original.items():
+        assert row["rlnClassNumber"] == permuted[identity]["rlnClassNumber"]
+        for label in ("rlnClass2DConsensusMembership", "rlnClass2DConsensusEntropy"):
+            assert float(row[label]) == pytest.approx(float(permuted[identity][label]), abs=1e-5)

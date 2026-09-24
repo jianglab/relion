@@ -3579,6 +3579,8 @@ void RelionJob::initialiseClass2DConsensusJob()
 	hidden_name = ".gui_class2d_consensus";
 	joboptions["fn_optimiser"] = JobOption("Parallel Class2D optimiser:", LABEL_CLASS2D_OPT, 1, "", "STAR Files (*_optimiser.star)",
 		"Select any runNNN_itXXX_optimiser.star from a completed parallel Class2D job. All sibling replicas at the same iteration will be included automatically.");
+	joboptions["consensus_method"] = JobOption("Consensus assignment method:", job_consensus_method_options, 0,
+		"Categorical EM is the default. Experimental sparse NMF uses equal replica weights and normalized memberships, not posterior probabilities. Its dense membership factors require up to 8 * particles * consensus classes bytes; additional workspace is reported at runtime. NMF tuning is available through relion_class2d_consensus CLI options.");
 	joboptions["nr_classes"] = JobOption("Number of consensus classes:", 0, 0, 200, 1,
 		"0 inherits the source model class count; otherwise enter an integer at least 2. The number of occupied classes can be smaller. Identical source label patterns cannot be subdivided.");
 	joboptions["random_seed"] = JobOption("Initialization random seed:", std::string("1"),
@@ -3608,6 +3610,14 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 {
 	commands.clear();
 	initialisePipeline(outputname, job_counter);
+	const std::string method_option = joboptions["consensus_method"].getString();
+	if (method_option != job_consensus_method_options[0] && method_option != job_consensus_method_options[1])
+	{
+		error_message = "ERROR: unknown consensus assignment method.";
+		return false;
+	}
+	const std::string method = method_option == job_consensus_method_options[0] ? "categorical_em" : "sparse_nmf";
+
 	long long nr_iter_value = 0;
 	if (!parseStrictInteger(joboptions["nr_iter"].getString(), nr_iter_value) || nr_iter_value < 1 || nr_iter_value > INT_MAX)
 	{
@@ -3701,6 +3711,7 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 			joboptions["fn_optimiser"].node_type));
 	commands.push_back("`which relion_class2d_consensus` --i " + optimiser +
 		" --nr_runs " + integerToString(nr_runs) + " --K " + integerToString(nr_classes) + " --o " + outputname + "consensus --j " + joboptions["nr_threads"].getString());
+	commands.back() += " --method " + method;
 	if (!joboptions["do_reset_alignments"].getBoolean())
 		commands.back() += " --legacy_keep_alignments";
 

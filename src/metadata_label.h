@@ -731,6 +731,19 @@ enum EMDLabel
 	EMDL_TOMO_TILT_MOVIE_INDEX,
 	EMDL_TOMO_TILT_MOVIE_FILE_NAME,
 
+	EMDL_CLASS2D_CONSENSUS_METHOD,
+	EMDL_CLASS2D_CONSENSUS_MEMBERSHIP,
+	EMDL_CLASS2D_CONSENSUS_COMPONENT_VALUE,
+	EMDL_CLASS2D_CONSENSUS_OBJECTIVE,
+	EMDL_CLASS2D_CONSENSUS_START,
+	EMDL_CLASS2D_CONSENSUS_SELECTED_START,
+	EMDL_CLASS2D_CONSENSUS_FITTED_COMPONENTS,
+	EMDL_CLASS2D_CONSENSUS_CONVERGED,
+	EMDL_CLASS2D_CONSENSUS_TERMINATION,
+	EMDL_CLASS2D_CONSENSUS_MAX_ITERATIONS,
+	EMDL_CLASS2D_CONSENSUS_TOLERANCE,
+	EMDL_CLASS2D_CONSENSUS_STARTS,
+
 	EMDL_UNKNOWN_LABEL,
 
 	EMDL_LAST_LABEL // **** NOTE ****: Do keep this label always at the end
@@ -1257,7 +1270,7 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, EMDL_DOUBLE, "rlnHelicalTrackLengthAngst", "Distance (in A) from the position of this helical segment to the starting point of the tube");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS, EMDL_INT, "rlnClassNumber", "Class number for which a particle has its highest probability");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY, EMDL_DOUBLE, "rlnClass2DConsensusProbability", "Posterior probability of the assigned Class2D consensus class");
-		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, EMDL_DOUBLE, "rlnClass2DConsensusEntropy", "Normalised entropy of the Class2D consensus posterior distribution");
+		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, EMDL_DOUBLE, "rlnClass2DConsensusEntropy", "Normalised entropy of the consensus posterior (categorical EM) or membership (sparse NMF) distribution");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT, EMDL_DOUBLE, "rlnClass2DConsensusAgreement", "Fraction of label-mapped Class2D replicas agreeing with the consensus class");
 		EMDL::addLabel(EMDL_PARTICLE_SELECTION_TYPE, EMDL_INT, "rlnParticleSelectionType", "Selection type for manually picked particles");
 		EMDL::addLabel(EMDL_PARTICLE_DLL, EMDL_DOUBLE, "rlnLogLikeliContribution", "Contribution of a particle to the log-likelihood target function");
@@ -1275,8 +1288,20 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_MOVIE_RUNNING_AVG, EMDL_INT, "rlnMovieFramesRunningAverage", "Number of movie frames inside the running average that will be used for movie-refinement");
 		EMDL::addLabel(EMDL_PARTICLE_PMAX, EMDL_DOUBLE, "rlnMaxValueProbDistribution", "Maximum value of the (normalised) probability function for a particle"); /**< particle, Maximum value of probability distribution */
 		EMDL::addLabel(EMDL_PARTICLE_NUMBER, EMDL_INT, "rlnParticleNumber", "Number of particles");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_METHOD, EMDL_STRING, "rlnClass2DConsensusMethod", "Consensus assignment method: categorical_em or sparse_nmf");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_MEMBERSHIP, EMDL_DOUBLE, "rlnClass2DConsensusMembership", "Maximum normalized sparse NMF membership; not a posterior probability");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_COMPONENT_VALUE, EMDL_DOUBLE, "rlnClass2DConsensusComponentValue", "Sparse NMF component profile within a source replica; each block sums to one");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_OBJECTIVE, EMDL_DOUBLE, "rlnClass2DConsensusObjective", "Sparse NMF squared reconstruction error divided by twice the particle and replica counts");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_START, EMDL_INT, "rlnClass2DConsensusStart", "One-based sparse NMF initialization number");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SELECTED_START, EMDL_INT, "rlnClass2DConsensusSelectedStart", "One-based selected sparse NMF initialization");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_FITTED_COMPONENTS, EMDL_INT, "rlnClass2DConsensusFittedComponents", "Number of fitted sparse NMF components, excluding padded slots");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_CONVERGED, EMDL_BOOL, "rlnClass2DConsensusConverged", "Whether the consensus solver satisfied its stopping criterion");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_TERMINATION, EMDL_STRING, "rlnClass2DConsensusTermination", "Consensus solver termination reason");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_MAX_ITERATIONS, EMDL_INT, "rlnClass2DConsensusMaxIterations", "Configured sparse NMF iteration limit");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_TOLERANCE, EMDL_DOUBLE, "rlnClass2DConsensusTolerance", "Configured sparse NMF convergence tolerance");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_STARTS, EMDL_INT, "rlnClass2DConsensusStarts", "Requested number of deterministic sparse NMF starts; capped at the pattern count");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES, EMDL_INT, "rlnClass2DConsensusSourceClasses", "Number of classes in each source replica");
-		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, EMDL_INT, "rlnClass2DConsensusOccupiedClasses", "Number of consensus classes with MAP-assigned particles");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, EMDL_INT, "rlnClass2DConsensusOccupiedClasses", "Number of consensus classes with assigned particles");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_PATTERNS, EMDL_INT, "rlnClass2DConsensusPatterns", "Number of distinct cross-run assignment patterns");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_MAPPING_MODE, EMDL_STRING, "rlnClass2DConsensusMappingMode", "Agreement mapping: one_to_one, source_to_consensus, or consensus_to_source; not classification accuracy");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_RUN_NUMBER, EMDL_INT, "rlnClass2DConsensusRunNumber", "One-based source Class2D replica number");
@@ -1285,7 +1310,7 @@ private:
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ADJUSTED_RAND, EMDL_DOUBLE, "rlnClass2DConsensusAdjustedRandIndex", "Adjusted Rand index between a Class2D replica and the consensus");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_MAPPED_AGREEMENT, EMDL_DOUBLE, "rlnClass2DConsensusMappedAgreement", "Fraction of a Class2D replica agreeing with the consensus after optimal label mapping");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_LOG_LIKELIHOOD, EMDL_DOUBLE, "rlnClass2DConsensusLogLikelihood", "Categorical latent-class consensus log likelihood");
-		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ITERATIONS, EMDL_INT, "rlnClass2DConsensusIterations", "Number of categorical consensus EM iterations");
+		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_ITERATIONS, EMDL_INT, "rlnClass2DConsensusIterations", "Number of consensus solver iterations");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASS, EMDL_INT, "rlnClass2DConsensusSourceClass", "One-based class number observed in a source Class2D replica");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_CONDITIONAL_PROBABILITY, EMDL_DOUBLE, "rlnClass2DConsensusConditionalProbability", "Probability of a source class conditional on a consensus class");
 

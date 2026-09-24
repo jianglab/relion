@@ -1341,6 +1341,7 @@ void JobWindow::initialiseClass2DConsensusWindow()
 	tab2->begin();
 	tab2->label("Optimisation");
 	resetHeight();
+	place("consensus_method");
 	place("nr_classes");
 	place("random_seed");
 	place("nr_iter");
