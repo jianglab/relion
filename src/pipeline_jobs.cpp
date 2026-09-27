@@ -2864,6 +2864,13 @@ void RelionJob::initialiseExtractJob()
 	joboptions["extract_size"] = JobOption("Particle box size (pix):", 128, 64, 512, 8, "Size of the extracted particles (in pixels). This should be an even number!");
 	joboptions["do_invert"] = JobOption("Invert contrast?", true, "If set to Yes, the contrast in the particles will be inverted.");
 	joboptions["do_float16"] = JobOption("Write output in float16?", true ,"If set to Yes, this program will write output images in float16 MRC format. This will save a factor of two in disk space compared to the default of writing in float32. Note that RELION and CCPEM will read float16 images, but other programs may not (yet) do so.");
+	{
+		const char *env = getenv("RELION_VIRTUAL_PARTICLES");
+		const bool default_virtual = (env != NULL) && textToBool(env);
+		joboptions["do_virtual"] = JobOption("Write virtual particles?", default_virtual, "If set to Yes, no particle images are written. Instead a small descriptor per micrograph records the coordinates and extraction settings, and particles are computed from the micrographs whenever a later job reads them, exactly as they would have been extracted. \
+This saves the disk space of the particle stacks and makes re-extraction nearly instant, but the micrographs must be kept: deleting them makes the particles unreadable. Computed particles are cached in .relion_vparticle_cache/ in the project (or under RELION_VPARTICLE_CACHE / RELION_CACHE_DIRECTORY), which can be deleted at any time. \
+Not available with CTF premultiplication/phase flipping, helical segments or sub-tomograms. Use relion_stack_create to write real stacks for other programs. The default can be set with the RELION_VIRTUAL_PARTICLES environment variable.");
+	}
 
 	joboptions["do_norm"] = JobOption("Normalize particles?", true, "If set to Yes, particles will be normalized in the way RELION prefers it.");
 	joboptions["bg_diameter"] = JobOption("Diameter background circle (pix): ", -1, -1, 600, 10, "Particles will be normalized to a mean value of zero and a standard-deviation of one for all pixels in the background area.\
@@ -2998,6 +3005,9 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 	{
 		command += " --float16 ";
 	}
+
+	// Explicit either way, so the job does not depend on the environment it runs in
+	command += joboptions["do_virtual"].getBoolean() ? " --virtual " : " --no_virtual ";
 
 	// Operate stuff
 	// Get an integer number for the bg_radius

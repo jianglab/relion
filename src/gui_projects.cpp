@@ -482,13 +482,26 @@ bool runIntermediateCleanupDialog(const std::vector<std::string> &project_paths)
                       ? project_paths[0]
                       : (std::to_string(project_paths.size()) + " projects");
 
-    char msg[1024];
+    size_t cache_files = 0;
+    long long cache_bytes = 0;
+    for (size_t i = 0; i < plans.size(); i++)
+    {
+        cache_files += plans[i].cache_files;
+        cache_bytes += plans[i].cache_bytes;
+    }
+    std::string cache_note;
+    if (cache_files > 0)
+        cache_note = "\nThis includes " + relion_cleanup::humanSize(cache_bytes) +
+                     " of virtual particle cache (Cache/virtual_particles/),\n"
+                     "which is rebuilt from the micrographs when next needed.\n";
+
+    char msg[1536];
     snprintf(msg, sizeof(msg),
-             "Remove %zu intermediate file(s) from\n%s,\nfreeing %s?\n\n"
+             "Remove %zu intermediate file(s) from\n%s,\nfreeing %s?\n%s\n"
              "The first and last iteration of every refinement are kept;\n"
              "the rounds in between are deleted and cannot be recovered.",
              total_files, where.c_str(),
-             relion_cleanup::humanSize(total_bytes).c_str());
+             relion_cleanup::humanSize(total_bytes).c_str(), cache_note.c_str());
 
     int ret = fl_choice("%s", "Cancel", "Remove", NULL, msg);
     if (ret != 1) return false;

@@ -288,6 +288,30 @@ TEST_CASE("removal reports progress and always ends at the total", "[cleanup]")
 		CHECK(seen.done[i] >= seen.done[i - 1]);
 }
 
+TEST_CASE("the virtual particle cache is cleaned up with the rest", "[cleanup]")
+{
+	TempDir tmp;
+	const std::string shard = tmp.path() + "/Cache/virtual_particles/ab";
+	makeDirs(shard);
+	writeFile(shard + "/ab12.vpc", 300);
+	writeFile(shard + "/ab34.vpc", 200);
+	makeDirs(tmp.path() + "/Class3D/job004");
+	writeFile(tmp.path() + "/Class3D/job004/run_it000_data.star");
+	writeFile(tmp.path() + "/Class3D/job004/run_it001_data.star");
+	writeFile(tmp.path() + "/Class3D/job004/run_it002_data.star");
+
+	relion_cleanup::Plan plan = relion_cleanup::planIntermediateRemoval(tmp.path());
+	CHECK(plan.remove.size() == 3);          // two cache entries and one middle iteration
+	CHECK(plan.cache_files == 2);
+	CHECK(plan.cache_bytes == 500);
+
+	long long freed = 0;
+	std::vector<std::string> errors;
+	CHECK(relion_cleanup::applyRemoval(plan, freed, errors) == 3);
+	// The emptied cache directories go as well
+	CHECK(access((tmp.path() + "/Cache").c_str(), F_OK) != 0);
+}
+
 TEST_CASE("human-readable sizes", "[cleanup]")
 {
 	CHECK(relion_cleanup::humanSize(0) == "0 B");

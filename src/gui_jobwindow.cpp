@@ -1077,6 +1077,7 @@ void JobWindow::initialiseExtractWindow()
 	current_y += STEPY/2;
 
 	place("do_float16", TOGGLE_DEACTIVATE);
+	place("do_virtual", TOGGLE_DEACTIVATE);
 
 	tab1->end();
 

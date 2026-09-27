@@ -34,12 +34,19 @@ struct Plan {
 	std::vector<std::string> kept;   ///< "Class3D/job005/run_it000" etc., for reporting
 	long long total_bytes;
 
-	Plan() : total_bytes(0) {}
+	/// Of `remove`, how much is the project's virtual particle cache
+	/// (Cache/virtual_particles/): nothing in it is irreplaceable, it is
+	/// recomputed from the micrographs when needed.
+	size_t cache_files;
+	long long cache_bytes;
+
+	Plan() : total_bytes(0), cache_files(0), cache_bytes(0) {}
 	bool empty() const { return remove.empty(); }
 };
 
 /// Scan a project directory (and every jobNNN directory under it) for
-/// intermediate iteration files. Nothing is deleted.
+/// intermediate iteration files, and its virtual particle cache. Nothing is
+/// deleted.
 Plan planIntermediateRemoval(const std::string& project_dir);
 
 /// Called every so often while deleting, so that a GUI can show progress and

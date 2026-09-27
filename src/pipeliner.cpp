@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 
+#include "src/virtual_particles.h"
 #include "src/pipeliner.h"
 #include <unistd.h>
 
@@ -1681,6 +1682,10 @@ bool PipeLine::cleanupAllJobs(bool do_harsh, std::string &error_message)
 				return false;
 		}
 	}
+
+	// The virtual particle cache holds nothing that cannot be recomputed from
+	// the micrographs, so either kind of project-wide clean-up can take it
+	vparticles::removeProjectCache(".");
 
 	return true;
 }

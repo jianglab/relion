@@ -141,6 +141,33 @@ TEST_CASE("Refine3D: align-halves checkbox emits a flag either way",
 	REQUIRE(command.find(" --dont_align_halves ") != std::string::npos);
 }
 
+TEST_CASE("Extract: virtual-particles checkbox emits a flag either way",
+          "[pipeline][extract]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_EXTRACT);
+	job.label = get_proc_label(job.type);
+	job.joboptions["star_mics"].setString("CtfFind/job003/micrographs_ctf.star");
+	job.joboptions["coords_suffix"].setString("AutoPick/job006/autopick.star");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	REQUIRE(job.joboptions.find("do_virtual") != job.joboptions.end());
+
+	// Explicit both ways, so the job does not depend on the environment it
+	// happens to run in (RELION_VIRTUAL_PARTICLES only sets the GUI default)
+	job.joboptions["do_virtual"].setString("Yes");
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --virtual ") != std::string::npos);
+	REQUIRE(command.find(" --no_virtual ") == std::string::npos);
+
+	job.joboptions["do_virtual"].setString("No");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --no_virtual ") != std::string::npos);
+}
+
 static bool generateCommands(RelionJob &job, std::vector<std::string> &commands,
 		std::string &final_command, std::string &error_message,
 		bool do_makedir = false, std::string outputname = "")

@@ -52,6 +52,15 @@ public:
 	// Write in float16 (MRC mode 12)?
 	bool write_float16;
 
+	// Write virtual particle stacks (.vstack descriptors) instead of pixels:
+	// particles are then read from the micrographs on demand.
+	// See documentation/virtual_particles.md
+	bool do_virtual;
+
+	/// Radius (output pixels) of the helical tube left out of the normalisation
+	/// background. One definition for real and virtual extraction alike.
+	RFLOAT helicalBackgroundRadius() const;
+
 	// Does the input micrograph STAR file or the input data STAR file have CTF information?
 	bool mic_star_has_ctf, data_star_has_ctf;
 

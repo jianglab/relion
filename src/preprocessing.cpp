@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/preprocessing.h"
+#include "src/virtual_particles.h"
 
 //#define PREP_TIMING
 #ifdef PREP_TIMING
@@ -55,6 +56,16 @@ void Preprocessing::read(int argc, char **argv, int rank)
 	fn_pick_star = parser.getOption("--pick_star", "Output STAR file with 2 columns for micrographs and coordinate files", "");
 	fn_data = parser.getOption("--reextract_data_star", "A _data.star file from a refinement to re-extract, e.g. with different binning or re-centered (instead of --coord_suffix)", "");
 	write_float16  = parser.checkOption("--float16", "Write in half-precision 16 bit floating point numbers (MRC mode 12), instead of 32 bit (MRC mode 0).");
+	{
+		// Opt-in; RELION_VIRTUAL_PARTICLES makes it the default, --no_virtual overrides that
+		const bool want = parser.checkOption("--virtual", "Write virtual particle stacks (small .vstack descriptors) instead of particle images; particles are then computed from the micrographs when read. Default from RELION_VIRTUAL_PARTICLES.");
+		const bool refuse = parser.checkOption("--no_virtual", "Write particle images even if RELION_VIRTUAL_PARTICLES is set");
+		const char* env = getenv("RELION_VIRTUAL_PARTICLES");
+		std::string e = (env == NULL) ? "" : std::string(env);
+		for (size_t i = 0; i < e.size(); i++) e[i] = tolower(e[i]);
+		const bool env_on = !(e.empty() || e == "0" || e == "no" || e == "off" || e == "false");
+		do_virtual = !refuse && (want || env_on);
+	}
 	keep_ctf_from_micrographs  = parser.checkOption("--keep_ctfs_micrographs", "By default, CTFs from fn_data will be kept. Use this flag to keep CTFs from input micrographs STAR file");
 	do_reset_offsets = parser.checkOption("--reset_offsets", "reset the origin offsets from the input _data.star file to zero?");
 	do_recenter = parser.checkOption("--recenter", "Re-center particle according to rlnOriginX/Y in --reextract_data_star STAR file");
@@ -313,6 +324,20 @@ void Preprocessing::initialise()
 		// Check for bg_radius in case of normalisation
 		if (do_normalise && bg_radius < 0)
 			REPORT_ERROR("ERROR: please provide a radius for a circle that defines the background area when normalising...");
+
+		if (do_virtual)
+		{
+			if (fn_operate_in != "")
+				REPORT_ERROR("ERROR: --virtual applies to particle extraction only, not to --operate_on.");
+			if (do_phase_flip || do_premultiply_ctf)
+				REPORT_ERROR("ERROR: virtual particles do not support CTF phase flipping or premultiplication yet; extract without --virtual.");
+			if (do_project_3d)
+				REPORT_ERROR("ERROR: virtual particles do not support --project3d; extract without --virtual.");
+			// Dust removal replaces the dust pixels with random numbers from a
+			// process-wide generator, so the same particle cannot be computed twice
+			if (white_dust_stddev > 0. || black_dust_stddev > 0.)
+				REPORT_ERROR("ERROR: virtual particles cannot use dust removal (--white_dust / --black_dust): it replaces pixels with random values, which cannot be reproduced when a particle is read again. Extract without --virtual, or set both to -1.");
+		}
 
 		// Extract helical segments
 		if (do_extract_helix)
@@ -940,6 +965,8 @@ bool Preprocessing::extractParticlesFromFieldOfView(FileName fn_mic, long int im
 
 		if (dimensionality == 3)
 		{
+			if (do_virtual)
+				REPORT_ERROR("extractParticlesFromFieldOfView ERROR: virtual particles support 2D micrographs only; extract sub-tomograms without --virtual.");
 			do_ramp = false;
 			if (do_phase_flip || do_premultiply_ctf)
 			{
@@ -990,10 +1017,11 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 
 	TIMING_TIC(TIMING_READ_IMG);
 
-	Imic.read(fn_mic);
+	// Virtual particles need only the micrograph's dimensions, not its pixels
+	Imic.read(fn_mic, !do_virtual);
 
 	// Calculate average value in the micrograph, for filling empty region around large-box extraction for premultiplication with CTF
-	RFLOAT mic_avg = Imic().computeAvg();
+	RFLOAT mic_avg = do_virtual ? 0. : Imic().computeAvg();
 
 	TIMING_TOC(TIMING_READ_IMG);
 
@@ -1014,6 +1042,8 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	MultidimArray<Complex> FT;
 	FourierTransformer transformer;
 	int ipos = 0;
+	std::vector<std::pair<long, long> > virtual_centres;
+	std::vector<double> virtual_psi;   // helical segments only: orients the tube mask
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
 	{
 		RFLOAT dxpos, dypos, dzpos;
@@ -1061,115 +1091,130 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 			obsModelPart.opticsMdt.getValue(EMDL_MICROGRAPH_PIXEL_SIZE, my_angpix, optics_group);
 		}
 
-		TIMING_TIC(TIMING_WINDOW);
-		// extract one particle in Ipart
-		if (dimensionality == 3)
-			Imic().window(Ipart(), z0, y0, x0, zF, yF, xF);
+		if (do_virtual)
+		{
+			// Metadata only: record the centre the window would be cut around;
+			// the pixels are computed from the micrograph when read
+			virtual_centres.push_back(std::make_pair(xpos, ypos));
+			if (do_extract_helix)
+			{
+				RFLOAT psi_deg = 0.;
+				MD.getValue(EMDL_ORIENT_PSI_PRIOR, psi_deg);
+				virtual_psi.push_back(psi_deg);
+			}
+		}
 		else
-			Imic().window(Ipart(), y0, x0, yF, xF, mic_avg);
-		Ipart().setXmippOrigin();
-		TIMING_TOC(TIMING_WINDOW);
-
-		// Premultiply the CTF of each particle, possibly in a bigger box (premultiply_ctf_extract_size)
-		if (do_phase_flip || do_premultiply_ctf)
 		{
-			transformer.FourierTransform(Ipart(), FT, false);
+			TIMING_TIC(TIMING_WINDOW);
+			// extract one particle in Ipart
+			if (dimensionality == 3)
+				Imic().window(Ipart(), z0, y0, x0, zF, yF, xF);
+			else
+				Imic().window(Ipart(), y0, x0, yF, xF, mic_avg);
+			Ipart().setXmippOrigin();
+			TIMING_TOC(TIMING_WINDOW);
 
-			MultidimArray<RFLOAT> Fctf;
-			Fctf.resize(YSIZE(FT), XSIZE(FT));
-			// do_abs, phase_flip, intact_first_peak, damping, padding
-			// 190802 TAKANORI: The original code using getCTF was do_damping=false, but for consistency with Polishing, I changed it.
-			// The boxsize in ObsModel has been updated above.
-			// In contrast to Polish, we premultiply particle BEFORE down-sampling, so PixelSize in ObsModel is OK.
-			// But we are doing this after extraction, so there is not much merit...
-			ctf.getFftwImage(Fctf, my_extract_size, my_extract_size, my_angpix, false, do_phase_flip, do_ctf_intact_first_peak, true, false);
-
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(FT)
+			// Premultiply the CTF of each particle, possibly in a bigger box (premultiply_ctf_extract_size)
+			if (do_phase_flip || do_premultiply_ctf)
 			{
-				DIRECT_MULTIDIM_ELEM(FT, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
+				transformer.FourierTransform(Ipart(), FT, false);
+
+				MultidimArray<RFLOAT> Fctf;
+				Fctf.resize(YSIZE(FT), XSIZE(FT));
+				// do_abs, phase_flip, intact_first_peak, damping, padding
+				// 190802 TAKANORI: The original code using getCTF was do_damping=false, but for consistency with Polishing, I changed it.
+				// The boxsize in ObsModel has been updated above.
+				// In contrast to Polish, we premultiply particle BEFORE down-sampling, so PixelSize in ObsModel is OK.
+				// But we are doing this after extraction, so there is not much merit...
+				ctf.getFftwImage(Fctf, my_extract_size, my_extract_size, my_angpix, false, do_phase_flip, do_ctf_intact_first_peak, true, false);
+
+				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(FT)
+				{
+					DIRECT_MULTIDIM_ELEM(FT, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
+				}
+
+				transformer.inverseFourierTransform(FT, Ipart());
+
+				if (extract_size != premultiply_ctf_extract_size)
+				{
+					Ipart().window(FIRST_XMIPP_INDEX(extract_size), FIRST_XMIPP_INDEX(extract_size),
+					               LAST_XMIPP_INDEX(extract_size),  LAST_XMIPP_INDEX(extract_size));
+				}
 			}
 
-			transformer.inverseFourierTransform(FT, Ipart());
+			TIMING_TIC(TIMING_BOUNDARY);
+			// Check boundaries: fill pixels outside the boundary with the nearest ones inside
+			// This will create lines at the edges, rather than zeros
+			Ipart().setXmippOrigin();
 
-			if (extract_size != premultiply_ctf_extract_size)
-			{
-				Ipart().window(FIRST_XMIPP_INDEX(extract_size), FIRST_XMIPP_INDEX(extract_size),
-				               LAST_XMIPP_INDEX(extract_size),  LAST_XMIPP_INDEX(extract_size));
-			}
-		}
-
-		TIMING_TIC(TIMING_BOUNDARY);
-		// Check boundaries: fill pixels outside the boundary with the nearest ones inside
-		// This will create lines at the edges, rather than zeros
-		Ipart().setXmippOrigin();
-
-		// X-boundaries
-		if (x0 < 0 || xF >= XSIZE(Imic()) )
-		{
-			FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
-			{
-				if (j + xpos < 0)
-					A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, i, -xpos);
-				else if (j + xpos >= XSIZE(Imic()))
-					A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, i, XSIZE(Imic()) - xpos - 1);
-			}
-		}
-
-		// Y-boundaries
-		if (y0 < 0 || yF >= YSIZE(Imic()))
-		{
-			FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
-			{
-				if (i + ypos < 0)
-					A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, -ypos, j);
-				else if (i + ypos >= YSIZE(Imic()))
-					A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, YSIZE(Imic()) - ypos - 1, j);
-			}
-		}
-
-		if (dimensionality == 3)
-		{
-			// Z-boundaries
-			if (z0 < 0 || zF >= ZSIZE(Imic()))
+			// X-boundaries
+			if (x0 < 0 || xF >= XSIZE(Imic()) )
 			{
 				FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
 				{
-					if (k + zpos < 0)
-						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), -zpos, i, j);
-					else if (k + zpos >= ZSIZE(Imic()))
-						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), ZSIZE(Imic()) - zpos - 1, i, j);
+					if (j + xpos < 0)
+						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, i, -xpos);
+					else if (j + xpos >= XSIZE(Imic()))
+						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, i, XSIZE(Imic()) - xpos - 1);
 				}
 			}
-		}
 
-		// 2D projection of 3D sub-tomograms
-		if (dimensionality == 3 && do_project_3d)
-		{
-			// Project the 3D sub-tomogram into a 2D particle again
-			Image<RFLOAT> Iproj(YSIZE(Ipart()), XSIZE(Ipart()));
-			Iproj().setXmippOrigin();
-			FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY3D(Ipart())
+			// Y-boundaries
+			if (y0 < 0 || yF >= YSIZE(Imic()))
 			{
-				DIRECT_A2D_ELEM(Iproj(), i, j) += DIRECT_A3D_ELEM(Ipart(), k, i, j);
+				FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
+				{
+					if (i + ypos < 0)
+						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, -ypos, j);
+					else if (i + ypos >= YSIZE(Imic()))
+						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, YSIZE(Imic()) - ypos - 1, j);
+				}
 			}
-			Ipart = Iproj;
-		}
-		TIMING_TOC(TIMING_BOUNDARY);
 
-		// performPerImageOperations will also append the particle to the output stack in fn_stack
-		// Jun24,2015 - Shaoda, extract helical segments
-		RFLOAT tilt_deg, psi_deg;
-		tilt_deg = psi_deg = 0.;
-		if (do_extract_helix) // If priors do not exist, errors will occur in 'readHelicalCoordinates()'.
-		{
-			MD.getValue(EMDL_ORIENT_TILT_PRIOR, tilt_deg);
-			MD.getValue(EMDL_ORIENT_PSI_PRIOR, psi_deg);
-		}
+			if (dimensionality == 3)
+			{
+				// Z-boundaries
+				if (z0 < 0 || zF >= ZSIZE(Imic()))
+				{
+					FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
+					{
+						if (k + zpos < 0)
+							A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), -zpos, i, j);
+						else if (k + zpos >= ZSIZE(Imic()))
+							A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), ZSIZE(Imic()) - zpos - 1, i, j);
+					}
+				}
+			}
 
-		TIMING_TIC(TIMING_PRE_IMG_OPS);
-		performPerImageOperations(Ipart, fn_output_img_root, my_current_nr_images + ipos, my_total_nr_images,
-		                          tilt_deg, psi_deg, all_avg, all_stddev, all_minval, all_maxval);
-		TIMING_TOC(TIMING_PRE_IMG_OPS);
+			// 2D projection of 3D sub-tomograms
+			if (dimensionality == 3 && do_project_3d)
+			{
+				// Project the 3D sub-tomogram into a 2D particle again
+				Image<RFLOAT> Iproj(YSIZE(Ipart()), XSIZE(Ipart()));
+				Iproj().setXmippOrigin();
+				FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY3D(Ipart())
+				{
+					DIRECT_A2D_ELEM(Iproj(), i, j) += DIRECT_A3D_ELEM(Ipart(), k, i, j);
+				}
+				Ipart = Iproj;
+			}
+			TIMING_TOC(TIMING_BOUNDARY);
+
+			// performPerImageOperations will also append the particle to the output stack in fn_stack
+			// Jun24,2015 - Shaoda, extract helical segments
+			RFLOAT tilt_deg, psi_deg;
+			tilt_deg = psi_deg = 0.;
+			if (do_extract_helix) // If priors do not exist, errors will occur in 'readHelicalCoordinates()'.
+			{
+				MD.getValue(EMDL_ORIENT_TILT_PRIOR, tilt_deg);
+				MD.getValue(EMDL_ORIENT_PSI_PRIOR, psi_deg);
+			}
+
+			TIMING_TIC(TIMING_PRE_IMG_OPS);
+			performPerImageOperations(Ipart, fn_output_img_root, my_current_nr_images + ipos, my_total_nr_images,
+			                          tilt_deg, psi_deg, all_avg, all_stddev, all_minval, all_maxval);
+			TIMING_TOC(TIMING_PRE_IMG_OPS);
+		}
 
 		TIMING_TIC(TIMING_REST);
 		// Also store all the particles information in the STAR file
@@ -1177,7 +1222,7 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		if (Ipart().getDim() == 3)
 			fn_img.compose(fn_output_img_root, my_current_nr_images + ipos + 1, "mrc");
 		else
-			fn_img.compose(my_current_nr_images + ipos + 1, fn_output_img_root + ".mrcs"); // start image counting in stacks at 1!
+			fn_img.compose(my_current_nr_images + ipos + 1, fn_output_img_root + (do_virtual ? ".vstack" : ".mrcs")); // start image counting in stacks at 1!
 		MD.setValue(EMDL_IMAGE_NAME, fn_img);
 		MD.setValue(EMDL_MICROGRAPH_NAME, fn_mic);
 
@@ -1240,6 +1285,25 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 
 		ipos++;
 	}
+
+	if (do_virtual)
+	{
+		vparticles::Recipe recipe;
+		recipe.extract_size = extract_size;
+		recipe.scale = do_rescale ? scale : -1;
+		recipe.window = do_rewindow ? window : -1;
+		recipe.normalise = do_normalise;
+		recipe.bg_radius = bg_radius;
+		recipe.ramp = do_ramp;
+		recipe.white_dust = white_dust_stddev;
+		recipe.black_dust = black_dust_stddev;
+		recipe.invert_contrast = do_invert_contrast;
+		recipe.float16 = write_float16;
+		recipe.angpix = output_angpix;
+		recipe.helical = do_extract_helix;
+		recipe.helical_radius = helicalBackgroundRadius();
+		vparticles::writeDescriptor(fn_output_img_root + ".vstack", fn_mic, recipe, virtual_centres, virtual_psi);
+	}
 }
 
 void Preprocessing::runOperateOnInputFile()
@@ -1287,6 +1351,18 @@ void Preprocessing::runOperateOnInputFile()
 	std::cout << " Done writing to " << fn_operate_out << std::endl;
 }
 
+RFLOAT Preprocessing::helicalBackgroundRadius() const
+{
+	RFLOAT bg_helical_radius = (helical_tube_outer_diameter * 0.5) / angpix;
+	// NB scale and extract_size are ints, so this is integer division: whenever
+	// the particles are downscaled the factor is 0 and the tube mask vanishes.
+	// Long-standing behaviour, kept exactly - virtual particles must reproduce
+	// what real extraction writes.
+	if (do_rescale)
+		bg_helical_radius *= scale / extract_size;
+	return bg_helical_radius;
+}
+
 void Preprocessing::performPerImageOperations(
 		Image<RFLOAT> &Ipart,
 		FileName fn_output_img_root,
@@ -1312,11 +1388,8 @@ void Preprocessing::performPerImageOperations(
 	// Jun24,2015 - Shaoda, helical segments
 	if (do_normalise)
 	{
-		RFLOAT bg_helical_radius = (helical_tube_outer_diameter * 0.5) / angpix;
-		if (do_rescale)
-			bg_helical_radius *= scale / extract_size;
 		normalise(Ipart, bg_radius, white_dust_stddev, black_dust_stddev, do_ramp,
-				do_extract_helix, bg_helical_radius, tilt_deg, psi_deg);
+				do_extract_helix, helicalBackgroundRadius(), tilt_deg, psi_deg);
 	}
 	TIMING_TOC(TIMING_NORMALIZE);
 

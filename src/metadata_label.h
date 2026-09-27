@@ -744,6 +744,23 @@ enum EMDLabel
 	EMDL_CLASS2D_CONSENSUS_TOLERANCE,
 	EMDL_CLASS2D_CONSENSUS_STARTS,
 
+	// Virtual particle stacks (.vstack descriptors): see documentation/virtual_particles.md
+	EMDL_VSTACK_VERSION,
+	EMDL_VSTACK_MICROGRAPH_CHECKSUM,
+	EMDL_VSTACK_EXTRACT_SIZE,
+	EMDL_VSTACK_RESCALE_SIZE,
+	EMDL_VSTACK_WINDOW_SIZE,
+	EMDL_VSTACK_NORMALISE,
+	EMDL_VSTACK_BG_RADIUS,
+	EMDL_VSTACK_RAMP,
+	EMDL_VSTACK_WHITE_DUST,
+	EMDL_VSTACK_BLACK_DUST,
+	EMDL_VSTACK_INVERT_CONTRAST,
+	EMDL_VSTACK_FLOAT16,
+	EMDL_VSTACK_HELICAL,
+	EMDL_VSTACK_HELICAL_RADIUS,
+	EMDL_VSTACK_PSI,
+
 	EMDL_UNKNOWN_LABEL,
 
 	EMDL_LAST_LABEL // **** NOTE ****: Do keep this label always at the end
@@ -1300,6 +1317,24 @@ private:
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_MAX_ITERATIONS, EMDL_INT, "rlnClass2DConsensusMaxIterations", "Configured sparse NMF iteration limit");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_TOLERANCE, EMDL_DOUBLE, "rlnClass2DConsensusTolerance", "Configured sparse NMF convergence tolerance");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_STARTS, EMDL_INT, "rlnClass2DConsensusStarts", "Requested number of deterministic sparse NMF starts; capped at the pattern count");
+
+		EMDL::addLabel(EMDL_VSTACK_VERSION, EMDL_INT, "rlnVirtualStackVersion", "Format version of a virtual particle stack (.vstack) descriptor");
+		EMDL::addLabel(EMDL_VSTACK_MICROGRAPH_CHECKSUM, EMDL_STRING, "rlnVirtualMicrographChecksum", "Identity of the micrograph a virtual stack was extracted from (size and content hash)");
+		EMDL::addLabel(EMDL_VSTACK_EXTRACT_SIZE, EMDL_INT, "rlnVirtualExtractSize", "Box size (in micrograph pixels) cut from the micrograph for each virtual particle");
+		EMDL::addLabel(EMDL_VSTACK_RESCALE_SIZE, EMDL_INT, "rlnVirtualRescaleSize", "Size virtual particles are rescaled to after cutting them out (-1: not rescaled)");
+		EMDL::addLabel(EMDL_VSTACK_WINDOW_SIZE, EMDL_INT, "rlnVirtualWindowSize", "Size the virtual particles are re-windowed to after rescaling (-1: not re-windowed)");
+		EMDL::addLabel(EMDL_VSTACK_NORMALISE, EMDL_BOOL, "rlnVirtualNormalise", "Whether virtual particles are normalised (background mean 0, stddev 1)");
+		EMDL::addLabel(EMDL_VSTACK_BG_RADIUS, EMDL_INT, "rlnVirtualBgRadius", "Background radius (in output pixels) used to normalise virtual particles");
+		EMDL::addLabel(EMDL_VSTACK_RAMP, EMDL_BOOL, "rlnVirtualRampBackground", "Whether normalisation subtracts a fitted background ramp rather than just the mean");
+		EMDL::addLabel(EMDL_VSTACK_WHITE_DUST, EMDL_DOUBLE, "rlnVirtualWhiteDust", "Sigma threshold for removing white dust from virtual particles (-1: off)");
+		EMDL::addLabel(EMDL_VSTACK_BLACK_DUST, EMDL_DOUBLE, "rlnVirtualBlackDust", "Sigma threshold for removing black dust from virtual particles (-1: off)");
+		EMDL::addLabel(EMDL_VSTACK_INVERT_CONTRAST, EMDL_BOOL, "rlnVirtualInvertContrast", "Whether the contrast of virtual particles is inverted");
+		EMDL::addLabel(EMDL_VSTACK_FLOAT16, EMDL_BOOL, "rlnVirtualFloat16", "Whether virtual particles are rounded to half precision, as --float16 stacks are");
+		EMDL::addLabel(EMDL_VSTACK_HELICAL, EMDL_BOOL, "rlnVirtualHelical", "Whether virtual particles are helical segments, normalised against a tube-shaped background");
+		// Kept as text at full precision: STAR writes doubles to six decimals, and the tube
+		// mask needs the exact radius and angle relion_preprocess used
+		EMDL::addLabel(EMDL_VSTACK_HELICAL_RADIUS, EMDL_STRING, "rlnVirtualHelicalRadius", "Radius (output pixels, full precision) of the helical tube excluded from the normalisation background");
+		EMDL::addLabel(EMDL_VSTACK_PSI, EMDL_STRING, "rlnVirtualPsi", "In-plane angle (degrees, full precision) that orients the helical tube mask of a virtual segment");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES, EMDL_INT, "rlnClass2DConsensusSourceClasses", "Number of classes in each source replica");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, EMDL_INT, "rlnClass2DConsensusOccupiedClasses", "Number of consensus classes with assigned particles");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_PATTERNS, EMDL_INT, "rlnClass2DConsensusPatterns", "Number of distinct cross-run assignment patterns");

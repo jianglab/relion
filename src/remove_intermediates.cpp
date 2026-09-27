@@ -155,6 +155,38 @@ Plan planIntermediateRemoval(const std::string& project_dir)
 	for (size_t i = 0; i < dirs.size(); i++)
 		scanOneDir(dirs[i], plan);
 
+	// The virtual particle cache: every entry is recomputable
+	const std::string cache = project_dir + "/Cache/virtual_particles";
+	DIR* top = opendir(cache.c_str());
+	if (top != NULL)
+	{
+		struct dirent* d;
+		while ((d = readdir(top)) != NULL)
+		{
+			if (d->d_name[0] == '.') continue;
+			const std::string sub = cache + "/" + d->d_name;
+			DIR* sd = opendir(sub.c_str());
+			if (sd == NULL) continue;
+			struct dirent* e;
+			while ((e = readdir(sd)) != NULL)
+			{
+				if (e->d_name[0] == '.') continue;
+				const std::string full = sub + "/" + e->d_name;
+				struct stat st;
+				if (lstat(full.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+				Candidate c;
+				c.path = full;
+				c.size_bytes = st.st_size;
+				plan.remove.push_back(c);
+				plan.total_bytes += c.size_bytes;
+				plan.cache_files++;
+				plan.cache_bytes += c.size_bytes;
+			}
+			closedir(sd);
+		}
+		closedir(top);
+	}
+
 	std::sort(plan.kept.begin(), plan.kept.end());
 	return plan;
 }
@@ -188,6 +220,18 @@ long applyRemoval(const Plan& plan, long long& freed_bytes,
 
 	if (progress != NULL)
 		progress(plan.remove.size(), plan.remove.size(), user_data);
+
+	// Emptied cache directories go too (rmdir only removes empty ones)
+	for (size_t i = 0; i < plan.remove.size(); i++)
+	{
+		const std::string& p = plan.remove[i].path;
+		const size_t at = p.find("/Cache/virtual_particles/");
+		if (at == std::string::npos) continue;
+		const std::string shard = p.substr(0, p.find_last_of('/'));
+		rmdir(shard.c_str());
+		rmdir(p.substr(0, at + 24).c_str());   // .../Cache/virtual_particles
+		rmdir(p.substr(0, at + 6).c_str());    // .../Cache
+	}
 
 	return n;
 }

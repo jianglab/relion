@@ -64,6 +64,7 @@
 #include "src/metadata_table.h"
 #include "src/fftw.h"
 #include "src/float16.h"
+#include "src/virtual_particles.h"
 
 /// @defgroup Images Images
 //@{
@@ -266,6 +267,12 @@ public:
 		  fileName = fileName.substr(0, found) ;
 
 		exist = exists(fileName);
+
+		// A write would be taken for an MRC stack and overwrite the descriptor;
+		// refuse before fopen("w") truncates it
+		if (mode != WRITE_READONLY && vparticles::isVirtualStackFormat(ext_name))
+			REPORT_ERROR("Cannot write image " + name + ": virtual particle stacks (.vstack) are read-only. "
+			             "Use relion_stack_create to write their particles to a real stack.");
 
 		std::string wmChar;
 
@@ -1394,6 +1401,43 @@ public:
 	}
 
 private:
+	/* Particles of a virtual stack (.vstack): computed from the micrograph the
+	 * descriptor names, bitwise identical to the stack relion_preprocess would
+	 * have written. select_img < 0 reads every particle, as for an .mrcs. */
+	int readVirtualStack(const FileName &name, long int select_img, bool readdata)
+	{
+		long int dump;
+		FileName fn_stack;
+		name.decompose(dump, fn_stack);
+		fn_stack = fn_stack.removeFileFormat();
+
+		const vparticles::Header h = vparticles::readHeader(fn_stack);
+		if (select_img >= h.n)
+			REPORT_ERROR("Image " + integerToString(select_img + 1) + " requested from virtual stack "
+			             + fn_stack + ", which holds " + integerToString(h.n) + ".");
+		const long int n = (select_img >= 0) ? 1 : h.n;
+
+		MDMainHeader.setValue(EMDL_IMAGE_DATATYPE, (int)(h.float16 ? Float16 : Float));
+		setSamplingRateInHeader(h.angpix, h.angpix);
+
+		if (!readdata)
+		{
+			data.setDimensions(h.box, h.box, 1, n);
+			return 0;
+		}
+
+		data.resize(n, 1, h.box, h.box);
+		MultidimArray<RFLOAT> one;
+		const size_t slice = (size_t)h.box * h.box;
+		for (long int k = 0; k < n; k++)
+		{
+			vparticles::readParticle(fn_stack, (select_img >= 0) ? select_img : k, one);
+			for (size_t i = 0; i < slice; i++)
+				DIRECT_MULTIDIM_ELEM(data, k * slice + i) = (T)DIRECT_MULTIDIM_ELEM(one, i);
+		}
+		return 0;
+	}
+
 	int _read(const FileName &name, fImageHandler &hFile, bool readdata=true, long int select_img = -1,
 			  bool mapData = false, bool is_2D = false)
 	{
@@ -1434,7 +1478,14 @@ private:
 		MDMainHeader.clear();
 		MDMainHeader.addObject();
 
-		if (ext_name.contains("spi") || ext_name.contains("xmp")  ||
+		// Virtual particle stacks first: the MRC stack test below matches any
+		// extension containing "st", which ".vstack" does. A stack converted in
+		// place by relion_stacks_to_virtual keeps its .mrcs name and is told
+		// apart from a real one by its first line.
+		if (vparticles::isVirtualStackFormat(ext_name) ||
+		    (ext_name.contains("mrcs") && fimg != NULL && vparticles::isVirtualStackFile(fileno(fimg))))
+			err = readVirtualStack(name, select_img, readdata);
+		else if (ext_name.contains("spi") || ext_name.contains("xmp")  ||
 			ext_name.contains("stk") || ext_name.contains("vol"))
 			err = readSPIDER(select_img);
 		else if (ext_name.contains("bz2") || ext_name.contains("xz") || ext_name.contains("zst"))
