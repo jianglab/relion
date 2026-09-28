@@ -618,6 +618,7 @@ void JobWindow::initialiseMotioncorrWindow()
 	if (!is_tomo) place("pre_exposure", TOGGLE_DEACTIVATE);
 	place("eer_grouping", TOGGLE_DEACTIVATE);
 	place("do_float16", TOGGLE_DEACTIVATE);
+	if (!is_tomo) place("movie_averages", TOGGLE_DEACTIVATE);
 	if (is_tomo) place("do_even_odd_split");
 
 	// Add a little spacer

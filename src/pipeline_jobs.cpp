@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/pipeline_jobs.h"
+#include "src/virtual_movie_averages.h"
 #include <unistd.h>
 #include <cerrno>
 #include <climits>
@@ -1787,6 +1788,20 @@ void RelionJob::initialiseMotioncorrJob()
 	if (!is_tomo) joboptions["last_frame_sum"] = JobOption("Last frame for corrected sum:", -1, 0, 32, 1, "Last frame to use in corrected average. Values equal to or smaller than 0 mean 'use all frames'.");
 	joboptions["eer_grouping"] = JobOption("EER fractionation:", 32, 1, 100, 1, "The number of hardware frames to group into one fraction. This option is relevant only for Falcon4 movies in the EER format. Note that all 'frames' in the GUI (e.g. first and last frame for corrected sum, dose per frame) refer to fractions, not raw detector frames. See https://www3.mrc-lmb.cam.ac.uk/relion/index.php/Image_compression#Falcon4_EER for detailed guidance on EER processing.");
 	joboptions["do_float16"] = JobOption("Write output in float16?", true ,"If set to Yes, RelionCor2 will write output images in float16 MRC format. This will save a factor of two in disk space compared to the default of writing in float32. Note that RELION and CCPEM will read float16 images, but other programs may not (yet) do so. For example, Gctf will not work with float16 images. Also note that this option does not work with UCSF MotionCor2. For CTF estimation, use CTFFIND-4.1 with pre-calculated power spectra (activate the 'Save sum of power spectra' option).");
+	if (!is_tomo)
+	{
+		// Default from RELION_VIRTUAL_MOVIE_AVERAGES, as relion_run_motioncorr reads it
+		const vmovies::Mode m = vmovies::mode();
+		joboptions["movie_averages"] = JobOption("Movie averages:", job_movie_average_options,
+			(m == vmovies::VIRTUAL) ? 2 : (m == vmovies::REAL) ? 1 : 0,
+			"How the motion-corrected micrographs are stored (RELION's own implementation only). "
+			"Real (legacy): as before. Real, regenerable: real files, made so that they can be regenerated bit for bit "
+			"from the movies later, e.g. to replace them by descriptors with Project > Virtualize. "
+			"Virtual: a small descriptor under each micrograph's name; the micrograph is computed from its movie "
+			"when a program reads it, and kept in a disposable cache (Cache/virtual_movie_averages). "
+			"Virtual micrographs need their movies, and CTFFIND must then use the power spectra from this job. "
+			"The default comes from the environment variable RELION_VIRTUAL_MOVIE_AVERAGES (1 or real).");
+	}
 	if (is_tomo)
 	{
 	joboptions["do_even_odd_split"] = JobOption("Save images for denoising?", false ,"If set to Yes, MotionCor2 will write output images summed from both the even frames of the input movie and the odd frames of the input movie. This generates two versions of the same movie which essential if you wish to carry out denoising later. If you are unsure whether you will need denoising later, it is best to select Yes, but be aware this option increases the processing time for MotionCor. At the moment, this is only available in Shawn Zheng's MotionCor2 (>=v1.3.0)  and therefore do_float_16 must equal false too.");
@@ -1879,6 +1894,31 @@ bool RelionJob::getCommandsMotioncorrJob(std::string &outputname, std::vector<st
 		command += " --even_odd_split ";
 	}
 	
+	// Always explicit, so the job does what its GUI box shows whatever
+	// RELION_VIRTUAL_MOVIE_AVERAGES says where it runs
+	if (!is_tomo && joboptions.find("movie_averages") != joboptions.end())
+	{
+		int choice = -1;
+		for (size_t i = 0; i < job_movie_average_options.size(); i++)
+			if (joboptions["movie_averages"].getString() == job_movie_average_options[i]) choice = (int)i;
+		if (choice < 0)
+		{
+			error_message = "ERROR: unknown choice for Movie averages: " + joboptions["movie_averages"].getString();
+			return false;
+		}
+		if (choice > 0 && !joboptions["do_own_motioncor"].getBoolean())
+		{
+			error_message = "ERROR: regenerable or virtual movie averages need RELION's own implementation of motion correction.";
+			return false;
+		}
+		if (choice == 2 && !joboptions["do_save_ps"].getBoolean())
+		{
+			error_message = "ERROR: virtual movie averages hold no pixels CTFFIND can read: save the sum of power spectra, and use them in CtfFind.";
+			return false;
+		}
+		command += std::string(" --movie_averages ") + job_movie_average_flags[choice];
+	}
+
 	if (joboptions["do_own_motioncor"].getBoolean())
 	{
 		label += ".own";

@@ -132,6 +132,14 @@ static const std::vector<std::string> job_gain_rotation_options{
 	"270 degrees (3)"
 };
 
+// MotionCorr's micrographs (--movie_averages; see virtual_movie_averages.h)
+static const std::vector<std::string> job_movie_average_options{
+	"Real (legacy)",
+	"Real, regenerable from the movies",
+	"Virtual (computed from the movies when read)"
+};
+static const char *const job_movie_average_flags[] = {"legacy", "real", "virtual"};
+
 static const std::vector<std::string> job_gain_flip_options{
 	"No flipping (0)",
 	"Flip upside down (1)",

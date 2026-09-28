@@ -345,3 +345,25 @@ class TestMovieAveragesToVirtual:
         r = _run(relion_bin, d, ["relion_movie_averages_to_virtual", "--project", ".", "--job", "MC", "--convert"], _env())
         assert "1 legacy" in r.stdout, r.stdout
         assert mic.read_bytes() == before
+
+
+@pytest.mark.integration
+class TestMovieAveragesFlag:
+    """--movie_averages (what the GUI passes) wins over RELION_VIRTUAL_MOVIE_AVERAGES."""
+
+    def test_flag_overrides_environment(self, test_data_dir, relion_bin):
+        d = test_data_dir
+        names = _write_movies(d, n_movies=1)
+        stem = Path(names[0]).with_suffix("")
+        _motioncorr(relion_bin, d, "MC_legacy", ["--dose_weighting", "--movie_averages", "legacy"], mode="1")
+        mic = (d / "MC_legacy" / stem).with_suffix(".mrc")
+        assert not mic.read_bytes().startswith(MAGIC)
+        assert "rlnMicrographSumRecipe" not in mic.with_suffix(".star").read_text()
+
+        _motioncorr(relion_bin, d, "MC_virtual", ["--dose_weighting", "--movie_averages", "virtual"], mode=None)
+        assert (d / "MC_virtual" / stem).with_suffix(".mrc").read_bytes().startswith(MAGIC)
+
+        _motioncorr(relion_bin, d, "MC_real", ["--dose_weighting", "--movie_averages", "real"], mode=None)
+        real = (d / "MC_real" / stem).with_suffix(".mrc")
+        assert not real.read_bytes().startswith(MAGIC)
+        assert "rlnMicrographSumRecipe" in real.with_suffix(".star").read_text()

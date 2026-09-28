@@ -229,6 +229,66 @@ TEST_CASE("Refinement jobs: RELION_KEEP_ALL_ITERATIONS sets the GUI default",
 	unsetenv("RELION_KEEP_ALL_ITERATIONS");
 }
 
+// MotionCorr: how micrographs are stored, always passed explicitly
+static void setUpMotioncorrJob(RelionJob &job)
+{
+	job.clear();
+	job.initialise(PROC_MOTIONCORR);
+	job.label = get_proc_label(job.type);
+	job.joboptions["input_star_mics"].setString("Import/job001/movies.star");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+}
+
+TEST_CASE("MotionCorr: movie averages choice emits a flag either way", "[pipeline][motioncorr]")
+{
+	unsetenv("RELION_VIRTUAL_MOVIE_AVERAGES");
+	RelionJob job;
+	setUpMotioncorrJob(job);
+	REQUIRE(job.joboptions.find("movie_averages") != job.joboptions.end());
+	REQUIRE(job.joboptions["movie_averages"].getString() == job_movie_average_options[0]);   // legacy by default
+
+	const char *flags[] = {" --movie_averages legacy", " --movie_averages real", " --movie_averages virtual"};
+	for (int i = 0; i < 3; i++)
+	{
+		INFO("choice " << i);
+		job.joboptions["movie_averages"].setString(job_movie_average_options[i]);
+		std::string command;
+		REQUIRE(generateCommand(job, command));
+		REQUIRE(command.find(flags[i]) != std::string::npos);
+	}
+
+	// Refused where they cannot work
+	std::string command;
+	job.joboptions["movie_averages"].setString(job_movie_average_options[2]);
+	job.joboptions["do_save_ps"].setString("No");
+	job.joboptions["do_float16"].setString("No");
+	REQUIRE_FALSE(generateCommand(job, command));          // CTFFIND would have nothing to read
+	job.joboptions["do_save_ps"].setString("Yes");
+	job.joboptions["do_own_motioncor"].setString("No");
+	job.joboptions["movie_averages"].setString(job_movie_average_options[1]);
+	REQUIRE_FALSE(generateCommand(job, command));          // MotionCor2's sums cannot be regenerated
+	// Legacy with MotionCor2 is fine (MotionCor2 writes no power spectra)
+	job.joboptions["movie_averages"].setString(job_movie_average_options[0]);
+	job.joboptions["do_save_ps"].setString("No");
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --movie_averages legacy") != std::string::npos);
+}
+
+TEST_CASE("MotionCorr: RELION_VIRTUAL_MOVIE_AVERAGES sets the default choice", "[pipeline][motioncorr]")
+{
+	const char *env[] = {"1", "real"};
+	for (int i = 0; i < 2; i++)
+	{
+		setenv("RELION_VIRTUAL_MOVIE_AVERAGES", env[i], 1);
+		RelionJob job;
+		setUpMotioncorrJob(job);
+		REQUIRE(job.joboptions["movie_averages"].getString() == job_movie_average_options[i == 0 ? 2 : 1]);
+	}
+	unsetenv("RELION_VIRTUAL_MOVIE_AVERAGES");
+}
+
 static bool generateCommands(RelionJob &job, std::vector<std::string> &commands,
 		std::string &final_command, std::string &error_message,
 		bool do_makedir = false, std::string outputname = "")

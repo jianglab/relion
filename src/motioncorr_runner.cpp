@@ -143,10 +143,17 @@ void MotioncorrRunner::read(int argc, char **argv, int rank)
 		early_binning = false;
 
 	{
-		const vmovies::Mode m = vmovies::mode();
+		// --movie_averages wins over RELION_VIRTUAL_MOVIE_AVERAGES; the GUI always passes it
+		const std::string choice = parser.getOption("--movie_averages", "How to store the micrographs: legacy, real (regenerable bit for bit from the movies) or virtual (descriptors, computed from the movies when read). Default: from RELION_VIRTUAL_MOVIE_AVERAGES", "");
+		vmovies::Mode m;
+		if (choice.empty()) m = vmovies::mode();
+		else if (choice == "legacy") m = vmovies::OFF;
+		else if (choice == "real") m = vmovies::REAL;
+		else if (choice == "virtual") m = vmovies::VIRTUAL;
+		else REPORT_ERROR("--movie_averages must be legacy, real or virtual, not " + choice);
 		if (m != vmovies::OFF && !do_own)
-			REPORT_ERROR("RELION_VIRTUAL_MOVIE_AVERAGES needs RELION's own motion correction (--use_own): "
-			             "only its micrographs can be regenerated from the movies. Unset it to use MotionCor2.");
+			REPORT_ERROR("Regenerable or virtual movie averages (--movie_averages, RELION_VIRTUAL_MOVIE_AVERAGES) need RELION's own "
+			             "motion correction (--use_own): only its micrographs can be regenerated from the movies.");
 		reproducible = (m != vmovies::OFF);
 		virtual_averages = (m == vmovies::VIRTUAL);
 	}
