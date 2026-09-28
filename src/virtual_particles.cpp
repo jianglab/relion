@@ -787,6 +787,14 @@ void forget(const std::string& fn_vstack)
 
 std::string micrographChecksum(const std::string& fn_mic)
 {
+	// A virtual movie average that replaced a real micrograph, after a bitwise
+	// check, stands for that file: particles extracted from it still verify
+	if (vmovies::isVirtualMovieAverageFile(fn_mic))
+	{
+		const std::string replaced = vmovies::replacedChecksum(fn_mic);
+		if (!replaced.empty()) return replaced;
+	}
+
 	int fd = open(fn_mic.c_str(), O_RDONLY);
 	if (fd < 0)
 		REPORT_ERROR("Cannot open micrograph " + fn_mic + ": " + std::string(strerror(errno)));

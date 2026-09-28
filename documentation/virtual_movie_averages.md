@@ -177,6 +177,29 @@ parsed in single precision (`textToFloat`), so the dose used was 1.27699995…,
 while the old record printed `1.277000`. Every double in a reproducible record,
 including the `general` table, is therefore written exactly.
 
+## Converting an existing project
+
+`relion_movie_averages_to_virtual --project . --j 8 [--convert]` replaces, in
+place, the micrographs of MotionCorr jobs that carry a sum recipe (made with
+`=real`) by descriptors: each is regenerated from its movie and compared pixel
+for pixel, and replaced (atomic rename) only if identical. Legacy micrographs
+are reported and kept. The descriptor records the identity of the file it
+replaced (`# replaces <checksum>` after the first line), and
+`vparticles::micrographChecksum()` returns it, so virtual particles extracted
+from the real micrograph keep verifying. Dry run unless `--convert`; each job
+gets `virtual_conversion.log`.
+
+In the GUI, **Project > Virtualize movie averages and particles...** runs
+`relion_stacks_to_virtual` and then `relion_movie_averages_to_virtual` (particles
+first: verifying a stack reads its micrograph, fast while it is still a real
+file), as a dry run or, after a confirmation, converting. The work is a
+separate background process (its own session) logging to
+`virtualization_<time>_<dryrun|convert>.log` in the project, so the GUI stays
+responsive and closing the window or the GUI does not stop it; the window
+shows the log live, and the equivalent command line for running on a cluster
+node instead. Command construction: `src/virtualize_project.{h,cpp}`
+(unit-tested); window: `src/gui_virtualize.cpp`.
+
 ## Next
 
 - **Converting `=real` micrographs** to descriptors in place (after checking

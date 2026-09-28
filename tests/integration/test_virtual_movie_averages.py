@@ -270,3 +270,78 @@ class TestVirtualMovieAverages:
         for out, virtual in (("Extract/real_from_virtual", False), ("Extract/virtual_from_virtual", True)):
             got = extract("MCV", out, virtual, env)
             assert np.array_equal(got, ref), f"{out}: max |diff| {np.abs(got - ref).max()}"
+
+
+# ---------------------------------------------------------------------------
+# relion_movie_averages_to_virtual: real (=real) micrographs -> descriptors, in place
+
+@pytest.mark.integration
+class TestMovieAveragesToVirtual:
+
+    def _particles(self, relion_bin, d, names, out, virtual, env):
+        (d / "Coords").mkdir(exist_ok=True)
+        rows = []
+        for n in names:
+            stem = Path(n).stem
+            cf = d / "Coords" / f"{stem}.star"
+            cf.write_text("\ndata_\n\nloop_\n_rlnCoordinateX #1\n_rlnCoordinateY #2\n"
+                          "100 100\n250 240\n400 300\n")
+            rows.append(f"MC/Movies/{stem}.mrc Coords/{cf.name}\n")
+        (d / "coords.star").write_text("\ndata_coordinate_files\n\nloop_\n_rlnMicrographName #1\n"
+                                        "_rlnMicrographCoordinates #2\n" + "".join(rows))
+        (d / out).mkdir(parents=True)
+        _run(relion_bin, d, ["relion_preprocess", "--i", "MC/corrected_micrographs.star", "--coord_list", "coords.star",
+                             "--part_star", f"{out}/particles.star", "--part_dir", f"{out}/", "--extract",
+                             "--extract_size", "64", "--norm", "--bg_radius", "25", "--float16",
+                             "--virtual" if virtual else "--no_virtual"], env)
+
+    def _read_particles(self, relion_bin, d, out, env):
+        _run(relion_bin, d, ["relion_stack_create", "--i", f"{out}/particles.star", "--o", f"{out}/all"], env)
+        return _read_mrc(d / out / "all.mrcs")
+
+    def test_convert_in_place(self, test_data_dir, relion_bin):
+        d = test_data_dir
+        names = _write_movies(d)
+        _motioncorr(relion_bin, d, "MC", CASES["dose_weighted_float16"], mode="real")
+        mics = [(d / "MC" / Path(n).with_suffix("")).with_suffix(".mrc") for n in names]
+        originals = {m: _read_mrc(m) for m in mics}
+        sizes = {m: m.stat().st_size for m in mics}
+
+        env = _env()
+        env["RELION_VPARTICLE_CACHE"] = "off"
+        # Particles of both kinds, extracted from the real micrographs
+        self._particles(relion_bin, d, names, "Extract/real", False, env)
+        self._particles(relion_bin, d, names, "Extract/virtual", True, env)
+        expected = self._read_particles(relion_bin, d, "Extract/real", env)
+
+        dry = _run(relion_bin, d, ["relion_movie_averages_to_virtual", "--project", ".", "--job", "MC", "--j", "2"], env)
+        assert f"{len(names)} regenerate bit for bit" in dry.stdout, dry.stdout
+        assert all(not m.read_bytes().startswith(MAGIC) and m.stat().st_size == sizes[m] for m in mics)
+
+        conv = _run(relion_bin, d, ["relion_movie_averages_to_virtual", "--project", ".", "--job", "MC", "--j", "2", "--convert"], env)
+        assert f"{len(names)} replaced" in conv.stdout, conv.stdout
+        for m in mics:
+            data = m.read_bytes()
+            assert data.startswith(MAGIC + b"# replaces ")
+            assert len(data) < sizes[m] / 10
+            got = _read_through_relion(relion_bin, d, m.relative_to(d), env)
+            assert np.array_equal(got, originals[m])
+        assert (d / "MC/virtual_conversion.log").exists()
+
+        # Virtual particles extracted from the real micrographs still verify and
+        # read back unchanged; so do the real stacks, and a fresh extraction
+        assert np.array_equal(self._read_particles(relion_bin, d, "Extract/virtual", env), expected)
+        assert np.array_equal(self._read_particles(relion_bin, d, "Extract/real", env), expected)
+
+        again = _run(relion_bin, d, ["relion_movie_averages_to_virtual", "--project", ".", "--job", "MC", "--j", "2", "--convert"], env)
+        assert f"{len(names)} already virtual" in again.stdout, again.stdout
+
+    def test_legacy_micrographs_are_kept(self, test_data_dir, relion_bin):
+        d = test_data_dir
+        names = _write_movies(d, n_movies=1)
+        _motioncorr(relion_bin, d, "MC", ["--dose_weighting"], mode=None)
+        mic = (d / "MC" / Path(names[0]).with_suffix("")).with_suffix(".mrc")
+        before = mic.read_bytes()
+        r = _run(relion_bin, d, ["relion_movie_averages_to_virtual", "--project", ".", "--job", "MC", "--convert"], _env())
+        assert "1 legacy" in r.stdout, r.stdout
+        assert mic.read_bytes() == before

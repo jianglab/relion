@@ -24,6 +24,7 @@
 #include <src/image.h>
 #include <src/metadata_table.h>
 #include <src/virtual_particles.h>
+#include <src/pipeline_jobs.h>
 #include <src/float16.h>
 
 #include <dirent.h>
@@ -81,23 +82,72 @@ void findExtractStars(const std::string& dir, std::vector<std::string>& out, int
 	std::sort(out.begin(), out.end());
 }
 
-/* The recipe an Extract job used, from the last relion_preprocess command in
- * its note.txt. Returns false, with a reason, for jobs the virtual reader
- * cannot reproduce. */
+/* The relion_preprocess command a job ran: the last one in its note.txt (the
+ * GUI appends every run there), else rebuilt from its job.star the way the GUI
+ * builds it (projects where note.txt was deleted or never written). */
+bool extractionCommand(const std::string& job, std::string& cmd, std::string& source, std::string& why)
+{
+	cmd.clear();
+	std::ifstream f((job + "/note.txt").c_str());
+	if (f)
+	{
+		std::string line;
+		while (std::getline(f, line))
+			if (line.find("relion_preprocess") != std::string::npos) cmd = line;
+		source = "note.txt";
+		if (!cmd.empty()) return true;
+	}
+	if (!exists(job + "/job.star"))
+	{
+		why = f ? "no relion_preprocess command in note.txt, and no job.star"
+		        : "neither note.txt nor job.star records how the job was run";
+		return false;
+	}
+	try
+	{
+		RelionJob rj;
+		bool is_continue = false;
+		if (!rj.read(job + "/", is_continue, true) || rj.type != PROC_EXTRACT)
+		{
+			why = "job.star is not an Extract job's";
+			return false;
+		}
+		const size_t at = job.rfind("job");
+		const int counter = (at == std::string::npos) ? 1 : atoi(job.c_str() + at + 3);
+		std::string outputname, final_command, err;
+		std::vector<std::string> commands;
+		if (!rj.getCommands(outputname, commands, final_command, false, counter, err))
+		{
+			why = "job.star: " + err.substr(0, err.find('\n'));
+			return false;
+		}
+		for (size_t i = 0; i < commands.size(); i++)
+			if (commands[i].find("relion_preprocess") != std::string::npos) cmd = commands[i];
+	}
+	catch (RelionError& e)
+	{
+		why = "job.star: " + e.msg.substr(0, e.msg.find('\n'));
+		return false;
+	}
+	source = "job.star";
+	if (cmd.empty()) { why = "no relion_preprocess command from job.star"; return false; }
+	return true;
+}
+
+/* The recipe an Extract job used, from its command line (extractionCommand()).
+ * Returns false, with a reason, for jobs the virtual reader cannot reproduce. */
 /// What a job's command line says beyond the per-particle recipe.
 struct JobInfo {
 	std::string mics_star;           ///< --i: the micrographs STAR (for pixel sizes)
+	std::string source;              ///< where the command line came from
 	double helical_diameter = -1.;   ///< --helical_outer_diameter, in Angstrom
 };
 
 bool recipeFromNote(const std::string& job, vparticles::Recipe& r, JobInfo& info, std::string& why)
 {
-	std::ifstream f((job + "/note.txt").c_str());
-	if (!f) { why = "no note.txt"; return false; }
-	std::string line, cmd;
-	while (std::getline(f, line))
-		if (line.find("relion_preprocess") != std::string::npos) cmd = line;
-	if (cmd.empty()) { why = "no relion_preprocess command in note.txt"; return false; }
+	std::string cmd, source;
+	if (!extractionCommand(job, cmd, source, why)) return false;
+	info.source = source;
 
 	std::vector<std::string> t;
 	{
@@ -136,8 +186,8 @@ bool recipeFromNote(const std::string& job, vparticles::Recipe& r, JobInfo& info
 	r.helical = opt.count("--helix") > 0;
 	info.mics_star = opt.count("--i") ? opt["--i"] : "";
 	info.helical_diameter = opt.count("--helical_outer_diameter") ? textToFloat(opt["--helical_outer_diameter"]) : -1.;
-	if (r.extract_size <= 0) { why = "no --extract_size in note.txt"; return false; }
-	if (r.helical && info.mics_star.empty()) { why = "helical job without --i in note.txt"; return false; }
+	if (r.extract_size <= 0) { why = "no --extract_size in " + source; return false; }
+	if (r.helical && info.mics_star.empty()) { why = "helical job without --i in " + source; return false; }
 	if (r.white_dust > 0 || r.black_dust > 0)
 	{
 		why = "uses dust removal, which fills dust pixels with random values that cannot be reproduced";
@@ -258,7 +308,8 @@ public:
 			std::string job = jobs[j];
 			while (job.size() > 1 && job[job.size() - 1] == '/') job.erase(job.size() - 1);
 			long long before = 0, after = 0;
-			processJob(job, before, after);
+			std::string skipped = processJob(job, before, after);
+			if (!skipped.empty()) skipped_jobs.push_back(job + ": " + skipped);
 			total_before += before;
 			total_after += after;
 		}
@@ -268,6 +319,13 @@ public:
 		          << (do_convert ? "replaced by " : "can be replaced by ") << humanBytes(total_after)
 		          << " of descriptors, " << (do_convert ? "saving " : "which would save ")
 		          << humanBytes(total_saved) << "." << std::endl;
+		if (!skipped_jobs.empty())
+		{
+			std::cout << " WARNING: " << skipped_jobs.size() << " of " << jobs.size()
+			          << " Extract job(s) were skipped, and their stacks kept:" << std::endl;
+			for (size_t i = 0; i < skipped_jobs.size(); i++)
+				std::cout << "   " << skipped_jobs[i] << std::endl;
+		}
 		if (!do_convert && total_saved > 0)
 			std::cout << " Run again with --convert to replace the verified stacks." << std::endl;
 		if (!private_tmp.empty())
@@ -275,6 +333,7 @@ public:
 	}
 
 private:
+	std::vector<std::string> skipped_jobs;
 	std::string private_tmp;   // dry run: descriptors are written here, never in the project
 
 	/* Where a stack's candidate descriptor goes. Converting needs it beside the
@@ -323,7 +382,8 @@ private:
 		return true;
 	}
 
-	void processJob(const std::string& job, long long& saved_before, long long& saved_after)
+	/// Returns why the whole job was skipped, or "" if it was processed
+	std::string processJob(const std::string& job, long long& saved_before, long long& saved_after)
 	{
 		std::cout << std::endl << " " << job << "/" << std::endl;
 		vparticles::Recipe recipe;
@@ -333,10 +393,10 @@ private:
 		    (recipe.helical && !readMicrographPixelSizes(info.mics_star, why)))
 		{
 			std::cout << "   skipped: " << why << std::endl;
-			return;
+			return why;
 		}
 		helical_diameter = info.helical_diameter;
-		std::cout << "   recipe: " << describe(recipe) << std::endl;
+		std::cout << "   recipe (from " << info.source << "): " << describe(recipe) << std::endl;
 
 		// Each stack's particle list: from the per-micrograph *_extract.star
 		// files when they survive, else from the job's particles.star (many
@@ -365,7 +425,7 @@ private:
 		else
 		{
 			std::cout << "   skipped: neither *_extract.star files nor particles.star" << std::endl;
-			return;
+			return "neither *_extract.star files nor particles.star";
 		}
 		if (verb > 0) std::cout << "   particle lists from " << source << std::endl;
 		std::vector<std::string> names;
@@ -422,6 +482,7 @@ private:
 			std::cout << "     skipped " << it->second << ": " << it->first << std::endl;
 		std::cout << "   " << humanBytes(saved_before) << " of stacks -> " << humanBytes(saved_after)
 		          << " of descriptors" << (do_convert ? " (replaced)" : " (if converted)") << std::endl;
+		return "";
 	}
 
 	/// One particle as the extraction saw it.

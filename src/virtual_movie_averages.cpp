@@ -152,19 +152,33 @@ bool isVirtualMovieAverageFile(const std::string& path)
 	return yes;
 }
 
-void writeDescriptor(const std::string& fn_mic, const std::string& fn_record)
+const char REPLACES_TAG[] = "# replaces ";
+
+void writeDescriptor(const std::string& fn_mic, const std::string& fn_record, const std::string& replaces)
 {
+	if (replaces.find('\n') != std::string::npos) REPORT_ERROR("writeDescriptor: bad checksum");
 	const std::string record = readWhole(fn_record);
 	std::ostringstream tmp;
 	tmp << fn_mic << ".tmp." << getpid();
 	{
 		std::ofstream out(tmp.str().c_str(), std::ios::binary | std::ios::trunc);
 		if (!out) REPORT_ERROR("Cannot write " + tmp.str() + ": " + std::string(strerror(errno)));
-		out << DESCRIPTOR_MAGIC << record;
+		out << DESCRIPTOR_MAGIC;
+		if (!replaces.empty()) out << REPLACES_TAG << replaces << "\n";
+		out << record;
 		if (!out) REPORT_ERROR("Cannot write " + tmp.str());
 	}
 	if (rename(tmp.str().c_str(), fn_mic.c_str()) != 0)
 		REPORT_ERROR("Cannot rename " + tmp.str() + " to " + fn_mic + ": " + std::string(strerror(errno)));
+}
+
+std::string replacedChecksum(const std::string& fn)
+{
+	std::ifstream in(fn.c_str());
+	std::string magic, line;
+	if (!std::getline(in, magic) || magic + "\n" != DESCRIPTOR_MAGIC) return "";
+	if (!std::getline(in, line) || line.compare(0, strlen(REPLACES_TAG), REPLACES_TAG) != 0) return "";
+	return line.substr(strlen(REPLACES_TAG));
 }
 
 Header readHeader(const std::string& fn)

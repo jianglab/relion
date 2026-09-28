@@ -20,6 +20,7 @@
 
 #include "gui_projects.h"
 #include "src/remove_intermediates.h"
+#include "gui_virtualize.h"
 #include <fstream>
 #include <sstream>
 #include <ctime>
@@ -892,6 +893,13 @@ ManageProjectsWindow::ManageProjectsWindow(int w, int h, const char *title)
     cleanup_btn->deactivate();
     bx += 110 + pad;
 
+    virtualize_btn = new Fl_Button(bx, btn_y, 110, bh, " Virtualize ");
+    virtualize_btn->callback(cb_virtualize, this);
+    virtualize_btn->tooltip("Replace particle stacks and movie averages that RELION can recompute bit for bit "
+                            "by small descriptors (dry run first); one project at a time");
+    virtualize_btn->deactivate();
+    bx += 110 + pad;
+
     Fl_Button *close_btn = new Fl_Button(w - pad - 90, btn_y, 90, bh, " Close ");
     close_btn->callback(cb_close, this);
 
@@ -962,6 +970,11 @@ void ManageProjectsWindow::cb_cleanup(Fl_Widget *, void *v)
     ((ManageProjectsWindow *)v)->cleanupSelected();
 }
 
+void ManageProjectsWindow::cb_virtualize(Fl_Widget *, void *v)
+{
+    ((ManageProjectsWindow *)v)->virtualizeSelected();
+}
+
 void ManageProjectsWindow::cb_name_input(Fl_Widget *, void *v)
 {
     ((ManageProjectsWindow *)v)->renameSelected();
@@ -1025,6 +1038,12 @@ void ManageProjectsWindow::updateButtonStates()
         cleanup_btn->activate();
     else
         cleanup_btn->deactivate();
+
+    // Converting is long and runs in the background: one project at a time
+    if (selected_count == 1)
+        virtualize_btn->activate();
+    else
+        virtualize_btn->deactivate();
 }
 
 void ManageProjectsWindow::sortByColumn(int col, bool asc)
@@ -1089,6 +1108,21 @@ void ManageProjectsWindow::cleanupSelected()
     // The sizes in the table are now wrong, so re-read them either way
     runIntermediateCleanupDialog(paths);
     refresh();
+}
+
+void ManageProjectsWindow::virtualizeSelected()
+{
+    for (int r = 0; r < table->rows(); r++)
+    {
+        if (!table->row_selected(r) || r >= (int)display_projects_.size()) continue;
+        if (!display_projects_[r].exists())
+        {
+            fl_alert("The project directory %s does not exist.", display_projects_[r].path.c_str());
+            return;
+        }
+        runVirtualizeDialog(display_projects_[r].path, true);   // this window is modal
+        return;
+    }
 }
 
 void ManageProjectsWindow::removeSelected()

@@ -365,6 +365,8 @@ private:
     inline void cb_manage_projects_i();
     static void cb_remove_intermediates(Fl_Widget*, void*);
     inline void cb_remove_intermediates_i();
+    static void cb_virtualize(Fl_Widget*, void*);
+    inline void cb_virtualize_i();
     static void cb_import_project(Fl_Widget*, void*);
     inline void cb_import_project_i();
     static void cb_import_cryosparc_project(Fl_Widget*, void*);

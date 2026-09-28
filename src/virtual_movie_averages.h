@@ -46,7 +46,14 @@ bool isVirtualMovieAverageFile(int fd);
 bool isVirtualMovieAverageFile(const std::string& path);
 
 /// Write the descriptor for micrograph `fn_mic` from its motion record (atomic).
-void writeDescriptor(const std::string& fn_mic, const std::string& fn_record);
+/// `replaces` is the identity (vparticles::micrographChecksum) of a real
+/// micrograph file this descriptor replaces, after it was verified to hold the
+/// same pixels: virtual particles extracted from that file keep verifying.
+void writeDescriptor(const std::string& fn_mic, const std::string& fn_record,
+                     const std::string& replaces = "");
+
+/// The identity recorded by writeDescriptor(..., replaces), or "".
+std::string replacedChecksum(const std::string& fn_descriptor);
 
 /// What a header-only read needs; no movie is touched.
 struct Header {

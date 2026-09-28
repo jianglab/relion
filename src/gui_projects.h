@@ -121,12 +121,14 @@ private:
     Fl_Button *rename_btn;
     Fl_Button *refresh_btn;
     Fl_Button *cleanup_btn;
+    Fl_Button *virtualize_btn;
 
     static void cb_open(Fl_Widget *, void *v);
     static void cb_remove(Fl_Widget *, void *v);
     static void cb_rename(Fl_Widget *, void *v);
     static void cb_refresh(Fl_Widget *, void *v);
     static void cb_cleanup(Fl_Widget *, void *v);
+    static void cb_virtualize(Fl_Widget *, void *v);
     static void cb_close(Fl_Widget *, void *v);
     static void cb_name_input(Fl_Widget *, void *v);
 
@@ -134,6 +136,7 @@ private:
     void renameSelected();
     void refreshSelected();
     void cleanupSelected();
+    void virtualizeSelected();
 
     /* Measuring a project means du over the whole tree, which on a project
      * with many jobs takes seconds. Doing that for every row before the window

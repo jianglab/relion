@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 
+#include "src/gui_virtualize.h"
 #include "src/gui_mainwindow.h"
 #include "src/gui_cache.h"
 #include "src/gui_projects.h"
@@ -416,6 +417,7 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
   		menubar->add("Project/Manage projects...", 0, cb_manage_projects, this);
   		menubar->add("Project/Manage cache...", 0, cb_cache_management, this);
   		menubar->add("Project/Remove intermediate files...", 0, cb_remove_intermediates, this);
+  		menubar->add("Project/Virtualize movie averages and particles...", 0, cb_virtualize, this);
  	}
 	project_manager.load();
 	rebuildRecentProjectsInMenu();
@@ -3140,6 +3142,24 @@ void GuiMainWindow::cb_remove_intermediates_i()
 
 	std::vector<std::string> paths(1, std::string(cwd));
 	runIntermediateCleanupDialog(paths);
+}
+
+void GuiMainWindow::cb_virtualize(Fl_Widget* o, void* v)
+{
+	GuiMainWindow* T = (GuiMainWindow*)v;
+	T->cb_virtualize_i();
+}
+
+void GuiMainWindow::cb_virtualize_i()
+{
+	// The GUI always runs from the project directory
+	char cwd[4096];
+	if (getcwd(cwd, sizeof(cwd)) == NULL)
+	{
+		fl_alert("Cannot determine the current project directory.");
+		return;
+	}
+	runVirtualizeDialog(cwd);
 }
 
 void GuiMainWindow::cb_import_project(Fl_Widget* o, void* v)

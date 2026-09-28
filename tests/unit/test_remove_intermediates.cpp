@@ -320,3 +320,77 @@ TEST_CASE("human-readable sizes", "[cleanup]")
 	CHECK(relion_cleanup::humanSize(1536) == "1.5 KB");
 	CHECK(relion_cleanup::humanSize(3LL * 1024 * 1024 * 1024) == "3.0 GB");
 }
+
+// ---------------------------------------------------------------------------
+// Project > Virtualize movie averages and particles
+// ---------------------------------------------------------------------------
+
+#include "src/virtualize_project.h"
+
+TEST_CASE("Virtualize: particles are converted before movie averages", "[cleanup][virtualize]")
+{
+	relion_virtualize::Options o;
+	o.threads = 4;
+	std::vector<std::string> c = relion_virtualize::commands(o, ".");
+	REQUIRE(c.size() == 2);
+	// Verifying a stack reads its micrograph: do it while micrographs are real
+	CHECK(c[0].find("relion_stacks_to_virtual ") == 0);
+	CHECK(c[1].find("relion_movie_averages_to_virtual ") == 0);
+	for (size_t i = 0; i < c.size(); i++)
+	{
+		CHECK(c[i].find(" --j 4") != std::string::npos);
+		CHECK(c[i].find("--convert") == std::string::npos);   // dry run by default
+	}
+	CHECK(c[0].find("--accept_float16_fix") == std::string::npos);
+
+	o.convert = true;
+	o.accept_float16_fix = true;
+	c = relion_virtualize::commands(o, ".");
+	CHECK(c[0].find(" --convert") != std::string::npos);
+	CHECK(c[1].find(" --convert") != std::string::npos);
+	CHECK(c[0].find(" --accept_float16_fix") != std::string::npos);
+	CHECK(c[1].find("float16") == std::string::npos);   // not an option of the micrograph converter
+
+	o.particles = false;
+	c = relion_virtualize::commands(o, ".");
+	REQUIRE(c.size() == 1);
+	CHECK(c[0].find("relion_movie_averages_to_virtual ") == 0);
+	o.movie_averages = false;
+	CHECK(relion_virtualize::commands(o, ".").empty());
+}
+
+TEST_CASE("Virtualize: the script runs every step and survives awkward paths", "[cleanup][virtualize]")
+{
+	relion_virtualize::Options o;
+	const std::string project = "/data/it's a project";
+	const std::string s = relion_virtualize::script(o, project);
+	CHECK(s.find("--project '/data/it'\\''s a project'") != std::string::npos);
+	CHECK(s.find("[exit $?] relion_stacks_to_virtual") != std::string::npos);
+	CHECK(s.find("[exit $?] relion_movie_averages_to_virtual") != std::string::npos);
+	CHECK(s.rfind("=== finished ===") != std::string::npos);
+
+	// And the shell really parses it: echo stands in for the programs
+	std::string probe = s;
+	for (const char* p : {"relion_stacks_to_virtual", "relion_movie_averages_to_virtual"})
+	{
+		const std::string prog(p);
+		size_t at;
+		while ((at = probe.find("; " + prog + " --project")) != std::string::npos)
+			probe.replace(at, prog.size() + 2, "; echo ARGS " + prog);
+	}
+	char tmpl[] = "/tmp/virtualize_probe_XXXXXX";
+	const int fd = mkstemp(tmpl);
+	REQUIRE(fd >= 0);
+	REQUIRE(write(fd, probe.c_str(), probe.size()) == (ssize_t)probe.size());
+	close(fd);
+	FILE* p = popen((std::string("sh ") + tmpl).c_str(), "r");
+	REQUIRE(p != NULL);
+	std::string out;
+	char buf[512];
+	while (fgets(buf, sizeof(buf), p)) out += buf;
+	pclose(p);
+	unlink(tmpl);
+	CHECK(out.find("ARGS relion_stacks_to_virtual --project /data/it's a project --j 8") != std::string::npos);
+	CHECK(out.find("[exit 0] relion_movie_averages_to_virtual") != std::string::npos);
+	CHECK(out.find("=== finished ===") != std::string::npos);
+}
