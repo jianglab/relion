@@ -168,6 +168,67 @@ TEST_CASE("Extract: virtual-particles checkbox emits a flag either way",
 	REQUIRE(command.find(" --no_virtual ") != std::string::npos);
 }
 
+// relion_refine deletes old iteration files unless told to keep them; every
+// refinement job must say which, so the job does what its GUI box shows even
+// when RELION_KEEP_ALL_ITERATIONS changes relion_refine's own default.
+static void setUpRefineJob(RelionJob &job, int type)
+{
+	job.clear();
+	job.initialise(type);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	if (job.joboptions.find("fn_ref") != job.joboptions.end())
+		job.joboptions["fn_ref"].setString("ref.mrc");
+	if (job.joboptions.find("do_grad") != job.joboptions.end())
+		job.joboptions["do_grad"].setString("No");
+	if (job.joboptions.find("do_em") != job.joboptions.end())
+		job.joboptions["do_em"].setString("Yes");
+	job.joboptions["nr_mpi"].setString(type == PROC_3DAUTO ? "3" : "1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+}
+
+TEST_CASE("Refinement jobs: keep-all-iterations emits a flag either way",
+          "[pipeline][keep_iterations]")
+{
+	unsetenv("RELION_KEEP_ALL_ITERATIONS");
+	const int types[] = {PROC_2DCLASS, PROC_INIMODEL, PROC_3DCLASS, PROC_3DAUTO};
+	for (int t : types)
+	{
+		INFO("job type " << t);
+		RelionJob job;
+		setUpRefineJob(job, t);
+		REQUIRE(job.joboptions.find("keep_all_iter") != job.joboptions.end());
+		// Pruning old iterations is the default
+		REQUIRE_FALSE(job.joboptions["keep_all_iter"].getBoolean());
+
+		std::string command;
+		REQUIRE(generateCommand(job, command));
+		REQUIRE(command.find(" --dont_keep_all_iterations") != std::string::npos);
+		REQUIRE(command.find(" --keep_all_iterations") == std::string::npos);
+
+		job.joboptions["keep_all_iter"].setString("Yes");
+		command.clear();
+		REQUIRE(generateCommand(job, command));
+		REQUIRE(command.find(" --keep_all_iterations") != std::string::npos);
+		REQUIRE(command.find(" --dont_keep_all_iterations") == std::string::npos);
+	}
+}
+
+TEST_CASE("Refinement jobs: RELION_KEEP_ALL_ITERATIONS sets the GUI default",
+          "[pipeline][keep_iterations]")
+{
+	setenv("RELION_KEEP_ALL_ITERATIONS", "1", 1);
+	RelionJob job;
+	setUpRefineJob(job, PROC_3DCLASS);
+	REQUIRE(job.joboptions["keep_all_iter"].getBoolean());
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --keep_all_iterations") != std::string::npos);
+	unsetenv("RELION_KEEP_ALL_ITERATIONS");
+}
+
 static bool generateCommands(RelionJob &job, std::vector<std::string> &commands,
 		std::string &final_command, std::string &error_message,
 		bool do_makedir = false, std::string outputname = "")

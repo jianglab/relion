@@ -1362,6 +1362,7 @@ void JobWindow::initialiseClass2DConsensusWindow()
 	place("cache_copy_threads");
 	group5->end();
 	place("do_combine_thru_disc");
+	place("keep_all_iter");
 	current_y += STEPY/2;
 	group6 = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group6->end();
@@ -1536,6 +1537,7 @@ void JobWindow::initialiseClass2DWindow()
 	place("cache_copy_threads");
 	group5->end();
 	place("do_combine_thru_disc");
+	place("keep_all_iter");
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -1632,6 +1634,7 @@ void JobWindow::initialiseInimodelWindow()
 	place("cache_copy_threads");
 	group5->end();
 	place("do_combine_thru_disc");
+	place("keep_all_iter");
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -1860,6 +1863,7 @@ void JobWindow::initialiseClass3DWindow()
 	place("cache_copy_threads");
 	group7->end();
 	place("do_combine_thru_disc");
+	place("keep_all_iter");
 	// Add a little spacer
 	current_y += STEPY/2;
 
@@ -2041,6 +2045,7 @@ void JobWindow::initialiseAutorefineWindow()
 	place("cache_copy_threads");
 	group4->end();
 	place("do_combine_thru_disc");
+	place("keep_all_iter");
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -2140,6 +2145,7 @@ void JobWindow::initialiseMultiBodyWindow()
 	place("cache_copy_threads");
 	group7->end();
 	place("do_combine_thru_disc");
+	place("keep_all_iter");
 
 	// Add a little spacer
 	current_y += STEPY/2;

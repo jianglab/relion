@@ -4536,6 +4536,14 @@ void MlOptimiserMpi::iterate()
 			MlOptimiser::write(DONT_WRITE_SAMPLING, DO_WRITE_DATA, DONT_WRITE_OPTIMISER, DONT_WRITE_MODEL, node->rank);
 		}
 
+		// Every rank has written its part of this iteration: the older ones can go
+		if (!keep_all_iterations)
+		{
+			MPI_Barrier(MPI_COMM_WORLD);
+			if (node->isLeader())
+				pruneOldIterations(iter);
+		}
+
 #ifdef TIMING
 		timer.toc(TIMING_ITER_WRITE);
 #endif

@@ -611,6 +611,22 @@ public:
 	/* Flag to align all classes to the largest class (for Class3D) */
 	bool do_align_classes;
 
+	// Iteration files (<fn_out>_itNNN_*): by default each iteration's files are
+	// deleted once the next iteration has been written in full, keeping only
+	// the last iteration, plus it000 when the run started from an initial
+	// reference (Class3D, Refine3D, MultiBody). --keep_all_iterations, or
+	// RELION_KEEP_ALL_ITERATIONS=1 as the default, keeps them all.
+	bool keep_all_iterations = false;
+	bool keep_first_iteration = true;
+
+	// --keep_all_iterations / --dont_keep_all_iterations, over the environment
+	// default; parsed the same way in both parse paths
+	void parseKeepAllIterations();
+
+	// Delete the files of iterations before `iter` (except it000 when
+	// keep_first_iteration), once iteration `iter` has been written
+	void pruneOldIterations(int iter);
+
 	/* Flag to assign all segments from the same helical filament to the same class */
 	bool do_keep_full_filaments;
 

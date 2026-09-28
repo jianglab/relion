@@ -44,6 +44,8 @@
 #include <omp.h>
 #include "src/macros.h"
 #include "src/error.h"
+#include <dirent.h>
+#include <sys/stat.h>
 #include "src/ml_optimiser.h"
 #include "src/fixed_class_initialisation.h"
 #include "src/class2d_consensus_metadata.h"
@@ -184,6 +186,11 @@ static std::string getFinufftCacheBudgetDefault()
 
 void MlOptimiser::parseContinue(int argc, char **argv)
 {
+    // A continued run never deletes it000: whatever exists belongs to the
+    // original run, which already applied its own rule to it (MultiBody, which
+    // continues a Refine3D, keeps the refinement's)
+    keep_first_iteration = true;
+
 #ifdef DEBUG
     std::cerr << "Entering parseContinue" << std::endl;
 #endif
@@ -479,6 +486,9 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     // that --continue behaves the same as a fresh run.
     parser.checkOption("--align_classes", "Align all classes to the largest class at the last iteration (Class3D only; this is the default)");
     do_align_classes = !parser.checkOption("--dont_align_classes", "Do not align all classes to the largest class at the last iteration");
+    // Only the last iteration's files are kept by default (plus it000 of a run
+    // that started from an initial reference); see pruneOldIterations().
+    parseKeepAllIterations();
 
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
@@ -734,6 +744,9 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     // that --continue behaves the same as a fresh run.
     parser.checkOption("--align_classes", "Align all classes to the largest class at the last iteration (Class3D only; this is the default)");
     do_align_classes = !parser.checkOption("--dont_align_classes", "Do not align all classes to the largest class at the last iteration");
+    // Only the last iteration's files are kept by default (plus it000 of a run
+    // that started from an initial reference); see pruneOldIterations().
+    parseKeepAllIterations();
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
     // so existing job.star files and scripts keep working; --dont_align_halves is
@@ -854,6 +867,10 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     }
     do_skip_align = parser.checkOption("--skip_align", "Skip orientational assignment (only classify)?");
     do_fix_classes = parser.checkOption("--fix_classes", "Keep every particle in its input class while refining orientations and translations?");
+    // A run from an initial reference keeps it000, the reference as prepared:
+    // a --ref that is not a de novo model, or the class averages of the input
+    // class assignments (--fix_classes, as consensus Class2D runs)
+    keep_first_iteration = (fn_ref != "None" && !is_3d_model) || do_fix_classes;
     do_skip_rotate = parser.checkOption("--skip_rotate", "Skip rotational assignment (only translate and classify)?");
     do_bimodal_psi = parser.checkOption("--bimodal_psi", "Do bimodal searches of psi angle?"); // Oct07,2015 - Shaoda, bimodal psi
     do_skip_maximization = false;
@@ -3714,6 +3731,7 @@ void MlOptimiser::iterate()
 #endif
         // Write output files
         write(DO_WRITE_SAMPLING, DO_WRITE_DATA, DO_WRITE_OPTIMISER, DO_WRITE_MODEL, 0);
+        pruneOldIterations(iter);
 
 #ifdef TIMING
         timer.toc(TIMING_ITER_WRITE);
@@ -11716,4 +11734,58 @@ void MlOptimiser::selfTranslateSubtomoStack2D(MultidimArray<RFLOAT> &img, const 
     shiftImageInFourierTransformWithTabSincos(Faux, FT, (RFLOAT)mymodel.ori_size, mymodel.ori_size, tab_sin, tab_cos, xshift, yshift);
     transformer.inverseFourierTransform(FT, img);
 
+}
+
+
+void MlOptimiser::parseKeepAllIterations()
+{
+    const char *env = getenv("RELION_KEEP_ALL_ITERATIONS");
+    std::string v = (env == NULL) ? "" : env;
+    for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+    keep_all_iterations = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+    if (parser.checkOption("--keep_all_iterations", "Keep the files of every iteration (default: only the last, plus it000 when starting from a reference; RELION_KEEP_ALL_ITERATIONS=1 makes keeping all the default)"))
+        keep_all_iterations = true;
+    if (parser.checkOption("--dont_keep_all_iterations", "Delete each iteration's files once the next has been written (the default, unless RELION_KEEP_ALL_ITERATIONS=1)"))
+        keep_all_iterations = false;
+}
+
+void MlOptimiser::pruneOldIterations(int iter)
+{
+    if (keep_all_iterations || iter <= 0) return;
+
+    // Only once this iteration really is on disk (gradient runs write only
+    // every few iterations, and write() returns early in between)
+    FileName fn_now;
+    fn_now.compose(fn_out + "_it", iter, "", 3);
+    if (!exists(fn_now + "_optimiser.star") && !exists(fn_now + "_data.star")) return;
+
+    const FileName dir = (fn_out.contains("/")) ? fn_out.beforeLastOf("/") : FileName(".");
+    const std::string base = (fn_out.contains("/")) ? fn_out.afterLastOf("/") : fn_out;
+    const std::string prefix = base + "_it";
+
+    DIR *d = opendir(dir.c_str());
+    if (d == NULL) return;
+    std::vector<std::string> doomed;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL)
+    {
+        const std::string name = e->d_name;
+        if (name.compare(0, prefix.size(), prefix) != 0) continue;
+        // <base>_itNNN followed by '_' or '.': an iteration file of this run
+        size_t k = prefix.size();
+        while (k < name.size() && isdigit((unsigned char)name[k])) k++;
+        if (k - prefix.size() < 3 || k >= name.size() || (name[k] != '_' && name[k] != '.')) continue;
+        const int it = textToInteger(name.substr(prefix.size(), k - prefix.size()));
+        if (it >= iter) continue;
+        if (it == 0 && keep_first_iteration) continue;
+        doomed.push_back(dir + "/" + name);
+    }
+    closedir(d);
+
+    for (size_t i = 0; i < doomed.size(); i++)
+    {
+        struct stat st;
+        if (lstat(doomed[i].c_str(), &st) == 0 && S_ISREG(st.st_mode))
+            unlink(doomed[i].c_str());
+    }
 }
