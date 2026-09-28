@@ -1,6 +1,6 @@
 # Virtual movie averages — `RELION_VIRTUAL_MOVIE_AVERAGES` (WIP)
 
-Branch `virtual_movie_averages_wip`, on top of `virtual_particles_wip`. Phase 5
+Builds on virtual particles (`virtual_particles.md`). Phase 5
 of `virtual_particles.md`: motion-corrected micrographs become an accelerator,
 computed from the movies, instead of data that must be kept. With virtual
 particles as well, nothing between the movies and the particle metadata has to

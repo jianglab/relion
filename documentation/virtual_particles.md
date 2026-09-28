@@ -273,8 +273,8 @@ kinds freely, since every name says what it is.
 
 ## Phases
 
-1. **Virtual stacks, reader, Extract option, cache** — implemented (branch
-   `virtual_particles_wip`). See "Status" below.
+1. **Virtual stacks, reader, Extract option, cache** — implemented. See
+   "Status" below.
 2. **Micrograph-major reading in `relion_refine`.** Order each rank's particles by
    micrograph within an iteration so cold reads stream micrographs rather than
    seeking. Open question to test: whether VDAM mini-batches drawn from whole
@@ -286,8 +286,8 @@ kinds freely, since every name says what it is.
 4. **Recipe extensions**: helical segments are done; CTF premultiplication /
    phase flip are open.
 5. **Regenerable micrographs: micrographs become an accelerator too.**
-   Implemented as virtual movie averages on `virtual_movie_averages_wip`
-   (`RELION_VIRTUAL_MOVIE_AVERAGES`): see `virtual_movie_averages.md`. A
+   Implemented as virtual movie averages (`RELION_VIRTUAL_MOVIE_AVERAGES`):
+   see `virtual_movie_averages.md`. A
    micrograph is derived from its movie and the motion-correction metadata
    RELION records per micrograph (global shifts and the local polynomial model,
    the same metadata the CryoSPARC importer writes). When a micrograph is
