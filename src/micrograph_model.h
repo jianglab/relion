@@ -40,7 +40,8 @@ public:
 	virtual void fit() = 0;
 
 	virtual void read(std::ifstream &fh, std::string block_name) = 0;
-	virtual void write(std::ostream &fh, std::string block_name) = 0;
+	// exact_doubles: every significant digit, so that a sum can be regenerated from it
+	virtual void write(std::ostream &fh, std::string block_name, bool exact_doubles = false) = 0;
 	virtual int getModelVersion() const = 0;
 
 	// Get motion at frame and (x, y);
@@ -63,7 +64,7 @@ public:
 	}
 
 	void read(std::ifstream &fh, std::string block_name);
-	void write(std::ostream &fh, std::string block_name);
+	void write(std::ostream &fh, std::string block_name, bool exact_doubles = false);
 
 	int getModelVersion() const {
 		return MOTION_MODEL_THIRD_ORDER_POLYNOMIAL;
@@ -85,6 +86,11 @@ public:
 	FileName fnDefect;
 
 	int first_frame; // First frame for local motion model. 1-indexed.
+
+	// How the motion-corrected sum was made (EMDL_MICROGRAPH_SUM_RECIPE), when it
+	// can be regenerated bit for bit from the movie and this record; empty for
+	// legacy sums. When set, every double in the record is written exactly.
+	std::string sum_recipe;
 	MotionModel *model;
 
 	// Local trajectories (not read from STAR files)
@@ -106,6 +112,10 @@ public:
 
 	// Write micrograph model from a STAR file
 	void write(FileName filename);
+
+	// Read a motion record whatever the file is called (a virtual movie
+	// average descriptor is a record under the micrograph's .mrc name)
+	void readRecord(FileName filename);
 
 	// Get gain reference file name
 	FileName getGainFilename() const;

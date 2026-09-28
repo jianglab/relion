@@ -34,6 +34,26 @@
 
 #include "src/multidim_array.h"
 
+/// Helpers shared by the caches of virtual data (particles, movie averages).
+namespace vcache {
+
+/// False for unset, "", "0", "no", "off", "false", "none".
+bool envTruthy(const char* v);
+
+/// mkdir -p
+void makeDirs(const std::string& path);
+
+/// Remove the least recently used entries (files ending in `suffix`, one level
+/// of shard directories below `dir`) until the cache is back under 90% of
+/// `limit_bytes`; dead writers' temporary files older than a day go too.
+void prune(const std::string& dir, long long limit_bytes, const std::string& suffix);
+
+/// Delete a directory tree without a shell and without following symlinks
+/// out of it. True if everything was removed.
+bool removeTree(const std::string& path);
+
+} // namespace vcache
+
 namespace vparticles {
 
 /// How particles are cut from a micrograph and processed: the plain 2D case of

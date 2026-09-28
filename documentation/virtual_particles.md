@@ -285,7 +285,9 @@ kinds freely, since every name says what it is.
    "Manage cache" is still open.
 4. **Recipe extensions**: helical segments are done; CTF premultiplication /
    phase flip are open.
-5. **Regenerable micrographs: micrographs become an accelerator too.** A
+5. **Regenerable micrographs: micrographs become an accelerator too.**
+   Implemented as virtual movie averages on `virtual_movie_averages_wip`
+   (`RELION_VIRTUAL_MOVIE_AVERAGES`): see `virtual_movie_averages.md`. A
    micrograph is derived from its movie and the motion-correction metadata
    RELION records per micrograph (global shifts and the local polynomial model,
    the same metadata the CryoSPARC importer writes). When a micrograph is

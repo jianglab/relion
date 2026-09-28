@@ -492,8 +492,8 @@ bool runIntermediateCleanupDialog(const std::vector<std::string> &project_paths)
     std::string cache_note;
     if (cache_files > 0)
         cache_note = "\nThis includes " + relion_cleanup::humanSize(cache_bytes) +
-                     " of virtual particle cache (Cache/virtual_particles/),\n"
-                     "which is rebuilt from the micrographs when next needed.\n";
+                     " of cache of virtual particles and movie averages (Cache/),\n"
+                     "which is rebuilt when next needed.\n";
 
     char msg[1536];
     snprintf(msg, sizeof(msg),

@@ -8,6 +8,7 @@
  ***************************************************************************/
 
 #include "src/virtual_particles.h"
+#include "src/virtual_movie_averages.h"
 
 #include "src/image.h"
 #include "src/metadata_table.h"
@@ -36,6 +37,99 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+
+
+namespace vcache {
+
+bool envTruthy(const char* v)
+{
+	if (v == NULL) return false;
+	std::string s(v);
+	for (size_t i = 0; i < s.size(); i++) s[i] = tolower(s[i]);
+	return !(s.empty() || s == "0" || s == "no" || s == "off" || s == "false" || s == "none");
+}
+
+void makeDirs(const std::string& path)
+{
+	std::string cur;
+	for (size_t i = 0; i < path.size(); i++)
+	{
+		cur += path[i];
+		if (path[i] == '/' || i + 1 == path.size()) mkdir(cur.c_str(), 0775);
+	}
+}
+
+/// Remove the least recently used entries (files ending in `suffix`, one level
+/// of shard directories down) until the cache is back under 90% of `limit`;
+/// dead writers' temporary files older than a day go too.
+void prune(const std::string& dir, long long limit, const std::string& suffix)
+{
+	struct Entry { time_t mtime; long long size; std::string path; };
+	std::vector<Entry> entries;
+	long long total = 0;
+	const time_t now = time(NULL);
+
+	DIR* top = opendir(dir.c_str());
+	if (top == NULL) return;
+	struct dirent* d;
+	while ((d = readdir(top)) != NULL)
+	{
+		if (d->d_name[0] == '.') continue;
+		const std::string sub = dir + "/" + d->d_name;
+		DIR* sd = opendir(sub.c_str());
+		if (sd == NULL) continue;
+		struct dirent* e;
+		while ((e = readdir(sd)) != NULL)
+		{
+			const std::string name = e->d_name;
+			const std::string path = sub + "/" + name;
+			struct stat st;
+			if (name[0] == '.' || stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+			if (name.find(".tmp.") != std::string::npos)
+			{
+				// A writer that died a day ago is not coming back for it
+				if (now - st.st_mtime > 86400) unlink(path.c_str());
+				continue;
+			}
+			if (name.size() < suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+			entries.push_back(Entry{st.st_mtime, (long long)st.st_size, path});
+			total += st.st_size;
+		}
+		closedir(sd);
+	}
+	closedir(top);
+
+	if (total <= limit) return;
+	std::sort(entries.begin(), entries.end(),
+	          [](const Entry& a, const Entry& b) { return a.mtime < b.mtime; });
+	const long long target = limit / 10 * 9;
+	for (size_t i = 0; i < entries.size() && total > target; i++)
+	{
+		// Another process may be removing the same file; either way it is gone
+		if (unlink(entries[i].path.c_str()) == 0 || errno == ENOENT) total -= entries[i].size;
+	}
+}
+
+// Delete a directory tree without a shell, so no path can be misparsed; never
+// follows symlinks out of the tree. True if everything was removed.
+bool removeTree(const std::string& path)
+{
+	struct stat st;
+	if (lstat(path.c_str(), &st) != 0) return errno == ENOENT;
+	if (!S_ISDIR(st.st_mode)) return unlink(path.c_str()) == 0 || errno == ENOENT;
+	bool ok = true;
+	DIR* d = opendir(path.c_str());
+	if (d == NULL) return false;
+	while (struct dirent* e = readdir(d))
+	{
+		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+		ok = removeTree(path + "/" + e->d_name) && ok;
+	}
+	closedir(d);
+	return (rmdir(path.c_str()) == 0 || errno == ENOENT) && ok;
+}
+
+} // namespace vcache
 
 namespace vparticles {
 
@@ -77,23 +171,8 @@ std::string exactString(double v)
 	return buf;
 }
 
-bool envTruthy(const char* v)
-{
-	if (v == NULL) return false;
-	std::string s(v);
-	for (size_t i = 0; i < s.size(); i++) s[i] = tolower(s[i]);
-	return !(s.empty() || s == "0" || s == "no" || s == "off" || s == "false" || s == "none");
-}
-
-void makeDirs(const std::string& path)
-{
-	std::string cur;
-	for (size_t i = 0; i < path.size(); i++)
-	{
-		cur += path[i];
-		if (path[i] == '/' || i + 1 == path.size()) mkdir(cur.c_str(), 0775);
-	}
-}
+using vcache::envTruthy;
+using vcache::makeDirs;
 
 // ---------------------------------------------------------------------------
 // Descriptors
@@ -264,15 +343,31 @@ std::shared_ptr<Micrograph> openMicrographUncached(const std::string& fn)
 	std::shared_ptr<Micrograph> m(new Micrograph());
 	m->fn = fn;
 
-	int fd = open(fn.c_str(), O_RDONLY);
+	// A virtual movie average is read from its cached real file (built from the
+	// movie if needed), or through Image when the cache is off
+	std::string path = fn;
+	if (vmovies::isVirtualMovieAverageFile(fn))
+	{
+		path = vmovies::materialise(fn);
+		if (path.empty())
+		{
+			m->img.reset(new Image<RFLOAT>());
+			m->img->read(fn);
+			m->nx = XSIZE((*m->img)());
+			m->ny = YSIZE((*m->img)());
+			return m;
+		}
+	}
+
+	int fd = open(path.c_str(), O_RDONLY);
 	if (fd < 0)
-		REPORT_ERROR("Cannot open micrograph " + fn + " to read virtual particles from it: "
+		REPORT_ERROR("Cannot open micrograph " + path + " to read virtual particles from it: "
 		             + std::string(strerror(errno)) + ". Virtual particles need their micrographs.");
 
 	int32_t h[256];
 	struct stat st;
 	bool mappable = (pread(fd, h, 1024, 0) == 1024) && (fstat(fd, &st) == 0);
-	const FileName ext = FileName(fn).getExtension();
+	const FileName ext = FileName(path).getExtension();
 	if (mappable)
 	{
 		const int32_t nx = h[0], ny = h[1], nz = h[2], mode = h[3], nsymbt = h[23];
@@ -536,50 +631,7 @@ void enforceCacheLimit(const std::string& dir, long long just_written)
 	if (before >= 0 && before + just_written < limit / 20) return;
 	g_written_since_scan = 0;
 
-	struct Entry { time_t mtime; long long size; std::string path; };
-	std::vector<Entry> entries;
-	long long total = 0;
-	const time_t now = time(NULL);
-
-	DIR* top = opendir(dir.c_str());
-	if (top == NULL) return;
-	struct dirent* d;
-	while ((d = readdir(top)) != NULL)
-	{
-		if (d->d_name[0] == '.') continue;
-		const std::string sub = dir + "/" + d->d_name;
-		DIR* sd = opendir(sub.c_str());
-		if (sd == NULL) continue;
-		struct dirent* e;
-		while ((e = readdir(sd)) != NULL)
-		{
-			const std::string name = e->d_name;
-			const std::string path = sub + "/" + name;
-			struct stat st;
-			if (name[0] == '.' || stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
-			if (name.find(".tmp.") != std::string::npos)
-			{
-				// A writer that died a day ago is not coming back for it
-				if (now - st.st_mtime > 86400) unlink(path.c_str());
-				continue;
-			}
-			if (name.size() < 4 || name.compare(name.size() - 4, 4, ".vpc") != 0) continue;
-			entries.push_back(Entry{st.st_mtime, (long long)st.st_size, path});
-			total += st.st_size;
-		}
-		closedir(sd);
-	}
-	closedir(top);
-
-	if (total <= limit) return;
-	std::sort(entries.begin(), entries.end(),
-	          [](const Entry& a, const Entry& b) { return a.mtime < b.mtime; });
-	const long long target = limit / 10 * 9;
-	for (size_t i = 0; i < entries.size() && total > target; i++)
-	{
-		// Another process may be removing the same file; either way it is gone
-		if (unlink(entries[i].path.c_str()) == 0 || errno == ENOENT) total -= entries[i].size;
-	}
+	vcache::prune(dir, limit, ".vpc");
 }
 
 void warnUnwritable(const std::string& dir, const std::string& why)
@@ -871,31 +923,12 @@ std::string cacheDirectory()
 	return PROJECT_CACHE_DIR;
 }
 
-// Delete a directory tree without a shell, so no path can be misparsed; never
-// follows symlinks out of the tree. True if everything was removed.
-static bool removeTree(const std::string& path)
-{
-	struct stat st;
-	if (lstat(path.c_str(), &st) != 0) return errno == ENOENT;
-	if (!S_ISDIR(st.st_mode)) return unlink(path.c_str()) == 0 || errno == ENOENT;
-	bool ok = true;
-	DIR* d = opendir(path.c_str());
-	if (d == NULL) return false;
-	while (struct dirent* e = readdir(d))
-	{
-		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-		ok = removeTree(path + "/" + e->d_name) && ok;
-	}
-	closedir(d);
-	return (rmdir(path.c_str()) == 0 || errno == ENOENT) && ok;
-}
-
 bool removeProjectCache(const std::string& project_dir)
 {
 	const std::string dir = project_dir + "/" + PROJECT_CACHE_DIR;
 	struct stat st;
 	if (lstat(dir.c_str(), &st) != 0) return false;
-	const bool ok = removeTree(dir);
+	const bool ok = vcache::removeTree(dir);
 	// Leave Cache/ itself only if something else lives there
 	rmdir((project_dir + "/Cache").c_str());
 	return ok;

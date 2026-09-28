@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "src/virtual_particles.h"
+#include "src/virtual_movie_averages.h"
 #include "src/pipeliner.h"
 #include <unistd.h>
 
@@ -1683,9 +1684,11 @@ bool PipeLine::cleanupAllJobs(bool do_harsh, std::string &error_message)
 		}
 	}
 
-	// The virtual particle cache holds nothing that cannot be recomputed from
-	// the micrographs, so either kind of project-wide clean-up can take it
+	// The caches of virtual particles and movie averages hold nothing that cannot
+	// be recomputed (from the micrographs, from the movies), so either kind of
+	// project-wide clean-up can take them
 	vparticles::removeProjectCache(".");
+	vmovies::removeProjectCache(".");
 
 	return true;
 }

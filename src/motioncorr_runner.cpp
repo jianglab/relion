@@ -18,6 +18,9 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include <omp.h>
+#include <cstdint>
+#include <map>
+#include <sstream>
 
 #include "src/motioncorr_runner.h"
 #ifdef _CUDA_ENABLED
@@ -32,6 +35,8 @@
 #include <src/jaz/single_particle/new_ft.h>
 #include "src/funcs.h"
 #include "src/renderEER.h"
+#include "src/virtual_movie_averages.h"
+#include "src/float16.h"
 
 //#define TIMING
 #ifdef TIMING
@@ -136,6 +141,15 @@ void MotioncorrRunner::read(int argc, char **argv, int rank)
 	early_binning = !parser.checkOption("--no_early_binning", "Disable --early_binning");
 	if (fabs(bin_factor - 1) < 0.01)
 		early_binning = false;
+
+	{
+		const vmovies::Mode m = vmovies::mode();
+		if (m != vmovies::OFF && !do_own)
+			REPORT_ERROR("RELION_VIRTUAL_MOVIE_AVERAGES needs RELION's own motion correction (--use_own): "
+			             "only its micrographs can be regenerated from the movies. Unset it to use MotionCor2.");
+		reproducible = (m != vmovies::OFF);
+		virtual_averages = (m == vmovies::VIRTUAL);
+	}
 
 	if ((!do_motioncor2 && !do_own) || (do_motioncor2 && do_own))
 		REPORT_ERROR("You have to choose either UCSF MotionCor2 or RELION's own implementation.");
@@ -913,12 +927,17 @@ void MotioncorrRunner::plotShifts(FileName fn_mic, Micrograph &mic)
 void MotioncorrRunner::saveModel(Micrograph &mic) {
 	mic.angpix = angpix;
 	mic.voltage = voltage;
-	mic.dose_per_frame = dose_per_frame;
+	// A reproducible record keeps the dose its sum was weighted with (a
+	// per-micrograph dose, when there is one)
+	if (mic.sum_recipe.empty())
+		mic.dose_per_frame = dose_per_frame;
 	mic.fnDefect = fn_defect;
 
 	FileName fn_avg = getOutputFileNames(mic.getMovieFilename());
 
 	mic.write(fn_avg.withoutExtension() + ".star");
+	if (virtual_averages && !mic.sum_recipe.empty())
+		vmovies::writeDescriptor(fn_avg, fn_avg.withoutExtension() + ".star");
 }
 
 void MotioncorrRunner::generateLogFilePDFAndWriteStarFiles()
@@ -1348,6 +1367,9 @@ bool MotioncorrRunner::executeOwnMotionCorrection(Micrograph &mic) {
 		const int NUM_MIN_OK = 6;
 		const int D_MAX = isEER ? 4 : 2;
 		const int PBUF_SIZE = 100;
+		if (reproducible)
+			fillBadPixelsReproducibly(Iframes, frames, bBad, D_MAX);
+		else
 		FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(bBad)
 		{
 			if (!DIRECT_A2D_ELEM(bBad, i, j)) continue;
@@ -1784,7 +1806,9 @@ bool MotioncorrRunner::executeOwnMotionCorrection(Micrograph &mic) {
 	}
 
 skip_fitting:
-	if (!do_dose_weighting || save_noDW) {
+	// A reproducible main output is made below; these legacy sums are then only
+	// the extra _noDW and odd/even files
+	if ((!do_dose_weighting && !reproducible) || save_noDW || (even_odd_split && !do_dose_weighting)) {
 		Iref().initZeros(Iframes[0]());
 		Iref_odd().initZeros(Iframes[0]());
 		Iref_even().initZeros(Iframes[0]());
@@ -1851,7 +1875,7 @@ skip_fitting:
 	}
 	
 	// Dose weighting
-	if (do_dose_weighting) {
+	if (do_dose_weighting && !reproducible) {
 		RCTIC(TIMING_DOSE_WEIGHTING);
 		if (std::abs(voltage - 300) > 2 && std::abs(voltage - 200) > 2 && std::abs(voltage - 100) > 2) {
 			REPORT_ERROR("Sorry, dose weighting is supported only for 300, 200 or 100 kV");
@@ -1913,6 +1937,49 @@ skip_fitting:
 
 	// Set the start frame for the local motion model.
 	mic.first_frame = frames[0] + 1; // NOTE that this is 1-indexed.
+
+	if (reproducible)
+	{
+		// The micrograph is, by definition, what sumFromRecord() makes of the movie
+		// and the record saved next to it; regenerating it later runs the same code
+		// on the same (exactly written) numbers.
+		Fframes.clear(); Iframes.clear(); Irefframes.clear();   // the sum re-reads the movie
+
+		double dose_used = mic.getDosePerFrame();
+		if (dose_used == -1) dose_used = dose_per_frame;
+		mic.setDosePerFrame(dose_used);
+		mic.angpix = angpix;
+		mic.voltage = voltage;
+		mic.fnDefect = fn_defect;
+
+		SumRecipe recipe;
+		recipe.dose_weighted = do_dose_weighting;
+		recipe.early_binning = early_binning;
+		recipe.fix_defects = !skip_defect;
+		recipe.float16 = write_float16;
+		// nx, ny are already binned with early binning
+		const bool late_bin = !early_binning && std::fabs(bin_factor - 1) >= 0.01;
+		recipe.nx = late_bin ? (int)(nx / bin_factor) : nx;
+		recipe.ny = late_bin ? (int)(ny / bin_factor) : ny;
+		if (recipe.nx % 2 != 0 || recipe.ny % 2 != 0)
+			REPORT_ERROR("The dimensions of the image after binning must be even");
+		mic.sum_recipe = recipe.str();
+
+		if (virtual_averages)
+		{
+			// saveModel() writes the descriptor next to the record
+			logfile << "Virtual movie average: " << fn_avg << " will be a descriptor, computed from the movie when read" << std::endl;
+		}
+		else
+		{
+			logfile << "Summing frames from the recorded motion (reproducible): ";
+			sumFromRecord(mic, recipe, Iref);
+			logfile << " done" << std::endl;
+			Iref.write(fn_avg, -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
+			logfile << "Written " << (do_dose_weighting ? "aligned and dose-weighted" : "aligned") << " sum to " << fn_avg
+			        << "; it can be regenerated from the movie and " << fn_avg.withoutExtension() + ".star" << std::endl;
+		}
+	}
 
 	return true;
 }
@@ -2686,4 +2753,309 @@ void MotioncorrRunner::fillDefectMask(MultidimArray<bool> &bBad, FileName fn_def
 				DIRECT_MULTIDIM_ELEM(bBad, n) = true;
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Reproducible sums (RELION_VIRTUAL_MOVIE_AVERAGES)
+
+std::string MotioncorrRunner::SumRecipe::str() const
+{
+	std::ostringstream o;
+	o << "version=" << version << " dose_weighted=" << dose_weighted
+	  << " early_binning=" << early_binning << " fix_defects=" << fix_defects
+	  << " float16=" << float16 << " nx=" << nx << " ny=" << ny;
+	return o.str();
+}
+
+bool MotioncorrRunner::SumRecipe::parse(const std::string &text, SumRecipe &out)
+{
+	std::map<std::string, int> kv;
+	std::istringstream in(text);
+	std::string tok;
+	while (in >> tok)
+	{
+		const size_t eq = tok.find('=');
+		if (eq == std::string::npos) return false;
+		kv[tok.substr(0, eq)] = textToInteger(tok.substr(eq + 1));
+	}
+	if (kv.count("version") == 0 || kv["version"] != 1) return false;
+	const char* keys[] = {"dose_weighted", "early_binning", "fix_defects", "float16", "nx", "ny"};
+	for (int k = 0; k < 6; k++)
+		if (kv.count(keys[k]) == 0) return false;
+	out.version = 1;
+	out.dose_weighted = kv["dose_weighted"];
+	out.early_binning = kv["early_binning"];
+	out.fix_defects = kv["fix_defects"];
+	out.float16 = kv["float16"];
+	out.nx = kv["nx"];
+	out.ny = kv["ny"];
+	return out.nx > 0 && out.ny > 0;
+}
+
+// splitmix64: a fixed, well-mixed hash, the same on every platform and run
+static inline uint64_t reproducibleHash(uint64_t x)
+{
+	x += 0x9E3779B97F4A7C15ULL;
+	x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+	x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+	return x ^ (x >> 31);
+}
+
+void MotioncorrRunner::fillBadPixelsReproducibly(std::vector<Image<float> > &Iframes, const std::vector<int> &frames,
+                                                 const MultidimArray<bool> &bBad, int d_max)
+{
+	const int n_frames = Iframes.size();
+	const int ny = YSIZE(bBad), nx = XSIZE(bBad);
+	const int NUM_MIN_OK = 6;
+
+	std::vector<std::pair<int, int> > bad;
+	FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(bBad)
+		if (DIRECT_A2D_ELEM(bBad, i, j)) bad.push_back(std::make_pair((int)i, (int)j));
+	if (bad.empty()) return;
+
+	// Only bad pixels are written and only good ones read, so the fill does not
+	// depend on the order pixels or frames are visited in.
+	#pragma omp parallel for num_threads(n_threads)
+	for (int iframe = 0; iframe < n_frames; iframe++)
+	{
+		MultidimArray<float> &I = Iframes[iframe]();
+		// Frame statistics for pixels without enough good neighbours; summed
+		// sequentially in double, so independent of the thread count
+		bool have_stats = false;
+		double frame_mean = 0, frame_std = 0;
+		for (size_t b = 0; b < bad.size(); b++)
+		{
+			const int i = bad[b].first, j = bad[b].second;
+			float pbuf[(2 * 4 + 1) * (2 * 4 + 1)];
+			int n_ok = 0;
+			for (int dy = -d_max; dy <= d_max; dy++)
+			{
+				const int y = i + dy;
+				if (y < 0 || y >= ny) continue;
+				for (int dx = -d_max; dx <= d_max; dx++)
+				{
+					const int x = j + dx;
+					if (x < 0 || x >= nx || DIRECT_A2D_ELEM(bBad, y, x)) continue;
+					pbuf[n_ok++] = DIRECT_A2D_ELEM(I, y, x);
+				}
+			}
+			const uint64_t h = reproducibleHash(((uint64_t)frames[iframe] << 42) ^ ((uint64_t)i << 21) ^ (uint64_t)j);
+			if (n_ok > NUM_MIN_OK)
+			{
+				DIRECT_A2D_ELEM(I, i, j) = pbuf[h % n_ok];
+				continue;
+			}
+			if (!have_stats)
+			{
+				double s = 0, ss = 0; long n = 0;
+				FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(bBad)
+				{
+					if (DIRECT_A2D_ELEM(bBad, i, j)) continue;
+					const double v = DIRECT_A2D_ELEM(I, i, j);
+					s += v; ss += v * v; n++;
+				}
+				frame_mean = (n > 0) ? s / n : 0;
+				frame_std = (n > 0) ? std::sqrt(std::max(0., ss / n - frame_mean * frame_mean)) : 0;
+				have_stats = true;
+			}
+			// Gaussian from two hash-derived uniforms (Box-Muller)
+			const double u1 = ((h >> 11) + 1.0) / 9007199254740993.0;
+			const double u2 = (reproducibleHash(h) >> 11) / 9007199254740992.0;
+			DIRECT_A2D_ELEM(I, i, j) = frame_mean + frame_std * std::sqrt(-2 * std::log(u1)) * std::cos(2 * PI * u2);
+		}
+	}
+}
+
+void MotioncorrRunner::sumFromRecord(const Micrograph &mic, const SumRecipe &recipe, Image<float> &Isum)
+{
+	const FileName fn_mic = mic.getMovieFilename();
+	const FileName fn_gain = mic.getGainFilename();
+	const RFLOAT bin = mic.getBinningFactor();
+	const bool early = recipe.early_binning && std::fabs(bin - 1) >= 0.01;
+
+	const bool isEER = EERRenderer::isEER(fn_mic);
+	EERRenderer renderer;
+	CompressedMRCReader compressedMRCreader;
+	const bool isCompressedMRC = compressedMRCreader.isCompressedMRC(fn_mic);
+	int n_io_threads = n_threads;
+	if (max_io_threads > 0 && n_io_threads > max_io_threads) n_io_threads = max_io_threads;
+
+	int nx, ny, nn;
+	Image<float> Ihead;
+	if (isEER)
+	{
+		renderer.read(fn_mic, mic.getEERUpsampling());
+		nx = renderer.getWidth(); ny = renderer.getHeight();
+		nn = renderer.getNFrames() / mic.getEERGrouping();
+	}
+	else if (isCompressedMRC)
+	{
+		compressedMRCreader.read(fn_mic, n_io_threads);
+		nx = XSIZE(compressedMRCreader.Ihead()); ny = YSIZE(compressedMRCreader.Ihead());
+		nn = NSIZE(compressedMRCreader.Ihead());
+	}
+	else
+	{
+		Ihead.read(fn_mic, false, -1, false, true);
+		nx = XSIZE(Ihead()); ny = YSIZE(Ihead()); nn = NSIZE(Ihead());
+	}
+
+	// The frames that were summed are the ones with a recorded shift
+	std::vector<int> frames; // 0-indexed
+	std::vector<RFLOAT> sx, sy;
+	for (int f = 1; f <= std::min(nn, mic.getNframes()); f++)
+	{
+		RFLOAT x, y;
+		if (mic.getShiftAt(f, 0, 0, x, y, false) != 0) continue;
+		frames.push_back(f - 1); sx.push_back(x); sy.push_back(y);
+	}
+	const int n_frames = frames.size();
+	if (n_frames == 0) REPORT_ERROR("sumFromRecord: no frame of " + fn_mic + " has a recorded shift");
+
+	std::vector<Image<float> > Iframes(n_frames);
+	#pragma omp parallel for num_threads(isCompressedMRC ? 1 : n_io_threads)
+	for (int iframe = 0; iframe < n_frames; iframe++)
+	{
+		if (isEER)
+			renderer.renderFrames(frames[iframe] * mic.getEERGrouping() + 1, (frames[iframe] + 1) * mic.getEERGrouping(), Iframes[iframe]());
+		else if (isCompressedMRC)
+			compressedMRCreader.readFrameInto(Iframes[iframe], frames[iframe]);
+		else
+			Iframes[iframe].read(fn_mic, true, frames[iframe], false, true);
+	}
+
+	Image<float> Igain;
+	if (fn_gain != "")
+	{
+		if (isEER) renderer.loadEERGain(fn_gain, Igain());
+		else Igain.read(fn_gain);
+		if (XSIZE(Igain()) != nx || YSIZE(Igain()) != ny)
+			REPORT_ERROR("sumFromRecord: the gain reference " + fn_gain + " does not match the movie " + fn_mic);
+		#pragma omp parallel for num_threads(n_threads)
+		for (int iframe = 0; iframe < n_frames; iframe++)
+			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Igain())
+				DIRECT_MULTIDIM_ELEM(Iframes[iframe](), n) *= DIRECT_MULTIDIM_ELEM(Igain(), n);
+	}
+
+	if (recipe.fix_defects)
+	{
+		// The same pixels MotionCorr fixed: defect map, dead gain pixels and the
+		// hot pixels it detected (recorded)
+		MultidimArray<bool> bBad(ny, nx);
+		bBad.initZeros();
+		if (mic.fnDefect != "") fillDefectMask(bBad, mic.fnDefect, n_threads);
+		if (fn_gain != "")
+			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Igain())
+				if (DIRECT_MULTIDIM_ELEM(Igain(), n) == 0) DIRECT_MULTIDIM_ELEM(bBad, n) = true;
+		for (size_t k = 0; k < mic.hotpixelX.size(); k++)
+			DIRECT_A2D_ELEM(bBad, mic.hotpixelY[k], mic.hotpixelX[k]) = true;
+		fillBadPixelsReproducibly(Iframes, frames, bBad, isEER ? 4 : 2);
+	}
+	Igain.clear();
+
+	const RFLOAT prescaling = early ? bin : 1;
+	const int wnx = early ? (int)(nx / bin) : nx, wny = early ? (int)(ny / bin) : ny;
+
+	// One plan by size, not by array: FFTW picks SIMD codelets by the alignment
+	// of the arrays it plans for, which would make the bits depend on malloc
+	NewFFT::FloatPlan plan_full(nx, ny, 1, FFTW_ESTIMATE);
+	NewFFT::FloatPlan plan_work(wnx, wny, 1, FFTW_ESTIMATE);
+	std::vector<MultidimArray<fComplex> > Fframes(n_frames);
+	#pragma omp parallel for num_threads(n_threads)
+	for (int iframe = 0; iframe < n_frames; iframe++)
+	{
+		if (!early)
+			NewFFT::FourierTransform(Iframes[iframe](), Fframes[iframe], plan_full);
+		else
+		{
+			MultidimArray<fComplex> F;
+			NewFFT::FourierTransform(Iframes[iframe](), F, plan_full);
+			Fframes[iframe].reshape(wny, wnx / 2 + 1);
+			cropInFourierSpace(F, Fframes[iframe]);
+		}
+		Iframes[iframe].clear();
+
+		// The recorded global shift (unbinned pixels), in one step
+		if (sx[iframe] != 0 || sy[iframe] != 0)
+			shiftNonSquareImageInFourierTransform(Fframes[iframe], -(sx[iframe] / prescaling) / wnx, -(sy[iframe] / prescaling) / wny);
+	}
+
+	if (recipe.dose_weighted)
+	{
+		const RFLOAT v = mic.voltage;
+		if (std::abs(v - 300) > 2 && std::abs(v - 200) > 2 && std::abs(v - 100) > 2)
+			REPORT_ERROR("sumFromRecord: dose weighting is supported only for 300, 200 or 100 kV");
+		std::vector<RFLOAT> doses(n_frames);
+		for (int iframe = 0; iframe < n_frames; iframe++)
+		{
+			doses[iframe] = mic.pre_exposure + mic.getDosePerFrame() * (frames[iframe] + 1);
+			if (std::abs(v - 200) <= 2) doses[iframe] /= 0.8;
+			else if (std::abs(v - 100) <= 2) doses[iframe] /= 0.64;
+		}
+		doseWeighting(Fframes, doses, mic.angpix * prescaling);
+	}
+
+	#pragma omp parallel for num_threads(n_threads)
+	for (int iframe = 0; iframe < n_frames; iframe++)
+	{
+		Iframes[iframe]().reshape(wny, wnx);
+		NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe](), plan_work);
+		Fframes[iframe].clear();
+	}
+
+	Isum().reshape(wny, wnx);
+	Isum().initZeros();
+	std::ostringstream quiet;
+	realSpaceInterpolation(Isum, Iframes, mic.model, quiet);
+	Iframes.clear();
+
+	if (!early && std::fabs(bin - 1) >= 0.01)
+	{
+		// As binNonSquareImage(), with plans by size
+		const int new_nx = nx / bin, new_ny = ny / bin;
+		if (new_nx % 2 != 0 || new_ny % 2 != 0)
+			REPORT_ERROR("The dimensions of the image after binning must be even");
+		NewFFT::FloatPlan plan_binned(new_nx, new_ny, 1, FFTW_ESTIMATE);
+		MultidimArray<fComplex> Fref(ny, nx / 2 + 1), Fbinned(new_ny, new_nx / 2 + 1);
+		NewFFT::FourierTransform(Isum(), Fref, plan_full);
+		cropInFourierSpace(Fref, Fbinned);
+		Isum().reshape(new_ny, new_nx);
+		NewFFT::inverseFourierTransform(Fbinned, Isum(), plan_binned);
+	}
+	if (XSIZE(Isum()) != recipe.nx || YSIZE(Isum()) != recipe.ny)
+		REPORT_ERROR("sumFromRecord: the sum of " + fn_mic + " is " + integerToString(XSIZE(Isum())) + "x"
+		             + integerToString(YSIZE(Isum())) + ", but its record says " + integerToString(recipe.nx)
+		             + "x" + integerToString(recipe.ny));
+	Isum.setSamplingRateInHeader(mic.angpix * bin, mic.angpix * bin);
+}
+
+bool MotioncorrRunner::readRecipe(const FileName &fn_record, SumRecipe &recipe, Micrograph *mic_out)
+{
+	Micrograph mic;
+	mic.readRecord(fn_record);
+	if (mic.sum_recipe.empty()) return false;
+	if (!SumRecipe::parse(mic.sum_recipe, recipe))
+		REPORT_ERROR(fn_record + ": unknown sum recipe '" + mic.sum_recipe + "'; this RELION is too old to regenerate it");
+	if (mic_out != NULL) *mic_out = mic;
+	return true;
+}
+
+void MotioncorrRunner::regenerateMicrograph(const FileName &fn_record, Image<float> &Isum, int n_threads)
+{
+	Micrograph mic;
+	SumRecipe recipe;
+	if (!readRecipe(fn_record, recipe, &mic))
+		REPORT_ERROR(fn_record + " was written without a sum recipe: its micrograph cannot be regenerated bit for bit "
+		             "(it was not made with RELION_VIRTUAL_MOVIE_AVERAGES)");
+
+	MotioncorrRunner R;
+	R.n_threads = n_threads;
+	R.max_io_threads = -1;
+	R.verb = 0;
+	R.sumFromRecord(mic, recipe, Isum);
+
+	// The values the stored micrograph holds
+	if (recipe.float16)
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Isum())
+			DIRECT_MULTIDIM_ELEM(Isum(), n) = half2float(float2half(DIRECT_MULTIDIM_ELEM(Isum(), n)));
 }

@@ -138,6 +138,9 @@ class MetaDataTable
 	// The version number of the file format (multiplied by 10,000)
 	int version;
 
+	// Write doubles with every significant digit (%.17g) rather than in 12 columns
+	bool exact_doubles;
+
 public:
 
 	MetaDataTable();
@@ -166,6 +169,10 @@ public:
 
 	void setName(const std::string Name);
 	std::string getName() const;
+
+	// Write doubles so that they read back exactly (for values that
+	// something is recomputed from, e.g. a motion model)
+	void setExactDoubles(bool exact);
 
 	void setVersion(int v);
 	int getVersion() const;

@@ -61,6 +61,7 @@ MetaDataTable::MetaDataTable()
 	name(""),
 	comment(""),
 	version(CURRENT_MDT_VERSION),
+	exact_doubles(false),
 	activeLabels(0)
 {
 }
@@ -82,6 +83,7 @@ MetaDataTable::MetaDataTable(const MetaDataTable &MD)
 	name(MD.name),
 	comment(MD.comment),
 	version(MD.version),
+	exact_doubles(MD.exact_doubles),
 	activeLabels(MD.activeLabels)
 {
 	for (size_t idx = 0; idx < MD.objects.size(); idx++)
@@ -114,6 +116,7 @@ MetaDataTable& MetaDataTable::operator = (const MetaDataTable &MD)
 		name = MD.name;
 		comment = MD.comment;
 		version = MD.version;
+		exact_doubles = MD.exact_doubles;
 
 		activeLabels = MD.activeLabels;
 
@@ -173,6 +176,7 @@ void MetaDataTable::clear()
 	name = "";
 	comment = "";
 	version = CURRENT_MDT_VERSION;
+	exact_doubles = false;
 
 	activeLabels.clear();
 }
@@ -200,6 +204,11 @@ void MetaDataTable::setName(const std::string newName)
 std::string MetaDataTable::getName() const
 {
 	return name;
+}
+
+void MetaDataTable::setExactDoubles(bool exact)
+{
+	exact_doubles = exact;
 }
 
 void MetaDataTable::setVersion(int v)
@@ -253,6 +262,15 @@ bool MetaDataTable::getValueToString(EMDLabel label, std::string &value, long ob
 		{
 			double v;
 			if(!getValue(label, v, objectID)) return false;
+
+			if (exact_doubles)
+			{
+				// 17 significant digits read back as the same double
+				char exact[32];
+				snprintf(exact, sizeof(exact), "%12.17g", v);
+				value = exact;
+				return true;
+			}
 
 			if ((ABS(v) > 0. && ABS(v) < 0.001) || ABS(v) > 100000.)
 			{

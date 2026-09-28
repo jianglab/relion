@@ -17,6 +17,7 @@
  * source code. Additional authorship citations may be added, but existing
  * author citations must be preserved.
  ***************************************************************************/
+#include "src/virtual_movie_averages.h"
 #include "src/ctffind_runner.h"
 #include <cmath>
 
@@ -389,6 +390,12 @@ void CtffindRunner::run()
 			obsModel.opticsMdt.getValue(EMDL_CTF_Q0, AmplitudeConstrast, optics_group_micrographs[imic]-1);
             EMDLabel mylabel = (is_tomo) ? EMDL_TOMO_TILT_SERIES_PIXEL_SIZE : EMDL_MICROGRAPH_PIXEL_SIZE;
             obsModel.opticsMdt.getValue(mylabel, angpix, optics_group_micrographs[imic]-1);
+
+			// CTFFIND reads the micrograph file itself; a virtual movie average
+			// holds no pixels (its power spectrum from MotionCorr does)
+			if (!use_given_ps && vmovies::isVirtualMovieAverageFile(fn_micrographs[imic]))
+				REPORT_ERROR(fn_micrographs[imic] + " is a virtual movie average, which CTFFIND cannot read. "
+				             "Use the power spectra from motion correction (--use_given_ps; \"Use power spectra from MotionCorr job?\" in the GUI).");
 
 			if (is_ctffind4)
 			{

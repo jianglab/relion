@@ -65,6 +65,7 @@
 #include "src/fftw.h"
 #include "src/float16.h"
 #include "src/virtual_particles.h"
+#include "src/virtual_movie_averages.h"
 
 /// @defgroup Images Images
 //@{
@@ -1401,6 +1402,37 @@ public:
 	}
 
 private:
+	/* A virtual movie average: a descriptor under a micrograph's name, whose
+	 * pixels are computed from the movie (bit for bit the micrograph motion
+	 * correction would have written). A header-only read touches no movie. */
+	int readVirtualMovieAverage(const FileName &name, long int select_img, bool readdata)
+	{
+		long int dump;
+		FileName fn;
+		name.decompose(dump, fn);
+		fn = fn.removeFileFormat();
+
+		const vmovies::Header h = vmovies::readHeader(fn);
+		if (select_img > 0)
+			REPORT_ERROR("Image " + integerToString(select_img + 1) + " requested from " + fn
+			             + ", a virtual movie average, which holds one image.");
+		MDMainHeader.setValue(EMDL_IMAGE_DATATYPE, (int)(h.float16 ? Float16 : Float));
+		setSamplingRateInHeader(h.angpix, h.angpix);
+
+		if (!readdata)
+		{
+			data.setDimensions(h.nx, h.ny, 1, 1);
+			return 0;
+		}
+
+		MultidimArray<RFLOAT> px;
+		vmovies::readMicrograph(fn, px);
+		data.resize(1, 1, h.ny, h.nx);
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(data)
+			DIRECT_MULTIDIM_ELEM(data, n) = (T)DIRECT_MULTIDIM_ELEM(px, n);
+		return 0;
+	}
+
 	/* Particles of a virtual stack (.vstack): computed from the micrograph the
 	 * descriptor names, bitwise identical to the stack relion_preprocess would
 	 * have written. select_img < 0 reads every particle, as for an .mrcs. */
@@ -1482,7 +1514,9 @@ private:
 		// extension containing "st", which ".vstack" does. A stack converted in
 		// place by relion_stacks_to_virtual keeps its .mrcs name and is told
 		// apart from a real one by its first line.
-		if (vparticles::isVirtualStackFormat(ext_name) ||
+		if (ext_name.contains("mrc") && fimg != NULL && vmovies::isVirtualMovieAverageFile(fileno(fimg)))
+			err = readVirtualMovieAverage(name, select_img, readdata);
+		else if (vparticles::isVirtualStackFormat(ext_name) ||
 		    (ext_name.contains("mrcs") && fimg != NULL && vparticles::isVirtualStackFile(fileno(fimg))))
 			err = readVirtualStack(name, select_img, readdata);
 		else if (ext_name.contains("spi") || ext_name.contains("xmp")  ||

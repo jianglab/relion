@@ -267,6 +267,7 @@ enum EMDLabel
 	EMDL_MICROGRAPH_FRAME_NUMBER,
 	EMDL_MICROGRAPH_MOTION_MODEL_VERSION,
 	EMDL_MICROGRAPH_START_FRAME,
+	EMDL_MICROGRAPH_SUM_RECIPE,
 	EMDL_MICROGRAPH_END_FRAME,
 	EMDL_MICROGRAPH_SHIFT_X,
 	EMDL_MICROGRAPH_SHIFT_Y,
@@ -1053,6 +1054,7 @@ private:
 		EMDL::addLabel(EMDL_MICROGRAPH_FRAME_NUMBER, EMDL_INT, "rlnMicrographFrameNumber", "Micrograph frame number");
 		EMDL::addLabel(EMDL_MICROGRAPH_MOTION_MODEL_VERSION, EMDL_INT, "rlnMotionModelVersion", "Version of micrograph motion model");
 		EMDL::addLabel(EMDL_MICROGRAPH_START_FRAME, EMDL_INT, "rlnMicrographStartFrame", "Start frame of a motion model");
+		EMDL::addLabel(EMDL_MICROGRAPH_SUM_RECIPE, EMDL_STRING, "rlnMicrographSumRecipe", "How the motion-corrected sum was made, so that it can be regenerated bit for bit from the movie (empty: legacy, not reproducible)");
 		EMDL::addLabel(EMDL_MICROGRAPH_END_FRAME, EMDL_INT, "rlnMicrographEndFrame", "End frame of a motion model");
 		EMDL::addLabel(EMDL_MICROGRAPH_SHIFT_X, EMDL_DOUBLE, "rlnMicrographShiftX", "X shift of a (patch of) micrograph");
 		EMDL::addLabel(EMDL_MICROGRAPH_SHIFT_Y, EMDL_DOUBLE, "rlnMicrographShiftY", "Y shift of a (patch of) micrograph");

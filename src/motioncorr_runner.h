@@ -210,7 +210,48 @@ public:
 	// Check if fn_defect is Serial EM's defect file
 	static bool detectSerialEMDefectText(FileName fn_defect);
 
+	// Virtual movie averages (RELION_VIRTUAL_MOVIE_AVERAGES, own implementation
+	// only). The micrograph is, by definition, what sumFromRecord() makes of the
+	// movie and the motion record saved next to it (written with exact doubles),
+	// so it can be regenerated bit for bit at any time.
+	//   =1     write a descriptor (the record) under the micrograph's name; the
+	//          pixels are computed when a program reads it (virtual_movie_averages.h)
+	//   =real  write the real micrograph, made the same reproducible way
+	bool reproducible = false;     // either value
+	bool virtual_averages = false; // =1
+
+	struct SumRecipe
+	{
+		int version;
+		bool dose_weighted, early_binning, fix_defects;
+		bool float16;   // the micrograph is stored (or would be) in float16
+		int nx, ny;     // size of the micrograph
+		SumRecipe() : version(1), dose_weighted(true), early_binning(false), fix_defects(true),
+		              float16(false), nx(0), ny(0) {}
+		std::string str() const;
+		// False if the text is not a recipe this build knows how to follow
+		static bool parse(const std::string &text, SumRecipe &out);
+	};
+
+	// Sum the movie of mic as recorded: global shifts in one Fourier step, dose
+	// weighting, the local model, binning. Reads the movie itself.
+	void sumFromRecord(const Micrograph &mic, const SumRecipe &recipe, Image<float> &Isum);
+
+	// Regenerate the micrograph described by a motion record written with a sum
+	// recipe (the .star next to the micrograph, or a virtual movie average
+	// descriptor). Errors for legacy records, which cannot be reproduced.
+	// Pixels are rounded as the stored micrograph would be (float16 or float32).
+	static void regenerateMicrograph(const FileName &fn_record, Image<float> &Isum, int n_threads);
+
+	// The recipe of a record, or false for a legacy one
+	static bool readRecipe(const FileName &fn_record, SumRecipe &recipe, Micrograph *mic_out = NULL);
+
 private:
+	// Replace each bad pixel in every frame by a neighbour chosen by a hash of
+	// (pixel, frame), not rand(): the same movie always gets the same fill
+	void fillBadPixelsReproducibly(std::vector<Image<float> > &Iframes, const std::vector<int> &frames,
+	                               const MultidimArray<bool> &bBad, int d_max);
+
 	// shiftx, shifty is relative to the (real space) image size
 	void shiftNonSquareImageInFourierTransform(MultidimArray<fComplex> &frame, RFLOAT shiftx, RFLOAT shifty);
 

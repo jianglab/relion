@@ -34,9 +34,9 @@ struct Plan {
 	std::vector<std::string> kept;   ///< "Class3D/job005/run_it000" etc., for reporting
 	long long total_bytes;
 
-	/// Of `remove`, how much is the project's virtual particle cache
-	/// (Cache/virtual_particles/): nothing in it is irreplaceable, it is
-	/// recomputed from the micrographs when needed.
+	/// Of `remove`, how much is the project's caches of virtual data
+	/// (Cache/virtual_particles/, Cache/virtual_movie_averages/): nothing in
+	/// them is irreplaceable, they are recomputed when needed.
 	size_t cache_files;
 	long long cache_bytes;
 

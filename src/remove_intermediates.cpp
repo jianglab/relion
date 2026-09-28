@@ -155,36 +155,40 @@ Plan planIntermediateRemoval(const std::string& project_dir)
 	for (size_t i = 0; i < dirs.size(); i++)
 		scanOneDir(dirs[i], plan);
 
-	// The virtual particle cache: every entry is recomputable
-	const std::string cache = project_dir + "/Cache/virtual_particles";
-	DIR* top = opendir(cache.c_str());
-	if (top != NULL)
+	// The caches of virtual data: every entry is recomputable
+	const char* caches[] = {"Cache/virtual_particles", "Cache/virtual_movie_averages"};
+	for (int ic = 0; ic < 2; ic++)
 	{
-		struct dirent* d;
-		while ((d = readdir(top)) != NULL)
+		const std::string cache = project_dir + "/" + caches[ic];
+		DIR* top = opendir(cache.c_str());
+		if (top != NULL)
 		{
-			if (d->d_name[0] == '.') continue;
-			const std::string sub = cache + "/" + d->d_name;
-			DIR* sd = opendir(sub.c_str());
-			if (sd == NULL) continue;
-			struct dirent* e;
-			while ((e = readdir(sd)) != NULL)
+			struct dirent* d;
+			while ((d = readdir(top)) != NULL)
 			{
-				if (e->d_name[0] == '.') continue;
-				const std::string full = sub + "/" + e->d_name;
-				struct stat st;
-				if (lstat(full.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
-				Candidate c;
-				c.path = full;
-				c.size_bytes = st.st_size;
-				plan.remove.push_back(c);
-				plan.total_bytes += c.size_bytes;
-				plan.cache_files++;
-				plan.cache_bytes += c.size_bytes;
+				if (d->d_name[0] == '.') continue;
+				const std::string sub = cache + "/" + d->d_name;
+				DIR* sd = opendir(sub.c_str());
+				if (sd == NULL) continue;
+				struct dirent* e;
+				while ((e = readdir(sd)) != NULL)
+				{
+					if (e->d_name[0] == '.') continue;
+					const std::string full = sub + "/" + e->d_name;
+					struct stat st;
+					if (lstat(full.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+					Candidate c;
+					c.path = full;
+					c.size_bytes = st.st_size;
+					plan.remove.push_back(c);
+					plan.total_bytes += c.size_bytes;
+					plan.cache_files++;
+					plan.cache_bytes += c.size_bytes;
+				}
+				closedir(sd);
 			}
-			closedir(sd);
+			closedir(top);
 		}
-		closedir(top);
 	}
 
 	std::sort(plan.kept.begin(), plan.kept.end());
@@ -225,12 +229,16 @@ long applyRemoval(const Plan& plan, long long& freed_bytes,
 	for (size_t i = 0; i < plan.remove.size(); i++)
 	{
 		const std::string& p = plan.remove[i].path;
-		const size_t at = p.find("/Cache/virtual_particles/");
-		if (at == std::string::npos) continue;
-		const std::string shard = p.substr(0, p.find_last_of('/'));
-		rmdir(shard.c_str());
-		rmdir(p.substr(0, at + 24).c_str());   // .../Cache/virtual_particles
-		rmdir(p.substr(0, at + 6).c_str());    // .../Cache
+		const char* caches[] = {"/Cache/virtual_particles/", "/Cache/virtual_movie_averages/"};
+		for (int ic = 0; ic < 2; ic++)
+		{
+			const std::string c = caches[ic];
+			const size_t at = p.find(c);
+			if (at == std::string::npos) continue;
+			rmdir(p.substr(0, p.find_last_of('/')).c_str());      // the shard
+			rmdir(p.substr(0, at + c.size() - 1).c_str());         // .../Cache/virtual_...
+			rmdir(p.substr(0, at + 6).c_str());                    // .../Cache
+		}
 	}
 
 	return n;

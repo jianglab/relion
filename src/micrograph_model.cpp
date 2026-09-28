@@ -55,10 +55,11 @@ MotionModel* ThirdOrderPolynomialModel::clone() const
 	return (MotionModel*) new ThirdOrderPolynomialModel(*this);
 }
 
-void ThirdOrderPolynomialModel::write(std::ostream &fh, std::string block_name)
+void ThirdOrderPolynomialModel::write(std::ostream &fh, std::string block_name, bool exact_doubles)
 {
 	MetaDataTable MD;
 	MD.setName(block_name);
+	MD.setExactDoubles(exact_doubles);
 
 	int coeff_idx = 0;
 
@@ -190,6 +191,7 @@ void Micrograph::write(FileName filename)
 
 	std::ofstream fh;
 	MetaDataTable MD;
+	const bool exact = !sum_recipe.empty();
 
 	fh.open(filename.c_str());
 	if (!fh)
@@ -199,6 +201,7 @@ void Micrograph::write(FileName filename)
 
         MD.setName("general");
         MD.setIsList(true);
+        MD.setExactDoubles(exact);   // dose, pixel size, ...: a reproducible sum depends on them
         MD.addObject();
         MD.setValue(EMDL_IMAGE_SIZE_X, width);
         MD.setValue(EMDL_IMAGE_SIZE_Y, height);
@@ -227,6 +230,9 @@ void Micrograph::write(FileName filename)
 
 	MD.setValue(EMDL_MICROGRAPH_START_FRAME, first_frame); // 1-indexed
 
+	if (exact)
+		MD.setValue(EMDL_MICROGRAPH_SUM_RECIPE, sum_recipe);
+
 	if (EERRenderer::isEER(fnMovie))
 	{
 		if (eer_upsampling > 0)
@@ -245,6 +251,7 @@ void Micrograph::write(FileName filename)
 
 	MD.clear();
 	MD.setName("global_shift");
+	MD.setExactDoubles(exact);
 	for (int frame = 0; frame < n_frames; frame++)
 	{
 		MD.addObject();
@@ -257,7 +264,7 @@ void Micrograph::write(FileName filename)
 	if (model != NULL)
 	{
 		std::string block_name = "local_motion_model";
-		model->write(fh, block_name);
+		model->write(fh, block_name, exact);
 	}
 
 	MD.clear();
@@ -294,6 +301,12 @@ void Micrograph::write(FileName filename)
 	MD.write(fh);
 
 	fh.close();
+}
+
+void Micrograph::readRecord(FileName filename)
+{
+	read(filename);   // drops any previous model and fields
+	ready = true;
 }
 
 FileName Micrograph::getGainFilename() const
@@ -492,6 +505,9 @@ void Micrograph::read(FileName fn_in, bool read_hotpixels)
 	if (!MDglobal.getValue(EMDL_MICROGRAPH_START_FRAME, first_frame))
 		first_frame = 1; // 1-indexed
 
+	if (!MDglobal.getValue(EMDL_MICROGRAPH_SUM_RECIPE, sum_recipe))
+		sum_recipe = "";
+
 	if (EERRenderer::isEER(fnMovie))
 	{
 		if (!MDglobal.getValue(EMDL_MICROGRAPH_EER_UPSAMPLING, eer_upsampling))
@@ -607,6 +623,7 @@ void Micrograph::clearFields()
 	height = 0;
 	n_frames = 0;
 	first_frame = 0;
+	sum_recipe = "";
 	binning = 1;
 
 	angpix = -1;
@@ -644,6 +661,7 @@ void Micrograph::copyFieldsFrom(const Micrograph& m)
 	height = m.height;
 	n_frames = m.n_frames;
 	first_frame = m.first_frame;
+	sum_recipe = m.sum_recipe;
 	binning = m.binning;
 
 	angpix = m.angpix;
