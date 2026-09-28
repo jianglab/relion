@@ -26,6 +26,11 @@ if [ ! -x "$python_executable" ]; then
     fi
 fi
 
+# Topaz saves its models as whole pickled objects, which PyTorch >= 2.6 refuses
+# to load by default (weights_only=True). These are models Topaz trained or
+# ships itself, so allow them - for Topaz only, not for the rest of the env.
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+
 # Run the Python script with forwarded arguments
 "$python_executable" -c "import re, sys; from topaz.main import main; sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0]); sys.exit(main())" "$@"
 
