@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 
+#include "src/import_project.h"
 #include "src/gui_virtualize.h"
 #include "src/gui_mainwindow.h"
 #include "src/gui_cache.h"
@@ -3178,20 +3179,29 @@ static bool is_jobdir_name(const std::string &name)
 
 void GuiMainWindow::cb_import_project_i()
 {
-	// 1. Choose source project directory
-	const char *src = fl_dir_chooser("Select the RELION project directory to import", ".");
+	// 1. Choose what to import: a project, a job, or a job type folder (e.g. Class2D)
+	const char *src = fl_dir_chooser("Select a RELION project, a job, or a job type folder (e.g. Class2D) to import", ".");
 	if (!src || strlen(src) == 0) return;
 	std::string sourceDir(src);
 	while (sourceDir.size() > 1 && sourceDir.back() == '/')
 		sourceDir.pop_back();
 	FileName sourceFn(sourceDir);
 
-	if (!exists(sourceFn + "/.gui_projectdir") && !exists(sourceFn + "/default_pipeline.star"))
+	relion_import::Selection selection = relion_import::classify(sourceDir);
+	if (selection.scope == relion_import::INVALID)
 	{
-		fl_alert("The selected directory does not appear to be a RELION project.\n"
-			 "Missing .gui_projectdir or default_pipeline.star.");
+		fl_alert("The selected folder is not a RELION project, a job folder or a job type folder, so nothing was imported.\n\n"
+			 "Please select one of these:\n"
+			 "  - a project folder (has .gui_projectdir or default_pipeline.star)\n"
+			 "      imports the whole project\n"
+			 "  - a job folder, e.g. Class2D/job008\n"
+			 "      imports that job and the jobs it depends on\n"
+			 "  - a job type folder, e.g. Class2D\n"
+			 "      imports all jobs in it and the jobs they depend on\n\n"
+			 "Selected: %s", sourceDir.c_str());
 		return;
 	}
+	const bool whole_project = (selection.scope == relion_import::WHOLE_PROJECT);
 
 	// 2. Choose/create destination directory
 	const char *dest = fl_dir_chooser("Select or create the destination directory for the imported project",
@@ -3210,8 +3220,12 @@ void GuiMainWindow::cb_import_project_i()
 
 	if (exists(destFn + "/.gui_projectdir") || exists(destFn + "/default_pipeline.star"))
 	{
-		int ret = fl_choice("The destination already contains a RELION project.\n"
-				    "Continue anyway?", "Cancel", "Continue", NULL);
+		int ret = whole_project ?
+			fl_choice("The destination already contains a RELION project.\n"
+				  "Continue anyway?", "Cancel", "Continue", NULL) :
+			fl_choice("The destination already contains a RELION project.\n"
+				  "Its pipeline file (default_pipeline.star) will be replaced by one listing only the imported jobs.\n"
+				  "Continue anyway?", "Cancel", "Continue", NULL);
 		if (ret != 1)
 			return;
 	}
@@ -3229,6 +3243,37 @@ void GuiMainWindow::cb_import_project_i()
 
 	touch(destFn + "/.gui_projectdir");
 	system(("mkdir -p " + destFn + "/.TMP_runfiles").c_str());
+
+	if (!whole_project)
+	{
+		// A job or a job type folder: link the jobs and their ancestry, with a pipeline file for just those
+		relion_import::Result result = relion_import::importJobs(selection, destDir);
+		if (!result.ok)
+		{
+			fl_alert("Import failed:\n%s", result.error.c_str());
+			return;
+		}
+
+		project_manager.add(destFn, destFn.afterLastOf("/"));
+		project_manager.save();
+
+		std::string msg = "Imported " + selection.what + ".\n  " +
+			integerToString(result.imported.size()) + " jobs in the new project, " +
+			integerToString(result.linked) + " newly linked\n";
+		if (result.existing > 0)
+			msg += "  " + integerToString(result.existing) + " already in the destination (left as they were)\n";
+		if (result.missing > 0)
+			msg += "  " + integerToString(result.missing) + " listed in the pipeline but with no folder in the source project\n";
+		if (!result.not_in_pipeline.empty())
+			msg += "  " + integerToString(result.not_in_pipeline.size()) + " selected job folders are not in the source pipeline and were skipped\n";
+		msg += "\nSwitch to the new project now?";
+		int ret = fl_choice("%s", "No", "Yes", NULL, msg.c_str());
+		if (ret == 1)
+			switchToProject(destDir);
+		else
+			rebuildRecentProjectsInMenu();
+		return;
+	}
 
 	// 4. Copy pipeline files and root-level non-directory files
 	{

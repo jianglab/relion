@@ -42,6 +42,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_ml_optimiser.cpp
     test_remove_intermediates.cpp
     test_virtual_particles.cpp
+    test_import_project.cpp
 )
 
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})
