@@ -347,6 +347,79 @@ def test_cryosparc_import_passthrough(relion_bin, test_data_dir):
     # so relion must have auto-discovered *_passthrough.cs in the same dir
 
 
+def test_cryosparc_import_ctf_is_micrographs(relion_bin, test_data_dir):
+    """A CTF job's own table holds only ctf/*; the micrograph path is in the
+    passthrough. The result is still a micrographs table, not 'images'."""
+    cs_file = test_data_dir / "exposures_ctf_estimated.cs"
+    # Not named *_passthrough.cs, so other tests' auto-discovery is unaffected
+    pt_file = test_data_dir / "exposures_ctf_pt.cs"
+    uids = [1, 2]
+
+    _make_cs(cs_file, [
+        ("uid", "<i8", uids),
+        ("ctf/accel_kv", "<f8", [300.0, 300.0]),
+        ("ctf/cs_mm", "<f8", [2.7, 2.7]),
+        ("ctf/amp_contrast", "<f8", [0.1, 0.1]),
+        ("ctf/df1_A", "<f8", [10000.0, 11000.0]),
+        ("ctf/df2_A", "<f8", [9000.0, 9500.0]),
+    ])
+    _make_cs(pt_file, [
+        ("uid", "<i8", uids),
+        ("micrograph_blob/path", "S", ["/data/mic1.mrc", "/data/mic2.mrc"]),
+        ("micrograph_blob/psize_A", "<f8", [1.2, 1.2]),
+    ])
+
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--passthrough", str(pt_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "micrographs_ctf.star",
+        "--do_cryosparc",
+        "--angpix", "1.2", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    star_text = (test_data_dir / "micrographs_ctf.star").read_text()
+    assert "data_micrographs" in star_text
+    assert "data_images" not in star_text
+    assert "rlnMicrographName" in star_text
+    assert "rlnMicrographPixelSize" in star_text
+    assert "rlnDefocusU" in star_text
+
+
+def test_cryosparc_import_picks_are_particles(relion_bin, test_data_dir):
+    """Picks (e.g. from the filament tracer) have coordinates but no extracted
+    blob yet; they are particles, not micrographs."""
+    cs_file = test_data_dir / "filament_picks.cs"
+
+    _make_cs(cs_file, [
+        ("uid", "<i8", [1, 2, 3]),
+        ("location/micrograph_path", "S", ["/data/mic1.mrc"] * 3),
+        ("location/center_x_frac", "<f8", [0.25, 0.5, 0.75]),
+        ("location/center_y_frac", "<f8", [0.25, 0.5, 0.25]),
+        ("location/micrograph_shape", ("<u4", (2,)), [[4096, 4096]] * 3),
+        ("filament/filament_uid", "<u4", [7, 7, 7]),
+    ])
+
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "filament_picks.star",
+        "--do_cryosparc",
+        "--angpix", "1.0", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    star_text = (test_data_dir / "filament_picks.star").read_text()
+    assert "data_particles" in star_text
+    assert "data_micrographs" not in star_text
+    assert "rlnMicrographName" in star_text
+    assert "rlnCoordinateX" in star_text
+    assert "1024" in star_text and "2048" in star_text
+
+
 def test_cryosparc_import_multi_optics(relion_bin, test_data_dir):
     """Import .cs with multiple optics groups (different kV/Cs/Q0)."""
     cs_file = test_data_dir / "multi_optics.cs"

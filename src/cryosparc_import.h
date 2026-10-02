@@ -492,8 +492,14 @@ static void convert(const std::string& cs_filename,
     int pt_fi_blob_shape  = have_passthrough ? find_field(hdr_pt.fields, "blob/shape") : -1;
 
     bool has_blob_info = (fi_blob_path >= 0 && fi_blob_idx >= 0);
-    bool have_micrographs = (fi_mic_path >= 0 || fi_loc_path >= 0);
-    bool have_particles = has_blob_info;
+    // Micrograph columns are often only in the passthrough (e.g. a CTF job's
+    // own table holds just ctf/*), so look there too.
+    bool have_micrographs = (fi_mic_path >= 0 || fi_loc_path >= 0 ||
+                             pt_fi_mic_path >= 0 || pt_fi_loc_path >= 0);
+    // Picks (e.g. from the filament tracer) have coordinates but no extracted
+    // image yet; they are still particles, not micrographs.
+    bool has_coords = (fi_loc_cx >= 0 || pt_fi_loc_cx >= 0);
+    bool have_particles = has_blob_info || has_coords;
 
     // Detect image size once
     // blob/shape stores integer pixel dimensions, often as uint16.

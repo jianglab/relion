@@ -100,6 +100,20 @@ static const JobMapping* findMapping(const std::string& cs_type)
 	return NULL;
 }
 
+/* The RELION job directory for a CryoSPARC job, e.g. J48 -> Class2D/job048.
+ * The job number is CryoSPARC's own, so that a job can be found under the same
+ * number in both projects; CryoSPARC numbers are already unique project-wide,
+ * as RELION's are. */
+static std::string relionJobDir(const JobMapping& m, const std::string& uid)
+{
+	const long num = cryosparc::jobNumber(uid);
+	if (num < 0)
+		REPORT_ERROR("ERROR: unexpected CryoSPARC job uid " + uid);
+	char rel[64];
+	snprintf(rel, sizeof(rel), "%s/job%03ld", m.relion_dir, num);
+	return rel;
+}
+
 class ImportCryosparcProject
 {
 public:
@@ -197,9 +211,9 @@ private:
 		makeDir(fn_out);
 		markProjectDir(fn_out);
 
-		// RELION numbers jobs across the whole project, not within each job
-		// type, so job001 appears once no matter which directory it is in.
-		int next_job = 0;
+		// Each job keeps its CryoSPARC number (J48 -> job048); the pipeline's
+		// counter goes one past the highest, so new jobs never reuse a number.
+		long max_job = 0;
 		int n_done = 0, n_failed = 0;
 		std::vector<cryosparc::PipelineJob> pipeline;
 
@@ -213,9 +227,8 @@ private:
 			const JobMapping* m = findMapping(j->type);
 			if (m == NULL) continue;
 
-			const int num = ++next_job;
-			char rel[64];
-			snprintf(rel, sizeof(rel), "%s/job%03d", m->relion_dir, num);
+			const std::string rel = relionJobDir(*m, j->uid);
+			max_job = std::max(max_job, cryosparc::jobNumber(j->uid));
 			const std::string job_dir = std::string(fn_out) + "/" + rel;
 
 			try
@@ -235,7 +248,7 @@ private:
 						project, *j, fn_out, job_dir, acq, opts);
 
 					addPipelineJob(pipeline, *j, m->relion_dir, rel, job_dir,
-					               std::string(rel) + "/corrected_micrographs.star");
+					               rel + "/corrected_micrographs.star");
 					touch(FileName(job_dir + "/" + RELION_JOB_EXIT_SUCCESS));
 
 					if (verb > 0)
@@ -274,7 +287,7 @@ private:
 		}
 
 		const long n_star = cryosparc::writeJobStars(fn_out, pipeline);
-		const long n_proc = cryosparc::writePipeline(fn_out, pipeline, next_job + 1);
+		const long n_proc = cryosparc::writePipeline(fn_out, pipeline, max_job + 1);
 
 		if (verb > 0)
 		{
@@ -360,7 +373,6 @@ private:
 
 	void reportPlan(const cryosparc::Project& project, const std::vector<std::string>& order)
 	{
-		int next_job = 0;                     // project-wide, as RELION numbers jobs
 		std::vector<std::string> unsupported;
 
 		if (verb > 0)
@@ -386,9 +398,7 @@ private:
 				continue;
 			}
 
-			const int num = ++next_job;
-			char rel[64];
-			snprintf(rel, sizeof(rel), "%s/job%03d", m->relion_dir, num);
+			const std::string rel = relionJobDir(*m, j->uid);
 
 			// What would actually be read for this job
 			std::string outputs;

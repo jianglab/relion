@@ -139,8 +139,7 @@ def test_import_writes_jobs_and_pipeline(importer, mini_project, tmp_path):
                        capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stdout + r.stderr
 
-    # RELION numbers jobs across the project, so the second job is job002 even
-    # though it is the first Class2D
+    # Each job keeps its CryoSPARC number: J1 -> job001, J2 -> job002
     assert (out / "Import" / "job001" / "particles.star").exists()
     assert (out / "Class2D" / "job002" / "run_it025_data.star").exists()
 
@@ -152,6 +151,35 @@ def test_import_writes_jobs_and_pipeline(importer, mini_project, tmp_path):
     assert "Import/job001/particles.star Class2D/job002/" in pipeline
     # The next job the GUI creates must not reuse a number
     assert "_rlnPipeLineJobCounter                     3" in pipeline
+
+
+def test_job_numbers_follow_cryosparc(importer, tmp_path):
+    """J5 becomes job005 even when J2-J4 do not exist or are not imported, so a
+    job can be found under the same number in both projects."""
+    proj = tmp_path / "CS-gap"
+    for uid in ("J1", "J5"):
+        (proj / uid).mkdir(parents=True)
+    _write_cs(proj / "J1" / "imported_particles.cs", 4)
+    _job_json(proj / "J1" / "job.json", "J1", "import_particles", "completed", [],
+              [("imported_particles", "blob", "particle.blob",
+                ["J1/imported_particles.cs"], [0])])
+    _write_cs(proj / "J5" / "J5_000_particles.cs", 4)
+    _job_json(proj / "J5" / "job.json", "J5", "class_2D_new", "completed", ["J1"],
+              [("particles", "blob", "particle.blob", ["J5/J5_000_particles.cs"], [0])])
+
+    out = tmp_path / "relion"
+    r = subprocess.run([importer, "--i", str(proj), "--o", str(out)],
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    assert (out / "Import" / "job001" / "particles.star").exists()
+    assert (out / "Class2D" / "job005" / "run_it025_data.star").exists()
+    assert not (out / "Class2D" / "job002").exists()
+
+    pipeline = (out / "default_pipeline.star").read_text()
+    assert "Import/job001/particles.star Class2D/job005/" in pipeline
+    # One past the highest CryoSPARC number, not the number of jobs imported
+    assert "_rlnPipeLineJobCounter                     6" in pipeline
 
 
 def test_import_looks_like_a_relion_project(importer, mini_project, tmp_path):
