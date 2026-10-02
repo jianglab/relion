@@ -285,6 +285,35 @@ def test_cryosparc_import_coordinates(relion_bin, test_data_dir):
     assert "2048" in star_text
 
 
+def test_cryosparc_import_coordinates_non_square(relion_bin, test_data_dir):
+    """CryoSPARC stores micrograph shapes as (height, width), so x scales by
+    the second element. Square micrographs cannot tell the two apart."""
+    cs_file = test_data_dir / "k3_picks.cs"
+    _make_cs(cs_file, [
+        ("location/micrograph_path", "S", ["/data/mic1.mrc"] * 2),
+        ("location/center_x_frac", "<f8", [0.5, 0.25]),
+        ("location/center_y_frac", "<f8", [0.25, 0.5]),
+        # A K3 micrograph: 4092 high, 5760 wide
+        ("location/micrograph_shape", ("<u4", (2,)), [[4092, 5760]] * 2),
+    ])
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "k3_picks.star",
+        "--do_cryosparc",
+        "--angpix", "1.0", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    rows = _read_particles((test_data_dir / "k3_picks.star").read_text())
+    assert len(rows) == 2
+    assert float(rows[0]["rlnCoordinateX"]) == pytest.approx(0.5 * 5760)
+    assert float(rows[0]["rlnCoordinateY"]) == pytest.approx(0.25 * 4092)
+    assert float(rows[1]["rlnCoordinateX"]) == pytest.approx(0.25 * 5760)
+    assert float(rows[1]["rlnCoordinateY"]) == pytest.approx(0.5 * 4092)
+
+
 def test_cryosparc_import_passthrough(relion_bin, test_data_dir):
     """Import .cs with passthrough merge: extract has blob+align, passthrough has CTF+mic."""
     extract_file = test_data_dir / "extract_file.cs"
