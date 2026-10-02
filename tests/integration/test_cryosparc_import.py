@@ -418,6 +418,9 @@ def test_cryosparc_import_picks_are_particles(relion_bin, test_data_dir):
     assert "rlnMicrographName" in star_text
     assert "rlnCoordinateX" in star_text
     assert "1024" in star_text and "2048" in star_text
+    # Tracer picks are filament segments, so they carry the helical columns
+    assert "rlnHelicalTubeID" in star_text
+    assert "rlnAnglePsiPrior" in star_text
 
 
 def test_cryosparc_import_multi_optics(relion_bin, test_data_dir):
@@ -493,6 +496,100 @@ def test_cryosparc_import_multi_optics(relion_bin, test_data_dir):
     assert particle_data[1] == "1", f"Expected group 1, got {particle_data[1]}"
     assert particle_data[2] == "2", f"Expected group 2, got {particle_data[2]}"
     assert particle_data[3] == "2", f"Expected group 2, got {particle_data[3]}"
+
+
+def _read_particles(star_text):
+    """The data_particles rows as dicts keyed by label."""
+    labels, rows, inside = [], [], False
+    for line in star_text.splitlines():
+        s = line.strip()
+        if s.startswith("data_"):
+            inside = (s == "data_particles")
+        elif not inside or not s or s.startswith("loop_") or s.startswith("#"):
+            continue
+        elif s.startswith("_"):
+            labels.append(s.split()[0][1:])
+        else:
+            rows.append(dict(zip(labels, s.split())))
+    return rows
+
+
+def test_cryosparc_import_helical_priors(relion_bin, test_data_dir):
+    """Filament segments carry RELION's helical columns, with tube IDs
+    renumbered from 1 within each micrograph and the filament angle as the psi
+    prior. Downstream of the tracer the filament columns come through the
+    passthrough, so put them there."""
+    cs_file = test_data_dir / "class2d_particles.cs"
+    pt_file = test_data_dir / "class2d_pt.cs"
+    uids = [1, 2, 3, 4]
+
+    _make_cs(cs_file, [
+        ("uid", "<i8", uids),
+        ("blob/path", "S", ["/data/seg.mrcs"] * 4),
+        ("blob/idx", "<i8", [0, 1, 2, 3]),
+        ("blob/psize_A", "<f8", [1.0] * 4),
+    ])
+    _make_cs(pt_file, [
+        ("uid", "<i8", uids),
+        ("location/micrograph_path", "S",
+         ["/data/mic1.mrc", "/data/mic1.mrc", "/data/mic1.mrc", "/data/mic2.mrc"]),
+        ("location/center_x_frac", "<f8", [0.1, 0.2, 0.5, 0.5]),
+        ("location/center_y_frac", "<f8", [0.1, 0.2, 0.5, 0.5]),
+        ("location/micrograph_shape", ("<u4", (2,)), [[1000, 1000]] * 4),
+        # Project-wide uids: two filaments on mic1, a third on mic2
+        ("filament/filament_uid", "<u8", [900001, 900001, 900002, 900003]),
+        ("filament/filament_pose", "<f8", [np.pi / 4, np.pi / 4, np.pi / 2, 0.0]),
+        ("filament/position_A", "<f8", [0.0, 28.0, 0.0, 0.0]),
+    ])
+
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--passthrough", str(pt_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "class2d_particles.star",
+        "--do_cryosparc",
+        "--angpix", "1.0", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    rows = _read_particles((test_data_dir / "class2d_particles.star").read_text())
+    assert len(rows) == 4
+    for label in ("rlnHelicalTubeID", "rlnAngleTiltPrior", "rlnAnglePsiPrior",
+                  "rlnAnglePsiFlipRatio", "rlnHelicalTrackLengthAngst"):
+        assert label in rows[0], f"Missing {label}"
+
+    # Tube IDs restart at 1 on each micrograph
+    assert [int(r["rlnHelicalTubeID"]) for r in rows] == [1, 1, 2, 1]
+    assert all(float(r["rlnAngleTiltPrior"]) == 90.0 for r in rows)
+    assert all(float(r["rlnAnglePsiFlipRatio"]) == 0.5 for r in rows)
+    # RELION's sign convention: psi prior = -filament angle
+    assert float(rows[0]["rlnAnglePsiPrior"]) == pytest.approx(-45.0, abs=1e-3)
+    assert float(rows[2]["rlnAnglePsiPrior"]) == pytest.approx(-90.0, abs=1e-3)
+    assert float(rows[1]["rlnHelicalTrackLengthAngst"]) == pytest.approx(28.0)
+
+
+def test_cryosparc_import_non_helical_has_no_priors(relion_bin, test_data_dir):
+    """Single particles must not gain helical columns."""
+    cs_file = test_data_dir / "spa_particles.cs"
+    _make_cs(cs_file, [
+        ("blob/path", "S", ["/data/part.mrcs"] * 2),
+        ("blob/idx", "<i8", [0, 1]),
+        ("blob/psize_A", "<f8", [1.0, 1.0]),
+    ])
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "spa_particles.star",
+        "--do_cryosparc",
+        "--angpix", "1.0", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    star_text = (test_data_dir / "spa_particles.star").read_text()
+    assert "rlnHelicalTubeID" not in star_text
+    assert "rlnAnglePsiPrior" not in star_text
 
 
 def test_cryosparc_import_invalid_file(relion_bin, test_data_dir):

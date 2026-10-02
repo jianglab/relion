@@ -490,6 +490,9 @@ static void convert(const std::string& cs_filename,
     int pt_fi_ctf_anisomag = have_passthrough ? find_field(hdr_pt.fields, "ctf/anisomag") : -1;
     int pt_fi_blob_psize  = have_passthrough ? find_field(hdr_pt.fields, "blob/psize_A") : -1;
     int pt_fi_blob_shape  = have_passthrough ? find_field(hdr_pt.fields, "blob/shape") : -1;
+    int pt_fi_fil_uid     = have_passthrough ? find_field(hdr_pt.fields, "filament/filament_uid") : -1;
+    int pt_fi_fil_pose    = have_passthrough ? find_field(hdr_pt.fields, "filament/filament_pose") : -1;
+    int pt_fi_fil_posA    = have_passthrough ? find_field(hdr_pt.fields, "filament/position_A") : -1;
 
     bool has_blob_info = (fi_blob_path >= 0 && fi_blob_idx >= 0);
     // Micrograph columns are often only in the passthrough (e.g. a CTF job's
@@ -500,6 +503,14 @@ static void convert(const std::string& cs_filename,
     // image yet; they are still particles, not micrographs.
     bool has_coords = (fi_loc_cx >= 0 || pt_fi_loc_cx >= 0);
     bool have_particles = has_blob_info || has_coords;
+    // Filament segments (from the filament tracer, and every job downstream of
+    // it through the passthrough) get RELION's helical columns.
+    bool is_helical = have_particles &&
+                      (fi_fil_uid >= 0 || pt_fi_fil_uid >= 0 ||
+                       fi_fil_pose >= 0 || pt_fi_fil_pose >= 0);
+    // RELION numbers tubes from 1 within each micrograph; CryoSPARC gives each
+    // filament a project-wide uid. micrograph -> (filament uid -> tube ID)
+    std::map<std::string, std::map<long, long> > tube_ids;
 
     // Detect image size once
     // blob/shape stores integer pixel dimensions, often as uint16.
@@ -900,6 +911,30 @@ static void convert(const std::string& cs_filename,
             }
         };
         set_coord(fi_loc_cx, pt_fi_loc_cx, fi_loc_cy, pt_fi_loc_cy);
+
+        // --- Helical priors ---
+        // The same columns RELION's own helical extraction writes. The psi
+        // prior is the filament direction with RELION's sign (-angle, as for
+        // alignments2D/pose above); the flip ratio of 0.5 is RELION's default
+        // bimodal prior, since a tracer cannot tell the filament's polarity.
+        if (is_helical) {
+            if (fi_fil_uid >= 0 || (pt_row && pt_fi_fil_uid >= 0)) {
+                const auto& f = (fi_fil_uid >= 0) ? hdr.fields[fi_fil_uid] : hdr_pt.fields[pt_fi_fil_uid];
+                const char* src = (fi_fil_uid >= 0) ? row : pt_row;
+                long fil_uid = read_int(src + f.offset, 0, f.kind, f.itemsize);
+                std::map<long, long>& ids = tube_ids[mic_name];
+                auto it = ids.find(fil_uid);
+                long tube_id = (it != ids.end()) ? it->second : (long)ids.size() + 1;
+                ids[fil_uid] = tube_id;
+                set_value(MD, "rlnHelicalTubeID", tube_id);
+            }
+            set_value(MD, "rlnAngleTiltPrior", 90.0);
+            if (fi_fil_pose >= 0 || (pt_row && pt_fi_fil_pose >= 0))
+                set_value(MD, "rlnAnglePsiPrior", -rd(fi_fil_pose, pt_fi_fil_pose) * DEG_PER_RAD);
+            set_value(MD, "rlnAnglePsiFlipRatio", 0.5);
+            if (fi_fil_posA >= 0 || (pt_row && pt_fi_fil_posA >= 0))
+                set_value(MD, "rlnHelicalTrackLengthAngst", rd(fi_fil_posA, pt_fi_fil_posA));
+        }
 
         // --- Optics group ---
         set_value(MD, "rlnOpticsGroup", (long)row_optgroup[i]);
