@@ -428,6 +428,7 @@ def test_cryosparc_import_picks_are_particles(relion_bin, test_data_dir):
         ("location/center_x_frac", "<f8", [0.25, 0.5, 0.75]),
         ("location/center_y_frac", "<f8", [0.25, 0.5, 0.25]),
         ("location/micrograph_shape", ("<u4", (2,)), [[4096, 4096]] * 3),
+        ("location/micrograph_psize_A", "<f4", [1.06] * 3),
         ("filament/filament_uid", "<u4", [7, 7, 7]),
     ])
 
@@ -450,6 +451,19 @@ def test_cryosparc_import_picks_are_particles(relion_bin, test_data_dir):
     # Tracer picks are filament segments, so they carry the helical columns
     assert "rlnHelicalTubeID" in star_text
     assert "rlnAnglePsiPrior" in star_text
+
+    # Picks have no images: their image pixel size is the micrograph's (from
+    # location/, not --angpix), so re-extraction does not rescale coordinates
+    optics = star_text.split("data_particles")[0]
+    labels = [l.split()[0] for l in optics.splitlines() if l.startswith("_rln")]
+    values = [l.split() for l in optics.splitlines()
+              if l.strip() and not l.startswith(("_", "#", "data_", "loop_"))][0]
+    row = dict(zip(labels, values))
+    assert float(row["_rlnImagePixelSize"]) == pytest.approx(1.06, abs=1e-4)
+    assert float(row["_rlnMicrographPixelSize"]) == pytest.approx(1.06, abs=1e-4)
+    # ... and a box size of 0: not extracted yet, but present, which is what
+    # re-extraction requires before it substitutes its own box
+    assert int(row["_rlnImageSize"]) == 0
 
 
 def test_cryosparc_import_multi_optics(relion_bin, test_data_dir):

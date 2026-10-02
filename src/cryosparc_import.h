@@ -537,6 +537,7 @@ static void convert(const std::string& cs_filename,
     int fi_blob_shape  = find_field(hdr.fields, "blob/shape");
     int fi_mic_path    = find_field(hdr.fields, "micrograph_blob/path");
     int fi_mic_psize   = find_field(hdr.fields, "micrograph_blob/psize_A");
+    int fi_loc_psize   = find_field(hdr.fields, "location/micrograph_psize_A");
     int fi_loc_path    = find_field(hdr.fields, "location/micrograph_path");
     int fi_loc_cx      = find_field(hdr.fields, "location/center_x_frac");
     int fi_loc_cy      = find_field(hdr.fields, "location/center_y_frac");
@@ -573,6 +574,7 @@ static void convert(const std::string& cs_filename,
     // Pre-compute passthrough field indices for fallback
     int pt_fi_mic_path    = have_passthrough ? find_field(hdr_pt.fields, "micrograph_blob/path") : -1;
     int pt_fi_mic_psize   = have_passthrough ? find_field(hdr_pt.fields, "micrograph_blob/psize_A") : -1;
+    int pt_fi_loc_psize   = have_passthrough ? find_field(hdr_pt.fields, "location/micrograph_psize_A") : -1;
     int pt_fi_loc_path    = have_passthrough ? find_field(hdr_pt.fields, "location/micrograph_path") : -1;
     int pt_fi_loc_cx      = have_passthrough ? find_field(hdr_pt.fields, "location/center_x_frac") : -1;
     int pt_fi_loc_cy      = have_passthrough ? find_field(hdr_pt.fields, "location/center_y_frac") : -1;
@@ -701,8 +703,16 @@ static void convert(const std::string& cs_filename,
             og.voltage = rd_v(row, pt_row, fi_ctf_kv, pt_fi_ctf_kv, kV);
             og.spherical_aberration = rd_v(row, pt_row, fi_ctf_cs, pt_fi_ctf_cs, Cs);
             og.amplitude_contrast = rd_v(row, pt_row, fi_ctf_q0, pt_fi_ctf_q0, Q0);
-            og.image_pixel_size = rd_v(row, pt_row, fi_blob_psize, pt_fi_blob_psize, pixel_size);
-            og.micrograph_pixel_size = rd_v(row, pt_row, fi_mic_psize, pt_fi_mic_psize, pixel_size);
+            // Picks record the micrograph's pixel size under location/ rather
+            // than micrograph_blob/
+            og.micrograph_pixel_size = rd_v(row, pt_row, fi_mic_psize, pt_fi_mic_psize,
+                                            rd_v(row, pt_row, fi_loc_psize, pt_fi_loc_psize, pixel_size));
+            // Picks have no images yet, so their "image" is the micrograph:
+            // re-extraction rescales coordinates by image / micrograph pixel
+            // size, and would shift them by offsets picks do not have otherwise
+            og.image_pixel_size = has_blob_info
+                ? rd_v(row, pt_row, fi_blob_psize, pt_fi_blob_psize, pixel_size)
+                : og.micrograph_pixel_size;
 
             og.beam_tilt_x = 0.0; og.beam_tilt_y = 0.0;
             int tilt_fi = (fi_ctf_tilt >= 0) ? fi_ctf_tilt : -1;
@@ -768,6 +778,11 @@ static void convert(const std::string& cs_filename,
         MDopt.setValue(EMDL_IMAGE_DIMENSIONALITY, 2);
         if (og.image_size > 0)
             MDopt.setValue(EMDL_IMAGE_SIZE, og.image_size);
+        else if (have_particles && !has_blob_info)
+            // Picks have not been extracted, so they have no box yet; 0 says
+            // so. Re-extraction requires the label to be present, and replaces
+            // the value with the box it extracts.
+            MDopt.setValue(EMDL_IMAGE_SIZE, 0);
         MDopt.setValue(EMDL_CTF_VOLTAGE, og.voltage);
         MDopt.setValue(EMDL_CTF_CS, og.spherical_aberration);
         MDopt.setValue(EMDL_CTF_Q0, og.amplitude_contrast);
