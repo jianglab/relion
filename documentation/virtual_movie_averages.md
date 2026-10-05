@@ -218,3 +218,10 @@ node instead. Command construction: `src/virtualize_project.{h,cpp}`
   stacks are virtual: they need verified replication before anything derived
   from them is deleted (the real-project scan found files lost to MooseFS chunk
   loss).
+
+## EER verification (kept here from the project notes)
+
+A real EER project (nfahim/AB_APOE_IU/003: 4096² × 48 EER groups, `.gain`
+reference, 7×5 patches) regenerates bit for bit at 1 and 16 threads, and
+descriptors read through RELION equal the real micrographs. Virtual movie
+averages work with RELION's own motion correction (`--use_own`) only.

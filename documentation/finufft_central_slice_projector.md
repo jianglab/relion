@@ -484,3 +484,9 @@ in `Projector::resolveForwardInterpolator()`.
   `--projector_finufft` is combined with `--gpu`.
 - Validation per §4 (isolated radial-power-spectrum comparison and two
   independent `--auto_refine` runs) has not been run.
+
+## Measured accuracy (kept here from the project notes)
+
+- Relative error against a brute-force exact central slice: **1.1e-6** for NUFFT,
+  **7.4e-3** for trilinear.
+- Reconstructions made with the two interpolators correlate at 0.999984.
