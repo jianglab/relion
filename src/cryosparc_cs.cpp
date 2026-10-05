@@ -82,6 +82,15 @@ std::string CsTable::getString(size_t row, const std::string& field) const
 	return read_string(impl_->rowPtr(row), f.offset, f.itemsize);
 }
 
+std::vector<std::string> csFieldNames(const std::string& filename)
+{
+	const CsHeader h = read_header(filename);
+	std::vector<std::string> out;
+	for (size_t i = 0; i < h.fields.size(); i++)
+		out.push_back(h.fields[i].name);
+	return out;
+}
+
 void convertCsToStar(const std::string& cs_filename,
                      const std::string& star_filename,
                      const std::string& optics_group_name,

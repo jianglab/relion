@@ -285,6 +285,35 @@ def test_cryosparc_import_coordinates(relion_bin, test_data_dir):
     assert "2048" in star_text
 
 
+def test_cryosparc_import_coordinates_non_square(relion_bin, test_data_dir):
+    """CryoSPARC stores micrograph shapes as (height, width), so x scales by
+    the second element. Square micrographs cannot tell the two apart."""
+    cs_file = test_data_dir / "k3_picks.cs"
+    _make_cs(cs_file, [
+        ("location/micrograph_path", "S", ["/data/mic1.mrc"] * 2),
+        ("location/center_x_frac", "<f8", [0.5, 0.25]),
+        ("location/center_y_frac", "<f8", [0.25, 0.5]),
+        # A K3 micrograph: 4092 high, 5760 wide
+        ("location/micrograph_shape", ("<u4", (2,)), [[4092, 5760]] * 2),
+    ])
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "k3_picks.star",
+        "--do_cryosparc",
+        "--angpix", "1.0", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    rows = _read_particles((test_data_dir / "k3_picks.star").read_text())
+    assert len(rows) == 2
+    assert float(rows[0]["rlnCoordinateX"]) == pytest.approx(0.5 * 5760)
+    assert float(rows[0]["rlnCoordinateY"]) == pytest.approx(0.25 * 4092)
+    assert float(rows[1]["rlnCoordinateX"]) == pytest.approx(0.25 * 5760)
+    assert float(rows[1]["rlnCoordinateY"]) == pytest.approx(0.5 * 4092)
+
+
 def test_cryosparc_import_passthrough(relion_bin, test_data_dir):
     """Import .cs with passthrough merge: extract has blob+align, passthrough has CTF+mic."""
     extract_file = test_data_dir / "extract_file.cs"
@@ -345,6 +374,96 @@ def test_cryosparc_import_passthrough(relion_bin, test_data_dir):
 
     # Verify auto-discovery: passthrough filename was NOT passed explicitly,
     # so relion must have auto-discovered *_passthrough.cs in the same dir
+
+
+def test_cryosparc_import_ctf_is_micrographs(relion_bin, test_data_dir):
+    """A CTF job's own table holds only ctf/*; the micrograph path is in the
+    passthrough. The result is still a micrographs table, not 'images'."""
+    cs_file = test_data_dir / "exposures_ctf_estimated.cs"
+    # Not named *_passthrough.cs, so other tests' auto-discovery is unaffected
+    pt_file = test_data_dir / "exposures_ctf_pt.cs"
+    uids = [1, 2]
+
+    _make_cs(cs_file, [
+        ("uid", "<i8", uids),
+        ("ctf/accel_kv", "<f8", [300.0, 300.0]),
+        ("ctf/cs_mm", "<f8", [2.7, 2.7]),
+        ("ctf/amp_contrast", "<f8", [0.1, 0.1]),
+        ("ctf/df1_A", "<f8", [10000.0, 11000.0]),
+        ("ctf/df2_A", "<f8", [9000.0, 9500.0]),
+    ])
+    _make_cs(pt_file, [
+        ("uid", "<i8", uids),
+        ("micrograph_blob/path", "S", ["/data/mic1.mrc", "/data/mic2.mrc"]),
+        ("micrograph_blob/psize_A", "<f8", [1.2, 1.2]),
+    ])
+
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--passthrough", str(pt_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "micrographs_ctf.star",
+        "--do_cryosparc",
+        "--angpix", "1.2", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    star_text = (test_data_dir / "micrographs_ctf.star").read_text()
+    assert "data_micrographs" in star_text
+    assert "data_images" not in star_text
+    assert "rlnMicrographName" in star_text
+    assert "rlnMicrographPixelSize" in star_text
+    assert "rlnDefocusU" in star_text
+
+
+def test_cryosparc_import_picks_are_particles(relion_bin, test_data_dir):
+    """Picks (e.g. from the filament tracer) have coordinates but no extracted
+    blob yet; they are particles, not micrographs."""
+    cs_file = test_data_dir / "filament_picks.cs"
+
+    _make_cs(cs_file, [
+        ("uid", "<i8", [1, 2, 3]),
+        ("location/micrograph_path", "S", ["/data/mic1.mrc"] * 3),
+        ("location/center_x_frac", "<f8", [0.25, 0.5, 0.75]),
+        ("location/center_y_frac", "<f8", [0.25, 0.5, 0.25]),
+        ("location/micrograph_shape", ("<u4", (2,)), [[4096, 4096]] * 3),
+        ("location/micrograph_psize_A", "<f4", [1.06] * 3),
+        ("filament/filament_uid", "<u4", [7, 7, 7]),
+    ])
+
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "filament_picks.star",
+        "--do_cryosparc",
+        "--angpix", "1.0", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    star_text = (test_data_dir / "filament_picks.star").read_text()
+    assert "data_particles" in star_text
+    assert "data_micrographs" not in star_text
+    assert "rlnMicrographName" in star_text
+    assert "rlnCoordinateX" in star_text
+    assert "1024" in star_text and "2048" in star_text
+    # Tracer picks are filament segments, so they carry the helical columns
+    assert "rlnHelicalTubeID" in star_text
+    assert "rlnAnglePsiPrior" in star_text
+
+    # Picks have no images: their image pixel size is the micrograph's (from
+    # location/, not --angpix), so re-extraction does not rescale coordinates
+    optics = star_text.split("data_particles")[0]
+    labels = [l.split()[0] for l in optics.splitlines() if l.startswith("_rln")]
+    values = [l.split() for l in optics.splitlines()
+              if l.strip() and not l.startswith(("_", "#", "data_", "loop_"))][0]
+    row = dict(zip(labels, values))
+    assert float(row["_rlnImagePixelSize"]) == pytest.approx(1.06, abs=1e-4)
+    assert float(row["_rlnMicrographPixelSize"]) == pytest.approx(1.06, abs=1e-4)
+    # ... and a box size of 0: not extracted yet, but present, which is what
+    # re-extraction requires before it substitutes its own box
+    assert int(row["_rlnImageSize"]) == 0
 
 
 def test_cryosparc_import_multi_optics(relion_bin, test_data_dir):
@@ -420,6 +539,100 @@ def test_cryosparc_import_multi_optics(relion_bin, test_data_dir):
     assert particle_data[1] == "1", f"Expected group 1, got {particle_data[1]}"
     assert particle_data[2] == "2", f"Expected group 2, got {particle_data[2]}"
     assert particle_data[3] == "2", f"Expected group 2, got {particle_data[3]}"
+
+
+def _read_particles(star_text):
+    """The data_particles rows as dicts keyed by label."""
+    labels, rows, inside = [], [], False
+    for line in star_text.splitlines():
+        s = line.strip()
+        if s.startswith("data_"):
+            inside = (s == "data_particles")
+        elif not inside or not s or s.startswith("loop_") or s.startswith("#"):
+            continue
+        elif s.startswith("_"):
+            labels.append(s.split()[0][1:])
+        else:
+            rows.append(dict(zip(labels, s.split())))
+    return rows
+
+
+def test_cryosparc_import_helical_priors(relion_bin, test_data_dir):
+    """Filament segments carry RELION's helical columns, with tube IDs
+    renumbered from 1 within each micrograph and the filament angle as the psi
+    prior. Downstream of the tracer the filament columns come through the
+    passthrough, so put them there."""
+    cs_file = test_data_dir / "class2d_particles.cs"
+    pt_file = test_data_dir / "class2d_pt.cs"
+    uids = [1, 2, 3, 4]
+
+    _make_cs(cs_file, [
+        ("uid", "<i8", uids),
+        ("blob/path", "S", ["/data/seg.mrcs"] * 4),
+        ("blob/idx", "<i8", [0, 1, 2, 3]),
+        ("blob/psize_A", "<f8", [1.0] * 4),
+    ])
+    _make_cs(pt_file, [
+        ("uid", "<i8", uids),
+        ("location/micrograph_path", "S",
+         ["/data/mic1.mrc", "/data/mic1.mrc", "/data/mic1.mrc", "/data/mic2.mrc"]),
+        ("location/center_x_frac", "<f8", [0.1, 0.2, 0.5, 0.5]),
+        ("location/center_y_frac", "<f8", [0.1, 0.2, 0.5, 0.5]),
+        ("location/micrograph_shape", ("<u4", (2,)), [[1000, 1000]] * 4),
+        # Project-wide uids: two filaments on mic1, a third on mic2
+        ("filament/filament_uid", "<u8", [900001, 900001, 900002, 900003]),
+        ("filament/filament_pose", "<f8", [np.pi / 4, np.pi / 4, np.pi / 2, 0.0]),
+        ("filament/position_A", "<f8", [0.0, 28.0, 0.0, 0.0]),
+    ])
+
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--passthrough", str(pt_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "class2d_particles.star",
+        "--do_cryosparc",
+        "--angpix", "1.0", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    rows = _read_particles((test_data_dir / "class2d_particles.star").read_text())
+    assert len(rows) == 4
+    for label in ("rlnHelicalTubeID", "rlnAngleTiltPrior", "rlnAnglePsiPrior",
+                  "rlnAnglePsiFlipRatio", "rlnHelicalTrackLengthAngst"):
+        assert label in rows[0], f"Missing {label}"
+
+    # Tube IDs restart at 1 on each micrograph
+    assert [int(r["rlnHelicalTubeID"]) for r in rows] == [1, 1, 2, 1]
+    assert all(float(r["rlnAngleTiltPrior"]) == 90.0 for r in rows)
+    assert all(float(r["rlnAnglePsiFlipRatio"]) == 0.5 for r in rows)
+    # RELION's sign convention: psi prior = -filament angle
+    assert float(rows[0]["rlnAnglePsiPrior"]) == pytest.approx(-45.0, abs=1e-3)
+    assert float(rows[2]["rlnAnglePsiPrior"]) == pytest.approx(-90.0, abs=1e-3)
+    assert float(rows[1]["rlnHelicalTrackLengthAngst"]) == pytest.approx(28.0)
+
+
+def test_cryosparc_import_non_helical_has_no_priors(relion_bin, test_data_dir):
+    """Single particles must not gain helical columns."""
+    cs_file = test_data_dir / "spa_particles.cs"
+    _make_cs(cs_file, [
+        ("blob/path", "S", ["/data/part.mrcs"] * 2),
+        ("blob/idx", "<i8", [0, 1]),
+        ("blob/psize_A", "<f8", [1.0, 1.0]),
+    ])
+    cmd = [
+        str(relion_bin / "relion_import"), "--i", str(cs_file),
+        "--odir", str(test_data_dir) + "/",
+        "--ofile", "spa_particles.star",
+        "--do_cryosparc",
+        "--angpix", "1.0", "--kV", "300", "--Cs", "2.7", "--Q0", "0.1",
+    ]
+    result = subprocess_run(cmd)
+    assert result.returncode == 0, f"relion_import failed: {result.stderr}"
+
+    star_text = (test_data_dir / "spa_particles.star").read_text()
+    assert "rlnHelicalTubeID" not in star_text
+    assert "rlnAnglePsiPrior" not in star_text
 
 
 def test_cryosparc_import_invalid_file(relion_bin, test_data_dir):

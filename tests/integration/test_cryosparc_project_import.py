@@ -59,16 +59,19 @@ def _write_cs(path, rows, extra_fields=()):
 
 
 def _job_json(path, uid, job_type, status, parents, results):
-    """`results` is a list of (group, name, type, [metafiles], [versions])."""
+    """`results` is a list of (group, name, type, [metafiles], [versions]),
+    optionally followed by a passthrough flag."""
     groups = {}
     out_results = []
-    for group, name, rtype, metafiles, versions in results:
+    for res in results:
+        group, name, rtype, metafiles, versions = res[:5]
+        passthrough = res[5] if len(res) > 5 else False
         groups.setdefault(group, {"name": group, "type": rtype.split(".")[0],
                                   "title": group, "num_items": 1})
         out_results.append({
             "group_name": group, "name": name, "type": rtype,
             "metafiles": metafiles, "versions": versions,
-            "passthrough": False, "num_items": [1] * len(metafiles),
+            "passthrough": passthrough, "num_items": [1] * len(metafiles),
         })
     doc = {
         "uid": uid, "job_type": job_type, "type": job_type, "status": status,
@@ -139,8 +142,7 @@ def test_import_writes_jobs_and_pipeline(importer, mini_project, tmp_path):
                        capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stdout + r.stderr
 
-    # RELION numbers jobs across the project, so the second job is job002 even
-    # though it is the first Class2D
+    # Each job keeps its CryoSPARC number: J1 -> job001, J2 -> job002
     assert (out / "Import" / "job001" / "particles.star").exists()
     assert (out / "Class2D" / "job002" / "run_it025_data.star").exists()
 
@@ -152,6 +154,121 @@ def test_import_writes_jobs_and_pipeline(importer, mini_project, tmp_path):
     assert "Import/job001/particles.star Class2D/job002/" in pipeline
     # The next job the GUI creates must not reuse a number
     assert "_rlnPipeLineJobCounter                     3" in pipeline
+
+
+def test_job_numbers_follow_cryosparc(importer, tmp_path):
+    """J5 becomes job005 even when J2-J4 do not exist or are not imported, so a
+    job can be found under the same number in both projects."""
+    proj = tmp_path / "CS-gap"
+    for uid in ("J1", "J5"):
+        (proj / uid).mkdir(parents=True)
+    _write_cs(proj / "J1" / "imported_particles.cs", 4)
+    _job_json(proj / "J1" / "job.json", "J1", "import_particles", "completed", [],
+              [("imported_particles", "blob", "particle.blob",
+                ["J1/imported_particles.cs"], [0])])
+    _write_cs(proj / "J5" / "J5_000_particles.cs", 4)
+    _job_json(proj / "J5" / "job.json", "J5", "class_2D_new", "completed", ["J1"],
+              [("particles", "blob", "particle.blob", ["J5/J5_000_particles.cs"], [0])])
+
+    out = tmp_path / "relion"
+    r = subprocess.run([importer, "--i", str(proj), "--o", str(out)],
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    assert (out / "Import" / "job001" / "particles.star").exists()
+    assert (out / "Class2D" / "job005" / "run_it025_data.star").exists()
+    assert not (out / "Class2D" / "job002").exists()
+
+    pipeline = (out / "default_pipeline.star").read_text()
+    assert "Import/job001/particles.star Class2D/job005/" in pipeline
+    # One past the highest CryoSPARC number, not the number of jobs imported
+    assert "_rlnPipeLineJobCounter                     6" in pipeline
+
+
+_LOCATION = [("location/micrograph_path", "S32"),
+             ("location/center_x_frac", "<f4"),
+             ("location/center_y_frac", "<f4"),
+             ("location/micrograph_shape", "<u4", (2,))]
+_FILAMENT = [("filament/filament_uid", "<u8"),
+             ("filament/filament_pose", "<f4"),
+             ("filament/position_A", "<f4")]
+
+
+def _set_location(a):
+    for i in range(len(a)):
+        a[i]["location/micrograph_path"] = b"J1/mic1.mrc"
+        a[i]["location/center_x_frac"] = 0.1 * (i + 1)
+        a[i]["location/center_y_frac"] = 0.1 * (i + 1)
+        a[i]["location/micrograph_shape"] = (4092, 5760)
+
+
+def test_filament_columns_survive_2d_classification(importer, tmp_path):
+    """CryoSPARC's 2D classification passes through location/* but not
+    filament/*, so the helical columns must come from an ancestor, joined on
+    particle uid."""
+    proj = tmp_path / "CS-helix"
+    for uid in ("J1", "J2"):
+        (proj / uid).mkdir(parents=True)
+
+    # J1: particles with filament/* (as an extraction from tracer picks has)
+    _write_cs(proj / "J1" / "imported_particles.cs", 4, _LOCATION + _FILAMENT)
+    a = np.load(proj / "J1" / "imported_particles.cs")
+    _set_location(a)
+    a["filament/filament_uid"] = [900001, 900001, 900002, 900002]
+    a["filament/filament_pose"] = np.pi / 4
+    a["filament/position_A"] = [0.0, 28.0, 0.0, 28.0]
+    with open(proj / "J1" / "imported_particles.cs", "wb") as f:
+        np.save(f, a, allow_pickle=False)
+    _job_json(proj / "J1" / "job.json", "J1", "import_particles", "completed", [],
+              [("imported_particles", "blob", "particle.blob",
+                ["J1/imported_particles.cs"], [0])])
+
+    # J2: 2D classification keeping 3 of the 4 particles, in a different order;
+    # its passthrough has location/* and no filament/*
+    _write_cs(proj / "J2" / "J2_000_particles.cs", 3)
+    m = np.load(proj / "J2" / "J2_000_particles.cs")
+    m["uid"] = [4, 1, 2]
+    with open(proj / "J2" / "J2_000_particles.cs", "wb") as f:
+        np.save(f, m, allow_pickle=False)
+    pt = np.zeros(3, dtype=[("uid", "<u8")] + _LOCATION)
+    _set_location(pt)
+    pt["uid"] = [4, 1, 2]
+    with open(proj / "J2" / "J2_passthrough_particles.cs", "wb") as f:
+        np.save(f, pt, allow_pickle=False)
+    _job_json(proj / "J2" / "job.json", "J2", "class_2D_new", "completed", ["J1"],
+              [("particles", "blob", "particle.blob", ["J2/J2_000_particles.cs"], [0]),
+               ("particles", "location", "particle.location",
+                ["J2/J2_passthrough_particles.cs"], [0], True)])
+
+    out = tmp_path / "relion"
+    r = subprocess.run([importer, "--i", str(proj), "--o", str(out)],
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # The import log says where the helical columns came from
+    assert "filament columns from" in r.stdout
+    assert "imported_particles.cs" in r.stdout.split("filament columns from", 1)[1]
+
+    text = (out / "Class2D" / "job002" / "run_it025_data.star").read_text()
+    labels, rows, inside = [], [], False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("data_"):
+            inside = (s == "data_particles")
+        elif not inside or not s or s.startswith(("loop_", "#")):
+            continue
+        elif s.startswith("_"):
+            labels.append(s.split()[0][1:])
+        else:
+            rows.append(dict(zip(labels, s.split())))
+
+    assert len(rows) == 3
+    # Rows follow J2's order (uids 4, 1, 2); J1's filaments are uid 1,2 -> 900001
+    # and uid 3,4 -> 900002, renumbered per micrograph in order of appearance
+    assert [int(r["rlnHelicalTubeID"]) for r in rows] == [1, 2, 2]
+    assert [float(r["rlnHelicalTrackLengthAngst"]) for r in rows] == [28.0, 0.0, 28.0]
+    assert all(float(r["rlnAnglePsiPrior"]) == pytest.approx(-45.0, abs=1e-3) for r in rows)
+    # The job's own passthrough is still merged too
+    assert "rlnCoordinateX" in labels
 
 
 def test_import_looks_like_a_relion_project(importer, mini_project, tmp_path):

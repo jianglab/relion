@@ -42,7 +42,12 @@ private:
 	std::shared_ptr<Impl> impl_;
 };
 
-/// Convert a .cs table (merging passthrough files on uid) to a RELION STAR file.
+/// The column names of a .cs file, from its header alone, so that a large table
+/// can be checked for a column without loading it. Throws if unreadable.
+std::vector<std::string> csFieldNames(const std::string& filename);
+
+/// Convert a .cs table to a RELION STAR file, merging the passthrough files
+/// (comma-separated) onto it by uid.
 void convertCsToStar(const std::string& cs_filename,
                      const std::string& star_filename,
                      const std::string& optics_group_name,

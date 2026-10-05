@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <cstdio>
 #include <iostream>
+#include <map>
 #include <set>
 #include <algorithm>
 
@@ -99,10 +100,70 @@ std::string findPathField(const CsTable& t, const std::string& result_name)
 	return "";
 }
 
+/// Whether a .cs file has a column, from its header alone; false if unreadable.
+/// Cached, since every job downstream of a large table asks about it.
+bool csHasField(const std::string& path, const std::string& field)
+{
+	static std::map<std::string, std::set<std::string> > cache;
+	std::map<std::string, std::set<std::string> >::iterator it = cache.find(path);
+	if (it == cache.end())
+	{
+		std::set<std::string> names;
+		try
+		{
+			const std::vector<std::string> v = csFieldNames(path);
+			names.insert(v.begin(), v.end());
+		}
+		catch (const std::exception&) {}
+		it = cache.insert(std::make_pair(path, names)).first;
+	}
+	return it->second.count(field) > 0;
+}
+
+/* The nearest ancestor table that still carries filament/* for these particles.
+ *
+ * CryoSPARC does not keep filament/* in the passthrough of every job
+ * downstream of the filament tracer (2D classification keeps only
+ * location/*), so from there on the helical columns would be lost. Particle
+ * uids are kept from job to job, so the ancestor's table can be merged in on
+ * uid like any other passthrough. Returns "" if no ancestor has them.
+ */
+std::string filamentSource(const Project& project, const Job& j)
+{
+	std::vector<std::string> queue(j.parents.begin(), j.parents.end());
+	std::set<std::string> seen(queue.begin(), queue.end());
+
+	for (size_t q = 0; q < queue.size(); q++)
+	{
+		const Job* a = project.job(queue[q]);
+		if (a == NULL) continue;
+
+		for (size_t g = 0; g < a->groups.size(); g++)
+		{
+			const OutputGroup& grp = a->groups[g];
+			if (grp.type != "particle") continue;
+			std::vector<std::string> files = grp.passthroughMetafiles();
+			files.insert(files.begin(), grp.primaryMetafile());
+			for (size_t f = 0; f < files.size(); f++)
+			{
+				if (files[f].empty()) continue;
+				const std::string p = project.resolve(files[f]);
+				if (csHasField(p, "filament/filament_uid") && csHasField(p, "uid"))
+					return p;
+			}
+		}
+
+		for (size_t p = 0; p < a->parents.size(); p++)
+			if (seen.insert(a->parents[p]).second) queue.push_back(a->parents[p]);
+	}
+	return "";
+}
+
 /// Convert a group's primary table (plus passthroughs) to a STAR file.
-long convertGroup(const Project& project, const OutputGroup& grp,
+long convertGroup(const Project& project, const Job& j, const OutputGroup& grp,
                   const std::string& star_path,
-                  const Project::Acquisition& acq, double amplitude_contrast)
+                  const Project::Acquisition& acq, double amplitude_contrast,
+                  std::string& note)
 {
 	const std::string primary = grp.primaryMetafile();
 	if (primary.empty()) return 0;
@@ -113,6 +174,25 @@ long convertGroup(const Project& project, const OutputGroup& grp,
 	{
 		if (!pt_joined.empty()) pt_joined += ",";
 		pt_joined += project.resolve(pts[i]);
+	}
+
+	// Filament particles whose own tables lost filament/* get it back from an
+	// ancestor, so the helical columns survive 2D classification and beyond
+	if (grp.type == "particle")
+	{
+		bool has_filament = csHasField(project.resolve(primary), "filament/filament_uid");
+		for (size_t i = 0; i < pts.size() && !has_filament; i++)
+			has_filament = csHasField(project.resolve(pts[i]), "filament/filament_uid");
+		if (!has_filament)
+		{
+			const std::string src = filamentSource(project, j);
+			if (!src.empty())
+			{
+				if (!pt_joined.empty()) pt_joined += ",";
+				pt_joined += src;
+				note = "filament columns from " + relativeTo(src, project.dir());
+			}
+		}
 	}
 
 	convertCsToStar(project.resolve(primary), star_path, "opticsGroup1",
@@ -280,7 +360,7 @@ JobWriteResult writeGenericJob(const Project& project,
 	const std::string star_name = mainStarName(relion_kind, cs_job);
 	const std::string star_path = out_job_dir + "/" + star_name;
 
-	res.n_rows = convertGroup(project, *grp, star_path, acq, opts.amplitude_contrast);
+	res.n_rows = convertGroup(project, cs_job, *grp, star_path, acq, opts.amplitude_contrast, res.note);
 	res.main_star = relativeTo(star_path, out_project);
 
 	// Make the images the table refers to reachable under short in-project names
@@ -308,7 +388,7 @@ JobWriteResult writeGenericJob(const Project& project,
 		}
 		catch (const std::exception& e)
 		{
-			res.note = std::string("could not link images: ") + e.what();
+			res.note += std::string(res.note.empty() ? "" : "; ") + "could not link images: " + e.what();
 		}
 	}
 

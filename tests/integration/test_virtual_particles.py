@@ -218,6 +218,46 @@ def test_recentred_reextraction_matches(relion_bin, project):
     assert_same_particles(relion_bin, project, real, virt)
 
 
+def test_reextraction_from_imported_picks(relion_bin, project):
+    """Picks that were never extracted, as relion_import_cryosparc writes a
+    filament tracer job: no particle images, rlnImageSize 0 in the optics
+    table, and helical columns. Re-extraction must accept them, use its own
+    box, and carry the helical columns through."""
+    picks = [("Micrographs/mic001.mrc", 180, 150, 1), ("Micrographs/mic001.mrc", 200, 160, 1),
+             ("Micrographs/mic002.mrc", 100, 100, 1), ("Micrographs/mic002.mrc", 120, 110, 2)]
+    write_loop(project / "picks.star", [
+        ("optics", ["OpticsGroupName", "OpticsGroup", "MicrographOriginalPixelSize",
+                    "MicrographPixelSize", "ImagePixelSize", "ImageDimensionality",
+                    "ImageSize", "Voltage", "SphericalAberration", "AmplitudeContrast"],
+         [["opticsGroup1", 1, 1.5, 1.5, 1.5, 2, 0, 300, 2.7, 0.1]]),
+        ("particles", ["MicrographName", "CoordinateX", "CoordinateY", "DefocusU", "DefocusV",
+                       "DefocusAngle", "OpticsGroup", "HelicalTubeID", "AngleTiltPrior",
+                       "AnglePsiPrior", "AnglePsiFlipRatio", "HelicalTrackLengthAngst"],
+         [[m, x, y, 12000, 11800, 30.0, 1, t, 90.0, -26.6, 0.5, 30.0 * i]
+          for i, (m, x, y, t) in enumerate(picks)]),
+    ])
+
+    star = extract(relion_bin, project, "Extract/from_picks",
+                   ["--reextract_data_star", "picks.star", "--extract_size", "64"], virtual=False)
+
+    labels, rows = read_particles(star)
+    assert len(rows) == 4
+    for lab in ("HelicalTubeID", "AngleTiltPrior", "AnglePsiPrior",
+                "AnglePsiFlipRatio", "HelicalTrackLengthAngst"):
+        assert lab in labels, f"lost {lab}"
+    assert [int(r[labels.index("HelicalTubeID")]) for r in rows] == [1, 1, 1, 2]
+    assert all(float(r[labels.index("AnglePsiPrior")]) == pytest.approx(-26.6) for r in rows)
+    # Coordinates are unchanged: picks have no offsets to apply
+    assert [(float(r[labels.index("CoordinateX")]), float(r[labels.index("CoordinateY")]))
+            for r in rows] == [(x, y) for _, x, y, _ in picks]
+    # The extracted particles have the extraction box, not the placeholder
+    optics = Path(star).read_text().split("data_particles")[0]
+    olabels = [l.split()[0] for l in optics.splitlines() if l.startswith("_rln")]
+    orow = [l.split() for l in optics.splitlines()
+            if l.strip() and not l.startswith(("_", "#", "data_", "loop_"))][0]
+    assert int(orow[olabels.index("_rlnImageSize")]) == 64
+
+
 def test_environment_variable_sets_the_default(relion_bin, project):
     opts = ["--coord_list", "coords.star", "--extract_size", "48"]
     (project / "Extract/env").mkdir(parents=True)

@@ -380,6 +380,110 @@ static void set_value(MetaDataTable& MD, const std::string& rln_name, const std:
         MD.setValue(label, val);
 }
 
+// Bytes one field occupies in a row, including any sub-array
+static int field_bytes(const CsField& f) {
+    int n = f.itemsize;
+    for (int d : f.subshape) n *= d;
+    return n;
+}
+
+// Read one or more passthrough files (comma-separated) as a single table.
+// Later files are joined on uid onto the rows of the first, each adding only
+// the columns the earlier ones lack, so the rest of convert() can treat them
+// as one passthrough. A later file that shares no uid with the first adds
+// nothing, since its columns would describe other particles.
+static void read_passthroughs(const std::string& list, CsHeader& hdr, std::vector<char>& data) {
+    std::vector<std::string> files;
+    for (size_t start = 0;;) {
+        size_t comma = list.find(',', start);
+        std::string p = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!p.empty()) files.push_back(p);
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    if (files.empty())
+        throw std::runtime_error("No passthrough file in: " + list);
+
+    hdr = read_header(files[0]);
+    data = read_data(files[0], hdr);
+    if (files.size() == 1) return;
+
+    int fi_uid = find_field(hdr.fields, "uid");
+    if (fi_uid < 0) {
+        std::cerr << " WARNING: " << files[0] << " has no uid column; ignoring the other passthrough files" << std::endl;
+        return;
+    }
+
+    for (size_t k = 1; k < files.size(); k++) {
+        CsHeader hk = read_header(files[k]);
+        std::vector<char> dk = read_data(files[k], hk);
+        int k_uid = find_field(hk.fields, "uid");
+        if (k_uid < 0) {
+            std::cerr << " WARNING: " << files[k] << " has no uid column; ignored" << std::endl;
+            continue;
+        }
+
+        std::map<long, size_t> rows_k;
+        for (size_t i = 0; i < hk.num_rows; i++) {
+            const CsField& f = hk.fields[k_uid];
+            rows_k[read_int(dk.data() + i * hk.total_itemsize + f.offset, 0, f.kind, f.itemsize)] = i;
+        }
+
+        std::vector<long> match(hdr.num_rows, -1);
+        size_t n_match = 0;
+        for (size_t i = 0; i < hdr.num_rows; i++) {
+            const CsField& f = hdr.fields[fi_uid];
+            auto it = rows_k.find(read_int(data.data() + i * hdr.total_itemsize + f.offset, 0, f.kind, f.itemsize));
+            if (it == rows_k.end()) continue;
+            match[i] = (long)it->second;
+            n_match++;
+        }
+        if (n_match == 0) {
+            std::cerr << " WARNING: " << files[k] << " shares no particles with " << files[0] << "; ignored" << std::endl;
+            continue;
+        }
+
+        std::vector<int> add;
+        int extra = 0;
+        for (int f = 0; f < (int)hk.fields.size(); f++) {
+            if (find_field(hdr.fields, hk.fields[f].name) >= 0) continue;
+            add.push_back(f);
+            extra += field_bytes(hk.fields[f]);
+        }
+        if (add.empty()) continue;
+
+        const int old_size = hdr.total_itemsize;
+        const int new_size = old_size + extra;
+        std::vector<char> merged(hdr.num_rows * (size_t)new_size, 0);
+        for (size_t i = 0; i < hdr.num_rows; i++) {
+            char* dst = merged.data() + i * new_size;
+            std::memcpy(dst, data.data() + i * old_size, old_size);
+            if (match[i] < 0) continue;
+            const char* src = dk.data() + match[i] * hk.total_itemsize;
+            int off = old_size;
+            for (int a : add) {
+                const int n = field_bytes(hk.fields[a]);
+                std::memcpy(dst + off, src + hk.fields[a].offset, n);
+                off += n;
+            }
+        }
+
+        int off = old_size;
+        for (int a : add) {
+            CsField f = hk.fields[a];
+            f.offset = off;
+            off += field_bytes(f);
+            hdr.fields.push_back(f);
+        }
+        hdr.total_itemsize = new_size;
+        data.swap(merged);
+
+        if (n_match < hdr.num_rows)
+            std::cerr << " WARNING: " << (hdr.num_rows - n_match) << " of " << hdr.num_rows
+                      << " particles are not in " << files[k] << "; their columns from it are left empty" << std::endl;
+    }
+}
+
 static void convert(const std::string& cs_filename,
                      const std::string& star_filename,
                      const std::string& optics_group_name,
@@ -413,8 +517,7 @@ static void convert(const std::string& cs_filename,
     int pt_fi_uid = -1;
     bool have_passthrough = !passthrough_filename.empty();
     if (have_passthrough) {
-        hdr_pt = read_header(passthrough_filename);
-        data_pt = read_data(passthrough_filename, hdr_pt);
+        read_passthroughs(passthrough_filename, hdr_pt, data_pt);
         pt_fi_uid = find_field(hdr_pt.fields, "uid");
         if (pt_fi_uid >= 0) {
             for (size_t i = 0; i < hdr_pt.num_rows; i++) {
@@ -434,6 +537,7 @@ static void convert(const std::string& cs_filename,
     int fi_blob_shape  = find_field(hdr.fields, "blob/shape");
     int fi_mic_path    = find_field(hdr.fields, "micrograph_blob/path");
     int fi_mic_psize   = find_field(hdr.fields, "micrograph_blob/psize_A");
+    int fi_loc_psize   = find_field(hdr.fields, "location/micrograph_psize_A");
     int fi_loc_path    = find_field(hdr.fields, "location/micrograph_path");
     int fi_loc_cx      = find_field(hdr.fields, "location/center_x_frac");
     int fi_loc_cy      = find_field(hdr.fields, "location/center_y_frac");
@@ -470,6 +574,7 @@ static void convert(const std::string& cs_filename,
     // Pre-compute passthrough field indices for fallback
     int pt_fi_mic_path    = have_passthrough ? find_field(hdr_pt.fields, "micrograph_blob/path") : -1;
     int pt_fi_mic_psize   = have_passthrough ? find_field(hdr_pt.fields, "micrograph_blob/psize_A") : -1;
+    int pt_fi_loc_psize   = have_passthrough ? find_field(hdr_pt.fields, "location/micrograph_psize_A") : -1;
     int pt_fi_loc_path    = have_passthrough ? find_field(hdr_pt.fields, "location/micrograph_path") : -1;
     int pt_fi_loc_cx      = have_passthrough ? find_field(hdr_pt.fields, "location/center_x_frac") : -1;
     int pt_fi_loc_cy      = have_passthrough ? find_field(hdr_pt.fields, "location/center_y_frac") : -1;
@@ -490,10 +595,28 @@ static void convert(const std::string& cs_filename,
     int pt_fi_ctf_anisomag = have_passthrough ? find_field(hdr_pt.fields, "ctf/anisomag") : -1;
     int pt_fi_blob_psize  = have_passthrough ? find_field(hdr_pt.fields, "blob/psize_A") : -1;
     int pt_fi_blob_shape  = have_passthrough ? find_field(hdr_pt.fields, "blob/shape") : -1;
+    int pt_fi_fil_uid     = have_passthrough ? find_field(hdr_pt.fields, "filament/filament_uid") : -1;
+    int pt_fi_fil_pose    = have_passthrough ? find_field(hdr_pt.fields, "filament/filament_pose") : -1;
+    int pt_fi_fil_posA    = have_passthrough ? find_field(hdr_pt.fields, "filament/position_A") : -1;
 
     bool has_blob_info = (fi_blob_path >= 0 && fi_blob_idx >= 0);
-    bool have_micrographs = (fi_mic_path >= 0 || fi_loc_path >= 0);
-    bool have_particles = has_blob_info;
+    // Micrograph columns are often only in the passthrough (e.g. a CTF job's
+    // own table holds just ctf/*), so look there too.
+    bool have_micrographs = (fi_mic_path >= 0 || fi_loc_path >= 0 ||
+                             pt_fi_mic_path >= 0 || pt_fi_loc_path >= 0);
+    // Picks (e.g. from the filament tracer) have coordinates but no extracted
+    // image yet; they are still particles, not micrographs.
+    bool has_coords = (fi_loc_cx >= 0 || pt_fi_loc_cx >= 0);
+    bool have_particles = has_blob_info || has_coords;
+    // Filament segments (from the filament tracer, and every job downstream of
+    // it through the passthrough) get RELION's helical columns.
+    bool is_helical = have_particles &&
+                      (fi_fil_uid >= 0 || pt_fi_fil_uid >= 0 ||
+                       fi_fil_pose >= 0 || pt_fi_fil_pose >= 0);
+    // RELION numbers tubes from 1 within each micrograph; CryoSPARC gives each
+    // filament a project-wide uid. micrograph -> (filament uid -> tube ID)
+    std::map<std::string, std::map<long, long> > tube_ids;
+    size_t n_rows_without_filament = 0;
 
     // Detect image size once
     // blob/shape stores integer pixel dimensions, often as uint16.
@@ -580,8 +703,16 @@ static void convert(const std::string& cs_filename,
             og.voltage = rd_v(row, pt_row, fi_ctf_kv, pt_fi_ctf_kv, kV);
             og.spherical_aberration = rd_v(row, pt_row, fi_ctf_cs, pt_fi_ctf_cs, Cs);
             og.amplitude_contrast = rd_v(row, pt_row, fi_ctf_q0, pt_fi_ctf_q0, Q0);
-            og.image_pixel_size = rd_v(row, pt_row, fi_blob_psize, pt_fi_blob_psize, pixel_size);
-            og.micrograph_pixel_size = rd_v(row, pt_row, fi_mic_psize, pt_fi_mic_psize, pixel_size);
+            // Picks record the micrograph's pixel size under location/ rather
+            // than micrograph_blob/
+            og.micrograph_pixel_size = rd_v(row, pt_row, fi_mic_psize, pt_fi_mic_psize,
+                                            rd_v(row, pt_row, fi_loc_psize, pt_fi_loc_psize, pixel_size));
+            // Picks have no images yet, so their "image" is the micrograph:
+            // re-extraction rescales coordinates by image / micrograph pixel
+            // size, and would shift them by offsets picks do not have otherwise
+            og.image_pixel_size = has_blob_info
+                ? rd_v(row, pt_row, fi_blob_psize, pt_fi_blob_psize, pixel_size)
+                : og.micrograph_pixel_size;
 
             og.beam_tilt_x = 0.0; og.beam_tilt_y = 0.0;
             int tilt_fi = (fi_ctf_tilt >= 0) ? fi_ctf_tilt : -1;
@@ -647,6 +778,11 @@ static void convert(const std::string& cs_filename,
         MDopt.setValue(EMDL_IMAGE_DIMENSIONALITY, 2);
         if (og.image_size > 0)
             MDopt.setValue(EMDL_IMAGE_SIZE, og.image_size);
+        else if (have_particles && !has_blob_info)
+            // Picks have not been extracted, so they have no box yet; 0 says
+            // so. Re-extraction requires the label to be present, and replaces
+            // the value with the box it extracts.
+            MDopt.setValue(EMDL_IMAGE_SIZE, 0);
         MDopt.setValue(EMDL_CTF_VOLTAGE, og.voltage);
         MDopt.setValue(EMDL_CTF_CS, og.spherical_aberration);
         MDopt.setValue(EMDL_CTF_Q0, og.amplitude_contrast);
@@ -887,13 +1023,43 @@ static void convert(const std::string& cs_filename,
                 std::vector<double> shape = get_mic_shape(row, fi_loc_shape, pt_fi_loc_shape, pt_row);
                 if (shape.empty())
                     shape = get_mic_shape(row, fi_mic_shape, pt_fi_mic_shape, pt_row);
+                // CryoSPARC stores shapes in NumPy order, (height, width)
                 if (shape.size() >= 2) {
-                    set_value(MD, "rlnCoordinateX", cx * shape[0]);
-                    set_value(MD, "rlnCoordinateY", cy * shape[1]);
+                    set_value(MD, "rlnCoordinateX", cx * shape[1]);
+                    set_value(MD, "rlnCoordinateY", cy * shape[0]);
                 }
             }
         };
         set_coord(fi_loc_cx, pt_fi_loc_cx, fi_loc_cy, pt_fi_loc_cy);
+
+        // --- Helical priors ---
+        // The same columns RELION's own helical extraction writes. The psi
+        // prior is the filament direction with RELION's sign (-angle, as for
+        // alignments2D/pose above); the flip ratio of 0.5 is RELION's default
+        // bimodal prior, since a tracer cannot tell the filament's polarity.
+        const bool row_has_filament =
+            fi_fil_uid >= 0 || fi_fil_pose >= 0 ||
+            (pt_row && (pt_fi_fil_uid >= 0 || pt_fi_fil_pose >= 0));
+        if (is_helical && !row_has_filament)
+            n_rows_without_filament++;
+        if (is_helical && row_has_filament) {
+            if (fi_fil_uid >= 0 || (pt_row && pt_fi_fil_uid >= 0)) {
+                const auto& f = (fi_fil_uid >= 0) ? hdr.fields[fi_fil_uid] : hdr_pt.fields[pt_fi_fil_uid];
+                const char* src = (fi_fil_uid >= 0) ? row : pt_row;
+                long fil_uid = read_int(src + f.offset, 0, f.kind, f.itemsize);
+                std::map<long, long>& ids = tube_ids[mic_name];
+                auto it = ids.find(fil_uid);
+                long tube_id = (it != ids.end()) ? it->second : (long)ids.size() + 1;
+                ids[fil_uid] = tube_id;
+                set_value(MD, "rlnHelicalTubeID", tube_id);
+            }
+            set_value(MD, "rlnAngleTiltPrior", 90.0);
+            if (fi_fil_pose >= 0 || (pt_row && pt_fi_fil_pose >= 0))
+                set_value(MD, "rlnAnglePsiPrior", -rd(fi_fil_pose, pt_fi_fil_pose) * DEG_PER_RAD);
+            set_value(MD, "rlnAnglePsiFlipRatio", 0.5);
+            if (fi_fil_posA >= 0 || (pt_row && pt_fi_fil_posA >= 0))
+                set_value(MD, "rlnHelicalTrackLengthAngst", rd(fi_fil_posA, pt_fi_fil_posA));
+        }
 
         // --- Optics group ---
         set_value(MD, "rlnOpticsGroup", (long)row_optgroup[i]);
@@ -907,6 +1073,10 @@ static void convert(const std::string& cs_filename,
     MDopt.write(fh);
     MD.write(fh);
     fh.close();
+
+    if (n_rows_without_filament > 0)
+        std::cerr << " WARNING: " << n_rows_without_filament << " of " << hdr.num_rows
+                  << " filament particles have no filament/* values; their helical columns are left empty" << std::endl;
 
     std::cout << " Written " << star_filename << " with " << hdr.num_rows << " particles from CryoSPARC .cs file" << std::endl;
 }
