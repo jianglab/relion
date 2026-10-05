@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 
+#include <src/rect_refusal.h>
 #include <src/args.h>
 #include <src/ml_optimiser.h>
 #include <src/jaz/single_particle/obs_model.h>
@@ -81,6 +82,8 @@ public:
 		optimiser.do_preread_images = false;
 
 		optimiser.read(fn_opt);
+		if (optimiser.mymodel.isRect())
+			refuseRectangularImages("relion_particle_reposition", "the refinement used non-square particles");
 		optimiser.mymodel.setFourierTransformMaps(false);
 
 		// Use a user-provided subset of particles instead of all of them?
@@ -89,6 +92,8 @@ public:
             std::cout <<" Reading data ..." << std::endl;
             optimiser.mydata.read(fn_dat, "", "");
 		}
+		if (optimiser.mydata.obsModel.anyRectBox())
+			refuseRectangularImages("relion_particle_reposition", "the optics groups describe non-square particles");
 
 
 		// Loop over all micrographs

@@ -41,6 +41,11 @@ void BackProjector::initialiseDataAndWeight(int current_size)
 
 	initialiseData(current_size);
 	weight.resize(data);
+	if (rect)
+	{
+		weight.setXmippOrigin();
+		weight.xinit = 0;
+	}
 
 }
 
@@ -58,6 +63,11 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
                                       RFLOAT r_ewald_sphere, bool is_positive_curvature,
                                       Matrix2D<RFLOAT>* magMatrix)
 {
+	if (rect)
+	{
+		backproject2Dto3DRect(f2d, A, Mweight, r_ewald_sphere, is_positive_curvature, magMatrix);
+		return;
+	}
 	RFLOAT m00, m10, m01, m11;
 
 	if (magMatrix != 0)
@@ -363,6 +373,8 @@ void BackProjector::backprojectNonuniform2Dto3D(const std::vector<Complex> &samp
 	                                            RFLOAT r_ewald_sphere, bool is_positive_curvature,
 	                                            Matrix2D<RFLOAT>* magMatrix)
 {
+	if (rect)
+		REPORT_ERROR("BackProjector::backprojectNonuniform2Dto3D: not supported for rectangular boxes");
 	if (samples.size() != sample_x.size() || samples.size() != sample_y.size())
 	{
 		REPORT_ERROR("BackProjector::backprojectNonuniform2Dto3D: inconsistent sample arrays");
@@ -577,6 +589,8 @@ void BackProjector::backproject1Dto2D(const MultidimArray<Complex > &f1d,
                                       const Matrix2D<RFLOAT> &A,
                                       const MultidimArray<RFLOAT> *Mweight)
 {
+	if (rect)
+		REPORT_ERROR("BackProjector::backproject1Dto2D: not supported for rectangular boxes");
 	Matrix2D<RFLOAT> Ainv = A.inv();
 	Ainv *= (RFLOAT)padding_factor;  // take scaling into account directly
 
@@ -691,6 +705,11 @@ void BackProjector::backrotate2D(const MultidimArray<Complex > &f2d,
                                  const MultidimArray<RFLOAT> *Mweight,
                                  Matrix2D<RFLOAT>* magMatrix)
 {
+	if (rect)
+	{
+		backrotate2DRect(f2d, A, Mweight, magMatrix);
+		return;
+	}
 	Matrix2D<RFLOAT> Ainv = A.inv();
 	Ainv *= (RFLOAT)padding_factor;  // take scaling into account directly
 
@@ -889,6 +908,11 @@ void BackProjector::backrotate3D(const MultidimArray<Complex > &f3d,
                                  const Matrix2D<RFLOAT> &A,
                                  const MultidimArray<RFLOAT> *Mweight)
 {
+	if (rect)
+	{
+		backrotate3DRect(f3d, A, Mweight);
+		return;
+	}
 	// f3d should already be in the right size (ori_size,orihalfdim)
 	// AND the points outside max_r should already be zero.
 
@@ -1074,6 +1098,11 @@ void BackProjector::backrotate3D(const MultidimArray<Complex > &f3d,
 void BackProjector::getLowResDataAndWeight(MultidimArray<Complex > &lowres_data, MultidimArray<RFLOAT> &lowres_weight,
                                            int lowres_r_max)
 {
+	if (rect)
+	{
+		getLowResDataAndWeightRect(lowres_data, lowres_weight, lowres_r_max);
+		return;
+	}
 
 	const int lowres_r2_max = ROUND(padding_factor * lowres_r_max) * ROUND(padding_factor * lowres_r_max);
 	const int lowres_pad_size = 2 * (ROUND(padding_factor * lowres_r_max) + 1) + 1;
@@ -1115,6 +1144,11 @@ void BackProjector::getLowResDataAndWeight(MultidimArray<Complex > &lowres_data,
 void BackProjector::setLowResDataAndWeight(MultidimArray<Complex > &lowres_data, MultidimArray<RFLOAT> &lowres_weight,
                                            int lowres_r_max)
 {
+	if (rect)
+	{
+		setLowResDataAndWeightRect(lowres_data, lowres_weight, lowres_r_max);
+		return;
+	}
 
 	const int lowres_r2_max = ROUND(padding_factor * lowres_r_max) * ROUND(padding_factor * lowres_r_max);
 	const int lowres_pad_size = 2 * (ROUND(padding_factor * lowres_r_max) + 1) + 1;
@@ -1150,6 +1184,11 @@ void BackProjector::setLowResDataAndWeight(MultidimArray<Complex > &lowres_data,
 
 void BackProjector::getDownsampledAverage(MultidimArray<Complex>& avg, bool divide) const
 {
+	if (rect)
+	{
+		getDownsampledAverageRect(avg, divide);
+		return;
+	}
 	MultidimArray<RFLOAT> down_weight;
 
 	// Pre-set down_data and down_weight sizes
@@ -1214,6 +1253,11 @@ void BackProjector::calculateDownSampledFourierShellCorrelation(const MultidimAr
                                                                 const MultidimArray<Complex>& avg2,
                                                                 MultidimArray<RFLOAT>& fsc) const
 {
+	if (rect)
+	{
+		calculateDownSampledFourierShellCorrelationRect(avg1, avg2, fsc);
+		return;
+	}
 	if (!avg1.sameShape(avg2))
 		REPORT_ERROR("ERROR BackProjector::calculateDownSampledFourierShellCorrelation: two arrays have different sizes");
 
@@ -1267,6 +1311,11 @@ void BackProjector::updateSSNRarrays(RFLOAT tau2_fudge,
                                      bool is_whole_instead_of_half,
 									 bool correct_tau2_by_avgctf2)
 {
+	if (rect)
+	{
+		updateSSNRarraysRect(tau2_fudge, tau2_io, sigma2_out, data_vs_prior_out, fourier_coverage_out, fsc, avgctf2, update_tau2_with_fsc, is_whole_instead_of_half, correct_tau2_by_avgctf2);
+		return;
+	}
 	// never rely on references (handed to you from the outside) for computation:
 	// they could be the same (i.e. reconstruct(..., dummy, dummy, dummy, dummy, ...); )
 	MultidimArray<RFLOAT> sigma2, data_vs_prior, fourier_coverage;
@@ -1435,6 +1484,8 @@ void BackProjector::externalReconstruct(MultidimArray<RFLOAT> &vol_out,
                                         RFLOAT tau2_fudge,
                                         int verb)
 {
+	if (rect)
+		REPORT_ERROR("BackProjector::externalReconstruct: not supported for rectangular boxes");
 
 	FileName fn_recons = fn_out+"_external_reconstruct.mrc";
 	FileName fn_star = fn_out+"_external_reconstruct.star";
@@ -1604,6 +1655,11 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
                                 bool printTimes,
                                 Image<RFLOAT>* weight_out)
 {
+	if (rect)
+	{
+		reconstructRect(vol_out, max_iter_preweight, do_map, tau2, tau2_fudge, normalise, minres_map, printTimes, weight_out);
+		return;
+	}
 #ifdef TIMING
 	Timer ReconTimer;
 	int ReconS_1 = ReconTimer.setNew(" RcS1_Init ");
@@ -2219,6 +2275,8 @@ void BackProjector::reconstructGrad(
 		bool use_fsc,
 		bool printTimes)
 {
+	if (rect)
+		REPORT_ERROR("BackProjector::reconstructGrad: not supported for rectangular boxes");
 	const int max_r2 = ROUND(r_max * padding_factor) * ROUND(r_max * padding_factor);
 	RFLOAT oversampling_correction = (ref_dim == 3) ? (padding_factor * padding_factor * padding_factor) : (padding_factor * padding_factor);
 
@@ -2384,6 +2442,11 @@ void BackProjector::enforceHermitianSymmetry()
 
 void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twist, RFLOAT helical_rise)
 {
+	if (rect)
+	{
+		applyHelicalSymmetryRect(nr_helical_asu, helical_twist, helical_rise);
+		return;
+	}
 	if ( (nr_helical_asu < 2) || (ref_dim != 3) )
 		return;
 
@@ -2541,6 +2604,11 @@ void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twis
 
 void BackProjector::applyPointGroupSymmetry(int threads)
 {
+	if (rect)
+	{
+		applyPointGroupSymmetryRect(threads);
+		return;
+	}
 
 //#define DEBUG_SYMM
 #ifdef DEBUG_SYMM
@@ -2700,6 +2768,11 @@ void BackProjector::applyPointGroupSymmetry(int threads)
 
 void BackProjector::convoluteBlobRealSpace(FourierTransformer &transformer, bool do_mask)
 {
+	if (rect)
+	{
+		convoluteBlobRealSpaceRect(transformer, do_mask);
+		return;
+	}
 
 	MultidimArray<RFLOAT> Mconv;
 	int padhdim = pad_size / 2;
@@ -2747,6 +2820,11 @@ void BackProjector::convoluteBlobRealSpace(FourierTransformer &transformer, bool
 
 void BackProjector::windowToOridimRealSpace(FourierTransformer &transformer, MultidimArray<RFLOAT> &Mout, bool printTimes)
 {
+	if (rect)
+	{
+		windowToOridimRealSpaceRect(transformer, Mout);
+		return;
+	}
 
 #ifdef TIMING
 	Timer OriDimTimer;

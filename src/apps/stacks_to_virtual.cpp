@@ -508,8 +508,8 @@ private:
 			Row r;
 			r.has_psi = !recipe.helical || md.getValue(EMDL_ORIENT_PSI_PRIOR, psi);
 			name.decompose(r.idx, stack);
-			r.x = (long)x;
-			r.y = (long)y;
+			r.x = (long)std::floor(x + 0.5);
+			r.y = (long)std::floor(y + 0.5);
 			r.psi = psi;
 			r.mic = mic;
 			by_stack[stack].push_back(r);
@@ -547,7 +547,7 @@ private:
 		Image<RFLOAT> head;
 		head.read(t.stack, false);
 		if (NSIZE(head()) != (long)t.centres.size()) { t.skip = "stack holds a different number of particles than listed"; return; }
-		if (XSIZE(head()) != recipe.outputSize() || YSIZE(head()) != recipe.outputSize())
+		if (XSIZE(head()) != recipe.outputSize() || YSIZE(head()) != recipe.outputSizeY())
 			{ t.skip = "stack box size does not match the recorded recipe"; return; }
 	}
 

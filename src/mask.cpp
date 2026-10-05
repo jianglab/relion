@@ -40,7 +40,7 @@ template class std::basic_string<char>;
 #endif
 // Mask out corners outside sphere (replace by average value)
 // Apply a soft mask (raised cosine with cosine_width pixels width)
-void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine_width, MultidimArray<RFLOAT> *Mnoise)
+void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine_width, MultidimArray<RFLOAT> *Mnoise, bool follow_box_shape)
 {
 
 	vol.setXmippOrigin();
@@ -48,6 +48,9 @@ void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine
 	if (radius < 0)
 		radius = (RFLOAT)XSIZE(vol)/2.;
 	radius_p = radius + cosine_width;
+	RFLOAT sx = 1., sy = 1., sz = 1.;
+	if (follow_box_shape)
+		boxShapeScales(vol, sx, sy, sz);
 
 
 	if (Mnoise == NULL)
@@ -55,7 +58,7 @@ void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine
 		// Calculate average background value
 		FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
 		{
-			r = sqrt((RFLOAT)(k*k + i*i + j*j));
+			r = (follow_box_shape) ? sqrt((RFLOAT)(k*sz*k*sz + i*sy*i*sy + j*sx*j*sx)) : sqrt((RFLOAT)(k*k + i*i + j*j));
 			if (r < radius)
 				continue;
 			else if (r > radius_p)
@@ -76,7 +79,7 @@ void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine
 	// Apply noisy or average background value
 	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
 	{
-		r = sqrt((RFLOAT)(k*k + i*i + j*j));
+		r = (follow_box_shape) ? sqrt((RFLOAT)(k*sz*k*sz + i*sy*i*sy + j*sx*j*sx)) : sqrt((RFLOAT)(k*k + i*i + j*j));
 		if (r < radius)
 		{
 			continue;

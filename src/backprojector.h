@@ -152,6 +152,10 @@ public:
 			ref_dim = op.ref_dim;
 			data_dim = op.data_dim;
 			skip_gridding = op.skip_gridding;
+			rect = op.rect;
+			box_nx = op.box_nx;
+			box_ny = op.box_ny;
+			box_nz = op.box_nz;
 			// BackProjector stuff
 			weight = op.weight;
 			tab_ftblob = op.tab_ftblob;
@@ -483,6 +487,35 @@ public:
 		}
 	}
 #endif
+
+	// ---- Rectangular images / cuboid volumes (implemented in backprojector_rect.cpp) ----
+	// Called from the square entry points when rect is true. Everything not listed here
+	// (gradient, non-uniform, 1D, external reconstruct) gives an error in rect mode.
+	void checkRectBox(const char *who) const;
+	void backproject2Dto3DRect(const MultidimArray<Complex> &f2d, const Matrix2D<RFLOAT> &A,
+	                           const MultidimArray<RFLOAT> *Mweight, RFLOAT r_ewald_sphere,
+	                           bool is_positive_curvature, Matrix2D<RFLOAT> *magMatrix);
+	void backrotate2DRect(const MultidimArray<Complex> &f2d, const Matrix2D<RFLOAT> &A,
+	                      const MultidimArray<RFLOAT> *Mweight, Matrix2D<RFLOAT> *magMatrix);
+	void backrotate3DRect(const MultidimArray<Complex> &f3d, const Matrix2D<RFLOAT> &A,
+	                      const MultidimArray<RFLOAT> *Mweight);
+	void getLowResDataAndWeightRect(MultidimArray<Complex> &lowres_data, MultidimArray<RFLOAT> &lowres_weight, int lowres_r_max);
+	void setLowResDataAndWeightRect(MultidimArray<Complex> &lowres_data, MultidimArray<RFLOAT> &lowres_weight, int lowres_r_max);
+	void getDownsampledAverageRect(MultidimArray<Complex> &avg, bool divide) const;
+	void calculateDownSampledFourierShellCorrelationRect(const MultidimArray<Complex> &avg1,
+	                                                     const MultidimArray<Complex> &avg2,
+	                                                     MultidimArray<RFLOAT> &fsc) const;
+	void updateSSNRarraysRect(RFLOAT tau2_fudge, MultidimArray<RFLOAT> &tau2_io, MultidimArray<RFLOAT> &sigma2_out,
+	                          MultidimArray<RFLOAT> &data_vs_prior_out, MultidimArray<RFLOAT> &fourier_coverage_out,
+	                          const MultidimArray<RFLOAT> &fsc, const MultidimArray<RFLOAT> &avgctf2,
+	                          bool update_tau2_with_fsc, bool is_whole_instead_of_half, bool correct_tau2_by_avgctf2);
+	void applyHelicalSymmetryRect(int nr_helical_asu, RFLOAT helical_twist, RFLOAT helical_rise);
+	void applyPointGroupSymmetryRect(int threads);
+	void convoluteBlobRealSpaceRect(FourierTransformer &transformer, bool do_mask);
+	void windowToOridimRealSpaceRect(FourierTransformer &transformer, MultidimArray<RFLOAT> &Mout);
+	void reconstructRect(MultidimArray<RFLOAT> &vol_out, int max_iter_preweight, bool do_map,
+	                     const MultidimArray<RFLOAT> &tau2, RFLOAT tau2_fudge, RFLOAT normalise,
+	                     int minres_map, bool printTimes, Image<RFLOAT> *weight_out);
 };
 
 #endif /* BACKPROJECTOR_H_ */

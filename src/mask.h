@@ -27,13 +27,28 @@
 #include "src/euler.h"
 #include "src/macros.h"
 
+// Scale factors that turn the ellipse (ellipsoid) inscribed in a rectangular
+// image (cuboid) into a circle (sphere) whose radius is half the shortest side.
+// All are 1 for a square image or a cube.
+inline void boxShapeScales(const MultidimArray<RFLOAT> &v, RFLOAT &sx, RFLOAT &sy, RFLOAT &sz)
+{
+	RFLOAT m = (XSIZE(v) < YSIZE(v)) ? XSIZE(v) : YSIZE(v);
+	if (ZSIZE(v) > 1 && ZSIZE(v) < m) m = ZSIZE(v);
+	sx = m / (RFLOAT)XSIZE(v);
+	sy = m / (RFLOAT)YSIZE(v);
+	sz = (ZSIZE(v) > 1) ? m / (RFLOAT)ZSIZE(v) : 1.;
+}
+
 // Mask out corners outside sphere (replace by average value)
 // Apply a soft mask (raised cosine with cosine_width pixels width)
+// With follow_box_shape, the radius belongs to the shortest side and the mask is an
+// ellipse (ellipsoid) with the proportions of a rectangular image (cuboid).
 void softMaskOutsideMap(
 		MultidimArray<RFLOAT> &vol,
 		RFLOAT radius = -1.,
 		RFLOAT cosine_width = 3,
-		MultidimArray<RFLOAT> *Mnoise = NULL);
+		MultidimArray<RFLOAT> *Mnoise = NULL,
+		bool follow_box_shape = false);
 
 // May27,2015 - Shaoda, Helical refinement
 void softMaskOutsideMapForHelix(

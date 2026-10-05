@@ -61,6 +61,24 @@ void alignMapToMap(
     RFLOAT &best_dy,
     RFLOAT &best_dz);
 
+/// Rotate (as Projector::rotate3D does) and then translate vol_align in place.
+void applyMapTransformation(
+    MultidimArray<RFLOAT> &vol_align,
+    RFLOAT rot, RFLOAT tilt, RFLOAT psi,
+    RFLOAT dx, RFLOAT dy, RFLOAT dz,
+    RFLOAT angpix);
+
+/// As alignMapToMap, for a cuboid map: the transformation is searched in the central
+/// cube (side = shortest axis) and applied to the whole cuboid. For a cube it is
+/// the same as alignMapToMap.
+void alignCuboidMapToMap(
+    MultidimArray<RFLOAT> &vol_align,
+    const MultidimArray<RFLOAT> &vol_ref,
+    int nr_freedom, RFLOAT angpix, RFLOAT maxres,
+    int search_range, RFLOAT search_step_rot, RFLOAT search_step_trans,
+    RFLOAT &best_rot, RFLOAT &best_tilt, RFLOAT &best_psi,
+    RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz);
+
 /// Apply the inverse of a found transformation to a per-particle orientation.
 /// For C1 (nr_freedom==6): composes the inverse rotation into the old one,
 /// subtracts the inverse translation.

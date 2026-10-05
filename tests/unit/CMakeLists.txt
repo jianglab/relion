@@ -43,6 +43,10 @@ set(RELION_UNIT_TEST_SOURCES
     test_remove_intermediates.cpp
     test_virtual_particles.cpp
     test_import_project.cpp
+    test_rectangular_box.cpp
+    test_rectangular_projector.cpp
+    test_rectangular_backprojector.cpp
+    test_fused_extract.cpp
 )
 
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})
@@ -77,10 +81,31 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )
 endforeach()
+
+# GUI tests need FLTK; widgets are built but never shown, so no display is required
+if(TARGET relion_gui_lib)
+    add_executable(relion_gui_tests test_gui_jobwindows.cpp)
+    target_include_directories(relion_gui_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/tests
+        ${FFTW_INCLUDES}
+        ${FLTK_INCLUDE_DIR}
+    )
+    if (CUDA_FOUND)
+        target_include_directories(relion_gui_tests PRIVATE ${CUDA_TOOLKIT_INCLUDE})
+    endif()
+    target_link_libraries(relion_gui_tests relion_gui_lib relion_lib ${FLTK_LIBRARIES} ${FFTW_LIBRARIES} ${TIFF_LIBRARIES})
+    add_dependencies(relion_gui_tests relion_gui_lib)
+    add_test(
+        NAME unit_gui
+        COMMAND relion_gui_tests
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+endif()

@@ -94,7 +94,7 @@ void ReferenceMap::load(int verb, bool debug)
 	if ( maps[0].data.xdim != maps[0].data.ydim
 	  || maps[0].data.ydim != maps[0].data.zdim)
 	{
-		REPORT_ERROR(reconFn0 + " is not cubical.\n");
+		REPORT_ERROR("ERROR: rectangular particle images (non-cubic reference maps) are not supported by this program: " + reconFn0 + " is not cubical; it needs square particles.\n");
 	}
 
 	if (debug) std::cout << "reading: " << reconFn1 << "\n";
@@ -104,7 +104,7 @@ void ReferenceMap::load(int verb, bool debug)
 	if ( maps[1].data.xdim != maps[1].data.ydim
 	  || maps[1].data.ydim != maps[1].data.zdim)
 	{
-		REPORT_ERROR(reconFn1 + " is not cubical.\n");
+		REPORT_ERROR("ERROR: rectangular particle images (non-cubic reference maps) are not supported by this program: " + reconFn1 + " is not cubical; it needs square particles.\n");
 	}
 
 	if ( maps[0].data.xdim != maps[1].data.xdim

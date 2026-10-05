@@ -47,6 +47,8 @@ ObservationModel::ObservationModel(const MetaDataTable &_opticsMdt, bool do_die_
 	lambda(_opticsMdt.numberOfObjects()),
 	Cs(_opticsMdt.numberOfObjects()),
 	boxSizes(_opticsMdt.numberOfObjects(), 0.0),
+	boxSizesX(_opticsMdt.numberOfObjects(), 0),
+	boxSizesY(_opticsMdt.numberOfObjects(), 0),
     CtfPremultiplied(_opticsMdt.numberOfObjects(), false),
     CtfCorrected(_opticsMdt.numberOfObjects(), false)
 {
@@ -91,7 +93,8 @@ ObservationModel::ObservationModel(const MetaDataTable &_opticsMdt, bool do_die_
 
 	magMatrices.resize(opticsMdt.numberOfObjects());
 
-	hasBoxSizes = opticsMdt.containsLabel(EMDL_IMAGE_SIZE);
+	hasBoxSizes = opticsMdt.containsLabel(EMDL_IMAGE_SIZE)
+	           || (opticsMdt.containsLabel(EMDL_IMAGE_SIZE_X) && opticsMdt.containsLabel(EMDL_IMAGE_SIZE_Y));
 
 	if (opticsMdt.containsLabel(EMDL_IMAGE_OPTICS_GROUP_NAME))
 	{
@@ -149,7 +152,17 @@ ObservationModel::ObservationModel(const MetaDataTable &_opticsMdt, bool do_die_
             CtfCorrected[i] = val;
         }
 
-		opticsMdt.getValue(EMDL_IMAGE_SIZE, boxSizes[i], i);
+		if (opticsMdt.containsLabel(EMDL_IMAGE_SIZE_X) && opticsMdt.containsLabel(EMDL_IMAGE_SIZE_Y))
+		{
+			opticsMdt.getValue(EMDL_IMAGE_SIZE_X, boxSizesX[i], i);
+			opticsMdt.getValue(EMDL_IMAGE_SIZE_Y, boxSizesY[i], i);
+			boxSizes[i] = XMIPP_MAX(boxSizesX[i], boxSizesY[i]);
+		}
+		else
+		{
+			opticsMdt.getValue(EMDL_IMAGE_SIZE, boxSizes[i], i);
+			boxSizesX[i] = boxSizesY[i] = boxSizes[i];
+		}
 
 		double kV;
 		opticsMdt.getValue(EMDL_CTF_VOLTAGE, kV, i);
@@ -234,7 +247,7 @@ void ObservationModel::predictObservation_DC(
 		REPORT_ERROR_STR("ObservationModel::predictObservation: Unable to make a prediction without knowing the box size.\n");
 	}
 
-	const int s_out = boxSizes[opticsGroup];
+	const int s_out = getBoxSize(opticsGroup);
 	const int sh_out = s_out/2 + 1;
 	const double ps = angpix[opticsGroup];
 
@@ -354,7 +367,7 @@ void ObservationModel::predictObservation(
 		REPORT_ERROR_STR("ObservationModel::predictObservation: Unable to make a prediction without knowing the box size.\n");
 	}
 
-	const int s_out = boxSizes[opticsGroup];
+	const int s_out = getBoxSize(opticsGroup);
 	const int sh_out = s_out/2 + 1;
 
 	double xoff, yoff;
@@ -459,7 +472,7 @@ Volume<t2Vector<Complex>> ObservationModel::predictComplexGradient(Projector &pr
 	partMdt.getValue(EMDL_IMAGE_OPTICS_GROUP, opticsGroup, particle);
 	opticsGroup--;
 
-	const int s_out = boxSizes[opticsGroup];
+	const int s_out = getBoxSize(opticsGroup);
 	const int sh_out = s_out/2 + 1;
 
 	Volume<t2Vector<Complex>> out(sh_out,s_out,1);
@@ -537,8 +550,9 @@ void ObservationModel::divideByMtf(
 
 	if (fnMtfs.size() > opticsGroup)
 	{
-		const BufferedImage<RFLOAT>& mtf = getMtfImage(opticsGroup, s);
-		const BufferedImage<RFLOAT>& avgmtf = getAverageMtfImage(s);
+		const bool rect = isRectBox(opticsGroup);
+		const BufferedImage<RFLOAT>& mtf = rect ? getMtfImageRect(opticsGroup, sh, s) : getMtfImage(opticsGroup, s);
+		const BufferedImage<RFLOAT>& avgmtf = rect ? getAverageMtfImageRect(sh, s) : getAverageMtfImage(s);
 
 		if (do_multiply_instead)
 		{
@@ -604,7 +618,9 @@ void ObservationModel::demodulatePhase(int opticsGroup, MultidimArray<Complex>& 
 	if (oddZernikeCoeffs.size() > opticsGroup
 			&& oddZernikeCoeffs[opticsGroup].size() > 0)
 	{
-		const BufferedImage<Complex>& corr = getPhaseCorrection(opticsGroup, s);
+		const BufferedImage<Complex>& corr = isRectBox(opticsGroup)
+				? getPhaseCorrectionRect(opticsGroup, sh, s)
+				: getPhaseCorrection(opticsGroup, s);
 
 		if (do_modulate_instead)
 		{
@@ -647,7 +663,7 @@ bool ObservationModel::allBoxSizesIdentical() const
 
 	for (int i = 1; i < boxSizes.size(); i++)
 	{
-		if (boxSizes[i] != boxSizes[0])
+		if (boxSizes[i] != boxSizes[0] || boxSizesX[i] != boxSizesX[0] || boxSizesY[i] != boxSizesY[0])
 		{
 			out = false;
 			break;
@@ -723,7 +739,7 @@ void ObservationModel::setBoxSize(int opticsGroup, int newBoxSize)
 		REPORT_ERROR("ObservationModel::setBoxSize: wrong opticsGroup");
 	}
 
-	boxSizes[opticsGroup] = newBoxSize;
+	boxSizes[opticsGroup] = boxSizesX[opticsGroup] = boxSizesY[opticsGroup] = newBoxSize;
 
 	phaseCorr[opticsGroup].clear();
 	gammaOffset[opticsGroup].clear();
@@ -739,18 +755,65 @@ int ObservationModel::getBoxSize(int opticsGroup) const
 {
 	if (!hasBoxSizes)
 	{
+		if (opticsMdt.containsLabel(EMDL_IMAGE_SIZE_X) || opticsMdt.containsLabel(EMDL_IMAGE_SIZE_Y))
+			REPORT_ERROR("ObservationModel::getBoxSize: ERROR: the optics groups describe rectangular particle images (rlnImageSizeX/Y), which this program does not support; it needs square particles (rlnImageSize).\n");
 		REPORT_ERROR("ObservationModel::getBoxSize: box sizes not available. Make sure particle images are available before converting/importing STAR files from earlier versions of RELION.\n");
 	}
 
+	if (boxSizesX[opticsGroup] != boxSizesY[opticsGroup])
+	{
+		REPORT_ERROR("ObservationModel::getBoxSize: optics group " + std::to_string(opticsGroup + 1)
+			+ " has rectangular particle images (" + std::to_string(boxSizesX[opticsGroup]) + " x "
+			+ std::to_string(boxSizesY[opticsGroup]) + " pixels), which this program does not support; it needs square particles.");
+	}
+
 	return boxSizes[opticsGroup];
+}
+
+int ObservationModel::getBoxSizeX(int opticsGroup) const
+{
+	if (!hasBoxSizes)
+		REPORT_ERROR("ObservationModel::getBoxSizeX: box sizes not available.");
+	return boxSizesX[opticsGroup];
+}
+
+int ObservationModel::getBoxSizeY(int opticsGroup) const
+{
+	if (!hasBoxSizes)
+		REPORT_ERROR("ObservationModel::getBoxSizeY: box sizes not available.");
+	return boxSizesY[opticsGroup];
+}
+
+int ObservationModel::getNominalBoxSize(int opticsGroup) const
+{
+	if (!hasBoxSizes)
+		REPORT_ERROR("ObservationModel::getNominalBoxSize: box sizes not available.");
+	return boxSizes[opticsGroup];
+}
+
+bool ObservationModel::isRectBox(int opticsGroup) const
+{
+	return hasBoxSizes && boxSizesX[opticsGroup] != boxSizesY[opticsGroup];
+}
+
+bool ObservationModel::anyRectBox() const
+{
+	for (size_t i = 0; i < boxSizes.size(); i++)
+		if (isRectBox(i)) return true;
+	return false;
 }
 
 void ObservationModel::getBoxSizes(std::vector<int>& sDest, std::vector<int>& shDest) const
 {
 	if (!hasBoxSizes)
 	{
+		if (opticsMdt.containsLabel(EMDL_IMAGE_SIZE_X) || opticsMdt.containsLabel(EMDL_IMAGE_SIZE_Y))
+			REPORT_ERROR("ObservationModel::getBoxSizes: ERROR: the optics groups describe rectangular particle images (rlnImageSizeX/Y), which this program does not support; it needs square particles (rlnImageSize).\n");
 		REPORT_ERROR("ObservationModel::getBoxSizes: box sizes not available. Make sure particle images are available before converting/importing STAR files from earlier versions of RELION.\n");
 	}
+
+	if (anyRectBox())
+		REPORT_ERROR("ObservationModel::getBoxSizes: ERROR: rectangular particle images are not supported by this program; it needs square particles.");
 
 	sDest.resize(boxSizes.size());
 	shDest.resize(boxSizes.size());
@@ -1189,6 +1252,138 @@ const BufferedImage<RFLOAT>& ObservationModel::getMtfImage(int optGroup, int s)
 	return mtfImage[optGroup][s];
 }
 
+
+const BufferedImage<RFLOAT>& ObservationModel::getMtfImageRect(int optGroup, int xdim, int ydim)
+{
+	const int key = -(ydim * 65536 + xdim);
+
+	#pragma omp critical(ObservationModel_getMtfImage)
+	{
+		if (mtfImage[optGroup].find(key) == mtfImage[optGroup].end())
+		{
+			if (optGroup >= originalAngpix.size())
+			{
+				REPORT_ERROR("For MTF correction, the rlnMicrographOriginalPixelSize column is necessary in the optics table.");
+			}
+
+			MetaDataTable MDmtf;
+			MDmtf.read(fnMtfs[optGroup]);
+			const int mtfc = MDmtf.numberOfObjects();
+
+			std::vector<RFLOAT> mtf_resol(mtfc), mtf_value(mtfc);
+
+			for (int i = 0; i < mtfc; i++)
+			{
+				mtf_resol[i] = MDmtf.getRfloat(EMDL_RESOLUTION_INVPIXEL, i) / originalAngpix[optGroup];
+				mtf_value[i] = MDmtf.getRfloat(EMDL_POSTPROCESS_MTF_VALUE, i);
+
+				if (mtf_value[i] < 1e-10)
+					REPORT_ERROR("ERROR: zero or negative values encountered in MTF curve: " + fnMtfs[optGroup]);
+			}
+
+			RFLOAT res_per_elem = (mtf_resol[mtfc-1] - mtf_resol[0]) / (RFLOAT)(mtfc);
+			if (res_per_elem < 1e-10)
+				REPORT_ERROR(" ERROR: the resolution in the MTF star file does not go up....");
+
+			mtfImage[optGroup][key] = BufferedImage<RFLOAT>(xdim, ydim);
+			BufferedImage<RFLOAT>& img = mtfImage[optGroup][key];
+
+			// Frequencies come from the full box of the group: a cropped image keeps the indices
+			const double asx = angpix[optGroup] * boxSizesX[optGroup];
+			const double asy = angpix[optGroup] * boxSizesY[optGroup];
+
+			for (int y = 0; y < ydim; y++)
+			for (int x = 0; x < xdim; x++)
+			{
+				const double xx = x / asx;
+				const double yy = (y < ydim/2 ? y : y - ydim) / asy;
+
+				RFLOAT res = sqrt(xx*xx + yy*yy);
+				int i_0 = FLOOR(res / res_per_elem);
+				RFLOAT mtf;
+
+				if (i_0 >= mtfc-1)
+					mtf = mtf_value[mtfc-1];
+				else if (i_0 <= 0)
+					mtf = mtf_value[0];
+				else
+				{
+					RFLOAT x_0 = mtf_resol[i_0], y_0 = mtf_value[i_0];
+					RFLOAT x_1 = mtf_resol[i_0 + 1], y_1 = mtf_value[i_0 + 1];
+					mtf = y_0 + (y_1 - y_0)*(res - x_0)/(x_1 - x_0);
+				}
+
+				img(x,y) = mtf;
+			}
+		}
+	}
+
+	return mtfImage[optGroup][key];
+}
+
+const BufferedImage<RFLOAT>& ObservationModel::getAverageMtfImageRect(int xdim, int ydim)
+{
+	const int key = -(ydim * 65536 + xdim);
+
+	#pragma omp critical(ObservationModel_getAverageMtfImage)
+	{
+		if (avgMtfImage.find(key) == avgMtfImage.end())
+		{
+			avgMtfImage[key] = getMtfImageRect(0, xdim, ydim);
+
+			for (int i = 1; i < mtfImage.size(); i++)
+				avgMtfImage[key] += getMtfImageRect(i, xdim, ydim);
+
+			avgMtfImage[key] /= (RFLOAT)mtfImage.size();
+		}
+	}
+
+	return avgMtfImage[key];
+}
+
+const BufferedImage<Complex>& ObservationModel::getPhaseCorrectionRect(int optGroup, int xdim, int ydim)
+{
+	const int key = -(ydim * 65536 + xdim);
+
+	#pragma omp critical(ObservationModel_getPhaseCorrection)
+	{
+		if (phaseCorr[optGroup].find(key) == phaseCorr[optGroup].end())
+		{
+			phaseCorr[optGroup][key] = BufferedImage<Complex>(xdim, ydim);
+			BufferedImage<Complex>& img = phaseCorr[optGroup][key];
+
+			const double asx = angpix[optGroup] * boxSizesX[optGroup];
+			const double asy = angpix[optGroup] * boxSizesY[optGroup];
+			const Matrix2D<RFLOAT>& M = magMatrices[optGroup];
+
+			for (int y = 0; y < ydim; y++)
+			for (int x = 0; x < xdim; x++)
+			{
+				double phase = 0.0;
+
+				for (int i = 0; i < oddZernikeCoeffs[optGroup].size(); i++)
+				{
+					int m, n;
+					Zernike::oddIndexToMN(i, m, n);
+
+					const double xx0 = x / asx;
+					const double yy0 = (y < ydim/2 ? y : y - ydim) / asy;
+
+					const double xx = M(0,0) * xx0 + M(0,1) * yy0;
+					const double yy = M(1,0) * xx0 + M(1,1) * yy0;
+
+					phase += oddZernikeCoeffs[optGroup][i] * Zernike::Z_cart(m,n,xx,yy);
+				}
+
+				img(x,y).real = cos(phase);
+				img(x,y).imag = sin(phase);
+			}
+		}
+	}
+
+	return phaseCorr[optGroup][key];
+}
+
 const BufferedImage<RFLOAT>& ObservationModel::getAverageMtfImage(int s)
 {
 	#pragma omp critical(ObservationModel_getAverageMtfImage)
@@ -1229,9 +1424,10 @@ const BufferedImage<Complex>& ObservationModel::getPhaseCorrection(int optGroup,
 			phaseCorr[optGroup][s] = BufferedImage<Complex>(sh,s);
 
 			BufferedImage<Complex>& img = phaseCorr[optGroup][s];
-			// Use s (requested size) so that spatial frequency x/(s*angpix) is
-			// correct for both native and padded (CTF-padding) calls.
-			const double as = angpix[optGroup] * s;
+			// Real-space size behind this array. Padding (s > box) makes the frequency
+			// spacing finer: 1/(s*angpix). A Fourier-cropped image (s < box, as made by
+			// the optimiser's current_size) keeps the spacing of the full box: 1/(box*angpix).
+			const double as = angpix[optGroup] * XMIPP_MAX(s, boxSizes[optGroup]);
 			const Matrix2D<RFLOAT>& M = magMatrices[optGroup];
 			
 			for (int y = 0; y < s;  y++)
@@ -1278,9 +1474,10 @@ const BufferedImage<RFLOAT>& ObservationModel::getGammaOffset(int optGroup, int 
 			gammaOffset[optGroup][s] = BufferedImage<RFLOAT>(sh,s);
 			BufferedImage<RFLOAT>& img = gammaOffset[optGroup][s];
 
-			// Use s (requested size) so that spatial frequency x/(s*angpix) is
-			// correct for both native and padded (CTF-padding) calls.
-			const double as = angpix[optGroup] * s;
+			// Real-space size behind this array. Padding (s > box) makes the frequency
+			// spacing finer: 1/(s*angpix). A Fourier-cropped image (s < box, as made by
+			// the optimiser's current_size) keeps the spacing of the full box: 1/(box*angpix).
+			const double as = angpix[optGroup] * XMIPP_MAX(s, boxSizes[optGroup]);
 			const Matrix2D<RFLOAT>& M = magMatrices[optGroup];
 
 			for (int y = 0; y < s;  y++)

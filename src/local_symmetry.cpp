@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 
+#include "src/rect_refusal.h"
 #include "src/local_symmetry.h"
 
 //#define DEBUG
@@ -2285,6 +2286,7 @@ void local_symmetry_parameters::run()
 
 		unsym_map.clear();
 		unsym_map.read(fn_unsym);
+		refuseNonCubicMap(unsym_map(), "relion_localsym");
 		//sym_map.clear();
 
 		int box_size = ((XSIZE(unsym_map())) < (YSIZE(unsym_map()))) ? (XSIZE(unsym_map())) : (YSIZE(unsym_map()));
@@ -2337,6 +2339,7 @@ void local_symmetry_parameters::run()
 		{
 			duplicate_masks_only = false;
 			map_in.read(fn_unsym);
+			refuseNonCubicMap(map_in(), "relion_localsym");
 		}
 		else
 			duplicate_masks_only = true;

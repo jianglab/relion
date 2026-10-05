@@ -18,6 +18,7 @@
  * source code. Additional authorship citations may be added, but existing
  * author citations must be preserved.
  ***************************************************************************/
+#include <src/rect_refusal.h>
 #include "src/autopicker.h"
 #include <src/jaz/single_particle/new_ft.h>
 
@@ -501,6 +502,10 @@ void AutoPicker::initialise(int rank)
 			}
 		}
 
+		refuseNonCubicMap(Istk(), "relion_autopick", "3D reference");
+		if (ZSIZE(Istk()) == 1 && Istk().getDim() == 2 && XSIZE(Istk()) != YSIZE(Istk()))
+			refuseRectangularImages("relion_autopick", "the reference images are " + std::to_string(XSIZE(Istk())) + " x " + std::to_string(YSIZE(Istk())) + " pixels, not square");
+
 		if (ZSIZE(Istk()) > 1)
 		{
 			if (autopick_helical_segments)
@@ -633,6 +638,10 @@ void AutoPicker::initialise(int rank)
 				std::cout << " + You can override this by providing --particle_diameter (in Angstroms)" << std::endl;
 			}
 		}
+
+		for (int iref = 0; iref < Mrefs.size(); iref++)
+			if (XSIZE(Mrefs[iref]) != YSIZE(Mrefs[iref]))
+				refuseRectangularImages("relion_autopick", "reference " + std::to_string(iref + 1) + " is " + std::to_string(XSIZE(Mrefs[iref])) + " x " + std::to_string(YSIZE(Mrefs[iref])) + " pixels, not square");
 
 		// Now bring Mrefs from angpix_ref to angpix!
 		if (fabs(angpix_ref - angpix) > 1e-3)

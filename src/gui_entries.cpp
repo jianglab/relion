@@ -419,6 +419,13 @@ void GuiEntry::cb_menu_i()
 			else
 				my_deactivate_group->activate();
 		}
+		if (my_inverse_group != NULL)
+		{
+			if (strcmp(inp->value(), "Yes") == 0)
+				my_inverse_group->deactivate();
+			else
+				my_inverse_group->activate();
+		}
 	}
 }
 

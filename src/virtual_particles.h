@@ -32,7 +32,9 @@
 #include <utility>
 #include <vector>
 
+#include "src/complex.h"
 #include "src/multidim_array.h"
+#include "src/resample_rotate.h"
 
 /// Helpers shared by the caches of virtual data (particles, movie averages).
 namespace vcache {
@@ -72,11 +74,16 @@ struct Recipe {
 	double angpix;         ///< pixel size of the output particles
 	bool   helical;        ///< helical segments: normalised against a tube-shaped background
 	double helical_radius; ///< that tube's radius, exactly as relion_preprocess computed it
+	int    extract_size_y; ///< height of a rectangular box (extract_size is then its width), or -1 for a square box
+	bool   rotated;        ///< each particle is cut with its own box angle around a sub-pixel centre
+	ResampleMethod interpolation; ///< resampling of rotated boxes
 
 	Recipe();
 
-	/// Side length of the particles this recipe produces.
+	/// Width and height of the particles this recipe produces.
 	int outputSize() const;
+	int outputSizeY() const;
+	bool rectangular() const { return extract_size_y > 0 && extract_size_y != extract_size; }
 };
 
 /// True for the format extension of a virtual stack ("vstack").
@@ -105,23 +112,61 @@ std::string micrographChecksum(const std::string& fn_mic);
 /// STAR file can never move a particle by a pixel.
 /// For helical recipes `psi` holds each segment's in-plane angle (the tube
 /// mask's orientation); otherwise it is empty.
+/// For rotated recipes `cx`, `cy` hold each particle's exact centre and `angle`
+/// the angle its box is turned by (degrees); otherwise they are empty.
 void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
                      const Recipe& recipe,
                      const std::vector<std::pair<long, long> >& centres,
-                     const std::vector<double>& psi = std::vector<double>());
+                     const std::vector<double>& psi = std::vector<double>(),
+                     const std::vector<double>& cx = std::vector<double>(),
+                     const std::vector<double>& cy = std::vector<double>(),
+                     const std::vector<double>& angle = std::vector<double>());
 
 /// What a header-only read needs.
 struct Header {
 	long   n;        ///< number of particles
-	int    box;      ///< output side length
+	int    box;      ///< output width (the side length of a square box)
+	int    box_y;    ///< output height
 	double angpix;
 	bool   float16;
 };
 Header readHeader(const std::string& fn_vstack);
 
-/// Particle `index` (0-based) of a virtual stack, into `out` (box x box).
+/// Particle `index` (0-based) of a virtual stack, into `out` (box_y rows of box).
 /// Thread-safe.
 void readParticle(const std::string& fn_vstack, long index, MultidimArray<RFLOAT>& out);
+
+/// Pixel size of the micrograph the particles of a virtual stack were cut from.
+double micrographPixelSize(const std::string& fn_vstack);
+
+/// Box (width, height) of the same physical size as the stack's particles at
+/// pixel size `angpix`, rounded up to even numbers.
+void sameExtentBox(const std::string& fn_vstack, double angpix, int& nx, int& ny);
+
+/// Fused extraction (see fused_extract.h): the Fourier transform of particle
+/// `index` on a box of nx x ny pixels of size `angpix`, evaluated directly from
+/// the micrograph pixels, as FourierTransform() + CenterFFTbySign() would give
+/// for the particle cut at that pixel size. The recipe's normalisation applies,
+/// with its radii converted to the new pixel size. Thread-safe.
+void readParticleFourier(const std::string& fn_vstack, long index, double angpix, int nx, int ny,
+                         MultidimArray<Complex>& F2D);
+
+/// Fused extraction without a virtual stack: what relion_preprocess's options
+/// would have said. Radii are in output pixels, except the helical diameter (A).
+struct DirectRecipe {
+	bool   normalise = false, ramp = true, invert_contrast = false;
+	bool   helical = false;      ///< tube-shaped background (needs psi prior)
+	bool   rotate = false;       ///< turn each box to put its tube horizontal (--rotate_to_horizontal)
+	double bg_radius = -1.;
+	double helical_diameter = -1.;
+	double mic_angpix = -1.;
+};
+
+/// Same as readParticleFourier, for a particle given by its micrograph, its
+/// coordinate (micrograph pixels), box angle (degrees; turned boxes) and psi prior (degrees; helical segments).
+void readParticleFourierDirect(const std::string& fn_mic, double cx, double cy, double box_angle, double psi_prior,
+                               const DirectRecipe& d, double angpix, int nx, int ny,
+                               MultidimArray<Complex>& F2D);
 
 /// Where the cache lives by default, relative to the project root.
 const char PROJECT_CACHE_DIR[] = "Cache/virtual_particles";

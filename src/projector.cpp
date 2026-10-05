@@ -150,6 +150,11 @@ int Projector::resolveForwardInterpolator(bool accelerator_in_use, int verb)
 
 void Projector::initialiseData(int current_size)
 {
+	if (rect)
+	{
+		initialiseDataRect(current_size);
+		return;
+	}
 	// By default r_max is half ori_size
 	if (current_size < 0)
 		r_max = ori_size / 2;
@@ -188,6 +193,8 @@ void Projector::initZeros(int current_size)
 
 long int Projector::getSize()
 {
+	if (rect)
+		return (long int)MULTIDIM_SIZE(data);
 	// Short side of data array
 	switch (ref_dim)
 	{
@@ -210,6 +217,14 @@ void Projector::computeFourierTransformMap(
 		int current_size, int nr_threads, bool do_gridding, bool do_heavy, int min_ires,
 		const MultidimArray<RFLOAT>* fourier_mask, bool do_gpu)
 {
+	if (rect)
+	{
+		if (do_gpu)
+			REPORT_ERROR("Projector::computeFourierTransformMap: rectangular boxes are not supported on the GPU yet.");
+		computeFourierTransformMapRect(vol_in, power_spectrum, current_size, do_gridding, do_heavy, min_ires, fourier_mask);
+		return;
+	}
+
 	TIMING_TIC(TIMING_TOP);
 
 	TIMING_TIC(TIMING_INIT1);
@@ -949,6 +964,8 @@ void evaluateAndScatter(const Projector& proj, FinufftQueryPoints& pts)
 
 void Projector::prepareFinufft()
 {
+	if (rect && interpolator == FINUFFT)
+		REPORT_ERROR("RELION_INTERPOLATION=nufft is not supported for rectangular boxes yet.");
 	finufft_modes.clear();
 
 	if (interpolator != FINUFFT) return;
@@ -1076,6 +1093,11 @@ void Projector::get2DFourierTransformMany(std::vector<MultidimArray<Complex > *>
 
 void Projector::project(MultidimArray<Complex > &f2d, Matrix2D<RFLOAT> &A)
 {
+	if (rect)
+	{
+		projectRect(f2d, A);
+		return;
+	}
 	// f2d should already be in the right size (ori_size,orihalfdim)
 	// AND the points outside r_max should already be zero...
 	// f2d.initZeros();
@@ -1253,6 +1275,8 @@ void Projector::project(MultidimArray<Complex > &f2d, Matrix2D<RFLOAT> &A)
 
 void Projector::projectGradient(Volume<t2Vector<Complex>>& img_out, Matrix2D<RFLOAT>& At)
 {
+	if (rect)
+		REPORT_ERROR("Projector::projectGradient: rectangular boxes are not supported.");
 	const int s = img_out.dimy;
 	const int sh = img_out.dimx;
 
@@ -1371,6 +1395,8 @@ void Projector::projectGradient(Volume<t2Vector<Complex>>& img_out, Matrix2D<RFL
 // Never actually used:
 void Projector::project2Dto1D(MultidimArray<Complex > &f1d, Matrix2D<RFLOAT> &A)
 {
+	if (rect)
+		REPORT_ERROR("Projector::project2Dto1D: rectangular boxes are not supported.");
 	// f1d should already be in the right size (ori_size,orihalfdim)
 	// AND the points outside r_max should already be zero...
 	// f1d.initZeros();
@@ -1472,6 +1498,11 @@ void Projector::project2Dto1D(MultidimArray<Complex > &f1d, Matrix2D<RFLOAT> &A)
 
 void Projector::rotate2D(MultidimArray<Complex > &f2d, Matrix2D<RFLOAT> &A)
 {
+	if (rect)
+	{
+		rotate2DRect(f2d, A);
+		return;
+	}
 	// f2d should already be in the right size (ori_size,orihalfdim)
 	// AND the points outside max_r should already be zero...
 	// f2d.initZeros();
@@ -1594,6 +1625,8 @@ void Projector::rotate2D(MultidimArray<Complex > &f2d, Matrix2D<RFLOAT> &A)
 
 void Projector::rotate3D(MultidimArray<Complex > &f3d, Matrix2D<RFLOAT> &A)
 {
+	if (rect)
+		REPORT_ERROR("Projector::rotate3D: rectangular boxes are not supported for 3D rotation yet.");
 	// f3d should already be in the right size (ori_size,orihalfdim)
 	// AND the points outside max_r should already be zero
 	// f3d.initZeros();

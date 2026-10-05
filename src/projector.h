@@ -91,6 +91,18 @@ public:
 	// Padded size of the map in Fourier-space
 	int pad_size;
 
+	/* Rectangular images / cuboid volumes (see documentation/rectangular_particles.md).
+	 *
+	 * ori_size stays the single "nominal" size L = max(nx, ny, nz); resolution shells
+	 * are counted in units of 1/(L * pixel size).  When the box is not square or
+	 * cubic, box_nx/ny/nz hold the real-space size per axis and rect is true; the
+	 * Fourier data array is then sized per axis and all rectangular code lives in
+	 * projector_rect.cpp.  For a square box rect is false and none of this is used,
+	 * so square runs behave exactly as before.
+	 */
+	bool rect;
+	int box_nx, box_ny, box_nz;
+
 	// Interpolation scheme (TRILINEAR or NEAREST_NEIGHBOUR, for BackProjector also CONVOLUTE_BLOB)
 	int interpolator;
 
@@ -235,6 +247,10 @@ public:
 			data = op.data;
 			ori_size = op.ori_size;
 			pad_size = op.pad_size;
+			rect = op.rect;
+			box_nx = op.box_nx;
+			box_ny = op.box_ny;
+			box_nz = op.box_nz;
 			r_max = op.r_max;
 			r_min_nn = op.r_min_nn;
 			interpolator = op.interpolator;
@@ -269,8 +285,25 @@ public:
 		r_max = r_min_nn = interpolator = ref_dim = data_dim = pad_size = 0;
 		padding_factor = 0.;
 		padded_real_size = 0;
+		rect = false;
+		box_nx = box_ny = box_nz = 0;
 		finufft_modes.clear();
 	}
+
+	/* Set a non-square box: nx x ny (nz = 0 for a 2D reference) or a cuboid.
+	 * Sets ori_size to the largest side. Call before initialiseData().
+	 * A square or cubic box simply leaves the projector in its classic state. */
+	void setBoxSize(int nx, int ny, int nz = 0);
+
+	/* Fourier-pixel index along each axis -> nominal shell units: multiply by L / n_axis. */
+	RFLOAT shellScaleX() const { return rect ? (RFLOAT)ori_size / box_nx : 1.; }
+	RFLOAT shellScaleY() const { return rect ? (RFLOAT)ori_size / box_ny : 1.; }
+	RFLOAT shellScaleZ() const { return rect ? (RFLOAT)ori_size / box_nz : 1.; }
+
+	/* The images are not the same shape as the map: a 3D cuboid (nx = ny = image height,
+	 * nz = image width) is projected onto images of width box_nz and height box_nx. */
+	RFLOAT imgScaleX() const { return rect ? (RFLOAT)ori_size / (ref_dim == 3 ? box_nz : box_nx) : 1.; }
+	RFLOAT imgScaleY() const { return rect ? (RFLOAT)ori_size / (ref_dim == 3 ? box_nx : box_ny) : 1.; }
 
 	/*
 	 * Resize data array to the given size
@@ -414,5 +447,15 @@ public:
 	* Get a rotated version of the 3D map (mere interpolation)
 	*/
 	void rotate3D(MultidimArray<Complex > &img_out, Matrix2D<RFLOAT> &A);
+
+private:
+	// Rectangular / cuboid implementations, in projector_rect.cpp
+	void initialiseDataRect(int current_size);
+	void computeFourierTransformMapRect(MultidimArray<RFLOAT> &vol_in, MultidimArray<RFLOAT> &power_spectrum,
+	                                    int current_size, bool do_gridding, bool do_heavy, int min_ires,
+	                                    const MultidimArray<RFLOAT> *fourier_mask);
+	void griddingCorrectRect(MultidimArray<RFLOAT> &vol_in);
+	void projectRect(MultidimArray<Complex > &img_out, Matrix2D<RFLOAT> &A);
+	void rotate2DRect(MultidimArray<Complex > &img_out, Matrix2D<RFLOAT> &A);
 };
 #endif

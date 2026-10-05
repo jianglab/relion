@@ -81,6 +81,21 @@ int Experiment::getOpticsImageSize(int optics_group)
 	return obsModel.getBoxSize(optics_group);
 }
 
+int Experiment::getOpticsImageSizeX(int optics_group)
+{
+	return obsModel.getBoxSizeX(optics_group);
+}
+
+int Experiment::getOpticsImageSizeY(int optics_group)
+{
+	return obsModel.getBoxSizeY(optics_group);
+}
+
+int Experiment::getOpticsNominalImageSize(int optics_group)
+{
+	return obsModel.getNominalBoxSize(optics_group);
+}
+
 long int Experiment::getGroupId(long int part_id)
 {
 	return particles[part_id].group_id;

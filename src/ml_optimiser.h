@@ -45,6 +45,7 @@
 #include "src/acc/settings.h"
 #include <src/jaz/tomography/optimisation_set.h>
 #include "src/prefetch.h"
+#include "src/fftw_rect.h"
 
 #define ML_SIGNIFICANT_WEIGHT 1.e-8
 #define METADATA_LINE_LENGTH METADATA_LINE_LENGTH_ALL
@@ -1077,6 +1078,33 @@ public:
 
 	// Initialise initial reference images
 	void initialiseReferences();
+
+	// Rectangular images (see documentation/rectangular_particles.md). For square data
+	// these all reduce to the original square calls.
+	bool isRectData() const { return mymodel.isRect(); }
+	int rectSizeX(int nominal) const { return axisSize(nominal, mymodel.imgX(), mymodel.ori_size); }
+	int rectSizeY(int nominal) const { return axisSize(nominal, mymodel.imgY(), mymodel.ori_size); }
+	int fullSizeX(int og) const { return mymodel.isRect() ? mymodel.imgX() : image_full_size[og]; }
+	int fullSizeY(int og) const { return mymodel.isRect() ? mymodel.imgY() : image_full_size[og]; }
+	// The nominal size an image of the optimiser was windowed to (the longest axis in real space)
+	template <typename T> int nominalSizeOf(const MultidimArray<T> &F) const
+	{
+		if (!mymodel.isRect()) return YSIZE(F);
+		return (mymodel.imgX() >= mymodel.imgY()) ? 2 * (XSIZE(F) - 1) : YSIZE(F);
+	}
+	void shiftTabFT(MultidimArray<Complex> &in, MultidimArray<Complex> &out, RFLOAT nominal_size, long int new_nominal_size,
+	                TabSine &tabsin, TabCosine &tabcos, RFLOAT xshift, RFLOAT yshift, RFLOAT zshift = 0.) const;
+	void windowFT(MultidimArray<Complex> &in, MultidimArray<Complex> &out, int nominal_size) const;
+	void windowFT(MultidimArray<RFLOAT> &in, MultidimArray<RFLOAT> &out, int nominal_size) const;
+	void shiftFT(MultidimArray<Complex> &in, MultidimArray<Complex> &out, RFLOAT nominal_size,
+	             RFLOAT xshift, RFLOAT yshift, RFLOAT zshift = 0.) const;
+	// Shell of Fourier pixel for images of the data box
+	long int shellOf(long int kp, long int ip, long int jp) const
+	{
+		return shellIndexRect(kp, ip, jp, mymodel.imgX(), mymodel.imgY(), mymodel.data_dim == 3 ? mymodel.boxZ() : mymodel.ori_size, mymodel.ori_size);
+	}
+	// Errors out for every option that cannot yet be combined with rectangular images
+	void checkRectangularSupport() const;
 
 	/* Calculates the sum of all individual power spectra and the average of all images for initial sigma_noise estimation
 	 * The rank is passed so that if one splits the data into random halves one can know which random half to treat

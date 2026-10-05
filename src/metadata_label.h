@@ -492,6 +492,7 @@ enum EMDLabel
 	EMDL_ORIENT_TILT_PRIOR,
 	EMDL_ORIENT_PSI,
 	EMDL_ORIENT_PSI_PRIOR,
+	EMDL_PARTICLE_EXTRACTION_ANGLE,
 	EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO,
 	EMDL_ORIENT_PSI_PRIOR_FLIP,  // KThurber
 
@@ -761,6 +762,12 @@ enum EMDLabel
 	EMDL_VSTACK_HELICAL,
 	EMDL_VSTACK_HELICAL_RADIUS,
 	EMDL_VSTACK_PSI,
+	EMDL_VSTACK_EXTRACT_SIZE_Y,
+	EMDL_VSTACK_ROTATED,
+	EMDL_VSTACK_INTERPOLATION,
+	EMDL_VSTACK_CENTRE_X,
+	EMDL_VSTACK_CENTRE_Y,
+	EMDL_VSTACK_ANGLE,
 
 	EMDL_UNKNOWN_LABEL,
 
@@ -1279,6 +1286,7 @@ private:
 		EMDL::addLabel(EMDL_ORIENT_TILT_PRIOR, EMDL_DOUBLE, "rlnAngleTiltPrior", "Center of the prior (in degrees) on the second Euler angle (tilt)");
 		EMDL::addLabel(EMDL_ORIENT_PSI, EMDL_DOUBLE, "rlnAnglePsi", "Third Euler, or in-plane angle (psi, in degrees)");
 		EMDL::addLabel(EMDL_ORIENT_PSI_PRIOR, EMDL_DOUBLE, "rlnAnglePsiPrior", "Center of the prior (in degrees) on the third Euler angle (psi)");
+		EMDL::addLabel(EMDL_PARTICLE_EXTRACTION_ANGLE, EMDL_DOUBLE, "rlnParticleExtractionAngle", "Angle (in degrees) by which the extraction box was turned in the micrograph, so that the direction at this angle in the micrograph lies along the horizontal axis of the particle image");
 		EMDL::addLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, EMDL_DOUBLE, "rlnAnglePsiFlipRatio", "Flip ratio of bimodal psi prior (0~0.5, 0 means an ordinary prior, 0.5 means a perfect bimodal prior)");
 		EMDL::addLabel(EMDL_ORIENT_PSI_PRIOR_FLIP, EMDL_BOOL, "rlnAnglePsiFlip", "Flag to indicate that psi prior angle has been flipped");  // KThurber
 
@@ -1337,6 +1345,12 @@ private:
 		// mask needs the exact radius and angle relion_preprocess used
 		EMDL::addLabel(EMDL_VSTACK_HELICAL_RADIUS, EMDL_STRING, "rlnVirtualHelicalRadius", "Radius (output pixels, full precision) of the helical tube excluded from the normalisation background");
 		EMDL::addLabel(EMDL_VSTACK_PSI, EMDL_STRING, "rlnVirtualPsi", "In-plane angle (degrees, full precision) that orients the helical tube mask of a virtual segment");
+		EMDL::addLabel(EMDL_VSTACK_EXTRACT_SIZE_Y, EMDL_INT, "rlnVirtualExtractSizeY", "Height (in micrograph pixels) of the box cut for each virtual particle; absent for a square box of rlnVirtualExtractSize");
+		EMDL::addLabel(EMDL_VSTACK_ROTATED, EMDL_BOOL, "rlnVirtualRotated", "Whether each virtual particle is cut at its own angle (rlnVirtualAngle) around a sub-pixel centre");
+		EMDL::addLabel(EMDL_VSTACK_INTERPOLATION, EMDL_STRING, "rlnVirtualInterpolation", "Resampling used to cut rotated virtual particles: linear, cubic or nufft");
+		EMDL::addLabel(EMDL_VSTACK_CENTRE_X, EMDL_STRING, "rlnVirtualCentreX", "Exact X-coordinate (micrograph pixels, full precision) a rotated virtual particle is centred on");
+		EMDL::addLabel(EMDL_VSTACK_CENTRE_Y, EMDL_STRING, "rlnVirtualCentreY", "Exact Y-coordinate (micrograph pixels, full precision) a rotated virtual particle is centred on");
+		EMDL::addLabel(EMDL_VSTACK_ANGLE, EMDL_STRING, "rlnVirtualAngle", "Angle (degrees, full precision) the box of a rotated virtual particle is turned by");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES, EMDL_INT, "rlnClass2DConsensusSourceClasses", "Number of classes in each source replica");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, EMDL_INT, "rlnClass2DConsensusOccupiedClasses", "Number of consensus classes with assigned particles");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_PATTERNS, EMDL_INT, "rlnClass2DConsensusPatterns", "Number of distinct cross-run assignment patterns");

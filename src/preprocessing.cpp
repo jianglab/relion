@@ -18,6 +18,8 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/preprocessing.h"
+#include "src/extract_rect.h"
+#include "src/fftw_rect.h"
 #include "src/virtual_particles.h"
 
 //#define PREP_TIMING
@@ -42,6 +44,29 @@
 #define TIMING_TIC(id)
 #define TIMING_TOC(id)
 #endif
+
+// True if any optics group has a non-zero beam tilt, Zernike coefficient or a non-identity magnification matrix
+static bool opticsHaveAberrations(const MetaDataTable &optics)
+{
+	MetaDataTable mdt = optics;
+	FOR_ALL_OBJECTS_IN_METADATA_TABLE(mdt)
+	{
+		RFLOAT v;
+		if (mdt.containsLabel(EMDL_IMAGE_BEAMTILT_X) && mdt.getValue(EMDL_IMAGE_BEAMTILT_X, v) && v != 0.) return true;
+		if (mdt.containsLabel(EMDL_IMAGE_BEAMTILT_Y) && mdt.getValue(EMDL_IMAGE_BEAMTILT_Y, v) && v != 0.) return true;
+		for (EMDLabel l : {EMDL_IMAGE_ODD_ZERNIKE_COEFFS, EMDL_IMAGE_EVEN_ZERNIKE_COEFFS})
+		{
+			std::vector<RFLOAT> c;
+			if (mdt.containsLabel(l) && mdt.getValue(l, c))
+				for (RFLOAT x : c) if (x != 0.) return true;
+		}
+		const EMDLabel mm[4] = {EMDL_IMAGE_MAG_MATRIX_00, EMDL_IMAGE_MAG_MATRIX_01, EMDL_IMAGE_MAG_MATRIX_10, EMDL_IMAGE_MAG_MATRIX_11};
+		const RFLOAT id[4] = {1., 0., 0., 1.};
+		for (int i = 0; i < 4; i++)
+			if (mdt.containsLabel(mm[i]) && mdt.getValue(mm[i], v) && v != id[i]) return true;
+	}
+	return false;
+}
 
 void Preprocessing::read(int argc, char **argv, int rank)
 {
@@ -78,6 +103,15 @@ void Preprocessing::read(int argc, char **argv, int rank)
 	do_extract = parser.checkOption("--extract", "Extract all particles from the micrographs");
     selection_type = textToInteger(parser.getOption("--selection_type", "Only extract particles with this selection type in the coordinate files (default = extract all)", "0"));
 	extract_size = textToInteger(parser.getOption("--extract_size", "Size of the box to extract the particles in (in pixels)", "-1"));
+	do_rect = false;
+	extract_size_x = textToInteger(parser.getOption("--extract_size_x", "Width of a rectangular box to extract the particles in (in pixels); needs --extract_size_y, replaces --extract_size", "-1"));
+	extract_size_y = textToInteger(parser.getOption("--extract_size_y", "Height of a rectangular box to extract the particles in (in pixels); needs --extract_size_x, replaces --extract_size", "-1"));
+	do_allow_unrotated_aberrations = parser.checkOption("--allow_unrotated_aberrations", "Allow --rotate_to_horizontal although the optics groups have aberrations, which are not turned with the boxes (the particles are then wrong for those aberrations)");
+	do_rotate_to_horizontal = parser.checkOption("--rotate_to_horizontal", "Turn the box of each helical segment so that its tube lies horizontal, using the segment's psi prior (needs --helix and a rectangular box)");
+	{
+		const char* env = getenv("RELION_EXTRACT_INTERPOLATION");
+		interpolation_name = parser.getOption("--interpolation", "Resampling when the box is turned: linear, cubic or nufft (nufft needs a build with FINUFFT). Default from RELION_EXTRACT_INTERPOLATION, else linear", (env != NULL && env[0] != '\0') ? env : "linear");
+	}
 	do_premultiply_ctf = parser.checkOption("--premultiply_ctf", "Premultiply the micrograph/frame with its CTF prior to particle extraction");
 	premultiply_ctf_extract_size = textToInteger(parser.getOption("--premultiply_extract_size", "Size of the box to extract the particles in (in pixels) before CTF premultiplication", "-1"));
 	if (premultiply_ctf_extract_size < 0)
@@ -148,7 +182,23 @@ void Preprocessing::initialise()
 			if (c != 1)
 				REPORT_ERROR("Preprocessing::initialise ERROR: please provide (only) one of these three options: --reextract_data_star, --coord_suffix & --coord_list ");
 
-			if (extract_size < 0)
+			do_rect = (extract_size_x > 0 || extract_size_y > 0);
+			if (do_rect)
+			{
+				if (extract_size > 0)
+					REPORT_ERROR("Preprocessing::initialise ERROR: use either --extract_size or --extract_size_x with --extract_size_y, not both");
+				if (extract_size_x <= 0 || extract_size_y <= 0)
+					REPORT_ERROR("Preprocessing::initialise ERROR: a rectangular box needs both --extract_size_x and --extract_size_y");
+				if (extract_size_x % 2 != 0 || extract_size_y % 2 != 0)
+					REPORT_ERROR("Preprocessing::initialise ERROR: only extracting to even-sized images is allowed in RELION...");
+				// Code that only knows square boxes sees the width
+				extract_size = extract_size_x;
+				if (extract_size_x == extract_size_y)
+					do_rect = false; // a square box is just the usual extraction, bit for bit
+				if (do_rect && premultiply_ctf_extract_size < 0)
+					premultiply_ctf_extract_size = extract_size;
+			}
+			else if (extract_size < 0)
 				REPORT_ERROR("Preprocessing::initialise ERROR: please provide the size of the box to extract particle using --extract_size ");
 
 			if (extract_size % 2 != 0)
@@ -339,6 +389,41 @@ void Preprocessing::initialise()
 				REPORT_ERROR("ERROR: virtual particles cannot use dust removal (--white_dust / --black_dust): it replaces pixels with random values, which cannot be reproduced when a particle is read again. Extract without --virtual, or set both to -1.");
 		}
 
+		// Rectangular and/or turned boxes
+		const ResampleMethod method = parseResampleMethod(interpolation_name);
+		if (do_rotate_to_horizontal && !do_extract_helix)
+			REPORT_ERROR("ERROR: --rotate_to_horizontal turns each box by its psi prior, so it needs --helix");
+		if (do_rect || do_rotate_to_horizontal)
+		{
+			if (!do_extract)
+				REPORT_ERROR("ERROR: rectangular or turned boxes apply to particle extraction only, not to --operate_on.");
+			if (dimensionality == 3)
+				REPORT_ERROR("ERROR: rectangular or turned boxes are not supported for 3D extraction yet.");
+			if (do_phase_flip || do_premultiply_ctf)
+				REPORT_ERROR("ERROR: rectangular or turned boxes do not support CTF phase flipping or premultiplication yet; extract without --phase_flip/--premultiply_ctf.");
+			if (do_rewindow)
+				REPORT_ERROR("ERROR: rectangular or turned boxes do not support --window yet.");
+			if (do_rescale && do_rect && extractrect::rescaledHeight(extract_size_x, extract_size_y, scale) < 0)
+				REPORT_ERROR("ERROR: with a rectangular box --scale is the new length (x), and the width (y) scaled by the same factor must be an even whole number of pixels: " + integerToString(extract_size_y) + " * " + integerToString(scale) + " / " + integerToString(extract_size_x) + " is not.");
+			if (do_recenter)
+				REPORT_ERROR("ERROR: rectangular or turned boxes do not support --recenter yet.");
+			if (do_project_3d)
+				REPORT_ERROR("ERROR: rectangular or turned boxes do not support --project3d.");
+		}
+		if (method == RESAMPLE_NUFFT)
+		{
+#ifndef RELION_USE_FINUFFT
+			REPORT_ERROR("ERROR: --interpolation nufft needs a RELION build with RELION_USE_FINUFFT=ON.");
+#endif
+		}
+		if (do_rotate_to_horizontal && opticsHaveAberrations(obsModelMic.opticsMdt))
+		{
+			if (!do_allow_unrotated_aberrations)
+				REPORT_ERROR("ERROR: the optics groups have beam tilt, higher-order aberrations or anisotropic magnification, which are defined in the micrograph frame, but --rotate_to_horizontal turns every particle by a different angle and RELION keeps one set of aberrations per optics group. The aberrations cannot be applied correctly to turned particles. Extract without --rotate_to_horizontal, or remove the aberrations from the optics table (they can be refined again on the particles later), or pass --allow_unrotated_aberrations to accept the error.");
+			if (verb > 0)
+				std::cerr << " Warning: --allow_unrotated_aberrations: beam tilt, higher-order aberrations and anisotropic magnification are NOT turned with the boxes." << std::endl;
+		}
+
 		// Extract helical segments
 		if (do_extract_helix)
 		{
@@ -489,8 +574,23 @@ void Preprocessing::joinAllStarFiles()
 			myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_PIXEL_SIZE, my_angpix);
 
 			if (do_rewindow) myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_SIZE, window);
-			else if (do_rescale) myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_SIZE, scale);
+			else if (do_rescale && !do_rect) myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_SIZE, scale);
+			else if (do_rect)
+			{
+				// Box::toTable semantics: rlnImageSizeX/Y for a rectangle, never both forms at once
+				if (myOutObsModel->opticsMdt.containsLabel(EMDL_IMAGE_SIZE))
+					myOutObsModel->opticsMdt.deactivateLabel(EMDL_IMAGE_SIZE);
+				myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_SIZE_X, do_rescale ? scale : extract_size_x);
+				myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_SIZE_Y, do_rescale ? extractrect::rescaledHeight(extract_size_x, extract_size_y, scale) : extract_size_y);
+			}
 			else myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_SIZE, extract_size);
+			if (!do_rect)
+			{
+				if (myOutObsModel->opticsMdt.containsLabel(EMDL_IMAGE_SIZE_X))
+					myOutObsModel->opticsMdt.deactivateLabel(EMDL_IMAGE_SIZE_X);
+				if (myOutObsModel->opticsMdt.containsLabel(EMDL_IMAGE_SIZE_Y))
+					myOutObsModel->opticsMdt.deactivateLabel(EMDL_IMAGE_SIZE_Y);
+			}
 
 			myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_DIMENSIONALITY, dimensionality);
 
@@ -1015,6 +1115,13 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	int my_extract_size = (do_phase_flip || do_premultiply_ctf) ? premultiply_ctf_extract_size : extract_size;
 	RFLOAT my_angpix;
 
+	// Rectangular and/or turned boxes take the shared path of extract_rect.h (also used by virtual particles)
+	const bool geom = do_rect || do_rotate_to_horizontal;
+	const int box_x = do_rect ? extract_size_x : my_extract_size;
+	const int box_y = do_rect ? extract_size_y : my_extract_size;
+	if (geom && MD.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE))
+		REPORT_ERROR("Preprocessing::extractParticlesFromOneMicrograph ERROR: the input particles were extracted with a turned box (rlnParticleExtractionAngle); re-extracting them with rectangular or turned boxes is not supported.");
+
 	TIMING_TIC(TIMING_READ_IMG);
 
 	// Virtual particles need only the micrograph's dimensions, not its pixels
@@ -1044,6 +1151,7 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	int ipos = 0;
 	std::vector<std::pair<long, long> > virtual_centres;
 	std::vector<double> virtual_psi;   // helical segments only: orients the tube mask
+	std::vector<double> virtual_cx, virtual_cy, virtual_angle;   // turned boxes only
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
 	{
 		RFLOAT dxpos, dypos, dzpos;
@@ -1051,17 +1159,17 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		long int x0, xF, y0, yF, z0, zF;
 		MD.getValue(EMDL_IMAGE_COORD_X, dxpos);
 		MD.getValue(EMDL_IMAGE_COORD_Y, dypos);
-		xpos = (long int)dxpos;
-		ypos = (long int)dypos;
+		xpos = (long int)std::floor(dxpos + 0.5);   // round to the nearest pixel, never truncate
+		ypos = (long int)std::floor(dypos + 0.5);
 
-		x0 = xpos + FIRST_XMIPP_INDEX(my_extract_size);
-		xF = xpos + LAST_XMIPP_INDEX(my_extract_size);
-		y0 = ypos + FIRST_XMIPP_INDEX(my_extract_size);
-		yF = ypos + LAST_XMIPP_INDEX(my_extract_size);
+		x0 = xpos + FIRST_XMIPP_INDEX(box_x);
+		xF = xpos + LAST_XMIPP_INDEX(box_x);
+		y0 = ypos + FIRST_XMIPP_INDEX(box_y);
+		yF = ypos + LAST_XMIPP_INDEX(box_y);
 		if (dimensionality == 3)
 		{
 			MD.getValue(EMDL_IMAGE_COORD_Z, dzpos);
-			zpos = (long int)dzpos;
+			zpos = (long int)std::floor(dzpos + 0.5);
 			z0 = zpos + FIRST_XMIPP_INDEX(extract_size);
 			zF = zpos + LAST_XMIPP_INDEX(extract_size);
 		}
@@ -1086,9 +1194,19 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		{
 			ctf.readByGroup(MD, &obsModelPart);
 			optics_group = obsModelPart.getOpticsGroup(MD);
-			if (obsModelPart.getBoxSize(optics_group) != my_extract_size)
+			if (!obsModelPart.hasBoxSizes || obsModelPart.getBoxSize(optics_group) != my_extract_size)
 				obsModelPart.setBoxSize(optics_group, my_extract_size);
 			obsModelPart.opticsMdt.getValue(EMDL_MICROGRAPH_PIXEL_SIZE, my_angpix, optics_group);
+		}
+
+		// A turned box lies along -psi, so that a tube with psi prior psi ends up horizontal
+		// (see extract_rect.h). The prior becomes the angle that is left, i.e. zero.
+		double box_angle = 0.;
+		if (do_rotate_to_horizontal)
+		{
+			RFLOAT psi_prior = 0.;
+			MD.getValue(EMDL_ORIENT_PSI_PRIOR, psi_prior);
+			box_angle = -(double)psi_prior;
 		}
 
 		if (do_virtual)
@@ -1100,7 +1218,13 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 			{
 				RFLOAT psi_deg = 0.;
 				MD.getValue(EMDL_ORIENT_PSI_PRIOR, psi_deg);
-				virtual_psi.push_back(psi_deg);
+				virtual_psi.push_back(do_rotate_to_horizontal ? 0. : psi_deg);
+			}
+			if (do_rotate_to_horizontal)
+			{
+				virtual_cx.push_back((double)dxpos);
+				virtual_cy.push_back((double)dypos);
+				virtual_angle.push_back(box_angle);
 			}
 		}
 		else
@@ -1109,6 +1233,16 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 			// extract one particle in Ipart
 			if (dimensionality == 3)
 				Imic().window(Ipart(), z0, y0, x0, zF, yF, xF);
+			else if (geom)
+			{
+				const MultidimArray<RFLOAT> &mic = Imic();
+				auto at = [&mic](long y, long x) { return DIRECT_A2D_ELEM(mic, y, x); };
+				if (do_rotate_to_horizontal)
+					extractrect::cutRotatedBox(at, XSIZE(mic), YSIZE(mic), (double)dxpos, (double)dypos,
+					                           box_x, box_y, box_angle, parseResampleMethod(interpolation_name), Ipart());
+				else
+					extractrect::cutBox(at, XSIZE(mic), YSIZE(mic), xpos, ypos, box_x, box_y, Ipart());
+			}
 			else
 				Imic().window(Ipart(), y0, x0, yF, xF, mic_avg);
 			Ipart().setXmippOrigin();
@@ -1147,8 +1281,8 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 			// This will create lines at the edges, rather than zeros
 			Ipart().setXmippOrigin();
 
-			// X-boundaries
-			if (x0 < 0 || xF >= XSIZE(Imic()) )
+			// X-boundaries (turned and rectangular boxes were cut with the edge pixels repeated already)
+			if (!geom && (x0 < 0 || xF >= XSIZE(Imic())) )
 			{
 				FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
 				{
@@ -1160,7 +1294,7 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 			}
 
 			// Y-boundaries
-			if (y0 < 0 || yF >= YSIZE(Imic()))
+			if (!geom && (y0 < 0 || yF >= YSIZE(Imic())))
 			{
 				FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
 				{
@@ -1208,6 +1342,8 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 			{
 				MD.getValue(EMDL_ORIENT_TILT_PRIOR, tilt_deg);
 				MD.getValue(EMDL_ORIENT_PSI_PRIOR, psi_deg);
+				if (do_rotate_to_horizontal)
+					psi_deg = 0.; // the tube is horizontal now
 			}
 
 			TIMING_TIC(TIMING_PRE_IMG_OPS);
@@ -1281,6 +1417,19 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 			}
 		}
 
+		if (do_rotate_to_horizontal)
+		{
+			// The particle image is the micrograph turned by box_angle: directions turn by -box_angle
+			MD.setValue(EMDL_PARTICLE_EXTRACTION_ANGLE, box_angle);
+			MD.setValue(EMDL_ORIENT_PSI_PRIOR, (RFLOAT)0.);
+			if (MD.containsLabel(EMDL_CTF_DEFOCUS_ANGLE))
+			{
+				RFLOAT defocus_angle;
+				MD.getValue(EMDL_CTF_DEFOCUS_ANGLE, defocus_angle);
+				MD.setValue(EMDL_CTF_DEFOCUS_ANGLE, (RFLOAT)extractrect::rotatedDefocusAngle(defocus_angle, box_angle));
+			}
+		}
+
 		TIMING_TOC(TIMING_REST);
 
 		ipos++;
@@ -1290,6 +1439,9 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	{
 		vparticles::Recipe recipe;
 		recipe.extract_size = extract_size;
+		if (do_rect) recipe.extract_size_y = extract_size_y;
+		recipe.rotated = do_rotate_to_horizontal;
+		recipe.interpolation = parseResampleMethod(interpolation_name);
 		recipe.scale = do_rescale ? scale : -1;
 		recipe.window = do_rewindow ? window : -1;
 		recipe.normalise = do_normalise;
@@ -1302,7 +1454,8 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		recipe.angpix = output_angpix;
 		recipe.helical = do_extract_helix;
 		recipe.helical_radius = helicalBackgroundRadius();
-		vparticles::writeDescriptor(fn_output_img_root + ".vstack", fn_mic, recipe, virtual_centres, virtual_psi);
+		vparticles::writeDescriptor(fn_output_img_root + ".vstack", fn_mic, recipe, virtual_centres, virtual_psi,
+		                            virtual_cx, virtual_cy, virtual_angle);
 	}
 }
 
@@ -1359,7 +1512,7 @@ RFLOAT Preprocessing::helicalBackgroundRadius() const
 	// Long-standing behaviour, kept exactly - virtual particles must reproduce
 	// what real extraction writes.
 	if (do_rescale)
-		bg_helical_radius *= scale / extract_size;
+		bg_helical_radius *= (do_rect || do_rotate_to_horizontal) ? (RFLOAT)scale / extract_size : scale / extract_size;
 	return bg_helical_radius;
 }
 
@@ -1378,7 +1531,11 @@ void Preprocessing::performPerImageOperations(
 
 	Ipart().setXmippOrigin();
 
-	if (do_rescale) rescale(Ipart, scale);
+	if (do_rescale)
+	{
+		if (do_rect) resizeMapRect(Ipart(), scale, extractrect::rescaledHeight(extract_size_x, extract_size_y, scale));
+		else rescale(Ipart, scale);
+	}
 
 	if (do_rewindow) rewindow(Ipart, window);
 

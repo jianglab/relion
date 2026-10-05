@@ -309,6 +309,10 @@ public:
 
 	// Get the original image size for this optics group
 	int getOpticsImageSize(int optics_group);
+	int getOpticsImageSizeX(int optics_group);
+	int getOpticsImageSizeY(int optics_group);
+	// Largest side; also valid for rectangular images
+	int getOpticsNominalImageSize(int optics_group);
 
 	// Get the random_subset for this particle
 	int getRandomSubset(long int part_id);

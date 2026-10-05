@@ -310,3 +310,54 @@ TEST_CASE("alignMapToMap: C1 returns params within search range for identical ma
 	REQUIRE(fabs(dy) <= 3.);
 	REQUIRE(fabs(dz) <= 3.);
 }
+
+// Cuboid maps (rectangular particles): the search runs in the central cube and the
+// result is applied to the whole cuboid.
+namespace
+{
+MultidimArray<RFLOAT> makeCuboid(int nx, int ny, int nz)
+{
+	MultidimArray<RFLOAT> vol(nz, ny, nx);
+	vol.initZeros();
+	const RFLOAT blobs[3][3] = {{16., 0., 0.}, {0., 12., 0.}, {-10., 0., 8.}};
+	for (int k = 0; k < nz; k++)
+		for (int i = 0; i < ny; i++)
+			for (int j = 0; j < nx; j++)
+				for (const auto &b : blobs)
+				{
+					const RFLOAT dx = j - nx / 2 - b[0], dy = i - ny / 2 - b[1], dz = k - nz / 2 - b[2];
+					DIRECT_A3D_ELEM(vol, k, i, j) += std::exp(-(dx*dx + dy*dy + dz*dz) / (2. * 6. * 6.));
+				}
+	return vol;
+}
+}
+
+TEST_CASE("alignCuboidMapToMap: rotation and shift are undone on a cuboid", "[alignmap]")
+{
+	auto ref = makeCuboid(96, 64, 64);
+	auto align = ref;
+	rotateZ(align, 2.);
+	translate(align, 0., 0., 3.);
+	const double before = corr(align, ref);
+
+	RFLOAT br, bt, bp, dx, dy, dz;
+	alignCuboidMapToMap(align, ref, 2, 1., 3., 3, 1., 1., br, bt, bp, dx, dy, dz);
+
+	REQUIRE(XSIZE(align) == 96);
+	REQUIRE(ZSIZE(align) == 64);
+	REQUIRE(corr(align, ref) > 0.99);
+	REQUIRE(corr(align, ref) > before);
+}
+
+TEST_CASE("alignCuboidMapToMap: a cube gives the same result as alignMapToMap", "[alignmap]")
+{
+	auto ref = makeVol(64);
+	auto a1 = ref, a2 = ref;
+	translate(a1, 0., 0., 3.);
+	a2 = a1;
+	RFLOAT r1, t1, p1, x1, y1, z1, r2, t2, p2, x2, y2, z2;
+	alignMapToMap(a1, ref, 2, 1., 3., 3, 1., 1., r1, t1, p1, x1, y1, z1);
+	alignCuboidMapToMap(a2, ref, 2, 1., 3., 3, 1., 1., r2, t2, p2, x2, y2, z2);
+	REQUIRE(z1 == z2);
+	REQUIRE(r1 == r2);
+}

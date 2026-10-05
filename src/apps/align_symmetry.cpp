@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 
+#include <src/rect_refusal.h>
 #include <src/projector.h>
 #include <src/fftw.h>
 #include <src/args.h>
@@ -190,6 +191,7 @@ public:
 
 			std::cout << " Reading map: " << fn_ins[imap] << std::endl;
 			vol_in.read(fn_ins[imap]);
+			refuseNonCubicMap(vol_in(), "relion_align_symmetry");
 
 
 			if ( fn_sym == "C1" || fn_sym == "c1" )

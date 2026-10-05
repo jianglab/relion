@@ -200,6 +200,9 @@ public:
     // Deactivate this group
 	Fl_Group * my_deactivate_group;
 	Fl_Group * my_additional_deactivate_group;
+
+	// Group that is deactivated while a Yes/No menu reads Yes (the reverse of my_deactivate_group)
+	Fl_Group * my_inverse_group;
 	bool actually_activate;
 
     ////////////// Slider entry
@@ -223,6 +226,7 @@ public:
 		menu = NULL;
 		my_deactivate_group = NULL;
 		my_additional_deactivate_group = NULL;
+		my_inverse_group = NULL;
 		actually_activate = false;
 		slider = NULL;
     };

@@ -21,6 +21,7 @@
 // LIMITATIONS:
 //  This program ignores (anisotropic) magnification and antisymmetric aberrations!
 
+#include <src/rect_refusal.h>
 #include <src/projector.h>
 #include <src/backprojector.h>
 #include <src/fftw.h>
@@ -131,6 +132,7 @@ public:
 
 		std::cout << " Reading map: " << fn_map << std::endl;
 		vol.read(fn_map);
+		refuseNonCubicMap(vol(), "relion_project");
 		std::cout << " Done reading map!" << std::endl;
 
 		if (fn_mask != "")

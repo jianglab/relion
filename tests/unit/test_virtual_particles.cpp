@@ -492,3 +492,103 @@ TEST_CASE("removing a project cache needs no shell and stays inside the cache", 
 	CHECK(lstat((outside + "/keep").c_str(), &st) == 0);      // the link was not followed
 	CHECK_FALSE(vparticles::removeProjectCache(project));     // nothing left to remove
 }
+
+// ---- rectangular and rotated recipes ---------------------------------------
+
+namespace {
+
+vparticles::Recipe rectRecipe(bool rotated, ResampleMethod method)
+{
+	vparticles::Recipe r;
+	r.extract_size = 96;
+	r.extract_size_y = 48;
+	r.rotated = rotated;
+	r.interpolation = method;
+	r.normalise = true;
+	r.bg_radius = 18;
+	r.ramp = true;
+	r.invert_contrast = true;
+	r.float16 = false;
+	r.angpix = 1.5;
+	return r;
+}
+
+} // namespace
+
+TEST_CASE("a rectangular recipe has the box width (y) and square recipes are unchanged", "[vparticles]")
+{
+	vparticles::Recipe sq = binnedRecipe();
+	REQUIRE_FALSE(sq.rectangular());
+	REQUIRE(sq.outputSizeY() == sq.outputSize());
+	const vparticles::Recipe r = rectRecipe(false, RESAMPLE_LINEAR);
+	REQUIRE(r.rectangular());
+	REQUIRE(r.outputSizeY() == 48);
+}
+
+TEST_CASE("rectangular and rotated recipes read the same with and without the cache", "[vparticles]")
+{
+	TempDir tmp;
+	const std::string mic = tmp.path() + "/mic.mrc", vs = tmp.path() + "/mic.vstack";
+	writeMicrograph(mic, Float);
+
+	std::vector<double> cx, cy, ang;
+	const std::vector<std::pair<long, long> > c = centres();
+	for (size_t i = 0; i < c.size(); i++)
+	{
+		cx.push_back(c[i].first + 0.37 * i);
+		cy.push_back(c[i].second - 0.21 * i);
+		ang.push_back(-60. + 37. * i);
+	}
+	std::vector<double> psi(c.size(), 0.);
+
+	const ResampleMethod methods[] = {RESAMPLE_LINEAR, RESAMPLE_CUBIC, RESAMPLE_NUFFT};
+	for (int rot = 0; rot < 2; rot++)
+		for (ResampleMethod m : methods)
+		{
+#ifndef RELION_USE_FINUFFT
+			if (m == RESAMPLE_NUFFT) continue;
+#endif
+			INFO("rotated " << rot << " method " << m);
+			const vparticles::Recipe r = rectRecipe(rot == 1, m);
+			if (rot) vparticles::writeDescriptor(vs, mic, r, c, psi, cx, cy, ang);
+			else vparticles::writeDescriptor(vs, mic, r, c);
+
+			std::vector<MultidimArray<RFLOAT> > direct, miss, hit;
+			{
+				CacheSetting off("off");
+				direct = readAll(vs, c.size());
+			}
+			{
+				CacheSetting on(tmp.path() + "/cache" + std::to_string(rot * 3 + (int) m));
+				miss = readAll(vs, c.size());
+				hit = readAll(vs, c.size());
+			}
+			REQUIRE(direct[0].xdim == 96);
+			REQUIRE(direct[0].ydim == 48);
+			CHECK(identical(direct, miss));
+			CHECK(identical(direct, hit));
+
+			// Header-only read reports the rectangle
+			vparticles::Header h = vparticles::readHeader(vs);
+			CHECK(h.box == 96);
+			CHECK(h.box_y == 48);
+		}
+}
+
+TEST_CASE("square recipes are still written as version 1 descriptors", "[vparticles]")
+{
+	TempDir tmp;
+	const std::string mic = tmp.path() + "/mic.mrc", vs = tmp.path() + "/mic.vstack";
+	writeMicrograph(mic, Float);
+	vparticles::writeDescriptor(vs, mic, binnedRecipe(), centres());
+	std::string text;
+	{
+		FILE* f = fopen(vs.c_str(), "r");
+		REQUIRE(f != NULL);
+		char buf[512];
+		while (fgets(buf, sizeof(buf), f)) text += buf;
+		fclose(f);
+	}
+	CHECK(text.find("rlnVirtualRotated") == std::string::npos);
+	CHECK(text.find("rlnVirtualExtractSizeY") == std::string::npos);
+}

@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "src/ml_model.h"
+#include "src/fftw_rect.h"
 
 #define MOM2_INIT_CONSTANT 1
 
@@ -30,6 +31,26 @@
 #define TIMING_TIC(id)
 #define TIMING_TOC(id)
 #endif
+
+void MlModel::setBox(int nx, int ny, int nz)
+{
+	if (nz > 0 && nx != ny && nz != nx)
+		REPORT_ERROR("ERROR: a rectangular 3D reference must have nx = ny = image height and nz = image width (the segments lie along the z axis), but it is "
+				+ integerToString(nx) + " x " + integerToString(ny) + " x " + integerToString(nz) + ".");
+	ori_size = XMIPP_MAX(nx, ny);
+	if (nz > 0)
+		ori_size = XMIPP_MAX(ori_size, nz);
+	if (nx == ny && (nz <= 0 || nz == nx))
+	{
+		box_nx = box_ny = box_nz = 0;
+	}
+	else
+	{
+		box_nx = nx;
+		box_ny = ny;
+		box_nz = (nz > 0) ? nz : 0;
+	}
+}
 
 void MlModel::initialise(bool _do_grad, bool _pseudo_halfsets)
 {
@@ -82,6 +103,8 @@ void MlModel::initialise(bool _do_grad, bool _pseudo_halfsets)
 	orientability_contrib.resize(nr_classes * nr_bodies);
 
 	Projector ref(ori_size, interpolator, padding_factor, r_min_nn, data_dim);
+	if (isRect())
+		ref.setBoxSize(boxX(), boxY(), (ref_dim == 3) ? boxZ() : 0);
 	PPref.clear();
 	PPrefRank.clear();
 	// Now fill the entire vector with instances of "ref"
@@ -137,6 +160,17 @@ void MlModel::read(FileName fn_in, int nr_optics_groups_from_mydata, bool _do_gr
 	    !MDlog.getValue(EMDL_MLMODEL_LL, LL) ||
 	    !MDlog.getValue(EMDL_MLMODEL_AVE_PMAX, ave_Pmax) )
 		REPORT_ERROR("MlModel::readStar: incorrect model_general table");
+
+	{
+		// Rectangular images/volumes: ori_size is then the largest side
+		int nx, ny, nz = 0;
+		if (MDlog.getValue(EMDL_IMAGE_SIZE_X, nx) && MDlog.getValue(EMDL_IMAGE_SIZE_Y, ny))
+		{
+			if (ref_dim == 3 && !MDlog.getValue(EMDL_IMAGE_SIZE_Z, nz))
+				REPORT_ERROR("MlModel::readStar: a 3D rectangular model needs rlnImageSizeZ");
+			setBox(nx, ny, nz);
+		}
+	}
 
 	if (!MDlog.getValue(EMDL_MLMODEL_SIGMA_OFFSET_ANGSTROM, sigma2_offset))
 	{
@@ -630,6 +664,13 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 	MDlog.setValue(EMDL_MLMODEL_DIMENSIONALITY, ref_dim);
 	MDlog.setValue(EMDL_MLMODEL_DIMENSIONALITY_DATA, data_dim);
 	MDlog.setValue(EMDL_MLMODEL_ORIGINAL_SIZE, ori_size);
+	if (isRect())
+	{
+		MDlog.setValue(EMDL_IMAGE_SIZE_X, boxX());
+		MDlog.setValue(EMDL_IMAGE_SIZE_Y, boxY());
+		if (ref_dim == 3)
+			MDlog.setValue(EMDL_IMAGE_SIZE_Z, boxZ());
+	}
 	MDlog.setValue(EMDL_MLMODEL_CURRENT_RESOLUTION, 1./current_resolution);
 	MDlog.setValue(EMDL_MLMODEL_CURRENT_SIZE, current_size);
 	MDlog.setValue(EMDL_MLMODEL_PADDING_FACTOR, padding_factor);
@@ -917,8 +958,8 @@ void MlModel::initialiseFromImages(
 					}
 				}
 
-				ori_size = XSIZE(img());
 				ref_dim = img().getDim();
+				setBox(XSIZE(img()), YSIZE(img()), (ref_dim == 3) ? ZSIZE(img()) : 0);
 				Iref.push_back(img());
 
 				if (_do_grad)
@@ -961,13 +1002,8 @@ void MlModel::initialiseFromImages(
 				}
 				pixel_size = header_pixel_size;
 			}
-			ori_size = XSIZE(img());
 			ref_dim = img().getDim();
-			if (ori_size != XSIZE(img()) || ori_size != YSIZE(img()))
-			{
-				std::cerr << " ori_size= " << ori_size << " XSIZE(img())= " << XSIZE(img()) << std::endl;
-				REPORT_ERROR("MlOptimiser::read: size of reference image is not the same as the experimental images!");
-			}
+			setBox(XSIZE(img()), YSIZE(img()), (ref_dim == 3) ? ZSIZE(img()) : 0);
 			Iref.clear();
 			Igrad1.clear();
 			Igrad2.clear();
@@ -1014,14 +1050,28 @@ void MlModel::initialiseFromImages(
 
 	// Make sure that the model has the same box and pixel size as (the first optics group of) the data
 	RFLOAT pixel_size_first_optics_group = _mydata.getOpticsPixelSize(0);
-	int box_size_first_optics_group = _mydata.getOpticsImageSize(0);
+	const int box_x_first_optics_group = _mydata.getOpticsImageSizeX(0);
+	const int box_y_first_optics_group = _mydata.getOpticsImageSizeY(0);
+	const bool data_is_rect = (box_x_first_optics_group != box_y_first_optics_group);
+	int box_size_first_optics_group = _mydata.getOpticsNominalImageSize(0);
 
 	if (fn_ref != "None")
 	{
 
-		if (fabs(pixel_size - pixel_size_first_optics_group) > 0.001 ||
-		    ori_size != box_size_first_optics_group)
+		// A cuboid reference only has to be on the pixel grid of the data: its three sides are
+		// independent of the image box (a helix lying along image x needs a long reference Z).
+		const bool box_mismatch = data_is_rect
+				? (imgX() != box_x_first_optics_group || imgY() != box_y_first_optics_group)
+				: (ori_size != box_size_first_optics_group || isRect());
+
+		if (fabs(pixel_size - pixel_size_first_optics_group) > 0.001 || box_mismatch)
 		{
+			if (data_is_rect || isRect())
+				REPORT_ERROR("ERROR: the reference box (" + integerToString(boxX()) + " x " + integerToString(boxY())
+					+ ") and pixel size (" + floatToString(pixel_size) + " A/px) do not match the rectangular particles ("
+					+ integerToString(box_x_first_optics_group) + " x " + integerToString(box_y_first_optics_group)
+					+ " px, " + floatToString(pixel_size_first_optics_group)
+					+ " A/px). The reference must be a cuboid on the same pixel grid as the particles (for segments along image x: nx = ny = image height, nz = image width). Rescaling a reference is not supported.");
 
 			std::string mesg = "";
 			if (fabs(pixel_size - pixel_size_first_optics_group) > 0.001)
@@ -1088,7 +1138,10 @@ void MlModel::initialiseFromImages(
 	else
 	{
 		pixel_size = pixel_size_first_optics_group;
-		ori_size = box_size_first_optics_group;
+		if (data_is_rect && (_is_3d_model || data_dim == 3 || _mydata.is_tomo))
+			setBox(box_y_first_optics_group, box_y_first_optics_group, box_x_first_optics_group);
+		else
+			setBox(box_x_first_optics_group, box_y_first_optics_group, 0);
 
 		// Calculate average of all unaligned images later on.
 		do_average_unaligned = true;
@@ -1097,12 +1150,12 @@ void MlModel::initialiseFromImages(
 		if (_is_3d_model || data_dim == 3 || _mydata.is_tomo)
 		{
 			ref_dim = 3;
-			img().initZeros(ori_size, ori_size, ori_size);
+			img().initZeros(boxZ(), boxY(), boxX());
 		}
 		else
 		{
 			ref_dim = 2;
-			img().initZeros(ori_size, ori_size);
+			img().initZeros(boxY(), boxX());
 		}
 		img().setXmippOrigin();
 		Iref.clear();
@@ -1581,7 +1634,7 @@ void MlModel::initialiseDataVersusPrior(bool fix_tau)
 	// Get the FT of all reference structures
 	// The Fourier Transforms are all "normalised" for 2D transforms of size = ori_size x ori_size
 	// And spectrum is squared, so ori_size*ori_size in the 3D case!
-	RFLOAT normfft = (ref_dim == 3 && data_dim == 2) ? (RFLOAT)(ori_size * ori_size) : 1.;
+	RFLOAT normfft = (ref_dim == 3 && data_dim == 2) ? (RFLOAT)(boxX() * boxX()) : 1.;
 
 	int nr_classes_bodies = nr_classes * nr_bodies; // also set multiple bodies!
 	for (int iclass = 0; iclass < nr_classes_bodies; iclass++)
@@ -1599,7 +1652,10 @@ void MlModel::initialiseDataVersusPrior(bool fix_tau)
 
 		// Get the power spectrum of the reference
 		MultidimArray<RFLOAT> spectrum(ori_size /2 + 1);
-		getSpectrum(Iref[iclass], spectrum, POWER_SPECTRUM);
+		if (isRect())
+			getSpectrumRect(Iref[iclass], spectrum, ori_size, POWER_SPECTRUM);
+		else
+			getSpectrum(Iref[iclass], spectrum, POWER_SPECTRUM);
 		// Factor two because of two-dimensionality of the complex plane
 		// (just like sigma2_noise estimates, the power spectra should be divided by 2)
 		spectrum *= normfft / 2.;
@@ -1728,6 +1784,9 @@ void MlWsumModel::initialise(MlModel &_model, FileName fn_sym, bool asymmetric_p
 	ref_dim = _model.ref_dim;
 	data_dim = _model.data_dim;
 	ori_size = _model.ori_size;
+	box_nx = _model.box_nx;
+	box_ny = _model.box_ny;
+	box_nz = _model.box_nz;
 	pdf_class = _model.pdf_class;
 	class_age = _model.class_age;
 	if (ref_dim == 2)
@@ -1785,6 +1844,11 @@ void MlWsumModel::initialise(MlModel &_model, FileName fn_sym, bool asymmetric_p
 	// Resize MlWsumModel-specific vectors
 	BackProjector BP(ori_size, ref_dim, fn_sym, interpolator, padding_factor, r_min_nn,
 					 ML_BLOB_ORDER, ML_BLOB_RADIUS, ML_BLOB_ALPHA, data_dim, _skip_gridding);
+	if (_model.isRect())
+	{
+		box_nx = _model.box_nx; box_ny = _model.box_ny; box_nz = _model.box_nz;
+		BP.setBoxSize(_model.boxX(), _model.boxY(), (ref_dim == 3) ? _model.boxZ() : 0);
+	}
 	BPref.clear();
 
 	pseudo_halfsets = _pseudo_halfsets;

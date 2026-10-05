@@ -61,6 +61,20 @@ public:
 	data_dim, output_boxsize, cache_copy_threads, nr_threads;
 	int verb = 1;
 
+	// Rectangular particle images (see documentation/rectangular_particles.md); 0 when the images are square
+	int rect_box_x = 0, rect_box_y = 0, rect_box_z = 0;
+	bool isRect() const { return rect_box_x > 0; }
+
+	// Fused extraction (see fused_extract.h): particles are virtual stacks, and their Fourier transforms are
+	// computed from the micrographs on a box and pixel size of the reconstruction's choosing
+	bool do_fused_extract = false;
+	int fused_box_x = -1, fused_box_y = -1;   // requested output image size; -1: same extent as the stored particles
+	int fused_nx = 0, fused_ny = 0;           // output image size in use
+	// Fused extraction straight from rlnMicrographName + rlnCoordinateX/Y, when the particles are not virtual stacks:
+	// the options below play the role of relion_preprocess's
+	bool fused_direct = false;
+	vparticles::DirectRecipe fused_recipe;
+
 	RFLOAT blob_radius, blob_alpha, angular_error, shift_error, angpix, maxres,
 	       helical_rise, helical_twist;
 	int s2_ctf_oversampling_min = 2;
@@ -115,6 +129,7 @@ public:
 	void readDebugArrays();
 
 	// Loop over all particles to be back-projected
+	void checkRectSupport() const;
 	void backproject(int rank = 0, int size = 1);
 
 	// For parallelisation purposes

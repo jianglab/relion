@@ -427,3 +427,132 @@ def test_converting_helical_segments(relion_bin, filaments):
     converted = [p for p in stacks if is_descriptor(p)]
     assert converted, out
     assert np.array_equal(before, materialise(relion_bin, project, star, "after_helical"))
+
+
+# ---------------------------------------------------------------------------
+# Rectangular and rotated boxes
+# ---------------------------------------------------------------------------
+
+def finufft_available(relion_bin, project):
+    (project / "x").mkdir(exist_ok=True)
+    r = run(relion_bin, project, ["relion_preprocess", "--i", "micrographs_ctf.star", "--coord_list", "coords.star",
+            "--part_star", "x/particles.star", "--part_dir", "x/", "--extract", "--extract_size_x", "64",
+            "--extract_size_y", "32", "--interpolation", "nufft"])
+    return "FINUFFT" not in (r.stdout + r.stderr)
+
+
+RECT = ["--extract_size_x", "96", "--extract_size_y", "48", "--norm", "--bg_radius", "18", "--invert_contrast",
+        "--float16"]
+
+
+def test_rectangular_virtual_matches_extracted(relion_bin, project):
+    opts = ["--coord_list", "coords.star"] + RECT
+    real = extract(relion_bin, project, "Extract/rreal", opts, virtual=False)
+    virt = extract(relion_bin, project, "Extract/rvirtual", opts, virtual=True)
+    particles = assert_same_particles(relion_bin, project, real, virt)
+    assert particles.shape == (11, 48, 96)
+
+    # The optics table gives the two sizes, not a single rlnImageSize
+    text = Path(real).read_text().split("data_particles")[0]
+    assert "_rlnImageSizeX" in text and "_rlnImageSizeY" in text
+    assert "_rlnImageSize " not in text
+
+
+def test_rectangular_scale_keeps_the_aspect_ratio(relion_bin, project):
+    opts = ["--coord_list", "coords.star", "--extract_size_x", "96", "--extract_size_y", "48", "--scale", "48",
+            "--norm", "--bg_radius", "9", "--float16"]
+    real = extract(relion_bin, project, "Extract/sreal", opts, virtual=False)
+    virt = extract(relion_bin, project, "Extract/svirtual", opts, virtual=True)
+    particles = assert_same_particles(relion_bin, project, real, virt)
+    assert particles.shape == (11, 24, 48)
+    text = Path(real).read_text().split("data_particles")[0]
+    assert "_rlnImageSizeX" in text and "_rlnImageSizeY" in text
+
+
+def test_rotating_a_box_with_aberrations_is_refused(relion_bin, filaments):
+    project = filaments
+    text = (project / "micrographs_ctf.star").read_text()
+    text = text.replace("_rlnAmplitudeContrast #6\n", "_rlnAmplitudeContrast #6\n_rlnBeamTiltX #7\n_rlnBeamTiltY #8\n", 1)
+    text = text.replace("1.5 300 2.7 0.1\n", "1.5 300 2.7 0.1 0.2 -0.1\n", 1)
+    (project / "micrographs_aberr.star").write_text(text)
+    (project / "Extract/ab").mkdir(parents=True)
+    args = ["relion_preprocess", "--i", "micrographs_aberr.star", "--part_star", "Extract/ab/particles.star",
+            "--part_dir", "Extract/ab/", "--extract"] + HELICAL + RECT + ["--rotate_to_horizontal", "--no_virtual"]
+    r = run(relion_bin, project, args)
+    assert r.returncode != 0 and "allow_unrotated_aberrations" in r.stdout + r.stderr
+    r = run(relion_bin, project, args + ["--allow_unrotated_aberrations"])
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("method", ["linear", "cubic", "nufft"])
+def test_rotated_helical_virtual_matches_extracted(relion_bin, filaments, method):
+    project = filaments
+    if method == "nufft" and not finufft_available(relion_bin, project):
+        pytest.skip("this build has no FINUFFT")
+    opts = HELICAL + RECT + ["--rotate_to_horizontal", "--interpolation", method]
+    real = extract(relion_bin, project, "Extract/rotreal", opts, virtual=False)
+    virt = extract(relion_bin, project, "Extract/rotvirtual", opts, virtual=True)
+    particles = assert_same_particles(relion_bin, project, real, virt)
+    assert particles.shape[0] > 10 and particles.shape[1:] == (48, 96)
+
+    labels, rows = read_particles(real)
+    psi = labels.index("AnglePsiPrior")
+    ext = labels.index("ParticleExtractionAngle")
+    assert all(abs(float(r[psi])) < 1e-4 for r in rows)          # residual after rotating
+    assert max(abs(float(r[ext])) for r in rows) > 10            # the tubes are not horizontal
+
+
+def test_rotation_follows_the_tube(relion_bin, project):
+    """A bright line along a tube becomes horizontal; the opposite sign would not."""
+    from math import atan2, degrees, cos, sin
+    y, x = np.mgrid[0:NY, 0:NX]
+    (x0, y0), (x1, y1) = (60.0, 70.0), (300.0, 230.0)
+    ang = atan2(y1 - y0, x1 - x0)
+    dist = np.abs((x - x0) * sin(ang) - (y - y0) * cos(ang))
+    mic = 10 * np.exp(-dist ** 2 / (2 * 4.0 ** 2)) + np.random.default_rng(3).normal(0, 0.05, (NY, NX))
+    write_mrc(project / "Micrographs" / "mic001.mrc", mic)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    psi = -degrees(ang)
+    write_loop(project / "mic1.star", [
+        ("optics", ["OpticsGroupName", "OpticsGroup", "MicrographPixelSize", "Voltage",
+                    "SphericalAberration", "AmplitudeContrast"], [["opticsGroup1", 1, 1.5, 300, 2.7, 0.1]]),
+        ("micrographs", ["MicrographName", "OpticsGroup", "DefocusU", "DefocusV", "DefocusAngle"],
+         [["Micrographs/mic001.mrc", 1, 12000, 11800, 30.0]]),
+    ])
+
+    def contrast(tag, psi_prior):
+        write_loop(project / f"parts_{tag}.star", [
+            ("optics", ["OpticsGroupName", "OpticsGroup", "MicrographOriginalPixelSize", "Voltage",
+                        "SphericalAberration", "AmplitudeContrast", "ImagePixelSize", "ImageSize",
+                        "ImageDimensionality"],
+             [["opticsGroup1", 1, 1.5, 300, 2.7, 0.1, 1.5, 64, 2]]),
+            ("particles", ["MicrographName", "OpticsGroup", "CoordinateX", "CoordinateY", "AnglePsiPrior",
+                           "AngleTiltPrior", "HelicalTubeID", "DefocusU", "DefocusV", "DefocusAngle"],
+             [["Micrographs/mic001.mrc", 1, cx, cy, f"{psi_prior:.6f}", 90, 1, 12000, 11800, 30.0]]),
+        ])
+        (project / f"Extract/{tag}").mkdir(parents=True)
+        r = run(relion_bin, project, ["relion_preprocess", "--i", "mic1.star", "--reextract_data_star",
+                f"parts_{tag}.star", "--part_star", f"Extract/{tag}/particles.star", "--part_dir", f"Extract/{tag}/",
+                "--extract", "--extract_size_x", "128", "--extract_size_y", "64", "--helix",
+                "--helical_outer_diameter", "20", "--rotate_to_horizontal", "--interpolation", "cubic",
+                "--no_virtual"])
+        assert r.returncode == 0, r.stdout + r.stderr
+        img = materialise(relion_bin, project, project / f"Extract/{tag}/particles.star", f"cmp_{tag}")[0]
+        return img.mean(axis=1).var() / (img.mean(axis=0).var() + 1e-12)
+
+    assert contrast("good", psi) > 20 * contrast("flipped", -psi)
+
+
+@pytest.mark.parametrize("option,message", [
+    (["--extract_size", "64", "--rotate_to_horizontal"], "helix"),           # rotating needs helical priors
+    (["--extract_size_x", "64"], "extract_size_y"),                          # both or neither
+    (["--extract_size_x", "64", "--extract_size_y", "32", "--phase_flip"], "phase"),
+    (["--extract_size_x", "64", "--extract_size_y", "32", "--window", "32"], "window"),
+    (["--extract_size_x", "96", "--extract_size_y", "50", "--scale", "48"], "scale"),     # 50*48/96 = 25 rows, odd
+], ids=["rotate_without_helix", "one_side_only", "phase_flip", "window", "scale_gives_odd_height"])
+def test_unsupported_rectangular_options_are_refused(relion_bin, project, option, message):
+    (project / "Extract/bad").mkdir(parents=True)
+    r = run(relion_bin, project, ["relion_preprocess", "--i", "micrographs_ctf.star", "--coord_list", "coords.star",
+            "--part_star", "Extract/bad/particles.star", "--part_dir", "Extract/bad/", "--extract"] + option)
+    assert r.returncode != 0
+    assert message in (r.stdout + r.stderr)

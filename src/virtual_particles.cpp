@@ -13,7 +13,10 @@
 #include "src/image.h"
 #include "src/metadata_table.h"
 #include "src/float16.h"
+#include "src/extract_rect.h"
+#include "src/fftw_rect.h"
 #include "src/cache_manager.h"
+#include "src/fused_extract.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -135,7 +138,11 @@ namespace vparticles {
 
 namespace {
 
-const int DESCRIPTOR_VERSION = 1;
+// Version 1 is square, upright boxes; version 2 adds rectangular boxes and turned boxes. A
+// descriptor is written as version 1 whenever it needs nothing of version 2, so that
+// builds that predate rectangular particles keep reading everything they always could.
+const int DESCRIPTOR_VERSION = 2;
+const int DESCRIPTOR_VERSION_SQUARE = 1;
 
 /* First line of every descriptor. A converted stack keeps its ".mrcs" name so
  * that no STAR file downstream has to change; the reader tells it apart from a
@@ -185,12 +192,14 @@ struct VStack {
 	Recipe recipe;
 	std::vector<long> x, y;      // integer centres, as extraction truncated them
 	std::vector<double> psi;     // helical: each segment's in-plane angle
+	std::vector<double> cx, cy, angle;   // rotated: exact centre and box angle of each particle
+	int version;                 // descriptor version as read
 	std::string key;             // cache key: everything that determines the pixels
 
 	std::mutex build;            // one thread builds the cache entry
 	std::atomic<bool> entry_ok;  // the cache entry was seen complete
 
-	VStack() : entry_ok(false) {}
+	VStack() : version(DESCRIPTOR_VERSION_SQUARE), entry_ok(false) {}
 };
 
 std::mutex g_mutex;
@@ -203,16 +212,19 @@ std::string recipeKeyString(const VStack& v)
 	const Recipe& r = v.recipe;
 	std::ostringstream s;
 	s.precision(17);
-	s << "v" << DESCRIPTOR_VERSION << "|" << v.mic_checksum
+	s << "v" << v.version << "|" << v.mic_checksum
 	  << "|" << r.extract_size << "|" << r.scale << "|" << r.window
 	  << "|" << r.normalise << "|" << r.bg_radius << "|" << r.ramp
 	  << "|" << r.white_dust << "|" << r.black_dust
 	  << "|" << r.invert_contrast << "|" << r.float16 << "|";
 	if (r.helical) s << "helical " << exactString(r.helical_radius) << "|";
+	if (r.rectangular()) s << "rect " << r.extract_size_y << "|";
+	if (r.rotated) s << "rotated " << resampleMethodName(r.interpolation) << "|";
 	for (size_t i = 0; i < v.x.size(); i++)
 	{
 		s << v.x[i] << "," << v.y[i];
 		if (r.helical) s << "," << exactString(v.psi[i]);
+		if (r.rotated) s << "," << exactString(v.cx[i]) << "," << exactString(v.cy[i]) << "," << exactString(v.angle[i]);
 		s << ";";
 	}
 	return s.str();
@@ -236,9 +248,11 @@ std::shared_ptr<VStack> getVStack(const std::string& path)
 	v->path = path;
 	int version = 0;
 	head.getValue(EMDL_VSTACK_VERSION, version, 0);
-	if (version != DESCRIPTOR_VERSION)
+	if (version != DESCRIPTOR_VERSION_SQUARE && version != DESCRIPTOR_VERSION)
 		REPORT_ERROR("Virtual particle stack " + path + " has version " + integerToString(version)
-		             + "; this RELION reads version " + integerToString(DESCRIPTOR_VERSION) + ".");
+		             + "; this RELION reads versions " + integerToString(DESCRIPTOR_VERSION_SQUARE) + " and "
+		             + integerToString(DESCRIPTOR_VERSION) + ".");
+	v->version = version;
 
 	Recipe& r = v->recipe;
 	head.getValue(EMDL_MICROGRAPH_NAME, v->mic, 0);
@@ -260,6 +274,14 @@ std::shared_ptr<VStack> getVStack(const std::string& path)
 		if (!head.getValue(EMDL_VSTACK_HELICAL_RADIUS, radius, 0))
 			REPORT_ERROR("Virtual particle stack " + path + " is helical but has no rlnVirtualHelicalRadius.");
 		r.helical_radius = strtod(radius.c_str(), NULL);
+	}
+	head.getValue(EMDL_VSTACK_EXTRACT_SIZE_Y, r.extract_size_y, 0);
+	head.getValue(EMDL_VSTACK_ROTATED, r.rotated, 0);
+	if (r.rotated)
+	{
+		std::string method;
+		head.getValue(EMDL_VSTACK_INTERPOLATION, method, 0);
+		r.interpolation = parseResampleMethod(method);
 	}
 	if (r.extract_size <= 0)
 		REPORT_ERROR("Virtual particle stack " + path + " has no valid rlnVirtualExtractSize.");
@@ -285,6 +307,16 @@ std::shared_ptr<VStack> getVStack(const std::string& path)
 			if (!parts.getValue(EMDL_VSTACK_PSI, psi))
 				REPORT_ERROR("Virtual particle stack " + path + " is helical but lacks rlnVirtualPsi.");
 			v->psi.push_back(strtod(psi.c_str(), NULL));
+		}
+		if (r.rotated)
+		{
+			std::string sx, sy, sa;
+			if (!parts.getValue(EMDL_VSTACK_CENTRE_X, sx) || !parts.getValue(EMDL_VSTACK_CENTRE_Y, sy)
+			    || !parts.getValue(EMDL_VSTACK_ANGLE, sa))
+				REPORT_ERROR("Virtual particle stack " + path + " is rotated but lacks rlnVirtualCentreX/Y or rlnVirtualAngle.");
+			v->cx.push_back(strtod(sx.c_str(), NULL));
+			v->cy.push_back(strtod(sy.c_str(), NULL));
+			v->angle.push_back(strtod(sa.c_str(), NULL));
 		}
 	}
 
@@ -461,22 +493,41 @@ void verifyMicrograph(const VStack& v)
  * performPerImageOperations then rescales, re-windows, normalises and inverts,
  * and the stack writer rounds to float or half. */
 void extractOne(const Micrograph& m, const Recipe& r, long xpos, long ypos, double psi,
-                MultidimArray<RFLOAT>& out)
+                double cx, double cy, double angle, MultidimArray<RFLOAT>& out)
 {
-	Image<RFLOAT> I(r.extract_size, r.extract_size);
-	const long first = FIRST_XMIPP_INDEX(r.extract_size);
-	for (long i = 0; i < r.extract_size; i++)
+	Image<RFLOAT> I;
+	if (r.rectangular() || r.rotated)
 	{
-		const long y = std::min(std::max(ypos + first + i, 0L), m.ny - 1);
-		for (long j = 0; j < r.extract_size; j++)
+		// The same functions relion_preprocess calls, so the pixels are the same
+		const int ny = r.rectangular() ? r.extract_size_y : r.extract_size;
+		const Micrograph* mp = &m;
+		auto at = [mp](long y, long x) { return mp->at(y, x); };
+		if (r.rotated)
+			extractrect::cutRotatedBox(at, m.nx, m.ny, cx, cy, r.extract_size, ny, angle, r.interpolation, I());
+		else
+			extractrect::cutBox(at, m.nx, m.ny, xpos, ypos, r.extract_size, ny, I());
+	}
+	else
+	{
+		I = Image<RFLOAT>(r.extract_size, r.extract_size);
+		const long first = FIRST_XMIPP_INDEX(r.extract_size);
+		for (long i = 0; i < r.extract_size; i++)
 		{
-			const long x = std::min(std::max(xpos + first + j, 0L), m.nx - 1);
-			DIRECT_A2D_ELEM(I(), i, j) = m.at(y, x);
+			const long y = std::min(std::max(ypos + first + i, 0L), m.ny - 1);
+			for (long j = 0; j < r.extract_size; j++)
+			{
+				const long x = std::min(std::max(xpos + first + j, 0L), m.nx - 1);
+				DIRECT_A2D_ELEM(I(), i, j) = m.at(y, x);
+			}
 		}
 	}
 
 	I().setXmippOrigin();
-	if (r.scale > 0) rescale(I, r.scale);
+	if (r.scale > 0)
+	{
+		if (r.rectangular()) resizeMapRect(I(), r.scale, r.outputSizeY());
+		else rescale(I, r.scale);
+	}
 	if (r.window > 0) rewindow(I, r.window);
 	I().setXmippOrigin();
 	if (r.normalise)
@@ -494,6 +545,13 @@ void extractOne(const Micrograph& m, const Recipe& r, long xpos, long ypos, doub
 }
 
 inline double psiOf(const VStack& v, size_t i) { return v.psi.empty() ? 0. : v.psi[i]; }
+
+void extractIndex(const Micrograph& m, const VStack& v, size_t i, MultidimArray<RFLOAT>& out)
+{
+	const bool rot = v.recipe.rotated;
+	extractOne(m, v.recipe, v.x[i], v.y[i], psiOf(v, i),
+	           rot ? v.cx[i] : 0., rot ? v.cy[i] : 0., rot ? v.angle[i] : 0., out);
+}
 
 // ---------------------------------------------------------------------------
 // Cache entries
@@ -537,10 +595,10 @@ void encode(const MultidimArray<RFLOAT>& img, const Recipe& r, std::vector<unsig
 	}
 }
 
-void decode(const unsigned char* p, const Recipe& r, int box, MultidimArray<RFLOAT>& out)
+void decode(const unsigned char* p, const Recipe& r, int box, int box_y, MultidimArray<RFLOAT>& out)
 {
-	out.resize(box, box);
-	const size_t n = (size_t)box * box;
+	out.resize(box_y, box);
+	const size_t n = (size_t)box * box_y;
 	for (size_t i = 0; i < n; i++)
 	{
 		if (r.float16)
@@ -568,7 +626,8 @@ bool readFromEntry(const std::string& path, VStack& v, long idx, MultidimArray<R
 	}
 
 	const int box = v.recipe.outputSize();
-	const size_t one = (size_t)box * box * bytesPerValue(v.recipe);
+	const int box_y = v.recipe.outputSizeY();
+	const size_t one = (size_t)box * box_y * bytesPerValue(v.recipe);
 
 	if (!v.entry_ok)
 	{
@@ -581,6 +640,7 @@ bool readFromEntry(const std::string& path, VStack& v, long idx, MultidimArray<R
 		             && h.dtype == (v.recipe.float16 ? 12u : 2u)
 		             && h.n == (uint64_t)v.x.size()
 		             && h.box == (uint32_t)box
+		             && h.reserved == (v.recipe.rectangular() ? (uint32_t)box_y : 0u)
 		             && strncmp(h.key, v.key.c_str(), sizeof(h.key)) == 0
 		             && (size_t)st.st_size == sizeof(h) + one * v.x.size();
 		if (!ok)
@@ -601,7 +661,7 @@ bool readFromEntry(const std::string& path, VStack& v, long idx, MultidimArray<R
 		v.entry_ok = false;
 		return false;
 	}
-	decode(buf.data(), v.recipe, box, out);
+	decode(buf.data(), v.recipe, box, box_y, out);
 	return true;
 }
 
@@ -672,12 +732,13 @@ bool buildEntry(const std::string& dir, VStack& v, long idx, MultidimArray<RFLOA
 	if (fd < 0)
 	{
 		warnUnwritable(dir, strerror(errno));
-		extractOne(*m, v.recipe, v.x[idx], v.y[idx], psiOf(v, idx), out);
+		extractIndex(*m, v, idx, out);
 		return false;
 	}
 
 	const int box = v.recipe.outputSize();
-	const size_t one = (size_t)box * box * bytesPerValue(v.recipe);
+	const int box_y = v.recipe.outputSizeY();
+	const size_t one = (size_t)box * box_y * bytesPerValue(v.recipe);
 
 	EntryHeader h;
 	memset(&h, 0, sizeof(h));
@@ -686,6 +747,7 @@ bool buildEntry(const std::string& dir, VStack& v, long idx, MultidimArray<RFLOA
 	h.dtype = v.recipe.float16 ? 12 : 2;
 	h.n = v.x.size();
 	h.box = box;
+	h.reserved = v.recipe.rectangular() ? (uint32_t)box_y : 0u;
 	strncpy(h.key, v.key.c_str(), sizeof(h.key) - 1);
 	bool ok = pwrite(fd, &h, sizeof(h), 0) == (ssize_t)sizeof(h);
 
@@ -701,7 +763,7 @@ bool buildEntry(const std::string& dir, VStack& v, long idx, MultidimArray<RFLOA
 	for (size_t k = 0; k < order.size() && ok; k++)
 	{
 		const size_t i = order[k];
-		extractOne(*m, v.recipe, v.x[i], v.y[i], psiOf(v, i), img);
+		extractIndex(*m, v, i, img);
 		encode(img, v.recipe, buf);
 		ok = pwrite(fd, buf.data(), one, sizeof(h) + one * i) == (ssize_t)one;
 		if ((long)i == idx) { out = img; have_idx = true; }
@@ -718,7 +780,7 @@ bool buildEntry(const std::string& dir, VStack& v, long idx, MultidimArray<RFLOA
 
 	unlink(tmp.str().c_str());
 	warnUnwritable(dir, strerror(saved_errno ? saved_errno : errno));
-	if (!have_idx) extractOne(*m, v.recipe, v.x[idx], v.y[idx], psiOf(v, idx), out);
+	if (!have_idx) extractIndex(*m, v, idx, out);
 	return false;
 }
 
@@ -731,7 +793,7 @@ bool buildEntry(const std::string& dir, VStack& v, long idx, MultidimArray<RFLOA
 Recipe::Recipe()
 	: extract_size(-1), scale(-1), window(-1), normalise(false), bg_radius(-1), ramp(true),
 	  white_dust(-1), black_dust(-1), invert_contrast(false), float16(false), angpix(1.),
-	  helical(false), helical_radius(-1.)
+	  helical(false), helical_radius(-1.), extract_size_y(-1), rotated(false), interpolation(RESAMPLE_LINEAR)
 {}
 
 int Recipe::outputSize() const
@@ -739,6 +801,13 @@ int Recipe::outputSize() const
 	if (window > 0) return window;
 	if (scale > 0) return scale;
 	return extract_size;
+}
+
+int Recipe::outputSizeY() const
+{
+	if (window > 0) return window;
+	if (scale > 0) return rectangular() ? extractrect::rescaledHeight(extract_size, extract_size_y, scale) : scale;
+	return rectangular() ? extract_size_y : extract_size;
 }
 
 bool isVirtualStackFormat(const std::string& ext)
@@ -776,7 +845,7 @@ void computeParticles(const std::string& fn_vstack, std::vector<MultidimArray<RF
 
 	out.assign(v->x.size(), MultidimArray<RFLOAT>());
 	for (size_t k = 0; k < order.size(); k++)
-		extractOne(*m, v->recipe, v->x[order[k]], v->y[order[k]], psiOf(*v, order[k]), out[order[k]]);
+		extractIndex(*m, *v, order[k], out[order[k]]);
 }
 
 void forget(const std::string& fn_vstack)
@@ -825,8 +894,16 @@ std::string micrographChecksum(const std::string& fn_mic)
 
 void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
                      const Recipe& r, const std::vector<std::pair<long, long> >& coords,
-                     const std::vector<double>& psi)
+                     const std::vector<double>& psi,
+                     const std::vector<double>& cx, const std::vector<double>& cy,
+                     const std::vector<double>& angle)
 {
+	if (r.rotated && (cx.size() != coords.size() || cy.size() != coords.size() || angle.size() != coords.size()))
+		REPORT_ERROR("writeDescriptor: a rotated virtual stack needs an exact centre and a box angle per particle.");
+	if ((r.rectangular() || r.rotated) && r.window > 0)
+		REPORT_ERROR("writeDescriptor: rectangular or rotated virtual particles do not support re-windowing.");
+	if (r.rectangular() && r.scale > 0 && r.outputSizeY() < 0)
+		REPORT_ERROR("writeDescriptor: the rescaled height of a rectangular box must be an even whole number of pixels.");
 	if (r.helical && psi.size() != coords.size())
 		REPORT_ERROR("writeDescriptor: a helical virtual stack needs one psi angle per segment.");
 	if (r.white_dust > 0 || r.black_dust > 0)
@@ -835,13 +912,26 @@ void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
 	head.setIsList(true);
 	head.setName("vstack");
 	head.addObject();
-	head.setValue(EMDL_VSTACK_VERSION, DESCRIPTOR_VERSION);
+	const bool v2 = r.rectangular() || r.rotated;
+	head.setValue(EMDL_VSTACK_VERSION, v2 ? DESCRIPTOR_VERSION : DESCRIPTOR_VERSION_SQUARE);
 	head.setValue(EMDL_MICROGRAPH_NAME, fn_mic);
 	head.setValue(EMDL_VSTACK_MICROGRAPH_CHECKSUM, micrographChecksum(fn_mic));
 	head.setValue(EMDL_VSTACK_EXTRACT_SIZE, r.extract_size);
 	head.setValue(EMDL_VSTACK_RESCALE_SIZE, r.scale);
 	head.setValue(EMDL_VSTACK_WINDOW_SIZE, r.window);
-	head.setValue(EMDL_IMAGE_SIZE, r.outputSize());
+	if (r.rectangular())
+	{
+		head.setValue(EMDL_VSTACK_EXTRACT_SIZE_Y, r.extract_size_y);
+		head.setValue(EMDL_IMAGE_SIZE_X, r.outputSize());
+		head.setValue(EMDL_IMAGE_SIZE_Y, r.outputSizeY());
+	}
+	else
+		head.setValue(EMDL_IMAGE_SIZE, r.outputSize());
+	if (r.rotated)
+	{
+		head.setValue(EMDL_VSTACK_ROTATED, true);
+		head.setValue(EMDL_VSTACK_INTERPOLATION, resampleMethodName(r.interpolation));
+	}
 	head.setValue(EMDL_IMAGE_PIXEL_SIZE, r.angpix);
 	head.setValue(EMDL_VSTACK_NORMALISE, r.normalise);
 	head.setValue(EMDL_VSTACK_BG_RADIUS, r.bg_radius);
@@ -864,6 +954,12 @@ void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
 		parts.setValue(EMDL_IMAGE_COORD_X, (RFLOAT)coords[i].first);
 		parts.setValue(EMDL_IMAGE_COORD_Y, (RFLOAT)coords[i].second);
 		if (r.helical) parts.setValue(EMDL_VSTACK_PSI, exactString(psi[i]));
+		if (r.rotated)
+		{
+			parts.setValue(EMDL_VSTACK_CENTRE_X, exactString(cx[i]));
+			parts.setValue(EMDL_VSTACK_CENTRE_Y, exactString(cy[i]));
+			parts.setValue(EMDL_VSTACK_ANGLE, exactString(angle[i]));
+		}
 	}
 
 	// Written aside and renamed, so a reader never sees half a descriptor
@@ -889,6 +985,7 @@ Header readHeader(const std::string& fn_vstack)
 	Header h;
 	h.n = v->x.size();
 	h.box = v->recipe.outputSize();
+	h.box_y = v->recipe.outputSizeY();
 	h.angpix = v->recipe.angpix;
 	h.float16 = v->recipe.float16;
 	return h;
@@ -917,7 +1014,110 @@ void readParticle(const std::string& fn_vstack, long index, MultidimArray<RFLOAT
 	// No cache: cut just this particle; only the pages under its box are read
 	verifyMicrograph(*v);
 	std::shared_ptr<Micrograph> m = openMicrograph(v->mic);
-	extractOne(*m, v->recipe, v->x[index], v->y[index], psiOf(*v, index), out);
+	extractIndex(*m, *v, index, out);
+}
+
+double micrographPixelSize(const std::string& fn_vstack)
+{
+	std::shared_ptr<VStack> v = getVStack(fn_vstack);
+	const Recipe& r = v->recipe;
+	return (r.scale > 0) ? r.angpix * r.scale / r.extract_size : r.angpix;
+}
+
+void sameExtentBox(const std::string& fn_vstack, double angpix, int& nx, int& ny)
+{
+	std::shared_ptr<VStack> v = getVStack(fn_vstack);
+	const Recipe& r = v->recipe;
+	const double f = r.angpix / angpix;
+	nx = 2 * (int)std::ceil(r.outputSize() * f / 2. - 1e-9);
+	ny = 2 * (int)std::ceil(r.outputSizeY() * f / 2. - 1e-9);
+}
+
+namespace {
+void fuseFromMicrograph(const Micrograph& m, const fusedextract::Geometry& g, const fusedextract::Normalisation& nrm,
+                        int nx, int ny, MultidimArray<Complex>& F2D)
+{
+	const Micrograph* mp = &m;
+	auto at = [mp](long y, long x) { return mp->at(y, x); };
+	fusedextract::Samples samples;
+	fusedextract::gather(at, m.nx, m.ny, g, samples);
+	fusedextract::normaliseSamples(samples, nx, ny, nrm);
+	fusedextract::fourierTransform(samples, g, F2D);
+}
+} // namespace
+
+void readParticleFourier(const std::string& fn_vstack, long index, double angpix, int nx, int ny,
+                         MultidimArray<Complex>& F2D)
+{
+	std::shared_ptr<VStack> v = getVStack(fn_vstack);
+	if (index < 0 || index >= (long)v->x.size())
+		REPORT_ERROR("Particle " + integerToString(index + 1) + " requested from virtual stack "
+		             + fn_vstack + ", which holds " + integerToString(v->x.size()) + ".");
+	const Recipe& r = v->recipe;
+	if (r.white_dust > 0. || r.black_dust > 0.)
+		REPORT_ERROR("Fused extraction does not support dust removal (" + fn_vstack + ").");
+
+	verifyMicrograph(*v);
+	std::shared_ptr<Micrograph> m = openMicrograph(v->mic);
+
+	const double mic_angpix = micrographPixelSize(fn_vstack);
+	const double to_new = r.angpix / angpix;   // recipe pixels -> output pixels
+
+	fusedextract::Geometry g;
+	g.nx = nx; g.ny = ny;
+	g.step = angpix / mic_angpix;
+	const bool rot = r.rotated;
+	g.cx = rot ? v->cx[index] : (double)v->x[index];
+	g.cy = rot ? v->cy[index] : (double)v->y[index];
+	g.angle = rot ? v->angle[index] : 0.;
+
+	fusedextract::Normalisation nrm;
+	nrm.normalise = r.normalise;
+	nrm.ramp = r.ramp;
+	nrm.invert = r.invert_contrast;
+	nrm.helical = r.helical;
+	nrm.bg_radius = r.bg_radius * to_new;
+	nrm.helical_radius = r.helical_radius * to_new;
+	nrm.psi = psiOf(*v, index);
+
+	fuseFromMicrograph(*m, g, nrm, nx, ny, F2D);
+}
+
+void readParticleFourierDirect(const std::string& fn_mic, double cx, double cy, double box_angle, double psi_prior,
+                               const DirectRecipe& d, double angpix, int nx, int ny,
+                               MultidimArray<Complex>& F2D)
+{
+	if (d.mic_angpix <= 0. || angpix <= 0.)
+		REPORT_ERROR("Fused extraction from coordinates needs the micrograph and the output pixel sizes.");
+	if (d.helical && !d.normalise)
+		REPORT_ERROR("Fused extraction: a helical background only matters with normalisation.");
+
+	std::shared_ptr<Micrograph> m = openMicrograph(fn_mic);
+
+	fusedextract::Geometry g;
+	g.nx = nx; g.ny = ny;
+	g.step = angpix / d.mic_angpix;
+	if (d.rotate)
+	{
+		// As relion_preprocess --rotate_to_horizontal: the box is turned by box_angle around the exact coordinate
+		g.cx = cx; g.cy = cy; g.angle = box_angle;
+	}
+	else
+	{
+		// Unturned boxes are cut around whole pixels; relion_preprocess rounds the coordinate to the nearest
+		g.cx = std::floor(cx + 0.5); g.cy = std::floor(cy + 0.5); g.angle = 0.;
+	}
+
+	fusedextract::Normalisation nrm;
+	nrm.normalise = d.normalise;
+	nrm.ramp = d.ramp;
+	nrm.invert = d.invert_contrast;
+	nrm.helical = d.helical;
+	nrm.bg_radius = d.bg_radius;
+	nrm.helical_radius = d.helical_diameter * 0.5 / angpix;
+	nrm.psi = d.rotate ? 0. : psi_prior;
+
+	fuseFromMicrograph(*m, g, nrm, nx, ny, F2D);
 }
 
 std::string cacheDirectory()

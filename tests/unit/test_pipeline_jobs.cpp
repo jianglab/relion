@@ -46,6 +46,45 @@ TEST_CASE("Reconstruct3D: cache_dir and cache_copy_threads options exist",
 	REQUIRE(job.joboptions.find("cache_copy_threads") != job.joboptions.end());
 }
 
+TEST_CASE("Reconstruct3D: fused-extraction options emit flags only when asked",
+          "[pipeline][reconstruct3d][fused]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_RECONSTRUCT3D);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	REQUIRE(job.joboptions.find("do_fused") != job.joboptions.end());
+	REQUIRE_FALSE(job.joboptions["do_fused"].getBoolean());
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find("--fused_extract") == std::string::npos);
+	REQUIRE(command.find("--box_x") == std::string::npos);
+
+	job.joboptions["do_fused"].setString("Yes");
+	job.joboptions["fused_angpix"].setString("2.5");
+	job.joboptions["fused_box_x"].setString("200");
+	job.joboptions["fused_box_y"].setString("96");
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --fused_extract") != std::string::npos);
+	REQUIRE(command.find(" --angpix 2.5") != std::string::npos);
+	REQUIRE(command.find(" --box_x 200") != std::string::npos);
+	REQUIRE(command.find(" --box_y 96") != std::string::npos);
+
+	// -1 means "take from the stored particles": no flag
+	job.joboptions["fused_angpix"].setString("-1");
+	job.joboptions["fused_box_x"].setString("-1");
+	job.joboptions["fused_box_y"].setString("-1");
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --fused_extract") != std::string::npos);
+	REQUIRE(command.find("--angpix") == std::string::npos);
+	REQUIRE(command.find("--box_x") == std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // MultiBody
 // ---------------------------------------------------------------------------
@@ -166,6 +205,54 @@ TEST_CASE("Extract: virtual-particles checkbox emits a flag either way",
 	command.clear();
 	REQUIRE(generateCommand(job, command));
 	REQUIRE(command.find(" --no_virtual ") != std::string::npos);
+}
+
+TEST_CASE("Extract: rectangular box and rotation options are emitted only when used",
+          "[pipeline][extract]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_EXTRACT);
+	job.label = get_proc_label(job.type);
+	job.joboptions["star_mics"].setString("CtfFind/job003/micrographs_ctf.star");
+	job.joboptions["coords_suffix"].setString("AutoPick/job006/autopick.star");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --extract_size ") != std::string::npos);
+	REQUIRE(command.find("--extract_size_x") == std::string::npos);
+	REQUIRE(command.find("--extract_size_y") == std::string::npos);
+	REQUIRE(command.find("--rotate_to_horizontal") == std::string::npos);
+	REQUIRE(command.find("--interpolation") == std::string::npos);
+
+	job.joboptions["do_rect_box"].setString("Yes");
+	job.joboptions["extract_size_x"].setString("768");
+	job.joboptions["extract_size_y"].setString("256");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --extract_size_x 768") != std::string::npos);
+	REQUIRE(command.find(" --extract_size_y 256") != std::string::npos);
+	REQUIRE(command.find(" --extract_size ") == std::string::npos);
+	REQUIRE(command.find("--rotate_to_horizontal") == std::string::npos);
+
+	job.joboptions["do_extract_helix"].setString("Yes");
+	job.joboptions["do_rotate_horizontal"].setString("Yes");
+	job.joboptions["extract_interpolation"].setString("cubic");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --rotate_to_horizontal --interpolation cubic") != std::string::npos);
+
+	// Rescaling a rectangular box sets the new length; the width must stay an even whole number
+	job.joboptions["do_rescale"].setString("Yes");
+	job.joboptions["rescale"].setString("384");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --scale 384") != std::string::npos);
+	job.joboptions["extract_size_y"].setString("250");   // 250 * 384 / 768 = 125 rows
+	command.clear();
+	REQUIRE_FALSE(generateCommand(job, command));
 }
 
 // relion_refine deletes old iteration files unless told to keep them; every

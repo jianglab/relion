@@ -21,6 +21,7 @@
 #include <src/image.h>
 #include <src/funcs.h>
 #include <src/args.h>
+#include <src/rect_refusal.h>
 #include <src/fftw.h>
 #include <src/time.h>
 #include <src/symmetries.h>
@@ -196,6 +197,19 @@ class image_handler_parameters
 			angpix = Iin.samplingRateX();
 			std::cerr << "WARNING: You did not specify --angpix. The pixel size in the image header, " << angpix << " A/px, is used." << std::endl;
 		}
+
+		// Fourier-space operations use cubic shells; a cuboid (nx = ny != nz) map would be silently mangled.
+		if (ZSIZE(Iin()) > 1 && (XSIZE(Iin()) != YSIZE(Iin()) || XSIZE(Iin()) != ZSIZE(Iin())))
+		{
+			if (requested_angpix > 0 || new_box > 0 || fn_fsc != "" || randomize_at > 0 || do_power || do_power_image || do_guinier ||
+			    fn_cosDPhi != "" || fn_correct_ampl != "" || fn_fourfilter != "" || fn_adjust_power != "" ||
+			    fabs(bfactor) > 0 || logfilter > 0 || lowpass > 0 || highpass > 0 || do_optimise_scale_subtract)
+				refuseRectangularImages("relion_image_handler", "the map is " + std::to_string(XSIZE(Iin())) + " x "
+					+ std::to_string(YSIZE(Iin())) + " x " + std::to_string(ZSIZE(Iin()))
+					+ " voxels, not cubic, and rescaling, resizing, filtering, FSC and power-spectrum options assume a cubic box");
+		}
+		if ((requested_angpix > 0 || new_box > 0) && obsModel.opticsMdt.containsLabel(EMDL_IMAGE_SIZE_X))
+			refuseRectangularImages("relion_image_handler", "--rescale_angpix and --new_box cannot update the rectangular box of the optics groups (rlnImageSizeX/Y); write the stack without a STAR file instead");
 
 		if (do_add_edge)
 		{

@@ -55,7 +55,9 @@ class ObservationModel
 		// cached values - protected to prevent users from accidentally changing them,
 		// expecting the changes to propagate into the optics star-file
 		std::vector<double> angpix, originalAngpix, lambda, Cs;
-		std::vector<int> boxSizes;
+		// boxSizes holds the largest side (the nominal size); boxSizesX/Y hold the sides of
+		// rectangular images. For square images all three agree.
+		std::vector<int> boxSizes, boxSizesX, boxSizesY;
 		std::vector<bool> CtfPremultiplied, CtfCorrected;
 		std::vector<std::vector<double> > evenZernikeCoeffs, oddZernikeCoeffs;
 		std::vector<Matrix2D<RFLOAT> > magMatrices;
@@ -108,6 +110,12 @@ class ObservationModel
 		// 2D image with the MTF (cached)
 		// Nyquist X is positive, Y is negative (non-FFTW!!)
 		const BufferedImage<RFLOAT>& getMtfImage(int optGroup, int s);
+
+		// Rectangular versions: the image has ydim rows and xdim = nx/2+1 columns, cropped from
+		// the full box of the optics group (indices keep their physical frequencies).
+		const BufferedImage<RFLOAT>& getMtfImageRect(int optGroup, int xdim, int ydim);
+		const BufferedImage<RFLOAT>& getAverageMtfImageRect(int xdim, int ydim);
+		const BufferedImage<Complex>& getPhaseCorrectionRect(int optGroup, int xdim, int ydim);
 
 		// 2D image with the average MTF (cached)
 		const BufferedImage<RFLOAT>& getAverageMtfImage(int s);
@@ -178,7 +186,15 @@ class ObservationModel
 		double getSphericalAberration(int opticsGroup) const;
 		std::vector<double> getSphericalAberrations() const;
 
+		// Errors if the box of this optics group is not square; code that does not
+		// support rectangular images calls this and so refuses them.
 		int getBoxSize(int opticsGroup) const;
+		int getBoxSizeX(int opticsGroup) const;
+		int getBoxSizeY(int opticsGroup) const;
+		// Largest side, valid for square and rectangular boxes alike
+		int getNominalBoxSize(int opticsGroup) const;
+		bool isRectBox(int opticsGroup) const;
+		bool anyRectBox() const;
 		void getBoxSizes(std::vector<int>& sDest, std::vector<int>& shDest) const;
 
 		// These do NOT update the metadata table!

@@ -1085,8 +1085,19 @@ void JobWindow::initialiseExtractWindow()
 	tab2->begin();
 	tab2->label("extract");
 	resetHeight();
-
+	Fl_Group *group_square = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_square->begin();
 	place("extract_size", TOGGLE_DEACTIVATE); //(current_y,"Particle box size (pix):", 128, 64, 512, 8, "Size of the extracted particles (in pixels). This should be an even number!");
+	group_square->end();
+	group6 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group6->end();
+	place("do_rect_box", TOGGLE_DEACTIVATE, group6);
+	group6->begin();
+	place("extract_size_x", TOGGLE_DEACTIVATE);
+	place("extract_size_y", TOGGLE_DEACTIVATE);
+	group6->end();
+	guientries["do_rect_box"].my_inverse_group = group_square; // particle box size is unused for a rectangular box
+	guientries["do_rect_box"].cb_menu_i();
 	place("do_invert", TOGGLE_DEACTIVATE); //(current_y, "Invert contrast?", true, "If set to Yes, the contrast in the particles will be inverted.");
 
 	// Add a little spacer
@@ -1149,6 +1160,9 @@ Pixels values higher than this many times the image stddev will be replaced with
 	place("helical_bimodal_angular_priors", TOGGLE_DEACTIVATE);
 	place("helical_nr_asu", TOGGLE_DEACTIVATE);
 	place("helical_rise", TOGGLE_DEACTIVATE);
+	current_y += STEPY/2;
+	place("do_rotate_horizontal", TOGGLE_DEACTIVATE);
+	place("extract_interpolation", TOGGLE_DEACTIVATE);
 
 	group5->end();
 
@@ -2731,6 +2745,19 @@ void JobWindow::initialiseReconstruct3DWindow()
 
 	place("random_subset_size");
 	place("random_subset_seed");
+
+	current_y += STEPY/2;
+
+	// Extract and reconstruct in one step (virtual particles or coordinates)
+	Fl_Group *group_fused = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_fused->end();
+	place("do_fused", TOGGLE_LEAVE_ACTIVE, group_fused);
+	group_fused->begin();
+	place("fused_angpix", TOGGLE_DEACTIVATE);
+	place("fused_box_x", TOGGLE_DEACTIVATE);
+	place("fused_box_y", TOGGLE_DEACTIVATE);
+	group_fused->end();
+	guientries["do_fused"].cb_menu_i();
 
 	tab1->end();
 

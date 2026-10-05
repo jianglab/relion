@@ -41,8 +41,13 @@ public:
 	// Dimension of the data (2D or 3D)
 	int data_dim;
 
-	// Original size of the images
+	// Original size of the images. For a rectangular box this is the largest side
+	// (the nominal size that spectra and shells are measured in).
 	int ori_size;
+
+	// Per-axis box size in pixels for rectangular images/volumes; 0 means the
+	// axis has size ori_size (the square/cubic case).
+	int box_nx, box_ny, box_nz;
 
 	// Pixel size (in Angstrom)
 	RFLOAT pixel_size;
@@ -252,6 +257,7 @@ public:
 		ref_dim(0),
 		data_dim(0),
 		ori_size(0),
+		box_nx(0), box_ny(0), box_nz(0),
 		pixel_size (0),
 		current_size(0),
 		current_resolution(0),
@@ -306,6 +312,9 @@ public:
 			ref_dim = MD.ref_dim;
 			data_dim = MD.data_dim;
 			ori_size = MD.ori_size;
+			box_nx = MD.box_nx;
+			box_ny = MD.box_ny;
+			box_nz = MD.box_nz;
 			pixel_size = MD.pixel_size;
 			current_size = MD.current_size;
 			current_resolution = MD.current_resolution;
@@ -408,7 +417,7 @@ public:
 		class_age.clear();
 		pdf_direction.clear();
 		nr_particles_per_group.clear();
-		ref_dim = data_dim = ori_size = nr_classes = nr_bodies = nr_groups = nr_directions = interpolator = r_min_nn;
+		ref_dim = data_dim = ori_size = box_nx = box_ny = box_nz = nr_classes = nr_bodies = nr_groups = nr_directions = interpolator = r_min_nn;
 		padding_factor = 0.;
 		ave_Pmax = avg_norm_correction = LL = sigma2_offset = tau2_fudge_factor = 0.;
 		sigma2_rot = sigma2_tilt = sigma2_psi = 0.;
@@ -442,6 +451,24 @@ public:
 	void initialiseFromImages(FileName fn_ref, bool _is_3d_model, Experiment &_mydata,
 			bool &do_average_unaligned, bool &do_generate_seeds, bool &refs_are_ctf_corrected,
 			RFLOAT ref_angpix = -1., bool _do_grad = false, bool _pseudo_halfsets = false, bool do_trust_ref = false, bool verb = false);
+
+	int boxX() const { return box_nx > 0 ? box_nx : ori_size; }
+	int boxY() const { return box_ny > 0 ? box_ny : ori_size; }
+	int boxZ() const { return box_nz > 0 ? box_nz : ori_size; }
+
+	// Size of the images that go with this model. A 3D cuboid is nx = ny = image height and
+	// nz = image width: the segments lie along image x and along the volume z axis.
+	int imgX() const { return ref_dim == 3 ? boxZ() : boxX(); }
+	int imgY() const { return ref_dim == 3 ? boxX() : boxY(); }
+
+	// True if the images (or volumes) are not square (cubic)
+	bool isRect() const
+	{
+		return boxX() != boxY() || (ref_dim == 3 && boxZ() != boxX());
+	}
+
+	// Sets the per-axis box; ori_size becomes the largest side. A square box clears the per-axis fields.
+	void setBox(int nx, int ny, int nz);
 
 	RFLOAT getResolution(int ipix)	{ return (RFLOAT)ipix/(pixel_size * ori_size); }
 

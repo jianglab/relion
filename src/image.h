@@ -1454,13 +1454,13 @@ private:
 
 		if (!readdata)
 		{
-			data.setDimensions(h.box, h.box, 1, n);
+			data.setDimensions(h.box, h.box_y, 1, n);
 			return 0;
 		}
 
-		data.resize(n, 1, h.box, h.box);
+		data.resize(n, 1, h.box_y, h.box);
 		MultidimArray<RFLOAT> one;
-		const size_t slice = (size_t)h.box * h.box;
+		const size_t slice = (size_t)h.box * h.box_y;
 		for (long int k = 0; k < n; k++)
 		{
 			vparticles::readParticle(fn_stack, (select_img >= 0) ? select_img : k, one);
@@ -1834,7 +1834,8 @@ void calculateBackgroundAvgStddev(Image<RFLOAT> &I,
                                   bool is_helical_segment = false,
                                   RFLOAT helical_mask_tube_outer_radius_pix = -1.,
                                   RFLOAT tilt_deg = 0.,
-                                  RFLOAT psi_deg = 0.);
+                                  RFLOAT psi_deg = 0.,
+                                  bool follow_box_shape = false);
 void subtractBackgroundRamp(Image<RFLOAT> &I,
                             int bg_radius,
                             bool is_helical_segment = false,

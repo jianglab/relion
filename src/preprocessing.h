@@ -32,6 +32,7 @@
 #include "src/metadata_table.h"
 #include "src/ctffind_runner.h"
 #include "src/helix.h"
+#include "src/resample_rotate.h"
 #include <src/jaz/single_particle/obs_model.h>
 #include <src/fftw.h>
 #include <src/time.h>
@@ -133,6 +134,19 @@ public:
 
 	// Box size to extract the particles in
 	int extract_size;
+
+	// Rectangular boxes (--extract_size_x/--extract_size_y); do_rect is false for the usual square box.
+	// extract_size then holds the width, so code that only handles square boxes sees a size
+	// but must check do_rect first.
+	bool do_rect;
+	int extract_size_x, extract_size_y;
+
+	// Turn each helical segment's box so that its tube lies horizontal (needs --helix)
+	bool do_allow_unrotated_aberrations;
+	bool do_rotate_to_horizontal;
+
+	// Resampling used when the box is turned: linear, cubic or nufft
+	std::string interpolation_name;
 
 	// Minimum threshold for autopickFigureOfMerit to extract particles
 	RFLOAT extract_minimum_fom;

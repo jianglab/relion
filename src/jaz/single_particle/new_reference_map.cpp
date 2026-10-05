@@ -97,7 +97,7 @@ void NewReferenceMap::load(int verb, bool debug)
 
 		if (!phase_RS[half].isCubical())
 		{
-			REPORT_ERROR(phase_file_names[0] + " is not cubical.\n");
+			REPORT_ERROR("ERROR: rectangular particle images (non-cubic reference maps) are not supported by this program: " + phase_file_names[0] + " is not cubical; it needs square particles.\n");
 		}
 
 		presharpen(phase_RS[half]);
@@ -108,7 +108,7 @@ void NewReferenceMap::load(int verb, bool debug)
 
 			if (!amp_RS[half].isCubical())
 			{
-				REPORT_ERROR(amplitude_file_names[0] + " is not cubical.\n");
+				REPORT_ERROR("ERROR: rectangular particle images (non-cubic reference maps) are not supported by this program: " + amplitude_file_names[0] + " is not cubical; it needs square particles.\n");
 			}
 
 			presharpen(amp_RS[half]);

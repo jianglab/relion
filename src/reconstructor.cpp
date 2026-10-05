@@ -19,6 +19,8 @@
  ***************************************************************************/
 #include "src/reconstructor.h"
 #include "src/cache_manager.h"
+#include "src/virtual_particles.h"
+#include "src/fftw_rect.h"
 
 #include "src/spatial_frequency_grid.h"
 #include "src/relion_finufft.h"
@@ -240,6 +242,17 @@ s2_ctf_oversampling_min = textToInteger(parser.getOption("--s2_ctf_oversampling_
 	mask_diameter  = textToFloat(parser.getOption("--mask_diameter", "Diameter (in A) of mask for Ewald-sphere curvature correction", "-1."));
 	width_mask_edge = textToInteger(parser.getOption("--width_mask_edge", "Width (in pixels) of the soft edge on the mask", "3"));
 	is_reverse = parser.checkOption("--reverse_curvature", "Try curvature the other way around");
+	rect_box_z = textToInteger(parser.getOption("--box_z", "Rectangular particle images only: size (pixels) of the cuboid reconstruction along z (the filament axis). Default: the image length (x). The cuboid's x and y are the image width (y)", "-1"));
+	do_fused_extract = parser.checkOption("--fused_extract", "Particles are virtual stacks (.vstack): compute each one's Fourier transform directly from its micrograph on the output grid (--angpix, --box_x, --box_y), without an intermediate image");
+	fused_box_x = textToInteger(parser.getOption("--box_x", "Fused extraction only: length (x, pixels, even) of the output particle images. Default: the same physical extent as the stored particles", "-1"));
+	fused_box_y = textToInteger(parser.getOption("--box_y", "Fused extraction only: width (y, pixels, even) of the output particle images. Default: the same physical extent as the stored particles", "-1"));
+	fused_recipe.normalise = parser.checkOption("--fused_norm", "Fused extraction from coordinates (particles that are not virtual stacks): normalise each particle as relion_preprocess --norm does");
+	fused_recipe.bg_radius = textToFloat(parser.getOption("--fused_bg_radius", "Fused extraction from coordinates: background radius (pixels of the output images) for --fused_norm", "-1"));
+	fused_recipe.ramp = !parser.checkOption("--fused_no_ramp", "Fused extraction from coordinates: do not subtract a fitted background plane");
+	fused_recipe.invert_contrast = parser.checkOption("--fused_invert_contrast", "Fused extraction from coordinates: invert the contrast of the particles, as relion_preprocess --invert_contrast");
+	fused_recipe.helical_diameter = textToFloat(parser.getOption("--fused_helical_diameter", "Fused extraction from coordinates, helical segments: outer diameter of the tube (A); the background is then the outside of a tube along the psi prior", "-1"));
+	fused_recipe.rotate = parser.checkOption("--fused_rotate_to_horizontal", "Fused extraction from coordinates: turn each box so that its tube lies horizontal, as relion_preprocess --rotate_to_horizontal: by rlnParticleExtractionAngle if the STAR file has it (particles from such an extraction), else by minus rlnAnglePsiPrior. The orientations in the STAR file must belong to the turned images");
+	fused_recipe.mic_angpix = textToFloat(parser.getOption("--fused_mic_angpix", "Fused extraction from coordinates: pixel size (A) of the micrographs. Default: rlnMicrographOriginalPixelSize of the optics table", "-1"));
 	newbox = textToInteger(parser.getOption("--newbox", "Box size of reconstruction after Ewald sphere correction", "-1"));
 	nr_sectors = textToInteger(parser.getOption("--sectors", "Number of sectors for Ewald sphere correction", "2"));
 	skip_mask = parser.checkOption("--skip_mask", "Do not apply real space mask during Ewald sphere correction");
@@ -357,28 +370,119 @@ void Reconstructor::initialise()
 	// Get dimension of the images
 	if (do_reconstruct_ctf)
 	{
+		if (obsModel.anyRectBox())
+			REPORT_ERROR("ERROR: rectangular particle images are not supported together with --reconstruct_ctf.");
 		output_boxsize = ctf_dim;
 	}
 	else
 	{
 		(DF).firstObject();
-		DF.getValue(EMDL_IMAGE_NAME, fn_img);
+		const bool has_image_name = DF.getValue(EMDL_IMAGE_NAME, fn_img);
+		if (do_fused_extract)
+		{
+			// Particles that are not virtual stacks are cut from their micrographs, given coordinates
+			FileName fn_first;
+			long int no_dummy;
+			if (has_image_name)
+			{
+				fn_img.decompose(no_dummy, fn_first);
+				fused_direct = !vparticles::isVirtualStackFile(fn_first);
+			}
+			else
+				fused_direct = true;
+			if (fused_direct && !(DF.containsLabel(EMDL_MICROGRAPH_NAME) && DF.containsLabel(EMDL_IMAGE_COORD_X) && DF.containsLabel(EMDL_IMAGE_COORD_Y)))
+				REPORT_ERROR("ERROR: --fused_extract needs particles in virtual stacks (relion_preprocess --virtual), or a STAR file with rlnMicrographName, rlnCoordinateX and rlnCoordinateY.");
+		}
 
-		if (image_path != "")
+		if (image_path != "" && has_image_name)
 		{
 			fn_img = image_path + "/" + fn_img.substr(fn_img.find_last_of("/")+1);
 		}
 
 		Image<RFLOAT> img0;
+		if (!fused_direct)
 		{
 			FileName fn_stack;
 			long int imgno_dummy;
 			fn_img.decompose(imgno_dummy, fn_stack);
 			if (!exists(fn_stack))
 				REPORT_ERROR("First image stack not found: " + fn_stack);
+			img0.read(fn_img, false);
 		}
-		img0.read(fn_img, false);
-		output_boxsize=(int)XSIZE(img0());
+		int in_nx = fused_direct ? 0 : XSIZE(img0()), in_ny = fused_direct ? 0 : YSIZE(img0());
+		if (do_fused_extract)
+		{
+			FileName fn_stack;
+			long int imgno_dummy;
+			if (!fused_direct)
+				fn_img.decompose(imgno_dummy, fn_stack);
+			if (do_ewald || newbox > 0 || spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2 || fn_sub != "" || fn_noise != "" || read_weights)
+				REPORT_ERROR("ERROR: --fused_extract cannot be combined with --ewald, --newbox, --spatial_frequency_mode s2, --subtract, --reconstruct_noise or --read_weights.");
+			if (!do_ignore_optics && (obsModel.hasEvenZernike || obsModel.hasOddZernike || obsModel.hasMagMatrices || obsModel.hasMultipleMtfs))
+				REPORT_ERROR("ERROR: --fused_extract does not support optics groups with higher-order aberrations, anisotropic magnification or several MTFs yet.");
+			if (fused_direct)
+			{
+				if (angpix <= 0. || fused_box_x <= 0 || fused_box_y <= 0)
+					REPORT_ERROR("ERROR: --fused_extract from coordinates needs --angpix, --box_x and --box_y (there are no stored particles to take them from).");
+				if (fused_recipe.mic_angpix <= 0.)
+				{
+					RFLOAT p;
+					if (!do_ignore_optics && obsModel.opticsMdt.getValue(EMDL_MICROGRAPH_ORIGINAL_PIXEL_SIZE, p, 0))
+						fused_recipe.mic_angpix = p;
+					else
+					{
+						// Last resort: the pixel size in the first micrograph's header
+						std::string fn_mic;
+						DF.getValue(EMDL_MICROGRAPH_NAME, fn_mic);
+						Image<RFLOAT> mic;
+						mic.read(fn_mic, false);
+						RFLOAT hdr = 0.;
+						if (mic.MDMainHeader.getValue(EMDL_IMAGE_SAMPLINGRATE_X, hdr) && hdr > 0.)
+							fused_recipe.mic_angpix = hdr;
+						else
+							REPORT_ERROR("ERROR: --fused_extract from coordinates needs the micrograph pixel size: give --fused_mic_angpix, or rlnMicrographOriginalPixelSize in the optics table.");
+					}
+				}
+				if (fused_recipe.normalise && fused_recipe.bg_radius <= 0.)
+					REPORT_ERROR("ERROR: --fused_norm needs --fused_bg_radius.");
+				if (fused_recipe.helical_diameter > 0.)
+				{
+					fused_recipe.helical = true;
+					if (!DF.containsLabel(EMDL_ORIENT_PSI_PRIOR))
+						REPORT_ERROR("ERROR: --fused_helical_diameter needs rlnAnglePsiPrior in the STAR file.");
+				}
+				if (fused_recipe.rotate && !DF.containsLabel(EMDL_ORIENT_PSI_PRIOR) && !DF.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE))
+					REPORT_ERROR("ERROR: --fused_rotate_to_horizontal needs rlnParticleExtractionAngle or rlnAnglePsiPrior in the STAR file.");
+				std::cout << " + Fused extraction from coordinates, micrograph pixel size " << fused_recipe.mic_angpix << " A" << std::endl;
+			}
+			else if (angpix < 0.)
+			{
+				angpix = vparticles::readHeader(fn_stack).angpix;
+				std::cout << " + Fused extraction: taking the output pixel size from the stored particles: " << angpix << std::endl;
+			}
+			if (!fused_direct)
+				vparticles::sameExtentBox(fn_stack, angpix, in_nx, in_ny);
+			if (fused_box_x > 0) in_nx = fused_box_x;
+			if (fused_box_y > 0) in_ny = fused_box_y;
+			if (in_nx % 2 != 0 || in_ny % 2 != 0)
+				REPORT_ERROR("ERROR: --fused_extract needs even --box_x and --box_y.");
+			fused_nx = in_nx;
+			fused_ny = in_ny;
+			std::cout << " + Fused extraction: " << fused_nx << " x " << fused_ny << " pixel images at " << angpix << " A/pixel computed from the micrographs" << std::endl;
+		}
+		output_boxsize = in_nx;
+		if (in_ny != in_nx && (fused_direct || img0().getDim() == 2))
+		{
+			rect_box_x = in_nx;
+			rect_box_y = in_ny;
+			// Segments lie along image x, so the cuboid has its long axis along z:
+			// map nz = image nx, map nx = ny = image ny
+			if (rect_box_z <= 0)
+				rect_box_z = rect_box_x;
+			output_boxsize = XMIPP_MAX(XMIPP_MAX(rect_box_x, rect_box_y), rect_box_z);
+		}
+		else
+			rect_box_z = 0;
 		// When doing Ewald-curvature correction or when having optics groups: allow reconstructing smaller box than the input images (which should have large boxes!!)
 		if ((do_ewald || !do_ignore_optics) && newbox > 0)
 		{
@@ -387,6 +491,8 @@ void Reconstructor::initialise()
 
 		if (do_3d_rot)
 			data_dim = 3;
+		else if (fused_direct)
+			data_dim = 2;
 		else // If not specifically provided, we autodetect it
 		{
 			if (do_ignore_optics)
@@ -431,6 +537,9 @@ void Reconstructor::initialise()
 		r_max = -1;
 	else
 		r_max = CEIL(output_boxsize * angpix / maxres);
+
+	if (isRect())
+		checkRectSupport();
 
 	if (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2)
 	{
@@ -708,6 +817,36 @@ const SpatialFrequencyGrid2D& Reconstructor::getS2Grid(long int cache_key)
     return it->second;
 }
 
+void Reconstructor::checkRectSupport() const
+{
+	const std::string prefix = "ERROR: rectangular particle images (" + std::to_string(rect_box_x) + " x " + std::to_string(rect_box_y)
+			+ ") are not supported together with ";
+	if (data_dim != 2)
+		REPORT_ERROR(prefix + "3D data.");
+	if (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2)
+		REPORT_ERROR(prefix + "--spatial_frequency_mode s2. Use the default s mode.");
+	if (do_ewald)
+		REPORT_ERROR(prefix + "--ewald.");
+	if (fn_sub != "")
+		REPORT_ERROR(prefix + "--subtract.");
+	if (newbox > 0)
+		REPORT_ERROR(prefix + "--newbox.");
+	if (do_reconstruct_ctf)
+		REPORT_ERROR(prefix + "--reconstruct_ctf.");
+	if (fn_noise != "")
+		REPORT_ERROR(prefix + "--reconstruct_noise.");
+	if (read_weights)
+		REPORT_ERROR(prefix + "--read_weights.");
+	if (do_external_reconstruct)
+		REPORT_ERROR(prefix + "--external_reconstruct.");
+	if (fn_debug != "" || do_debug)
+		REPORT_ERROR(prefix + "the debug outputs.");
+	if (do_ignore_optics)
+		return;
+	if (!obsModel.allBoxSizesIdentical() || !obsModel.allPixelSizesIdentical())
+		REPORT_ERROR("ERROR: with rectangular images all optics groups must have the same box size and pixel size.");
+}
+
 void Reconstructor::backproject(int rank, int size)
 {
 	if (fn_sub != "")
@@ -722,6 +861,8 @@ void Reconstructor::backproject(int rank, int size)
 	backprojector = BackProjector(output_boxsize, ref_dim, fn_sym, interpolator,
 					padding_factor, r_min_nn, blob_order,
 					blob_radius, blob_alpha, data_dim, skip_gridding);
+	if (isRect())
+		backprojector.setBoxSize(rect_box_y, rect_box_y, rect_box_z);
 	backprojector.initZeros(2 * r_max);
 
 	long int nr_parts = DF.numberOfObjects();
@@ -734,7 +875,7 @@ void Reconstructor::backproject(int rank, int size)
 	}
 
 	prefetcher_.reset();
-	const bool use_prefetch = do_prefetch && !do_reconstruct_ctf && fn_noise == "";
+	const bool use_prefetch = do_prefetch && !do_fused_extract && !do_reconstruct_ctf && fn_noise == "";
 	if (use_prefetch)
 	{
 		prefetcher_.reset(new AsyncReconstructPrefetcher(&DF, rank, size, subset, chosen_class, nr_threads + 2));
@@ -850,8 +991,8 @@ void Reconstructor::backprojectOneParticle(long int p)
 	if (!do_ignore_optics)
 	{
 		opticsGroup = obsModel.getOpticsGroup(DF, p);
-		myBoxSize = obsModel.getBoxSize(opticsGroup);
-		myPixelSize = obsModel.getPixelSize(opticsGroup);
+		myBoxSize = (isRect() || do_fused_extract) ? output_boxsize : obsModel.getBoxSize(opticsGroup);
+		myPixelSize = do_fused_extract ? angpix : obsModel.getPixelSize(opticsGroup);
 		ctf_premultiplied = obsModel.getCtfPremultiplied(opticsGroup);
 		if (do_ewald && ctf_premultiplied)
 			REPORT_ERROR("We cannot perform Ewald sphere correction on CTF premultiplied particles.");
@@ -860,7 +1001,8 @@ void Reconstructor::backprojectOneParticle(long int p)
 		{
 			A3D = obsModel.applyAnisoMag(A3D, opticsGroup);
 		}
-		A3D = obsModel.applyScaleDifference(A3D, opticsGroup, output_boxsize, angpix);
+		if (!do_fused_extract)
+			A3D = obsModel.applyScaleDifference(A3D, opticsGroup, output_boxsize, angpix);
 	}
 
 	// Translations (either through phase-shifts or in real space
@@ -913,7 +1055,45 @@ bool use_nonuniform_s2 = (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2);
 	(void)t_s2_read; (void)t_s2_fft; (void)t_s2_ctf; (void)t_s2_ewald;
 #endif
 
-        if (!do_reconstruct_ctf && fn_noise == "")
+        if (!do_reconstruct_ctf && fn_noise == "" && do_fused_extract)
+        {
+		if (fused_direct)
+		{
+			std::string fn_mic;
+			RFLOAT cx = 0., cy = 0., psi_prior = 0., box_angle = 0.;
+			DF.getValue(EMDL_MICROGRAPH_NAME, fn_mic, p);
+			DF.getValue(EMDL_IMAGE_COORD_X, cx, p);
+			DF.getValue(EMDL_IMAGE_COORD_Y, cy, p);
+			if (fused_recipe.helical || (fused_recipe.rotate && !DF.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE)))
+				DF.getValue(EMDL_ORIENT_PSI_PRIOR, psi_prior, p);
+			if (fused_recipe.rotate)
+			{
+				// Particles from a turned extraction record the angle; otherwise the box follows the psi prior
+				if (DF.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE))
+					DF.getValue(EMDL_PARTICLE_EXTRACTION_ANGLE, box_angle, p);
+				else
+					box_angle = -psi_prior;
+			}
+			vparticles::readParticleFourierDirect(fn_mic, cx, cy, box_angle, psi_prior, fused_recipe, angpix, fused_nx, fused_ny, F2D);
+		}
+		else
+		{
+			DF.getValue(EMDL_IMAGE_NAME, fn_img, p);
+			FileName fn_stack;
+			long int img_no;
+			fn_img.decompose(img_no, fn_stack);
+			vparticles::readParticleFourier(fn_stack, img_no - 1, angpix, fused_nx, fused_ny, F2D);
+		}
+
+		if (ABS(XX(trans)) > 0. || ABS(YY(trans)) > 0.)
+		{
+			if (isRect())
+				shiftImageInFourierTransformRect(F2D, F2D, rect_box_x, rect_box_y, 1., XX(trans), YY(trans), 0.);
+			else
+				shiftImageInFourierTransform(F2D, F2D, fused_nx, XX(trans), YY(trans), 0.);
+		}
+	}
+        else if (!do_reconstruct_ctf && fn_noise == "")
         {
                 if (prefetcher_)
                 {
@@ -942,7 +1122,10 @@ DF.getValue(EMDL_IMAGE_NAME, fn_img, p);
 
 		if (ABS(XX(trans)) > 0. || ABS(YY(trans)) > 0. || ABS(ZZ(trans)) > 0. ) // ZZ(trans) is 0 in case data_dim=2
 		{
-			shiftImageInFourierTransform(F2D, F2D, XSIZE(img()), XX(trans), YY(trans), ZZ(trans));
+			if (isRect())
+				shiftImageInFourierTransformRect(F2D, F2D, rect_box_x, rect_box_y, 1., XX(trans), YY(trans), 0.);
+			else
+				shiftImageInFourierTransform(F2D, F2D, XSIZE(img()), XX(trans), YY(trans), ZZ(trans));
 		}
 	}
 	else
@@ -1063,7 +1246,7 @@ DF.getValue(EMDL_IMAGE_NAME, fn_img, p);
                         ctf.readByGroup(DF, &obsModel, p);
                 }
 
-                ctf.getFftwImage(Fctf, myBoxSize, myBoxSize, myPixelSize,
+                ctf.getFftwImage(Fctf, isRect() ? rect_box_x : myBoxSize, isRect() ? rect_box_y : myBoxSize, myPixelSize,
                         ctf_phase_flipped, only_flip_phases,
                         intact_ctf_first_peak, true);
 

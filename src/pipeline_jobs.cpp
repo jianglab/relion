@@ -1,3 +1,4 @@
+
 /***************************************************************************
  *
  * Author: "Sjors H.W. Scheres"
@@ -21,6 +22,7 @@
 #include "src/virtual_movie_averages.h"
 #include <unistd.h>
 #include <cerrno>
+#include <algorithm>
 #include <climits>
 #include <cstdlib>
 #include <ctime>
@@ -2911,7 +2913,12 @@ void RelionJob::initialiseExtractJob()
 	joboptions["recenter_x"] = JobOption("Re-center on X-coordinate (in pix): ", std::string("0"), "Re-extract particles centered on this X-coordinate (in pixels in the reference)");
 	joboptions["recenter_y"] = JobOption("Re-center on Y-coordinate (in pix): ", std::string("0"), "Re-extract particles centered on this Y-coordinate (in pixels in the reference)");
 	joboptions["recenter_z"] = JobOption("Re-center on Z-coordinate (in pix): ", std::string("0"), "Re-extract particles centered on this Z-coordinate (in pixels in the reference)");
-	joboptions["extract_size"] = JobOption("Particle box size (pix):", 128, 64, 512, 8, "Size of the extracted particles (in pixels). This should be an even number!");
+	joboptions["extract_size"] = JobOption("Particle box size (pix):", 128, 64, 512, 8, "Size of the extracted particles (in pixels). This should be an even number! Ignored when 'Use a rectangular box?' is Yes: the rectangular length and width below are used instead.");
+	joboptions["do_rect_box"] = JobOption("Use a rectangular box?", false, "If set to Yes, particles are extracted into a rectangular box of the length (x) and width (y) below instead of the square box above. This is useful for long helical segments. Not available with 3D, CTF phase flipping/premultiplication, re-windowing or re-centering. When rescaling, the re-scaled size below is the new length and the width follows the aspect ratio. Rotating a box with beam tilt or higher-order aberrations is refused by relion_preprocess unless --allow_unrotated_aberrations is given in the additional arguments.");
+	joboptions["extract_size_x"] = JobOption("Rectangular length (pix):", 768, 64, 2048, 8, "Length (image x-dimension, in pixels, even number) of the rectangular box. For helical segments this is the segment length: the helix axis lies along x. Only used if a rectangular box is selected.");
+	joboptions["extract_size_y"] = JobOption("Rectangular width (pix):", 256, 64, 2048, 8, "Width (image y-dimension, in pixels, even number) of the rectangular box, perpendicular to the helix axis for helical segments. This plays the role of the usual particle box size. Only used if a rectangular box is selected.");
+	joboptions["do_rotate_horizontal"] = JobOption("Rotate helical segments to horizontal?", false, "If set to Yes (helical segments only), each segment is rotated so the helix axis is horizontal in the box. The residual in-plane angle prior becomes 0 and the rotation is stored in rlnParticleExtractionAngle.");
+	joboptions["extract_interpolation"] = JobOption("Interpolation for rotation:", std::vector<std::string>{"linear","cubic","nufft"}, 0, "Interpolation used when rotating segments. nufft needs a build with FINUFFT and is the most accurate at high resolution.");
 	joboptions["do_invert"] = JobOption("Invert contrast?", true, "If set to Yes, the contrast in the particles will be inverted.");
 	joboptions["do_float16"] = JobOption("Write output in float16?", true ,"If set to Yes, this program will write output images in float16 MRC format. This will save a factor of two in disk space compared to the default of writing in float32. Note that RELION and CCPEM will read float16 images, but other programs may not (yet) do so.");
 	{
@@ -3044,7 +3051,20 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 
 	command += " --part_dir " + outputname;
 	command += " --extract";
-	command += " --extract_size " + joboptions["extract_size"].getString();
+	const bool rect_box = joboptions["do_rect_box"].getBoolean();
+	if (rect_box)
+	{
+		command += " --extract_size_x " + joboptions["extract_size_x"].getString();
+		command += " --extract_size_y " + joboptions["extract_size_y"].getString();
+	}
+	else
+	{
+		command += " --extract_size " + joboptions["extract_size"].getString();
+	}
+	if (joboptions["do_extract_helix"].getBoolean() && joboptions["do_rotate_horizontal"].getBoolean())
+	{
+		command += " --rotate_to_horizontal --interpolation " + joboptions["extract_interpolation"].getString();
+	}
 
 	if (joboptions["do_fom_threshold"].getBoolean())
 	{
@@ -3061,7 +3081,7 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 
 	// Operate stuff
 	// Get an integer number for the bg_radius
-	RFLOAT bg_radius = (joboptions["bg_diameter"].getNumber(error_message) < 0.) ? 0.75 * joboptions["extract_size"].getNumber(error_message) : joboptions["bg_diameter"].getNumber(error_message);
+	RFLOAT bg_radius = (joboptions["bg_diameter"].getNumber(error_message) < 0.) ? 0.75 * (rect_box ? std::min(joboptions["extract_size_x"].getNumber(error_message), joboptions["extract_size_y"].getNumber(error_message)) : joboptions["extract_size"].getNumber(error_message)) : joboptions["bg_diameter"].getNumber(error_message);
 	if (error_message != "") return false;
 
 	bg_radius /= 2.; // Go from diameter to radius
@@ -3071,8 +3091,20 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 		bg_radius *= joboptions["rescale"].getNumber(error_message);
 		if (error_message != "") return false;
 
-		bg_radius /= joboptions["extract_size"].getNumber(error_message);
+		bg_radius /= rect_box ? joboptions["extract_size_x"].getNumber(error_message) : joboptions["extract_size"].getNumber(error_message);
 		if (error_message != "") return false;
+
+		if (rect_box)
+		{
+			const RFLOAT h = joboptions["extract_size_y"].getNumber(error_message) * joboptions["rescale"].getNumber(error_message)
+					/ joboptions["extract_size_x"].getNumber(error_message);
+			if (error_message != "") return false;
+			if (h < 2. || ABS(h - 2. * ROUND(h / 2.)) > 1e-6)
+			{
+				error_message = "ERROR: with a rectangular box the re-scaled length keeps the aspect ratio, so rectangular width * re-scaled size / rectangular length must be an even whole number (now " + floatToString(h) + ").";
+				return false;
+			}
+		}
 	}
 	if (joboptions["do_norm"].getBoolean())
 	{
@@ -8580,6 +8612,10 @@ If set to a value larger than the image size no masking will be performed.");
 
 	joboptions["do_pad1"] = JobOption("Skip padding?", false, "If set to Yes, the reconstruction will not use padding in Fourier space. Otherwise, the reconstruction is padded 2x. Skipping padding (i.e. use --pad 1) gives nearly as good results as using --pad 2, but some artifacts may appear in the corners from signal that is folded back.");
 	joboptions["do_invert_contrast"] = JobOption("Invert contrast?", false, "If set to Yes, multiply the reconstruction by -1 to flip the contrast.");
+	joboptions["do_fused"] = JobOption("Extract and reconstruct in one step?", false, "If set to Yes, each particle is computed directly from its micrograph on the Fourier grid of the reconstruction, without an intermediate particle image. The particles must be virtual stacks (Extract job with 'Write virtual particles?'), or the input STAR file must have rlnMicrographName and rlnCoordinateX/Y, in which case the pixel size and box size below are required. Not available with Ewald correction, s2 mode or optics groups with higher-order aberrations. Extra options for extraction from coordinates (--fused_norm, --fused_helical_diameter, ...) can be given under Running > Additional arguments.");
+	joboptions["fused_angpix"] = JobOption("Output pixel size (A):", -1, -1, 10, 0.1, "Pixel size of the particle images computed from the micrographs. A larger value than the stored particles' pixel size gives a smaller, faster reconstruction. -1: use the pixel size of the input optics group. Required when extracting from coordinates.");
+	joboptions["fused_box_x"] = JobOption("Rectangular length (pix):", -1, -1, 2048, 2, "Length (image x-dimension, in pixels, even) of the particle images computed from the micrographs. -1: the same physical extent as the stored particles. Required when extracting from coordinates.");
+	joboptions["fused_box_y"] = JobOption("Rectangular width (pix):", -1, -1, 2048, 2, "Width (image y-dimension, in pixels, even) of the particle images computed from the micrographs. Differs from the length for rectangular particles. -1: the same physical extent as the stored particles. Required when extracting from coordinates.");
 }
 
 bool RelionJob::getCommandsReconstruct3DJob(std::string &outputname, std::vector<std::string> &commands,
@@ -8659,6 +8695,16 @@ bool RelionJob::getCommandsReconstruct3DJob(std::string &outputname, std::vector
 		command += " --pad 1 ";
 	if (joboptions["do_invert_contrast"].getBoolean())
 		command += " --invert_contrast";
+	if (joboptions["do_fused"].getBoolean())
+	{
+		command += " --fused_extract";
+		if (joboptions["fused_angpix"].getNumber(error_message) > 0.)
+			command += " --angpix " + joboptions["fused_angpix"].getString();
+		if (joboptions["fused_box_x"].getNumber(error_message) > 0.)
+			command += " --box_x " + joboptions["fused_box_x"].getString();
+		if (joboptions["fused_box_y"].getNumber(error_message) > 0.)
+			command += " --box_y " + joboptions["fused_box_y"].getString();
+	}
 	command += " --j " + joboptions["nr_threads"].getString();
 	command += " " + joboptions["other_args"].getString();
 	commands.push_back(command);

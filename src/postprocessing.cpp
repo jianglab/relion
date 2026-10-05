@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 
+#include <src/rect_refusal.h>
 #include "src/postprocessing.h"
 
 void Postprocessing::read(int argc, char **argv)
@@ -158,6 +159,8 @@ void Postprocessing::initialise()
 
 	I1.read(fn_I1);
 	I2.read(fn_I2);
+	refuseNonCubicMap(I1(), "relion_postprocess", "half-map 1");
+	refuseNonCubicMap(I2(), "relion_postprocess", "half-map 2");
 	I1().setXmippOrigin();
 	I2().setXmippOrigin();
 

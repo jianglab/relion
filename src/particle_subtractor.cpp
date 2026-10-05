@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 
+#include <src/rect_refusal.h>
 #include "src/particle_subtractor.h"
 
 void ParticleSubtractor::read(int argc, char **argv)
@@ -112,6 +113,9 @@ void ParticleSubtractor::initialise(int _rank, int _size)
 		bool is_helical_segment = (opt.do_helical_refine) || ((opt.mymodel.ref_dim == 2) && (opt.helical_tube_outer_diameter > 0.));
 		opt.mydata.read(fn_sel, "", "", false, false, false, is_helical_segment);
 	}
+
+	if (opt.mymodel.isRect() || opt.mydata.obsModel.anyRectBox())
+		refuseRectangularImages("relion_particle_subtract", "the refinement or the optics groups describe non-square particles");
 
 	divideLabour(rank, size, my_first_part_id, my_last_part_id);
 
@@ -288,7 +292,7 @@ void ParticleSubtractor::revert()
 		Image<RFLOAT> Ihead;
 		Ihead.read(img_name, false, -1, false, true);
 		if (XSIZE(Ihead()) != YSIZE(Ihead()))
-			REPORT_ERROR("Particle " + img_name + " is not square.");
+			refuseRectangularImages("relion_particle_subtract --revert", "particle " + std::string(img_name) + " is not square");
 		obsModel.setBoxSize(og, XSIZE(Ihead()));
 		obsModel.opticsMdt.setValue(EMDL_IMAGE_SIZE, XSIZE(Ihead()), og);
 

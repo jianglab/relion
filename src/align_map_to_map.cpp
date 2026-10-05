@@ -327,7 +327,15 @@ void alignMapToMap(
         }
     }
 
-    // ---------------- apply to vol_align ----------------
+    applyMapTransformation(vol_align, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, angpix);
+}
+
+void applyMapTransformation(
+    MultidimArray<RFLOAT> &vol_align,
+    RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+    RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz,
+    RFLOAT angpix)
+{
     bool do_rot = (fabs(best_rot) > 1e-6 || fabs(best_tilt) > 1e-6 || fabs(best_psi) > 1e-6);
     bool do_trans = (fabs(best_dx) > 1e-6 || fabs(best_dy) > 1e-6 || fabs(best_dz) > 1e-6);
 
@@ -348,6 +356,46 @@ void alignMapToMap(
         ZZ(shift) = best_dz / angpix;
         selfTranslate(vol_align, shift, DONT_WRAP);
     }
+}
+
+void alignCuboidMapToMap(
+    MultidimArray<RFLOAT> &vol_align,
+    const MultidimArray<RFLOAT> &vol_ref,
+    int nr_freedom, RFLOAT angpix, RFLOAT maxres,
+    int search_range, RFLOAT search_step_rot, RFLOAT search_step_trans,
+    RFLOAT &best_rot, RFLOAT &best_tilt, RFLOAT &best_psi,
+    RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz)
+{
+    if (XSIZE(vol_align) != XSIZE(vol_ref) || YSIZE(vol_align) != YSIZE(vol_ref) || ZSIZE(vol_align) != ZSIZE(vol_ref))
+        REPORT_ERROR("alignCuboidMapToMap: the two maps must have the same size.");
+
+    const long int nx = XSIZE(vol_align), ny = YSIZE(vol_align), nz = ZSIZE(vol_align);
+    if (nx == ny && ny == nz)
+    {
+        alignMapToMap(vol_align, vol_ref, nr_freedom, angpix, maxres, search_range, search_step_rot,
+                      search_step_trans, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz);
+        return;
+    }
+
+    // The search needs a cube. Use the central cube whose side is the shortest axis
+    // (even, so the centre of the cube is the centre of the cuboid), then apply the
+    // transformation that was found to the whole cuboid.
+    long int side = XMIPP_MIN(nx, XMIPP_MIN(ny, nz));
+    side -= side % 2;
+    auto centralCube = [&](const MultidimArray<RFLOAT> &in)
+    {
+        MultidimArray<RFLOAT> out(side, side, side);
+        const long int ox = nx / 2 - side / 2, oy = ny / 2 - side / 2, oz = nz / 2 - side / 2;
+        for (long int k = 0; k < side; k++)
+            for (long int i = 0; i < side; i++)
+                for (long int j = 0; j < side; j++)
+                    DIRECT_A3D_ELEM(out, k, i, j) = DIRECT_A3D_ELEM(in, k + oz, i + oy, j + ox);
+        return out;
+    };
+    MultidimArray<RFLOAT> cube_align = centralCube(vol_align), cube_ref = centralCube(vol_ref);
+    alignMapToMap(cube_align, cube_ref, nr_freedom, angpix, maxres, search_range, search_step_rot,
+                  search_step_trans, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz);
+    applyMapTransformation(vol_align, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, angpix);
 }
 
 void applyInverseOrientationAdjustment(

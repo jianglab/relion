@@ -45,6 +45,7 @@
 
 #include "src/macros.h"
 #include "src/fftw.h"
+#include "src/rect_refusal.h"
 #include "src/args.h"
 #include <string.h>
 #include <math.h>
@@ -1237,6 +1238,7 @@ void applyBFactorToMap(MultidimArray<Complex > &FT, int ori_size, RFLOAT bfactor
 
 void applyBFactorToMap(MultidimArray<RFLOAT > &img, RFLOAT bfactor, RFLOAT angpix)
 {
+	refuseNonCubicMap(img, "B-factor filtering (applyBFactorToMap)");
 
 	FourierTransformer transformer;
 	MultidimArray<Complex > FT;
@@ -1269,6 +1271,7 @@ void LoGFilterMap(MultidimArray<Complex > &FT, int ori_size, RFLOAT sigma, RFLOA
 
 void LoGFilterMap(MultidimArray<RFLOAT > &img, RFLOAT sigma, RFLOAT angpix)
 {
+	refuseNonCubicMap(img, "LoG filtering (LoGFilterMap)");
 	FourierTransformer transformer;
 	MultidimArray<Complex > FT;
 
@@ -1372,6 +1375,7 @@ void lowPassFilterMap(MultidimArray<Complex > &FT, int ori_size,
 }
 void lowPassFilterMap(MultidimArray<RFLOAT > &img, RFLOAT low_pass, RFLOAT angpix, int filter_edge_width)
 {
+	refuseNonCubicMap(img, "low-pass filtering (lowPassFilterMap)");
 	FourierTransformer transformer;
 	MultidimArray<Complex > FT;
 
@@ -1434,6 +1438,7 @@ void lowPassFilterMap(MultidimArray<RFLOAT > &img, RFLOAT low_pass, RFLOAT angpi
 
 void highPassFilterMap(MultidimArray<RFLOAT > &img, RFLOAT low_pass, RFLOAT angpix, int filter_edge_width)
 {
+	refuseNonCubicMap(img, "high-pass filtering (highPassFilterMap)");
 	FourierTransformer transformer;
 	MultidimArray<Complex > FT;
 	transformer.FourierTransform(img, FT, false);
@@ -1510,6 +1515,7 @@ void directionalFilterMap(MultidimArray<Complex > &FT, int ori_size,
 
 void directionalFilterMap(MultidimArray<RFLOAT > &img, RFLOAT low_pass, RFLOAT angpix, std::string axis, int filter_edge_width)
 {
+	refuseNonCubicMap(img, "directional filtering (directionalFilterMap)");
 	FourierTransformer transformer;
 	MultidimArray<Complex > FT;
 

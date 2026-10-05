@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 
+#include <src/rect_refusal.h>
 #include "src/npy.hpp"
 #include "src/class_ranker.h"
 
@@ -489,6 +490,8 @@ void ClassRanker::initialise()
 
 		//Sjors 06022020: go back to just reading MD_optimiser for speed
 		mymodel.read(fn_model, nr_optics_groups);
+		if (mymodel.isRect())
+			refuseRectangularImages("relion_class_ranker", "the classification used non-square particles");
 		if (debug>0) std::cerr << "Done with reading model.star ..." << std::endl;
 
 		//myopt.read(fn_optimiser); // true means skip_groups_and_pdf_direction from mlmodel; only read 1000 particles...

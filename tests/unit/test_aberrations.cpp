@@ -387,6 +387,43 @@ TEST_CASE("ObservationModel::getPhaseCorrection — odd Zernike correction", "[a
 }
 
 // ===========================================================================
+// Suite 4b: Fourier-cropped images keep the physical frequency of each pixel
+// ===========================================================================
+
+// The optimiser windows the Fourier transform of a particle to a smaller size
+// (current_size) and then demodulates it. A cropped pixel has the same spatial
+// frequency as the same pixel of the full-size transform, so the aberration
+// must equal the full-size value there. (Padding to a LARGER size is different:
+// there the frequency spacing becomes finer. Both are covered.)
+TEST_CASE("Aberration images of a Fourier-cropped size keep physical frequency", "[aberrations]")
+{
+	const int box = 16, crop = 8;
+	const double apix = 1.3;
+
+	std::vector<double> even(9, 0.0), odd(6, 0.0);
+	even[2] = 0.7; even[4] = -0.3;
+	odd[0] = 0.8; odd[1] = -0.6; odd[4] = 0.2;
+
+	ObservationModel obs(makeOpticsTable(even, odd, box, apix), false);
+
+	const BufferedImage<Complex>& pFull = obs.getPhaseCorrection(0, box);
+	const BufferedImage<Complex>& pCrop = obs.getPhaseCorrection(0, crop);
+	const BufferedImage<RFLOAT>& gFull = obs.getGammaOffset(0, box);
+	const BufferedImage<RFLOAT>& gCrop = obs.getGammaOffset(0, crop);
+
+	for (int px : {0, 1, 2, 3})
+	for (int k : {0, 1, 2, 3, -1, -2, -3})
+	{
+		const int pyCrop = k >= 0 ? k : crop + k;
+		const int pyFull = k >= 0 ? k : box + k;
+
+		CHECK(pCrop(px, pyCrop).real == Approx(pFull(px, pyFull).real).epsilon(1e-12));
+		CHECK(pCrop(px, pyCrop).imag == Approx(pFull(px, pyFull).imag).epsilon(1e-12));
+		CHECK(gCrop(px, pyCrop) == Approx(gFull(px, pyFull)).epsilon(1e-12).margin(1e-14));
+	}
+}
+
+// ===========================================================================
 // Suite 5: demodulatePhase — inverse odd Zernike correction on observations
 // ===========================================================================
 

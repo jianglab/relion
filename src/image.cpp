@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/image.h"
+#include "src/mask.h"
 
 //#define DEBUG_REGULARISE_HELICAL_SEGMENTS
 
@@ -89,10 +90,13 @@ void normalise(
 {
 	RFLOAT avg, stddev;
 
-	if (2*bg_radius > XSIZE(I()))
+	// For a rectangular image the circle (or the tube across the short side) has to fit the short side
+	const int shortest = (I().getDim() == 2) ? XMIPP_MIN(XSIZE(I()), YSIZE(I())) : XSIZE(I());
+
+	if (2*bg_radius > shortest)
 		REPORT_ERROR("normalise ERROR: 2*bg_radius is larger than image size!");
 
-	if ( (is_helical_segment) && ( (2 * (helical_mask_tube_outer_radius_pix + 1)) > XSIZE(I()) ) )
+	if ( (is_helical_segment) && ( (2 * (helical_mask_tube_outer_radius_pix + 1)) > shortest ) )
 		REPORT_ERROR("normalise ERROR: Diameter of helical tube is larger than image size!");
 
 	if (is_helical_segment)
@@ -141,7 +145,8 @@ void calculateBackgroundAvgStddev(Image<RFLOAT> &I,
                                   bool is_helical_segment,
                                   RFLOAT helical_mask_tube_outer_radius_pix,
                                   RFLOAT tilt_deg,
-                                  RFLOAT psi_deg)
+                                  RFLOAT psi_deg,
+                                  bool follow_box_shape)
 {
 	int bg_radius2 = bg_radius * bg_radius;
 	RFLOAT sum, sum2, n, val, d;
@@ -234,9 +239,14 @@ void calculateBackgroundAvgStddev(Image<RFLOAT> &I,
 	else
 	{
 		// Calculate avg in the background pixels
+		RFLOAT sx = 1., sy = 1., sz = 1.;
+		if (I().getDim() == 2 && XSIZE(I()) != YSIZE(I()))
+			follow_box_shape = true;
+		if (follow_box_shape)
+			boxShapeScales(I(), sx, sy, sz);
 		FOR_ALL_ELEMENTS_IN_ARRAY3D(I())
 		{
-			if ( (k*k + i*i + j*j) > bg_radius2)
+			if ( (follow_box_shape) ? ((k*sz)*(k*sz) + (i*sy)*(i*sy) + (j*sx)*(j*sx) > bg_radius2) : ((k*k + i*i + j*j) > bg_radius2) )
 			{
 				val = A3D_ELEM(I(), k, i, j);
 				sum += val;
@@ -317,9 +327,12 @@ void subtractBackgroundRamp(
 	}
 	else
 	{
+		const bool ellipse = (XSIZE(I()) != YSIZE(I()));
+		const RFLOAT shortest = XMIPP_MIN(XSIZE(I()), YSIZE(I()));
+		const RFLOAT ax = bg_radius * XSIZE(I()) / shortest, ay = bg_radius * YSIZE(I()) / shortest;
 		FOR_ALL_ELEMENTS_IN_ARRAY2D(I())
 		{
-			if (i*i + j*j > bg_radius2)
+			if (ellipse ? ((RFLOAT)j * j / (ax * ax) + (RFLOAT)i * i / (ay * ay) > 1.) : (i*i + j*j > bg_radius2))
 			{
 				point.x = j;
 				point.y = i;

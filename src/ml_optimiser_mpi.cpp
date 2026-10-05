@@ -462,7 +462,7 @@ void MlOptimiserMpi::initialise()
 				Experiment temp;
 				temp.read(fn_data, fn_tomo, fn_motion, true, true);
 
-				int t_ori_size = temp.getOpticsImageSize(0);
+				int t_ori_size = temp.getOpticsNominalImageSize(0);
 				//temp.MDopt.getValue(EMDL_IMAGE_SIZE, t_ori_size, 0);
 
 				if(LowBoxLim < t_ori_size)
@@ -1721,7 +1721,7 @@ void MlOptimiserMpi::expectation()
 					else
 					{
 						// new in 3.1: first send the image_size of these particles (as no longer necessarily the same as mymodel.ori_size...)
-						int my_image_size = mydata.getOpticsImageSize(mydata.getOpticsGroup(JOB_FIRST));
+						int my_image_size = mydata.getOpticsNominalImageSize(mydata.getOpticsGroup(JOB_FIRST));
 						node->relion_MPI_Send(&my_image_size, 1, MPI_INT, this_follower, MPITAG_IMAGE_SIZE, MPI_COMM_WORLD);
 
 						// Send imagedata to the followers
@@ -3492,7 +3492,7 @@ void MlOptimiserMpi::alignHalves()
 					MULTIDIM_SIZE(half2_Iref),
 					MY_MPI_DOUBLE, reconstruct_rank2, MPITAG_IMAGE, MPI_COMM_WORLD, status);
 
-			alignMapToMap(half2_Iref, mymodel.Iref[ibody], nr_freedom,
+			alignCuboidMapToMap(half2_Iref, mymodel.Iref[ibody], nr_freedom,
 					mymodel.pixel_size, maxres,
 					3, 1., 1.,
 					best_rot, best_tilt, best_psi,
