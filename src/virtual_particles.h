@@ -168,6 +168,18 @@ void readParticleFourierDirect(const std::string& fn_mic, double cx, double cy, 
                                const DirectRecipe& d, double angpix, int nx, int ny,
                                MultidimArray<Complex>& F2D);
 
+/// Work split by micrograph. `group` is the micrograph (or stack) each particle
+/// comes from, `y` and `x` its position there. `order` lists all particles sorted
+/// by (group, y, x), so that reading them in turn walks each micrograph once, top
+/// to bottom. `cut` (nr_ranks + 1 entries) cuts `order` into one contiguous piece
+/// per rank, balanced by particle count; a cut moves to the nearest micrograph
+/// boundary unless that would unbalance the ranks by over a quarter of a share, so
+/// a rank normally owns whole micrographs, and a micrograph is split (into strips
+/// of consecutive y) only when there are too few of them.
+void orderByMicrograph(const std::vector<std::string>& group, const std::vector<double>& y,
+                       const std::vector<double>& x, int nr_ranks,
+                       std::vector<long>& order, std::vector<long>& cut);
+
 /// Where the cache lives by default, relative to the project root.
 const char PROJECT_CACHE_DIR[] = "Cache/virtual_particles";
 

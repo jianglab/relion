@@ -83,8 +83,7 @@ public:
 	};
 
 	AsyncReconstructPrefetcher(const MetaDataTable *df,
-	                          int rank,
-	                          int size,
+	                          const std::vector<long int> &my_parts,
 	                          int subset,
 	                          int chosen_class,
 	                          int max_queue = 3);
@@ -99,8 +98,7 @@ private:
 	bool shouldRead(long int ipart) const;
 
 	const MetaDataTable *df_;
-	int rank_;
-	int size_;
+	std::vector<long int> my_parts_;
 	int subset_;
 	int chosen_class_;
 	int max_queue_;

@@ -425,3 +425,40 @@ above); `--box_z` overrides the z size. Only the
 default s mode (grid, trilinear) is supported; `--spatial_frequency_mode s2`,
 `--ewald`, `--subtract`, `--newbox`, `--reconstruct_ctf`, `--reconstruct_noise`,
 `--read_weights` and 3D data are refused with a clear message.
+
+## Work split by micrograph in relion_reconstruct
+
+`relion_reconstruct` (and `_mpi`) sort the particles by (micrograph or stack, y, x) and give
+each MPI rank a contiguous block of whole micrographs, balanced by particle count. A big
+micrograph is cut into strips of y only when there are fewer micrographs than ranks. Threads
+take consecutive particles from the sorted list, so they work on the same micrograph. The
+map is unchanged (largest difference to the old split 1e-10 of a peak of 0.39).
+
+Measured with `--fused_extract` on 563 particles from 9 micrographs (10019 rectangular
+test, 8 CPUs in total, back-projection phase only, seconds):
+
+| ranks x threads | old split | by micrograph |
+|---|---|---|
+| 1 x 8 | 17.5 | 16 |
+| 2 x 4 | 13 | 11 |
+| 4 x 2 | 12.5 | 9 |
+
+The leader prints where the rest of the time goes (`[timing]` lines). Before: with 2 x 4
+about 15 s back-projection, 12 s reducing the volumes, 37 s in the final reconstruction.
+Changes: the volumes are summed onto the leader with `MPI_Reduce` in place (the old
+`MPI_Allreduce` made every rank hold a second copy of both volumes, which also ran 8 ranks
+out of memory); and the large serial loops of the final reconstruction (decentring, windowing,
+the skip-gridding division, the sinc correction) run on `--j` threads.
+
+Total wall time on the same test (seconds, 8 CPUs, `--fused_extract`):
+
+| ranks x threads | before | now |
+|---|---|---|
+| 1 x 8 | 59 | 40 |
+| 2 x 4 | 81 | 50 |
+| 4 x 2 | 105 | 75 |
+
+More ranks are still slower in total than one rank with 8 threads on this small data set: each
+rank holds a full padded volume (about 11 GB here) and they are summed through memory. MPI
+ranks only pay off for many more particles, or for several nodes. The maps agree with the old
+ones to 4e-9 (peak 0.39).

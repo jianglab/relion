@@ -142,14 +142,12 @@ void AsyncImagePrefetcher::workerThread()
 }
 
 AsyncReconstructPrefetcher::AsyncReconstructPrefetcher(const MetaDataTable *df,
-	                                                   int rank,
-	                                                   int size,
+	                                                   const std::vector<long int> &my_parts,
 	                                                   int subset,
 	                                                   int chosen_class,
 	                                                   int max_queue)
 	: df_(df),
-	  rank_(rank),
-	  size_(size),
+	  my_parts_(my_parts),
 	  subset_(subset),
 	  chosen_class_(chosen_class),
 	  max_queue_(max_queue),
@@ -208,9 +206,6 @@ void AsyncReconstructPrefetcher::stop()
 
 bool AsyncReconstructPrefetcher::shouldRead(long int ipart) const
 {
-	if (ipart % size_ != rank_)
-		return false;
-
 	int randSubset = 0, classid = 0;
 	df_->getValue(EMDL_PARTICLE_RANDOM_SUBSET, randSubset, ipart);
 	df_->getValue(EMDL_PARTICLE_CLASS, classid, ipart);
@@ -226,7 +221,7 @@ bool AsyncReconstructPrefetcher::shouldRead(long int ipart) const
 
 void AsyncReconstructPrefetcher::workerThread()
 {
-	for (long int ipart = 0; ipart < nr_parts_; ipart++)
+	for (long int ipart : my_parts_)
 	{
 		if (stop_requested_)
 			break;

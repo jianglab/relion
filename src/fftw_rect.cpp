@@ -9,6 +9,7 @@
 
 #include "src/fftw_rect.h"
 #include "src/fftw.h"
+#include <cstring>
 
 void windowFourierTransformRect(const MultidimArray<Complex> &in, MultidimArray<Complex> &out,
                                 long int new_nx, long int new_ny, long int new_nz)
@@ -29,27 +30,39 @@ void windowFourierTransformRect(const MultidimArray<Complex> &in, MultidimArray<
 
 	MultidimArray<Complex> result;
 	if (dim == 2)
-		result.initZeros(new_ny, new_hx);
+		result.resize(new_ny, new_hx);
 	else
-		result.initZeros(new_nz, new_ny, new_hx);
+		result.resize(new_nz, new_ny, new_hx);
 
 	const bool grows = new_hx > XSIZE(in) || new_ny > in_ny || new_nz > in_nz;
 	const double jmax = std::max<long int>(XSIZE(in) - 1, 1);
 	const double imax = std::max<long int>(in_ny / 2, 1);
 	const double kmax = std::max<long int>(in_nz / 2, 1);
 
-	FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_RECT(result)
+	const long int rz = ZSIZE(result), ry = YSIZE(result), rx = XSIZE(result);
+	#pragma omp parallel for
+	for (long int k = 0; k < rz; k++)
 	{
-		// the component must exist in the input: |kp|, |ip| within the input half-ranges
-		if (jp >= XSIZE(in)) continue;
-		if (ip > in_ny / 2 || ip < -((in_ny - 1) / 2)) continue;
-		if (dim == 3 && (kp > in_nz / 2 || kp < -((in_nz - 1) / 2))) continue;
-		if (grows)
+		const long int kp = (k <= rz / 2) ? k : k - rz;
+		std::memset((void*)&DIRECT_A3D_ELEM(result, k, 0, 0), 0, sizeof(Complex) * ry * rx);
+		for (long int i = 0; i < ry; i++)
 		{
-			const double a = jp / jmax, b = ip / imax, c = (dim == 3) ? kp / kmax : 0.;
-			if (a*a + b*b + c*c > 1.0) continue;
+			const long int ip = (i <= ry / 2) ? i : i - ry;
+			for (long int j = 0; j < rx; j++)
+			{
+				const long int jp = j;
+				// the component must exist in the input: |kp|, |ip| within the input half-ranges
+				if (jp >= XSIZE(in)) continue;
+				if (ip > in_ny / 2 || ip < -((in_ny - 1) / 2)) continue;
+				if (dim == 3 && (kp > in_nz / 2 || kp < -((in_nz - 1) / 2))) continue;
+				if (grows)
+				{
+					const double a = jp / jmax, b = ip / imax, c = (dim == 3) ? kp / kmax : 0.;
+					if (a*a + b*b + c*c > 1.0) continue;
+				}
+				FFTW_ELEM(result, kp, ip, jp) = FFTW_ELEM(in, kp, ip, jp);
+			}
 		}
-		FFTW_ELEM(result, kp, ip, jp) = FFTW_ELEM(in, kp, ip, jp);
 	}
 	out.moveFrom(result);
 }

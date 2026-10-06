@@ -33,6 +33,9 @@
 #include <unistd.h>
 #ifdef S2_PROFILE
 #include <chrono>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #endif
 
 namespace
@@ -874,21 +877,46 @@ void Reconstructor::backproject(int rank, int size)
 		init_progress_bar(nr_parts);
 	}
 
+	// Sort the particles by micrograph (or stack) and position, and give each rank whole
+	// micrographs: each micrograph is then read by one rank only, and its threads, taking
+	// consecutive particles in turn, work on the same micrograph at the same time.
+	std::vector<long int> my_parts;
+	{
+		std::vector<std::string> group(nr_parts);
+		std::vector<double> py(nr_parts, 0.), px(nr_parts, 0.);
+		const bool has_mic = DF.containsLabel(EMDL_MICROGRAPH_NAME);
+		const bool has_img = DF.containsLabel(EMDL_IMAGE_NAME);
+		const bool has_cy = DF.containsLabel(EMDL_IMAGE_COORD_Y), has_cx = DF.containsLabel(EMDL_IMAGE_COORD_X);
+		for (long int ipart = 0; ipart < nr_parts; ipart++)
+		{
+			long int imgno = ipart;
+			std::string key;
+			if (has_img)
+			{
+				FileName fn_img_p, fn_stack_p;
+				DF.getValue(EMDL_IMAGE_NAME, fn_img_p, ipart);
+				fn_img_p.decompose(imgno, fn_stack_p);
+				key = fn_stack_p;
+			}
+			if (has_mic && (fused_direct || !has_img))
+				DF.getValue(EMDL_MICROGRAPH_NAME, key, ipart);
+			group[ipart] = key;
+			RFLOAT c = 0.;
+			py[ipart] = (double)imgno;
+			if (has_cy) { DF.getValue(EMDL_IMAGE_COORD_Y, c, ipart); py[ipart] = c; }
+			if (has_cx) { DF.getValue(EMDL_IMAGE_COORD_X, c, ipart); px[ipart] = c; }
+		}
+		std::vector<long int> order, cut;
+		vparticles::orderByMicrograph(group, py, px, size, order, cut);
+		my_parts.assign(order.begin() + cut[rank], order.begin() + cut[rank + 1]);
+	}
+
 	prefetcher_.reset();
 	const bool use_prefetch = do_prefetch && !do_fused_extract && !do_reconstruct_ctf && fn_noise == "";
 	if (use_prefetch)
 	{
-		prefetcher_.reset(new AsyncReconstructPrefetcher(&DF, rank, size, subset, chosen_class, nr_threads + 2));
+		prefetcher_.reset(new AsyncReconstructPrefetcher(&DF, my_parts, subset, chosen_class, nr_threads + 2));
 		prefetcher_->start(nr_parts);
-	}
-
-	// Collect this rank's particle indices, then parallelize over them with --j threads.
-	std::vector<long int> my_parts;
-	my_parts.reserve(nr_parts / size + 1);
-	for (long int ipart = 0; ipart < nr_parts; ipart++)
-	{
-		if (ipart % size == rank)
-			my_parts.push_back(ipart);
 	}
 
 	if (nr_threads > 1)
@@ -1682,6 +1710,9 @@ void Reconstructor::reconstruct()
 	if (verb > 0)
 		std::cout << " + Starting the reconstruction ..." << std::endl;
 
+#ifdef _OPENMP
+	omp_set_num_threads(nr_threads);
+#endif
 	backprojector.symmetrise(nr_helical_asu, helical_twist, helical_rise/angpix);
 
 	if (do_reconstruct_ctf)

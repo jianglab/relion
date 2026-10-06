@@ -18,6 +18,9 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/reconstructor_mpi.h"
+#include <algorithm>
+#include <chrono>
+#include <iomanip>
 
 void ReconstructorMpi::read(int argc, char **argv)
 {
@@ -43,6 +46,21 @@ void ReconstructorMpi::read(int argc, char **argv)
 
 }
 
+// Sum an array onto the leader, in place and in pieces (an MPI count is an int). Followers keep
+// their own partial sums, and no second copy of the volume is made.
+static void reduceToLeader(double *p, long int n, bool is_leader)
+{
+	const long int chunk = 1L << 26;
+	for (long int off = 0; off < n; off += chunk)
+	{
+		const int c = (int)std::min(chunk, n - off);
+		if (is_leader)
+			MPI_Reduce(MPI_IN_PLACE, p + off, c, MY_MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+		else
+			MPI_Reduce(p + off, NULL, c, MY_MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+	}
+}
+
 void ReconstructorMpi::run()
 {
 
@@ -54,7 +72,18 @@ void ReconstructorMpi::run()
 		return;
 	}
 
+	typedef std::chrono::steady_clock WallClock;
+	WallClock::time_point t_last = WallClock::now();
+	auto lap = [&](const char *what)
+	{
+		WallClock::time_point t = WallClock::now();
+		if (node->isLeader())
+			std::cout << std::fixed << std::setprecision(1) << " + [timing] " << what << ": " << std::chrono::duration<double>(t - t_last).count() << " s" << std::endl;
+		t_last = t;
+	};
+
     Reconstructor::initialise();
+	lap("initialise");
 
     // MPI-guarded cache init: leader copies + registers, barrier, then followers register
     if (fn_cache != "")
@@ -66,17 +95,13 @@ void ReconstructorMpi::run()
 	// Helper for MPI reduce + reconstruct per subset
 	auto reduceAndReconstruct = [&](const FileName &fn_out_orig, bool is_half1, bool is_half2)
 	{
-		MultidimArray<Complex> sumd(backprojector.data);
-		MultidimArray<RFLOAT> sumw(backprojector.weight);
-		MPI_Allreduce(MULTIDIM_ARRAY(backprojector.data), MULTIDIM_ARRAY(sumd),
-			      2 * MULTIDIM_SIZE(backprojector.data), MY_MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-		MPI_Allreduce(MULTIDIM_ARRAY(backprojector.weight), MULTIDIM_ARRAY(sumw),
-			      MULTIDIM_SIZE(backprojector.weight), MY_MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		lap("back-projection");
+		reduceToLeader((double*)MULTIDIM_ARRAY(backprojector.data), 2 * MULTIDIM_SIZE(backprojector.data), node->isLeader());
+		reduceToLeader((double*)MULTIDIM_ARRAY(backprojector.weight), MULTIDIM_SIZE(backprojector.weight), node->isLeader());
+		lap("reduce across ranks");
 
 		if (node->isLeader())
 		{
-			backprojector.data = sumd;
-			backprojector.weight = sumw;
 			if (is_half1)
 				fn_out = fn_out_orig.insertBeforeExtension("_half1");
 			else if (is_half2)
@@ -85,6 +110,7 @@ void ReconstructorMpi::run()
 				fn_out = fn_out_orig;
 			reconstruct();
 		}
+		lap("reconstruct (leader)");
 		MPI_Barrier(MPI_COMM_WORLD);
 	};
 
@@ -129,17 +155,13 @@ void ReconstructorMpi::run()
 	else
 	{
 		Reconstructor::backproject(node->rank, node->size);
-		MultidimArray<Complex> sumd(backprojector.data);
-		MultidimArray<RFLOAT> sumw(backprojector.weight);
-		MPI_Allreduce(MULTIDIM_ARRAY(backprojector.data), MULTIDIM_ARRAY(sumd), 2*MULTIDIM_SIZE(backprojector.data), MY_MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-		MPI_Allreduce(MULTIDIM_ARRAY(backprojector.weight), MULTIDIM_ARRAY(sumw), MULTIDIM_SIZE(backprojector.weight), MY_MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-		if (node->isLeader())
-		{
-			backprojector.data = sumd;
-			backprojector.weight = sumw;
-		}
+		lap("back-projection");
+		reduceToLeader((double*)MULTIDIM_ARRAY(backprojector.data), 2 * MULTIDIM_SIZE(backprojector.data), node->isLeader());
+		reduceToLeader((double*)MULTIDIM_ARRAY(backprojector.weight), MULTIDIM_SIZE(backprojector.weight), node->isLeader());
+		lap("reduce across ranks");
 		if (node->isLeader())
 			reconstruct();
+		lap("reconstruct (leader)");
 	}
 
 }

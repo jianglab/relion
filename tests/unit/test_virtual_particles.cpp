@@ -592,3 +592,73 @@ TEST_CASE("square recipes are still written as version 1 descriptors", "[vpartic
 	CHECK(text.find("rlnVirtualRotated") == std::string::npos);
 	CHECK(text.find("rlnVirtualExtractSizeY") == std::string::npos);
 }
+
+TEST_CASE("particles are ordered by micrograph, y and x, and ranks get whole micrographs", "[vparticles][order]")
+{
+	// 6 micrographs of 5 particles, listed in a scrambled order
+	std::vector<std::string> group;
+	std::vector<double> y, x;
+	for (int i = 0; i < 30; i++)
+	{
+		group.push_back("mic" + std::to_string((i * 7) % 6));
+		y.push_back((i * 13) % 11);
+		x.push_back((i * 5) % 7);
+	}
+
+	std::vector<long> order, cut;
+	vparticles::orderByMicrograph(group, y, x, 3, order, cut);
+
+	REQUIRE(order.size() == 30);
+	std::vector<long> sorted = order;
+	std::sort(sorted.begin(), sorted.end());
+	for (long i = 0; i < 30; i++)
+		CHECK(sorted[i] == i);
+
+	for (size_t k = 1; k < order.size(); k++)
+	{
+		long a = order[k - 1], b = order[k];
+		bool ok = group[a] < group[b] ||
+			(group[a] == group[b] && (y[a] < y[b] || (y[a] == y[b] && x[a] <= x[b])));
+		CHECK(ok);
+	}
+
+	REQUIRE(cut.size() == 4);
+	CHECK(cut[0] == 0);
+	CHECK(cut[3] == 30);
+	for (int r = 0; r < 3; r++)
+	{
+		CHECK(cut[r + 1] - cut[r] == 10);
+		// a cut falls between micrographs
+		if (r > 0)
+			CHECK(group[order[cut[r] - 1]] != group[order[cut[r]]]);
+	}
+}
+
+TEST_CASE("one big micrograph is split between ranks in strips of y", "[vparticles][order]")
+{
+	std::vector<std::string> group(100, "only");
+	std::vector<double> y, x(100, 0.);
+	for (int i = 0; i < 100; i++)
+		y.push_back((i * 37) % 100);
+
+	std::vector<long> order, cut;
+	vparticles::orderByMicrograph(group, y, x, 4, order, cut);
+
+	REQUIRE(cut.size() == 5);
+	for (int r = 0; r < 4; r++)
+		CHECK(cut[r + 1] - cut[r] == 25);
+	CHECK(y[order[cut[1] - 1]] <= y[order[cut[1]]]);
+}
+
+TEST_CASE("more ranks than particles leaves some ranks empty", "[vparticles][order]")
+{
+	std::vector<std::string> group(2, "m");
+	std::vector<double> y(2, 0.), x(2, 0.);
+	std::vector<long> order, cut;
+	vparticles::orderByMicrograph(group, y, x, 5, order, cut);
+	REQUIRE(cut.size() == 6);
+	CHECK(cut.front() == 0);
+	CHECK(cut.back() == 2);
+	for (size_t r = 1; r < cut.size(); r++)
+		CHECK(cut[r] >= cut[r - 1]);
+}

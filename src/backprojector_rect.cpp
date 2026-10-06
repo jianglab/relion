@@ -22,6 +22,8 @@
  * L/2+1 entries. For nx == ny == nz == L every scale is 1.
  */
 
+#include <cstring>
+#include <vector>
 #include "src/backprojector.h"
 #include "src/fftw_rect.h"
 #include "src/mask.h"
@@ -172,12 +174,34 @@ inline bool sample3D(const MultidimArray<Complex> &data, const MultidimArray<RFL
 template <typename T1, typename T2>
 void decenterRect(MultidimArray<T1> &Min, MultidimArray<T2> &Mout, double my_rmax2, const AxisScale &sc)
 {
-	Mout.initZeros();
-	FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_RECT(Mout)
+	const long int nz = ZSIZE(Mout), ny = YSIZE(Mout), nx = XSIZE(Mout);
+	#pragma omp parallel for
+	for (long int k = 0; k < nz; k++)
 	{
-		if (sc.r2(kp, ip, jp) <= my_rmax2)
-			DIRECT_A3D_ELEM(Mout, k, i, j) = (T2)A3D_ELEM(Min, kp, ip, jp);
+		const long int kp = (k <= nz / 2) ? k : k - nz;
+		std::memset((void*)&DIRECT_A3D_ELEM(Mout, k, 0, 0), 0, sizeof(T2) * ny * nx);
+		for (long int i = 0; i < ny; i++)
+		{
+			const long int ip = (i <= ny / 2) ? i : i - ny;
+			for (long int j = 0; j < nx; j++)
+			{
+				if (sc.r2(kp, ip, j) <= my_rmax2)
+					DIRECT_A3D_ELEM(Mout, k, i, j) = (T2)A3D_ELEM(Min, kp, ip, j);
+			}
+		}
 	}
+}
+
+// CenterFFTbySign() with the planes shared between the threads
+static void centerFFTbySignParallel(MultidimArray<Complex> &v)
+{
+	const long int nz = ZSIZE(v), ny = YSIZE(v), nx = XSIZE(v);
+	#pragma omp parallel for
+	for (long int k = 0; k < nz; k++)
+		for (long int i = 0; i < ny; i++)
+			for (long int j = 0; j < nx; j++)
+				if (((k ^ i ^ j) & 1) != 0)
+					DIRECT_A3D_ELEM(v, k, i, j) *= -1;
 }
 
 // Soft mask outside the ellipse (ellipsoid) inscribed in the box, i.e. the radial mask of
@@ -930,9 +954,13 @@ void BackProjector::windowToOridimRealSpaceRect(FourierTransformer &transformer,
 	const int pnx = ROUND(padding_factor * box_nx), pny = ROUND(padding_factor * box_ny);
 	const int pnz = (ref_dim == 3) ? ROUND(padding_factor * box_nz) : 1;
 
-	MultidimArray<Complex> Ftmp;
-	windowFourierTransformRect(Fin, Ftmp, pnx, pny, pnz);
-	Fin.moveFrom(Ftmp);
+	// Usually the padded grid is already this size: nothing to window, and no copy of it
+	if (!(pnx == 2 * (XSIZE(Fin) - 1) && pny == YSIZE(Fin) && pnz == ZSIZE(Fin)))
+	{
+		MultidimArray<Complex> Ftmp;
+		windowFourierTransformRect(Fin, Ftmp, pnx, pny, pnz);
+		Fin.moveFrom(Ftmp);
+	}
 
 	RFLOAT normfft;
 	if (ref_dim == 2)
@@ -948,7 +976,7 @@ void BackProjector::windowToOridimRealSpaceRect(FourierTransformer &transformer,
 	}
 	Mout.setXmippOrigin();
 
-	CenterFFTbySign(Fin);
+	centerFFTbySignParallel(Fin);
 
 	transformer.setReal(Mout);
 	transformer.inverseFourierTransform();
@@ -1039,17 +1067,39 @@ void BackProjector::reconstructRect(MultidimArray<RFLOAT> &vol_out,
 		decenterRect(data, Fconv, max_r2, sc);
 
 		MultidimArray<RFLOAT> radavg_weight(r_max), counter(r_max);
+		radavg_weight.initZeros();
+		counter.initZeros();
 		const double round_max_r2 = (double)(r_max * padding_factor * r_max * padding_factor);
-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_RECT(Fweight)
+		const long int fz = ZSIZE(Fweight), fy = YSIZE(Fweight), fx = XSIZE(Fweight);
+		#pragma omp parallel
 		{
-			const double r2 = sc.r2(kp, ip, jp);
-			if (r2 < round_max_r2)
+			std::vector<RFLOAT> my_sum(r_max, 0.), my_count(r_max, 0.);
+			#pragma omp for nowait
+			for (long int k = 0; k < fz; k++)
 			{
-				const int ires = FLOOR(sqrt(r2) / padding_factor);
-				if (ires >= XSIZE(radavg_weight))
-					REPORT_ERROR("BUG: ires >=XSIZE(radavg_weight) ");
-				DIRECT_A1D_ELEM(radavg_weight, ires) += DIRECT_A3D_ELEM(Fweight, k, i, j);
-				DIRECT_A1D_ELEM(counter, ires) += 1.;
+				const long int kp = (k <= fz / 2) ? k : k - fz;
+				for (long int i = 0; i < fy; i++)
+				{
+					const long int ip = (i <= fy / 2) ? i : i - fy;
+					for (long int j = 0; j < fx; j++)
+					{
+						const double r2 = sc.r2(kp, ip, j);
+						if (r2 < round_max_r2)
+						{
+							const int ires = FLOOR(sqrt(r2) / padding_factor);
+							if (ires >= r_max)
+								REPORT_ERROR("BUG: ires >=XSIZE(radavg_weight) ");
+							my_sum[ires] += DIRECT_A3D_ELEM(Fweight, k, i, j);
+							my_count[ires] += 1.;
+						}
+					}
+				}
+			}
+			#pragma omp critical(radavg_merge)
+			for (int r = 0; r < r_max; r++)
+			{
+				DIRECT_A1D_ELEM(radavg_weight, r) += my_sum[r];
+				DIRECT_A1D_ELEM(counter, r) += my_count[r];
 			}
 		}
 
@@ -1062,21 +1112,34 @@ void BackProjector::reconstructRect(MultidimArray<RFLOAT> &vol_out,
 		}
 
 		bool have_warned = false;
-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_RECT(Fweight)
+		#pragma omp parallel for
+		for (long int k = 0; k < fz; k++)
 		{
-			const double r2 = sc.r2(kp, ip, jp);
-			const int ires = FLOOR(sqrt(r2) / padding_factor);
-			const RFLOAT w = XMIPP_MAX(DIRECT_A3D_ELEM(Fweight, k, i, j), DIRECT_A1D_ELEM(radavg_weight, (ires < r_max) ? ires : (r_max - 1)));
-			if (w == 0.)
+			const long int kp = (k <= fz / 2) ? k : k - fz;
+			for (long int i = 0; i < fy; i++)
 			{
-				if (!have_warned && abs(DIRECT_A3D_ELEM(Fconv, k, i, j)) > 0.)
+				const long int ip = (i <= fy / 2) ? i : i - fy;
+				for (long int j = 0; j < fx; j++)
 				{
-					std::cerr << " WARNING: ignoring divide by zero in skip_gridding: ires = " << ires << " kp = " << kp << " ip = " << ip << " jp = " << jp << std::endl;
-					have_warned = true;
+					const double r2 = sc.r2(kp, ip, j);
+					const int ires = FLOOR(sqrt(r2) / padding_factor);
+					const RFLOAT w = XMIPP_MAX(DIRECT_A3D_ELEM(Fweight, k, i, j), DIRECT_A1D_ELEM(radavg_weight, (ires < r_max) ? ires : (r_max - 1)));
+					if (w == 0.)
+					{
+						if (abs(DIRECT_A3D_ELEM(Fconv, k, i, j)) > 0.)
+						{
+							#pragma omp critical(radavg_warn)
+							if (!have_warned)
+							{
+								std::cerr << " WARNING: ignoring divide by zero in skip_gridding: ires = " << ires << " kp = " << kp << " ip = " << ip << " jp = " << j << std::endl;
+								have_warned = true;
+							}
+						}
+					}
+					else
+						DIRECT_A3D_ELEM(Fconv, k, i, j) /= w;
 				}
 			}
-			else
-				DIRECT_A3D_ELEM(Fconv, k, i, j) /= w;
 		}
 	}
 	else
@@ -1137,19 +1200,21 @@ void BackProjector::reconstructRect(MultidimArray<RFLOAT> &vol_out,
 	vol_out.setXmippOrigin();
 	{
 		const RFLOAT ix = 1. / box_nx, iy = 1. / box_ny, iz = (ref_dim == 3) ? 1. / box_nz : 0.;
-		FOR_ALL_ELEMENTS_IN_ARRAY3D(vol_out)
-		{
-			const RFLOAT fx = j * ix, fy = i * iy, fz = k * iz;
-			const RFLOAT r = sqrt(fx * fx + fy * fy + fz * fz);
-			if (r > 0.)
-			{
-				const RFLOAT rval = r / padding_factor;
-				const RFLOAT sinc = sin(PI * rval) / (PI * rval);
-				A3D_ELEM(vol_out, k, i, j) /= sinc * sinc;
-			}
-		}
+		#pragma omp parallel for
+		for (long int k = STARTINGZ(vol_out); k <= FINISHINGZ(vol_out); k++)
+			for (long int i = STARTINGY(vol_out); i <= FINISHINGY(vol_out); i++)
+				for (long int j = STARTINGX(vol_out); j <= FINISHINGX(vol_out); j++)
+				{
+					const RFLOAT fx = j * ix, fy = i * iy, fz = k * iz;
+					const RFLOAT r = sqrt(fx * fx + fy * fy + fz * fz);
+					if (r > 0.)
+					{
+						const RFLOAT rval = r / padding_factor;
+						const RFLOAT sinc = sin(PI * rval) / (PI * rval);
+						A3D_ELEM(vol_out, k, i, j) /= sinc * sinc;
+					}
+				}
 	}
-
 	transformer.cleanup();
 	vol_out.shrinkToFit();
 }

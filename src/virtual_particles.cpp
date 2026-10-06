@@ -991,6 +991,48 @@ Header readHeader(const std::string& fn_vstack)
 	return h;
 }
 
+void orderByMicrograph(const std::vector<std::string>& group, const std::vector<double>& y,
+                       const std::vector<double>& x, int nr_ranks,
+                       std::vector<long>& order, std::vector<long>& cut)
+{
+	const long n = (long)group.size();
+	order.resize(n);
+	for (long i = 0; i < n; i++)
+		order[i] = i;
+	std::stable_sort(order.begin(), order.end(), [&](long a, long b)
+	{
+		int c = group[a].compare(group[b]);
+		if (c != 0) return c < 0;
+		if (y[a] != y[b]) return y[a] < y[b];
+		return x[a] < x[b];
+	});
+
+	std::vector<long> bounds; // positions in `order` where a new micrograph starts
+	for (long i = 1; i < n; i++)
+		if (group[order[i]] != group[order[i - 1]])
+			bounds.push_back(i);
+
+	if (nr_ranks < 1) nr_ranks = 1;
+	cut.assign(nr_ranks + 1, n);
+	cut[0] = 0;
+	const double share = (double)n / nr_ranks;
+	for (int r = 1; r < nr_ranks; r++)
+	{
+		long target = (long)(share * r + 0.5);
+		long best = target;
+		long best_dist = (long)(share * 0.25);
+		std::vector<long>::const_iterator it = std::lower_bound(bounds.begin(), bounds.end(), target);
+		for (int k = 0; k < 2; k++)
+		{
+			std::vector<long>::const_iterator c = (k == 0) ? it : (it == bounds.begin() ? bounds.end() : it - 1);
+			if (c == bounds.end()) continue;
+			long d = std::labs(*c - target);
+			if (d <= best_dist) { best = *c; best_dist = d; }
+		}
+		cut[r] = std::max(best, cut[r - 1]);
+	}
+}
+
 void readParticle(const std::string& fn_vstack, long index, MultidimArray<RFLOAT>& out)
 {
 	std::shared_ptr<VStack> v = getVStack(fn_vstack);
