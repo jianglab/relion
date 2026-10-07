@@ -98,7 +98,8 @@ public:
 		void markReadyEvent(cudaStream_t stream = 0)
 		{
 			//TODO add a debug warning if event already set
-			DEBUG_HANDLE_ERROR(cudaEventCreate(&readyEvent));
+			// Only ever polled, never timed: an event without timing is cheaper to record and query
+			DEBUG_HANDLE_ERROR(cudaEventCreateWithFlags(&readyEvent, cudaEventDisableTiming));
 			DEBUG_HANDLE_ERROR(cudaEventRecord(readyEvent, stream));
 		}
 
@@ -152,14 +153,16 @@ private:
 	bool _freeReadyAllocs()
 	{
 		bool somethingFreed(false);
-		Alloc *next = first;
-		Alloc *curr;
+		Alloc *curr = first;
 
-		while (next != NULL)
+		// One pass. With the cache, _free() only merges curr with neighbours that are
+		// already free (deleting them, never curr), so curr->next is re-read after it;
+		// without the cache it deletes curr but leaves its neighbours alone. Restarting
+		// from the head after every free made this quadratic, all under the lock that
+		// every thread's allocations wait for.
+		while (curr != NULL)
 		{
-			curr = next;
-			next = curr->next;
-
+			Alloc *next = curr->next;
 			if (! curr->free && curr->freeWhenReady && curr->readyEvent != 0)
 			{
 				cudaError_t e = cudaEventQuery(curr->readyEvent);
@@ -167,8 +170,9 @@ private:
 				if (e == cudaSuccess)
 				{
 					_free(curr);
-					next = first; //List modified, restart
 					somethingFreed = true;
+					if (cache)
+						next = curr->next;
 				}
 				else if (e != cudaErrorNotReady)
 				{
@@ -176,6 +180,7 @@ private:
 					HandleError( e, __FILE__, __LINE__ );
 				}
 			}
+			curr = next;
 		}
 		return somethingFreed;
 	}
