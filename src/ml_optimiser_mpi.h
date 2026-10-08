@@ -145,6 +145,9 @@ public:
      */
     void iterate();
 
+    // Gather each process's CPU/GPU use of the E-step on the leader, which reports it
+    void gatherResourceReport(const resrep::ProcessStats &mine);
+
 #ifdef _SYCL_ENABLED
 private:
 	int syclDevicePerRank;

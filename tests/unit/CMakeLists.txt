@@ -43,6 +43,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_remove_intermediates.cpp
     test_virtual_particles.cpp
     test_helix_mask.cpp
+    test_resource_report.cpp
     test_import_project.cpp
     test_rectangular_box.cpp
     test_rectangular_projector.cpp

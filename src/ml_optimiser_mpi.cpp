@@ -4188,6 +4188,30 @@ void MlOptimiserMpi::updateAngularSamplingGrad(long int my_first_part_id, long i
 	}
 }
 
+void MlOptimiserMpi::gatherResourceReport(const resrep::ProcessStats &mine)
+{
+	if (!resrep::enabled())
+		return;
+	const std::string str = resrep::serialise(mine);
+	int len = (int)str.size();
+	std::vector<int> lens(node->size), offs(node->size, 0);
+	MPI_Gather(&len, 1, MPI_INT, &lens[0], 1, MPI_INT, 0, MPI_COMM_WORLD);
+	std::vector<char> all(1);
+	if (node->isLeader())
+	{
+		for (int r = 1; r < node->size; r++) offs[r] = offs[r - 1] + lens[r - 1];
+		all.resize(offs[node->size - 1] + lens[node->size - 1] + 1);
+	}
+	MPI_Gatherv((void*)str.data(), len, MPI_CHAR, &all[0], &lens[0], &offs[0], MPI_CHAR, 0, MPI_COMM_WORLD);
+	if (node->isLeader())
+	{
+		std::vector<resrep::ProcessStats> procs;
+		for (int r = 0; r < node->size; r++)
+			procs.push_back(resrep::deserialise(std::string(&all[offs[r]], lens[r])));
+		reportResources(procs, true);
+	}
+}
+
 void MlOptimiserMpi::iterate()
 {
 #ifdef TIMING
@@ -4264,7 +4288,9 @@ void MlOptimiserMpi::iterate()
 			std::cerr << " WARNING: skipping randomisation of particle order because random_seed equals zero..." << std::endl;
 		}
 
+		startResourceMonitor();
 		expectation();
+		stopResourceMonitor();
 #ifdef DEBUG
 		std::cerr << " finished expectation..." << std::endl;
 #endif
@@ -4608,6 +4634,12 @@ void MlOptimiserMpi::iterate()
 		}
 
     } // end loop iters
+
+	if (resrep::enabled())
+	{
+		resrep::finish(resource_total_);
+		gatherResourceReport(resource_total_);
+	}
 
 	// Hopefully this barrier will prevent some bus errors
 	MPI_Barrier(MPI_COMM_WORLD);

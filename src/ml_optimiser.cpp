@@ -3655,7 +3655,9 @@ void MlOptimiser::iterate()
         //if (grad_pseudo_halfsets)
         //	std::cerr << "DEBUG: doing pseudo gold standard" << std::endl;
 
+        startResourceMonitor();
         expectation();
+        stopResourceMonitor();
 
 
         // Sjors & Shaoda Apr 2015
@@ -3789,6 +3791,12 @@ void MlOptimiser::iterate()
         }
 
     } // end loop iters
+
+    if (resrep::enabled() && resource_total_.wall > 0.)
+    {
+        resrep::finish(resource_total_);
+        reportResources(std::vector<resrep::ProcessStats>(1, resource_total_), false);
+    }
 
     // delete threads etc
     iterateWrapUp();
@@ -11194,6 +11202,53 @@ void MlOptimiser::setMetaDataSubset(long int first_part_id, long int last_part_i
 
     } // end for part_id
 
+}
+
+std::vector<std::string> MlOptimiser::gpuPciBusIds()
+{
+    std::vector<std::string> ids;
+#ifdef _CUDA_ENABLED
+    if (do_gpu)
+        for (int d : gpuDevices)
+        {
+            char bus[64];
+            if (cudaDeviceGetPCIBusId(bus, sizeof(bus), d) == cudaSuccess)
+                ids.push_back(bus);
+        }
+#endif
+    return ids;
+}
+
+void MlOptimiser::startResourceMonitor()
+{
+    if (resrep::enabled())
+        resource_monitor_.start(gpuPciBusIds());
+}
+
+void MlOptimiser::stopResourceMonitor()
+{
+    if (!resrep::enabled())
+        return;
+    resrep::accumulate(resource_total_, resource_monitor_.stop(nr_threads));
+    resource_nr_steps_++;
+}
+
+void MlOptimiser::reportResources(const std::vector<resrep::ProcessStats> &procs, bool mpi)
+{
+    std::vector<std::string> advice = resrep::advise(procs, mpi);
+    double wall = 0.;
+    for (const auto &p : procs) wall = std::max(wall, p.wall);
+    std::cout << " Resource use over " << resource_nr_steps_ << " E-steps (" << (int)std::lround(wall) << " s):" << std::endl;
+    for (const auto &l : resrep::summary(procs, mpi))
+        std::cout << "  " << l << std::endl;
+    if (advice.empty())
+        std::cout << "  CPUs and GPUs were well balanced." << std::endl;
+    else
+    {
+        for (const auto &a : advice)
+            std::cout << "  - " << a << std::endl;
+        std::cout << "  (set RELION_RESOURCE_REPORT=off to silence these notes)" << std::endl;
+    }
 }
 
 void MlOptimiser::enforceFilamentConsistency()

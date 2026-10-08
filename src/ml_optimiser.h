@@ -46,6 +46,7 @@
 #include <src/jaz/tomography/optimisation_set.h>
 #include "src/prefetch.h"
 #include "src/fftw_rect.h"
+#include "src/resource_report.h"
 
 #define ML_SIGNIFICANT_WEIGHT 1.e-8
 #define METADATA_LINE_LENGTH METADATA_LINE_LENGTH_ALL
@@ -782,6 +783,16 @@ public:
 	// Per-class best orientations for each particle [nr_parts][nr_classes * METADATA_NR_CLASS_PARAMS]
 	// Used by enforceFilamentConsistency to fix orientations after class reassignment
 	MultidimArray<RFLOAT> exp_per_class_metadata_;
+
+	// CPU/GPU use of each E-step (resource_report.h)
+	resrep::Monitor resource_monitor_;
+	resrep::ProcessStats resource_total_;
+	int resource_nr_steps_ = 0;
+	std::vector<std::string> gpuPciBusIds();
+	void startResourceMonitor();
+	void stopResourceMonitor();
+	void reportResources(const std::vector<resrep::ProcessStats> &procs, bool mpi);
+
 	std::string exp_fn_img, exp_fn_ctf, exp_fn_recimg;
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;
