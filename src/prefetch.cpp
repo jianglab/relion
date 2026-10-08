@@ -50,12 +50,15 @@ void AsyncImagePrefetcher::startPrefetch(long int first_part_id, long int last_p
 	cv_start_.notify_one();
 }
 
-bool AsyncImagePrefetcher::waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target)
+bool AsyncImagePrefetcher::waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target, long int first_part_id, long int last_part_id)
 {
 	std::unique_lock<std::mutex> lock(mtx_);
 	cv_done_.wait(lock, [this]() { return ready_idx_ != -1 || shutdown_; });
 	if (shutdown_)
 		return false;
+	if (ready_first_ != first_part_id || ready_last_ != last_part_id)
+		REPORT_ERROR("AsyncImagePrefetcher: the prefetched images are for particles " + integerToString(ready_first_) + "-" +
+		             integerToString(ready_last_) + ", not the requested " + integerToString(first_part_id) + "-" + integerToString(last_part_id));
 
 	target.swap(buffers_[ready_idx_]);
 	ready_idx_ = -1;
@@ -88,6 +91,10 @@ void AsyncImagePrefetcher::workerThread()
 				return;
 			my_first = first_part_id_;
 			my_last = last_part_id_;
+			// Take the job: left set, the loop came straight back and read the same range
+			// again into the other buffer, and that stale copy could be handed out for the
+			// next range when the main thread was fast (particles got the wrong images)
+			has_work_ = false;
 		}
 
 		std::vector<MultidimArray<RFLOAT>>& buffer = buffers_[fill_idx_];
@@ -135,6 +142,8 @@ void AsyncImagePrefetcher::workerThread()
 		{
 			std::lock_guard<std::mutex> lock(mtx_);
 			ready_idx_ = fill_idx_;
+			ready_first_ = my_first;
+			ready_last_ = my_last;
 			fill_idx_ = 1 - fill_idx_;
 			cv_done_.notify_one();
 		}

@@ -40,7 +40,9 @@ public:
 	~AsyncImagePrefetcher();
 
 	void startPrefetch(long int first_part_id, long int last_part_id);
-	bool waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target);
+	/// Wait for the images of particles [first_part_id, last_part_id] (the range passed to
+	/// the last startPrefetch) and swap them into `target`. Any other range is an error.
+	bool waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target, long int first_part_id, long int last_part_id);
 	void stop();
 
 	long int readTimeOriginalUs() const { return read_time_original_us_; }
@@ -58,6 +60,7 @@ private:
 
 	long int first_part_id_;
 	long int last_part_id_;
+	long int ready_first_ = -1, ready_last_ = -1; // range held by buffers_[ready_idx_]
 	bool has_work_;
 	bool work_done_;
 

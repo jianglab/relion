@@ -4624,7 +4624,7 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
 #ifdef TIMING
         timer.tic(TIMING_ESP_PREFETCH_WAIT);
 #endif
-        prefetcher_->waitAndSwap(exp_imgs);
+        prefetcher_->waitAndSwap(exp_imgs, my_first_part_id, my_last_part_id);
 #ifdef TIMING
         timer.toc(TIMING_ESP_PREFETCH_WAIT);
 #endif
