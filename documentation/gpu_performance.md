@@ -34,7 +34,7 @@ The obvious remedies do not work:
 
 - **More threads in one process** (`--j 8` instead of `--j 4`) made it
   *slower*: about 40% longer before the allocator changes below, still about
-  7% longer after them. The threads contend inside the process.
+  20% longer after them (31 s instead of 26 s). The threads contend inside the process.
 - **More MPI processes on one GPU** without MPS also made it slower: GPU work
   from different processes is time-sliced, so the processes take turns rather
   than overlapping.
@@ -160,7 +160,8 @@ whether the GPU is fed, not how efficiently its kernels use it.
 
 ## Other changes made while investigating
 
-All verified to leave results unchanged, except the first, which fixes a bug:
+All verified against upstream RELION to leave results unchanged, except the
+two bug fixes (centring and prefetcher), which change them as intended:
 
 - **`--center_classes` in EM runs** (not `--grad`): `do_grad_next_iter` was
   never initialised and decides whether classes are centred each iteration, so
@@ -172,13 +173,16 @@ All verified to leave results unchanged, except the first, which fixes a bug:
 - **GPU allocator:** freeing ready blocks in one pass instead of restarting the
   list after every block, and recycling the CUDA events instead of creating and
   destroying one per freed buffer (a few hundred driver calls per particle).
-  The events are recorded on the legacy default stream so that memory is not
-  handed out again while kernels on other streams still read it.
+- **Image prefetcher** (fixed separately in JiangLab): the background reader
+  could hand a pool of particles the previous pool's images when the GPU code
+  was fast. With the faster allocator this happened often enough to change
+  results, which at first looked like a GPU race.
 - **Helical mask:** no heap allocation per pixel (`softMaskOutsideMapForHelix`);
   bitwise identical output.
 
-Together these made one process 12–32% faster on the GPU above (1 × 4 and
-1 × 8 threads); MPS is the much larger gain.
+Together these made one process 1.6–1.8× faster on the GPU above (1 × 4
+threads 46 s → 26 s, 1 × 8 threads 49 s → 31 s, small test); MPS is the
+larger gain.
 
 ## What limits it now, and what would help next
 
