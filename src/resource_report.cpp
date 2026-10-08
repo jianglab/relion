@@ -277,6 +277,27 @@ std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi
 			const double busy = sum / known;
 			std::ostringstream o;
 			const std::string gpus = ngpu > 1 ? "GPUs were" : "GPU was";
+
+			// Several processes on one GPU without MPS take turns on it: "busy" then
+			// counts the switching too, so it says nothing about how well the GPU is used
+			std::map<std::string, int> sharing;
+			bool mps = false;
+			for (size_t i : h.second)
+			{
+				for (const auto &g : procs[i].gpus) sharing[g]++;
+				mps = mps || procs[i].mps;
+			}
+			int most = 0;
+			for (const auto &g : sharing) most = std::max(most, g.second);
+			if (most >= 2 && !mps)
+			{
+				o << most << " worker processes shared a GPU" << where << " without NVIDIA MPS, so they took turns on it"
+				  << " (the " << pct(busy) << " busy includes switching between them). With MPS their work runs at the same time,"
+				  << " often several times faster: relion_refine_mpi starts it by itself unless RELION_AUTO_MPS=off or"
+				  << " nvidia-cuda-mps-control is missing.";
+				out.push_back(o.str());
+				continue;
+			}
 			if (busy < 0.6)
 			{
 				// Measured on helical Class2D: raising --j inside one process made the E-step

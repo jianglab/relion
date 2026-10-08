@@ -16,8 +16,10 @@ helical Class2D job it was 4.2× faster, with equivalent results:
 (EMPIAR-10944 subset: 37,022 segments, 50 classes, 5 iterations, box 128 at
 4.944 Å/pixel, `--helix --bimodal_psi --sigma_psi 2`.)
 
-`relion_refine` now says so itself: at the end of a run it prints how busy the
-GPU and the cores were, and what to change (see "The resource report" below).
+`relion_refine_mpi` now does this by itself: when two or more GPU workers share
+a node, it starts a private MPS daemon for the job and stops it at the end (see
+"Automatic MPS" below). At the end of every run it also prints how busy the GPU
+and the cores were, and what to change (see "The resource report").
 
 ## Why one process cannot fill the GPU
 
@@ -51,9 +53,39 @@ Measurements on a smaller test (4,590 segments, 2 iterations, same GPU):
 | 8 workers × 1 | – | 16 s |
 | 12 workers × 1 | – | 15 s |
 
-## How to run with MPS
+## Automatic MPS
 
-MPS needs no administrator rights. Start the control daemon inside the GPU job,
+`relion_refine_mpi` starts MPS itself, right after MPI starts and before any
+process opens the GPU (processes join MPS only when their CUDA context is
+created), when all of these hold:
+
+- `--gpu` is given and two or more worker processes run on the node;
+- no MPS is running already (neither `CUDA_MPS_PIPE_DIRECTORY` is set nor the
+  system daemon's `/tmp/nvidia-mps` exists);
+- `nvidia-cuda-mps-control` is available.
+
+One process per node starts the daemon in a private directory
+(`/tmp/relion_mps_<Slurm job>_<pid>`; short, because MPS uses Unix sockets) and
+all processes of that node point `CUDA_MPS_PIPE_DIRECTORY` at it. The daemon is
+told to quit when the run ends; it does so once the last process has
+disconnected, and its directory is removed. The output says what was done:
+
+```
+ Started NVIDIA MPS so that the 8 GPU workers on this node run on the GPU at the same time (RELION_AUTO_MPS=off to disable).
+```
+
+`RELION_AUTO_MPS=off` disables it. If the daemon cannot be started, RELION
+says so and runs without MPS. Same run as above, 8 workers × 1 thread on one
+GPU: 16 s with the automatic MPS, 117 s with `RELION_AUTO_MPS=off`; nothing
+was left running or on disk afterwards.
+
+So the only thing a user has to choose is the number of MPI processes: about
+one worker per core of the job, each with `--j 1`, works well.
+
+## Starting MPS by hand
+
+Only needed for programs other than `relion_refine_mpi`, or to share one
+daemon between several runs. MPS needs no administrator rights. Start the control daemon inside the GPU job,
 before `mpirun`, and stop it at the end. Put its pipe and log directories in a
 private temporary directory so that jobs on the same node do not share one:
 
@@ -116,6 +148,9 @@ a short report, for example:
   fraction (NVML, loaded at run time; without it there are no GPU numbers).
 - **GPU busy below 60%:** run MPI processes under MPS (with the commands), or
   more of them if MPS is already running (it detects a running daemon).
+- **Several processes on one GPU without MPS:** recommend MPS whatever the busy
+  figure says - processes that take turns keep the GPU "busy" switching
+  between them (98% busy, yet 7x slower than with MPS, in the test above).
 - **GPU busy above 90%:** more CPU processes or threads will not help.
 - **Allocated cores mostly idle:** request fewer cores (it suggests how many).
 - `RELION_RESOURCE_REPORT=off` silences it.

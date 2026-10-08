@@ -77,13 +77,27 @@ TEST_CASE("MPI: processes on a host share its cores, and low use is flagged", "[
 	busy.push_back(proc("n1", 3, 8, 0, -3., "", 0.33));
 	busy.push_back(proc("n1", 3, 8, 0, 0.75));
 	busy.push_back(proc("n1", 3, 8, 0, 0.75));
+	for (size_t i = 1; i < busy.size(); i++) busy[i].mps = true; // two workers on one GPU: with MPS
 	CHECK(resrep::advise(busy, true).empty());
 
 	waiting.push_back(proc("n1", 3, 8, 0, -3., "", 0.33));
 	waiting.push_back(proc("n1", 3, 8, 0, 0.75, "0000:01:00.0", 0.3));
 	waiting.push_back(proc("n1", 3, 8, 0, 0.75, "0000:01:00.0", 0.3));
+	for (size_t i = 1; i < waiting.size(); i++) waiting[i].mps = true;
 	auto a = resrep::advise(waiting, true);
 	CHECK(mentions(a, "on average only 2.8 of the 8 allocated cores were busy"));
+}
+
+TEST_CASE("several processes on one GPU without MPS are told to use it, whatever the busy figure", "[resource_report]")
+{
+	std::vector<resrep::ProcessStats> p;
+	p.push_back(proc("n1", 1, 8, 0, -3., "", 0.1));
+	for (int i = 0; i < 4; i++) p.push_back(proc("n1", 1, 8, 0, 0.98));
+	auto a = resrep::advise(p, true);
+	CHECK(mentions(a, "4 worker processes shared a GPU without NVIDIA MPS"));
+	CHECK(!mentions(a, "unlikely to make this faster"));
+	for (size_t i = 1; i < p.size(); i++) p[i].mps = true;
+	CHECK(!mentions(resrep::advise(p, true), "without NVIDIA MPS"));
 }
 
 TEST_CASE("totals over several E-steps weight GPU use by time", "[resource_report]")

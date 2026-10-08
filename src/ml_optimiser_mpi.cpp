@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/ml_optimiser_mpi.h"
+#include "src/mps_auto.h"
 #include "src/ml_optimiser.h"
 #ifdef _CUDA_ENABLED
 	#include "src/acc/cuda/cuda_ml_optimiser.h"
@@ -65,6 +66,17 @@ void MlOptimiserMpi::read(int argc, char **argv)
 
     // Define a new MpiNode
     node = new MpiNode(argc, argv);
+
+    // Before any process creates a CUDA context: let the GPU workers of each node share
+    // their GPUs through NVIDIA MPS when that helps (mps_auto.h)
+    {
+        bool uses_gpu = false;
+        for (int i = 1; i < argc; i++)
+            if (std::string(argv[i]) == "--gpu") uses_gpu = true;
+        const std::string note = mpsauto::start(MPI_COMM_WORLD, uses_gpu, node->rank);
+        if (note != "")
+            std::cout << " " << note << std::endl;
+    }
 
     if (node->isLeader())
     	PRINT_VERSION_INFO();
