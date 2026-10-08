@@ -108,7 +108,6 @@ void softMaskOutsideMapForHelix(
 		RFLOAT cosine_width,
 		MultidimArray<RFLOAT> *Mnoise)
 {
-	Matrix1D<RFLOAT> coords;
 	Matrix2D<RFLOAT> A;
 	RFLOAT sum_bg, sum, R1, R2, D1, D2, r, d, noise_w, noise_w1, noise_w2, noise_val;
 	int dim = vol.getDim();
@@ -156,11 +155,6 @@ void softMaskOutsideMapForHelix(
 	D1 = mask_cyl_radius_pix;
 	D2 = D1 + cosine_width;
 
-	// Init coords
-	coords.clear();
-	coords.resize(3);
-	coords.initZeros();
-
 	// Init rotational matrix A
 	A.clear();
 	A.resize(3, 3);
@@ -170,27 +164,30 @@ void softMaskOutsideMapForHelix(
 	// Don't put negative signs before tilt and psi values, use 'transpose' instead
 	A = A.transpose();
 
+	// Distance of a pixel to the helical axis (X for 2D, Z for 3D) after rotating it
+	// by A. The products are summed in the order Matrix2D * Matrix1D uses, so the
+	// result is bitwise the same, without allocating a vector for every pixel.
+	const RFLOAT a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
+	const RFLOAT a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
+	auto axisDistance = [&](long int k, long int i, long int j) -> RFLOAT
+	{
+		const RFLOAT x = (RFLOAT)j, y = (RFLOAT)i, z = (dim == 3) ? (RFLOAT)k : 0.;
+		const RFLOAT ry = ((0. + a10 * x) + a11 * y) + a12 * z;
+		if (dim == 3)
+		{
+			const RFLOAT rx = ((0. + a00 * x) + a01 * y) + a02 * z;
+			return sqrt(ry * ry + rx * rx);
+		}
+		return ABS(ry);
+	};
+
 	// Calculate noise weights for all voxels
 	sum_bg = sum = 0.;
 	if (Mnoise == NULL)
 	{
 		FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
 		{
-			// X, Y, Z coordinates
-			if (dim == 3)
-				ZZ(coords) = ((RFLOAT)(k));
-			else
-				ZZ(coords) = 0.;
-			YY(coords) = ((RFLOAT)(i));
-			XX(coords) = ((RFLOAT)(j));
-			// Rotate
-			coords = A * coords;
-
-			// Distance from the point to helical axis (perpendicular to X axis)
-			if (dim == 3)
-				d = sqrt(YY(coords) * YY(coords) + XX(coords) * XX(coords));
-			else
-				d = ABS(YY(coords));
+			d = axisDistance(k, i, j);
 			if (d > D2) // Noise areas (get values for noise estimations)
 			{
 				sum_bg += A3D_ELEM(vol, k, i, j);
@@ -213,22 +210,7 @@ void softMaskOutsideMapForHelix(
 	noise_val = sum_bg;
 	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
 	{
-		// X, Y, Z coordinates
-		if (dim == 3)
-			ZZ(coords) = ((RFLOAT)(k));
-		else
-			ZZ(coords) = 0.;
-		YY(coords) = ((RFLOAT)(i));
-		XX(coords) = ((RFLOAT)(j));
-
-		// Rotate
-		coords = A * coords;
-
-		// Distance from the point to helical axis (perpendicular to X axis)
-		if (dim == 3)
-			d = sqrt(YY(coords) * YY(coords) + XX(coords) * XX(coords));
-		else
-			d = ABS(YY(coords));
+		d = axisDistance(k, i, j);
 
 		// Distance from the origin
 		r = (RFLOAT)(i * i + j * j);
