@@ -359,11 +359,11 @@ public:
 	bool gradient_refine;
 
 	// Id current iteration is gradient based
-	bool do_grad;
-	bool do_grad_next_iter;
+	bool do_grad = false;
+	bool do_grad_next_iter = false; // read every iteration (class centring), set only in gradient mode
 
 	// Do pseudo half-sets to estimate noise
-	bool grad_pseudo_halfsets;
+	bool grad_pseudo_halfsets = false;
 
 	// Number of iterations at the end of a gradient refinement using Expectation-Maximization
 	int grad_em_iters;
