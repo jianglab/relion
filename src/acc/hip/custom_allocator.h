@@ -49,6 +49,16 @@ public:
 	{
 		friend class HipCustomAllocator;
 
+	public:
+		// Only ever polled, never timed: an event without timing is cheaper to record and query
+		static hipEvent_t newEvent()
+		{
+			hipEvent_t e;
+			DEBUG_HANDLE_ERROR(hipEventCreateWithFlags(&e, hipEventDisableTiming));
+			return e;
+		}
+	private:
+
 	private:
 		Alloc *prev, *next;
 		BYTE *ptr;
@@ -56,6 +66,7 @@ public:
 		bool free;
 		hipEvent_t readyEvent; //Event record used for auto free
 		bool freeWhenReady;
+		HipCustomAllocator *owner; // set by alloc(); its pool supplies the ready events
 
 
 #ifdef CUSTOM_ALLOCATOR_MEMGUARD
@@ -70,7 +81,8 @@ public:
 			size(0),
 			free(0),
 			readyEvent(0),
-			freeWhenReady(false)
+			freeWhenReady(false),
+			owner(NULL)
 		{}
 
 		~Alloc()
@@ -100,8 +112,9 @@ public:
 		void markReadyEvent(hipStream_t stream = 0)
 		{
 			//TODO add a debug warning if event already set
-			// Only ever polled, never timed: an event without timing is cheaper to record and query
-			DEBUG_HANDLE_ERROR(hipEventCreateWithFlags(&readyEvent, hipEventDisableTiming));
+			// Taken from the allocator's pool: creating and destroying an event for every
+			// freed buffer cost a few hundred driver calls per particle
+			readyEvent = owner ? owner->takeEvent() : newEvent();
 			DEBUG_HANDLE_ERROR(hipEventRecord(readyEvent, stream));
 		}
 
@@ -118,6 +131,10 @@ private:
 	bool cache;
 
 	omp_lock_t mutex;
+
+	// Recycled ready events (all made on this allocator's device)
+	std::vector<hipEvent_t> eventPool;
+	omp_lock_t eventMutex;
 
 
 	//Look for the first suited space
@@ -382,7 +399,7 @@ private:
 		a->freeWhenReady = false;
 		if (a->readyEvent != 0)
 		{
-			DEBUG_HANDLE_ERROR(hipEventDestroy(a->readyEvent));
+			returnEvent(a->readyEvent);
 			a->readyEvent = 0;
 		}
 
@@ -487,6 +504,27 @@ public:
 		_setup();
 
 		omp_init_lock(&mutex);
+		omp_init_lock(&eventMutex);
+	}
+
+	hipEvent_t takeEvent()
+	{
+		{
+			Lock el(&eventMutex);
+			if (!eventPool.empty())
+			{
+				hipEvent_t e = eventPool.back();
+				eventPool.pop_back();
+				return e;
+			}
+		}
+		return Alloc::newEvent();
+	}
+
+	void returnEvent(hipEvent_t e)
+	{
+		Lock el(&eventMutex);
+		eventPool.push_back(e);
 	}
 
 	void resize(size_t size)
@@ -611,6 +649,7 @@ public:
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(stream));
 #endif
 
+		newAlloc->owner = this;
 		return newAlloc;
 	};
 
@@ -620,6 +659,10 @@ public:
 			Lock ml(&mutex);
 			_clear();
 		}
+		for (hipEvent_t e : eventPool)
+			DEBUG_HANDLE_ERROR(hipEventDestroy(e));
+		eventPool.clear();
+		omp_destroy_lock(&eventMutex);
 		omp_destroy_lock(&mutex);
 	}
 
