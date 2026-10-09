@@ -2,8 +2,9 @@
  * tests/unit/test_resource_report.cpp
  *
  * The CPU/GPU balance advice of src/resource_report.h: a starved GPU asks for
- * more feeding threads, a saturated one for fewer, idle allocated cores are
- * flagged, and a balanced run gets no advice.
+ * more threads (up to a thread per core), then for MPI processes under MPS; a
+ * saturated one for fewer; idle allocated cores are flagged, and a balanced run
+ * gets no advice.
  */
 
 #include <catch2/catch.hpp>
@@ -37,15 +38,23 @@ bool mentions(const std::vector<std::string> &a, const std::string &what)
 }
 }
 
-TEST_CASE("a starved GPU without MPS recommends MPI processes under MPS", "[resource_report]")
+TEST_CASE("a starved GPU with fewer threads than cores asks for more threads", "[resource_report]")
 {
 	std::vector<resrep::ProcessStats> p(1, proc("n1", 4, 8, 0, 0.11));
 	auto a = resrep::advise(p, false);
 	REQUIRE(!a.empty());
 	CHECK(mentions(a, "busy only 11%"));
+	CHECK(mentions(a, "Raise --j from 4 to 8"));
+	CHECK(!mentions(a, "NVIDIA MPS"));
+}
+
+TEST_CASE("a starved GPU with a thread per core recommends MPI processes under MPS", "[resource_report]")
+{
+	std::vector<resrep::ProcessStats> p(1, proc("n1", 8, 8, 0, 0.11));
+	auto a = resrep::advise(p, false);
 	CHECK(mentions(a, "NVIDIA MPS"));
 	CHECK(mentions(a, "about 7, each with --j 1"));
-	CHECK(!mentions(a, "raise --j from"));
+	CHECK(!mentions(a, "Raise --j from"));
 }
 
 TEST_CASE("a starved GPU without idle cores makes no guess at a core count", "[resource_report]")
@@ -120,7 +129,7 @@ TEST_CASE("CPU-only runs with idle threads point at the disk", "[resource_report
 
 TEST_CASE("with MPS on, a starved GPU asks for more processes, and the summary says so", "[resource_report]")
 {
-	std::vector<resrep::ProcessStats> p(1, proc("n1", 4, 8, 0, 0.3));
+	std::vector<resrep::ProcessStats> p(1, proc("n1", 8, 8, 0, 0.3));
 	p[0].mps = true;
 	auto a = resrep::advise(p, false);
 	CHECK(mentions(a, "MPS is running"));
@@ -128,7 +137,7 @@ TEST_CASE("with MPS on, a starved GPU asks for more processes, and the summary s
 	auto s = resrep::summary(p, false);
 	REQUIRE(s.size() == 1);
 	CHECK(mentions(s, "GPU busy 30% (MPS on)"));
-	CHECK(mentions(s, "4 of 8 cores busy"));
+	CHECK(mentions(s, "8 of 8 cores busy"));
 }
 
 TEST_CASE("stats survive the MPI serialisation", "[resource_report]")

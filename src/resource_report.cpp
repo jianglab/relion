@@ -300,18 +300,23 @@ std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi
 			}
 			if (busy < 0.6)
 			{
-				// Measured on helical Class2D: raising --j inside one process made the E-step
-				// slower (threads contend), and several processes sharing one GPU only helped
-				// once NVIDIA MPS let their kernels run at the same time (2.7x faster).
+				// With the GPU code now issuing all classes at once, more threads in one
+				// process feed the GPU about as well as several processes under MPS (helical
+				// Class2D, 8 threads: as fast as 8 MPS workers), so first use the cores the job
+				// has; beyond that, several processes under NVIDIA MPS.
 				bool mps = false;
 				for (size_t i : h.second) mps = mps || procs[i].mps;
 				o << "The " << gpus << " busy only " << pct(busy) << " of the time" << where
 				  << ": the work per particle is small and the GPU waits for the CPU side. ";
 				const int suggest = std::max(2, ncores - 1);
-				if (!mps)
+				if (threads < ncores)
+					o << "Raise --j from " << per_worker << " to " << per_worker + (ncores - threads) / workers
+					  << " (a thread per allocated core): more threads keep more work on the GPU.";
+				else if (!mps)
 					o << "Run several MPI processes per GPU (about " << suggest << ", each with --j 1) under NVIDIA MPS, "
 					  << "which lets their GPU work run at the same time; without MPS they take turns and gain little. "
-					  << "Start it inside the job before mpirun: export CUDA_MPS_PIPE_DIRECTORY=$TMPDIR/mps CUDA_MPS_LOG_DIRECTORY=$TMPDIR/mps; "
+					  << "relion_refine_mpi starts MPS by itself; for other programs start it inside the job before mpirun: "
+					  << "export CUDA_MPS_PIPE_DIRECTORY=$TMPDIR/mps CUDA_MPS_LOG_DIRECTORY=$TMPDIR/mps; "
 					  << "mkdir -p $TMPDIR/mps; nvidia-cuda-mps-control -d (and stop it afterwards with: echo quit | nvidia-cuda-mps-control).";
 				else
 					o << "MPS is running: more MPI processes per GPU (about " << suggest << ", each with --j 1) should feed it better.";
