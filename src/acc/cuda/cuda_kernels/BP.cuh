@@ -41,7 +41,9 @@ __global__ void cuda_kernel_backproject2D(
 		int mdl_inity,
 		const BPClassJob *g_classes = NULL, // class batching: one block per class and
 		const int *g_class_start = NULL,    // orientation (see cuda_kernel_diff2_coarse)
-		int n_classes = 0)
+		int n_classes = 0,
+		bool compact = false)               // see below; needs translation_num * 8 bytes
+		                                    // of dynamic shared memory
 {
 	unsigned tid = threadIdx.x;
 	unsigned img = blockIdx.x;
@@ -74,7 +76,37 @@ __global__ void cuda_kernel_backproject2D(
 	else if (tid == 3)
 		s_eulers[3] = g_eulers[img*9+4] * padding_factor;
 
+	// compact: the significant translations of this orientation, in order, are listed
+	// once in shared memory (most are not significant; every pixel used to read and test
+	// every weight), and an orientation without any is skipped. Each pixel sums the same
+	// terms in the same order as before.
+	extern __shared__ unsigned char bp_dynamic[];
+	XFLOAT *s_w = (XFLOAT *) bp_dynamic;
+	int *s_t = (int *) (s_w + (compact ? translation_num : 0));
+	__shared__ int s_nr;
+	if (compact)
+	{
+		for (unsigned long t = tid; t < translation_num; t += BP_2D_BLOCK_SIZE)
+			s_w[t] = g_weights[img * translation_num + t];
+		__syncthreads();
+		if (tid == 0)
+		{
+			int k = 0;
+			for (unsigned long t = 0; t < translation_num; t++)
+				if (s_w[t] >= significant_weight)
+				{
+					s_w[k] = s_w[t];
+					s_t[k] = (int) t;
+					k++;
+				}
+			s_nr = k;
+		}
+	}
+
 	__syncthreads();
+
+	if (compact && s_nr == 0)
+		return;
 
 	int pixel_pass_num(ceilf((float)img_xy/(float)BP_2D_BLOCK_SIZE));
 
@@ -104,11 +136,13 @@ __global__ void cuda_kernel_backproject2D(
 
 		XFLOAT temp_real, temp_imag;
 
-		for (unsigned long itrans = 0; itrans < translation_num; itrans++)
+		const unsigned long nr_loop = compact ? (unsigned long) s_nr : translation_num;
+		for (unsigned long k = 0; k < nr_loop; k++)
 		{
-			weight = g_weights[img * translation_num + itrans];
+			const unsigned long itrans = compact ? (unsigned long) s_t[k] : k;
+			weight = compact ? s_w[k] : g_weights[img * translation_num + itrans];
 
-			if (weight >= significant_weight)
+			if (compact || weight >= significant_weight)
 			{
 				if(CTF_PREMULTIPLIED)
 				{

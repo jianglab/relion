@@ -1310,11 +1310,14 @@ void runBackProjectKernelBatched(
 	// dimensions shared by all classes' models, jobs their arrays
 	if (BP.mdlZ == 1)
 	{
-#define BP2D_BATCH(CP) cuda_kernel_backproject2D<CP><<<n, BP_2D_BLOCK_SIZE, 0, stream>>>( \
+		// The significant translations listed once per block (see cuda_kernel_backproject2D)
+		const size_t smem = translation_num * (sizeof(XFLOAT) + sizeof(int));
+		const bool compact = smem <= 40960;
+#define BP2D_BATCH(CP) cuda_kernel_backproject2D<CP><<<n, BP_2D_BLOCK_SIZE, compact ? smem : 0, stream>>>( \
 			d_img_real, d_img_imag, trans_x, trans_y, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgX*imgY, BP.mdlX, BP.mdlInitY, \
-			d_jobs, d_start, nc)
+			d_jobs, d_start, nc, compact)
 		if (ctf_premultiplied) BP2D_BATCH(true);
 		else                   BP2D_BATCH(false);
 #undef BP2D_BATCH
