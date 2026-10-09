@@ -1275,6 +1275,14 @@ void getAllSquaredDifferencesCoarse(
 	size_t img_re_offset = 0*(size_t)image_size;
 	size_t img_im_offset = 1*(size_t)image_size;
 
+#ifdef _CUDA_ENABLED
+	// The image, the correction image and the translations in one buffer, one upload
+	AccPtr<XFLOAT> passInputs = ptrFactory.make<XFLOAT>((size_t)image_size*3 + (size_t)translation_num*3);
+	passInputs.allAlloc();
+	AccPtr<XFLOAT> Fimg_(passInputs, 0, (size_t)image_size*2);
+	AccPtr<XFLOAT> corr_img(passInputs, (size_t)image_size*2, (size_t)image_size);
+	AccPtr<XFLOAT> trans_xyz(passInputs, (size_t)image_size*3, (size_t)translation_num*3);
+#else
 	AccPtr<XFLOAT> Fimg_ = ptrFactory.make<XFLOAT>((size_t)image_size*2);
 	AccPtr<XFLOAT> trans_xyz = ptrFactory.make<XFLOAT>((size_t)translation_num*3);
 	AccPtr<XFLOAT> corr_img = ptrFactory.make<XFLOAT>((size_t)image_size);
@@ -1287,6 +1295,7 @@ void getAllSquaredDifferencesCoarse(
 	Fimg_.allAlloc();
 	trans_xyz.allAlloc();
 	corr_img.allAlloc();
+#endif
 
     for (unsigned long img_id = 0; img_id < sp.nr_images; img_id++)
 	{
@@ -1368,9 +1377,11 @@ void getAllSquaredDifferencesCoarse(
 			Fimg_[img_im_offset+i] = Fimg.data[i].imag * pixel_correction;
 		}
 
+#ifndef _CUDA_ENABLED
 		trans_xyz.cpToDevice();
 
 		Fimg_.cpToDevice();
+#endif
 
 		CTOC(accMLO->timer,"translation_1");
 
@@ -1383,7 +1394,11 @@ void getAllSquaredDifferencesCoarse(
 #ifdef _SYCL_ENABLED
 		corr_img.setAccType(accSYCL);
 #endif
+#ifdef _CUDA_ENABLED
+		passInputs.cpToDevice();
+#else
 		corr_img.cpToDevice();
+#endif
 
         // do_CC does not seem Xi2 in the input allWeights!
         if (!do_CC)
@@ -1640,6 +1655,14 @@ void getAllSquaredDifferencesFine(
 	size_t img_re_offset = 0*(size_t)image_size;
 	size_t img_im_offset = 1*(size_t)image_size;
 
+#ifdef _CUDA_ENABLED
+	// The image, the correction image and the translations in one buffer, one upload
+	AccPtr<XFLOAT> passInputs = ptrFactory.make<XFLOAT>((size_t)image_size*3 + (size_t)translation_num*3);
+	passInputs.allAlloc();
+	AccPtr<XFLOAT> Fimg_(passInputs, 0, (size_t)image_size*2);
+	AccPtr<XFLOAT> corr_img(passInputs, (size_t)image_size*2, (size_t)image_size);
+	AccPtr<XFLOAT> trans_xyz(passInputs, (size_t)image_size*3, (size_t)translation_num*3);
+#else
 	AccPtr<XFLOAT> Fimg_     = ptrFactory.make<XFLOAT>((size_t)image_size*2);
 	AccPtr<XFLOAT> trans_xyz = ptrFactory.make<XFLOAT>((size_t)translation_num*3);
 	AccPtr<XFLOAT> corr_img = ptrFactory.make<XFLOAT>((size_t)image_size);
@@ -1652,6 +1675,7 @@ void getAllSquaredDifferencesFine(
 	Fimg_.allAlloc();
 	trans_xyz.allAlloc();
 	corr_img.allAlloc();
+#endif
 
     for (unsigned long img_id = 0; img_id < sp.nr_images; img_id++)
 	{
@@ -1758,10 +1782,14 @@ void getAllSquaredDifferencesFine(
 		corr_img.setAccType(accSYCL);
 #endif
 
+#ifdef _CUDA_ENABLED
+		passInputs.cpToDevice();
+#else
 		trans_xyz.cpToDevice();
 
 		Fimg_.cpToDevice();
 		corr_img.cpToDevice();
+#endif
 
 		CTOC(accMLO->timer,"kernel_init_1");
 
@@ -3592,11 +3620,18 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			size_t re_nomask_offset = 2*(size_t)image_size;
 			size_t im_nomask_offset = 3*(size_t)image_size;
 
+#ifdef _CUDA_ENABLED
+			// The images, CTFs and noise weights in one buffer, one upload (below)
+			AccPtr<XFLOAT> storeInputs = ptrFactory.make<XFLOAT>(6*(size_t)image_size);
+			storeInputs.allAlloc();
+			AccPtr<XFLOAT> Fimgs(storeInputs, 0, 4*(size_t)image_size);
+#else
 			AccPtr<XFLOAT> Fimgs = ptrFactory.make<XFLOAT>(4*(size_t)image_size);
 #ifdef _SYCL_ENABLED
 			Fimgs.setStreamAccType(devAcc);
 #endif
 			Fimgs.allAlloc();
+#endif
 
 			for (unsigned long i = 0; i < image_size; i ++)
 			{
@@ -3606,7 +3641,9 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				Fimgs[im_nomask_offset+i] = Fimg_nonmask.data[i].imag;
 			}
 
+#ifndef _CUDA_ENABLED
 			Fimgs.cpToDevice();
+#endif
 
 			CTOC(accMLO->timer,"translation_3");
 
@@ -3637,11 +3674,15 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				}
 			}
 
+#ifdef _CUDA_ENABLED
+			AccPtr<XFLOAT> ctfs(storeInputs, 4*(size_t)image_size, (size_t)image_size);
+#else
 			AccPtr<XFLOAT> ctfs = ptrFactory.make<XFLOAT>((size_t)image_size);
 #ifdef _SYCL_ENABLED
 			ctfs.setStreamAccType(devAcc);
 #endif
 			ctfs.allAlloc();
+#endif
 
 			if (baseMLO->do_ctf_correction)
 			{
@@ -3654,17 +3695,23 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					ctfs[i] = part_scale;
 			}
 
+#ifndef _CUDA_ENABLED
 			ctfs.cpToDevice();
+#endif
 
 			/*======================================================
 			                       MINVSIGMA
 			======================================================*/
 
+#ifdef _CUDA_ENABLED
+			AccPtr<XFLOAT> Minvsigma2s(storeInputs, 5*(size_t)image_size, (size_t)image_size);
+#else
 			AccPtr<XFLOAT> Minvsigma2s = ptrFactory.make<XFLOAT>((size_t)image_size);
 #ifdef _SYCL_ENABLED
 			Minvsigma2s.setStreamAccType(devAcc);
 #endif
 			Minvsigma2s.allAlloc();
+#endif
 
 			if (baseMLO->do_map)
 				for (unsigned long i = 0; i < image_size; i++)
@@ -3673,7 +3720,11 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				for (unsigned long i = 0; i < image_size; i++)
 					Minvsigma2s[i] = 1;
 
+#ifdef _CUDA_ENABLED
+			storeInputs.cpToDevice();
+#else
 			Minvsigma2s.cpToDevice();
+#endif
 
 			/*======================================================
 			                      CLASS LOOP
