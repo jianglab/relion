@@ -11,6 +11,9 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <deque>
+#include <map>
+#include <thread>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -65,6 +68,9 @@ public:
 		cudaEvent_t readyEvent; //Event record used for auto free
 		bool freeWhenReady;
 		CudaCustomAllocator *owner; // set by alloc(); its pool supplies the ready events
+		bool readyMarked;           // markReadyEvent() was called: free after the work
+		cudaStream_t readyStream;   // issued so far on this stream by this thread
+		std::thread::id readyThread;
 
 
 #ifdef CUSTOM_ALLOCATOR_MEMGUARD
@@ -80,7 +86,9 @@ public:
 			free(0),
 			readyEvent(0),
 			freeWhenReady(false),
-			owner(NULL)
+			owner(NULL),
+			readyMarked(false),
+			readyStream(0)
 		{}
 
 		~Alloc()
@@ -104,20 +112,33 @@ public:
 		bool isFree() { return free; }
 
 		inline
-		cudaEvent_t getReadyEvent() { return readyEvent; }
+		bool hasReadyMark() { return readyMarked || readyEvent != 0; }
 
+		// The block may be reused once the work issued so far on `stream` by this thread
+		// has completed. With an owner, no event is recorded here: the owner records one
+		// event for a batch of such blocks later (see CudaCustomAllocator::pending), which
+		// covers at least the same work - one event per freed buffer was a few hundred
+		// driver calls per particle, each taking the CUDA driver's per-process lock.
 		inline
 		void markReadyEvent(cudaStream_t stream = 0)
 		{
-			//TODO add a debug warning if event already set
-			// Taken from the allocator's pool: creating and destroying an event for every
-			// freed buffer cost a few hundred driver calls per particle
-			readyEvent = owner ? owner->takeEvent() : newEvent();
-			DEBUG_HANDLE_ERROR(cudaEventRecord(readyEvent, stream));
+			readyMarked = true;
+			readyStream = stream;
+			readyThread = std::this_thread::get_id();
+			if (!owner)
+			{
+				readyEvent = newEvent();
+				DEBUG_HANDLE_ERROR(cudaEventRecord(readyEvent, stream));
+			}
 		}
 
 		inline
-		void doFreeWhenReady() { freeWhenReady = true; }
+		void doFreeWhenReady()
+		{
+			freeWhenReady = true;
+			if (owner && readyMarked) // never marked: never freed, as before
+				owner->enqueuePending(this);
+		}
 	};
 
 private:
@@ -134,6 +155,94 @@ private:
 	std::vector<cudaEvent_t> eventPool;
 	omp_lock_t eventMutex;
 
+	// Blocks handed back with doFreeWhenReady() wait for the work issued before on their
+	// stream, by the thread that freed them. They are kept per (thread, stream):
+	// - open: no event yet. The thread itself closes its batches in its next alloc(),
+	//   recording one event per stream for all blocks freed on it since; recording later
+	//   than the free only covers more work. Only that thread may record:
+	//   cudaStreamPerThread means a different stream in every thread. (Keeping batches
+	//   open for longer, to save more events, was slower: the free-space search grew.)
+	// - closed: queued behind their event. Events on one stream complete in the order
+	//   they were recorded, so a queue is only queried from the front.
+	// Finding freed blocks used to take a walk over every block, querying each one's
+	// event, on every alloc() and under `mutex`; with several threads most of their time
+	// went waiting for that lock. When memory runs short, _syncReadyEvents() waits for the
+	// whole device instead and takes every block, open or closed: all work that used them
+	// was issued before they were handed back.
+	// Lock order: mutex, then scanMutex, then pendingMutex.
+	typedef std::pair<std::thread::id, cudaStream_t> PendingKey;
+	struct OpenBatch { std::vector<Alloc*> blocks; };
+	struct ClosedBatch { cudaEvent_t event; std::vector<Alloc*> blocks; };
+	std::map<PendingKey, OpenBatch> openBatches;
+	std::map<PendingKey, std::deque<ClosedBatch> > pending;
+	omp_lock_t pendingMutex; // guards openBatches and pending
+	omp_lock_t scanMutex;    // one thread at a time polls the pending events
+
+	// Close this thread's open batches
+	void _closeOwnBatches()
+	{
+		const std::thread::id me = std::this_thread::get_id();
+		Lock pl(&pendingMutex);
+		for (auto it = openBatches.lower_bound(PendingKey(me, (cudaStream_t) 0));
+		     it != openBatches.end() && it->first.first == me; )
+		{
+			ClosedBatch c;
+			c.event = takeEvent();
+			DEBUG_HANDLE_ERROR(cudaEventRecord(c.event, it->first.second));
+			c.blocks.swap(it->second.blocks);
+			pending[it->first].push_back(std::move(c));
+			it = openBatches.erase(it);
+		}
+	}
+
+	// Take the blocks whose batches' events have completed. Returns at once if another
+	// thread is already scanning: it will find the same blocks.
+	void _collectReady(std::vector<Alloc*> &ready)
+	{
+		if (!omp_test_lock(&scanMutex))
+			return;
+		{
+			Lock pl(&pendingMutex);
+			for (auto it = pending.begin(); it != pending.end(); )
+			{
+				std::deque<ClosedBatch> &q = it->second;
+				while (!q.empty())
+				{
+					cudaError_t e = cudaEventQuery(q.front().event);
+					if (e == cudaErrorNotReady)
+						break;
+					if (e != cudaSuccess)
+						HandleError( e, __FILE__, __LINE__ );
+					ready.insert(ready.end(), q.front().blocks.begin(), q.front().blocks.end());
+					returnEvent(q.front().event);
+					q.pop_front();
+				}
+				if (q.empty())
+					it = pending.erase(it);
+				else
+					++it;
+			}
+		}
+		omp_unset_lock(&scanMutex);
+	}
+
+	// Wait for the device, then take every handed-back block, open or closed
+	void _collectAll(std::vector<Alloc*> &ready)
+	{
+		Lock sl(&scanMutex);
+		DEBUG_HANDLE_ERROR(cudaDeviceSynchronize());
+		Lock pl(&pendingMutex);
+		for (auto &kv : pending)
+			for (ClosedBatch &c : kv.second)
+			{
+				ready.insert(ready.end(), c.blocks.begin(), c.blocks.end());
+				returnEvent(c.event);
+			}
+		pending.clear();
+		for (auto &kv : openBatches)
+			ready.insert(ready.end(), kv.second.blocks.begin(), kv.second.blocks.end());
+		openBatches.clear();
+	}
 
 	//Look for the first suited space
 	Alloc *_getFirstSuitedFree(size_t size)
@@ -146,60 +255,24 @@ private:
 		return a;
 	}
 
-	//Free allocs with recorded ready events
+	// Wait for all handed-back blocks and free them (caller holds mutex)
 	bool _syncReadyEvents()
 	{
-		bool somethingReady(false);
-		Alloc *a = first;
-
-		while (a != NULL)
-		{
-			if (! a->free && a->freeWhenReady && a->readyEvent != 0)
-			{
-				DEBUG_HANDLE_ERROR(cudaEventSynchronize(a->readyEvent));
-				somethingReady = true;
-			}
-
-			a = a->next;
-		}
-
-		return somethingReady;
+		std::vector<Alloc*> ready;
+		_collectAll(ready);
+		for (Alloc *a : ready)
+			_free(a);
+		return !ready.empty();
 	}
 
-	//Free allocs with recorded ready events
+	// Free the pending blocks whose events have completed (caller holds mutex)
 	bool _freeReadyAllocs()
 	{
-		bool somethingFreed(false);
-		Alloc *curr = first;
-
-		// One pass. With the cache, _free() only merges curr with neighbours that are
-		// already free (deleting them, never curr), so curr->next is re-read after it;
-		// without the cache it deletes curr but leaves its neighbours alone. Restarting
-		// from the head after every free made this quadratic, all under the lock that
-		// every thread's allocations wait for.
-		while (curr != NULL)
-		{
-			Alloc *next = curr->next;
-			if (! curr->free && curr->freeWhenReady && curr->readyEvent != 0)
-			{
-				cudaError_t e = cudaEventQuery(curr->readyEvent);
-
-				if (e == cudaSuccess)
-				{
-					_free(curr);
-					somethingFreed = true;
-					if (cache)
-						next = curr->next;
-				}
-				else if (e != cudaErrorNotReady)
-				{
-					_printState();
-					HandleError( e, __FILE__, __LINE__ );
-				}
-			}
-			curr = next;
-		}
-		return somethingFreed;
+		std::vector<Alloc*> ready;
+		_collectReady(ready);
+		for (Alloc *a : ready)
+			_free(a);
+		return !ready.empty();
 	}
 
 	size_t _getTotalFreeSpace()
@@ -395,6 +468,7 @@ private:
 		 * still in use, handing the same device memory to something else.
 		 */
 		a->freeWhenReady = false;
+		a->readyMarked = false;
 		if (a->readyEvent != 0)
 		{
 			returnEvent(a->readyEvent);
@@ -503,6 +577,14 @@ public:
 
 		omp_init_lock(&mutex);
 		omp_init_lock(&eventMutex);
+		omp_init_lock(&pendingMutex);
+		omp_init_lock(&scanMutex);
+	}
+
+	void enqueuePending(Alloc *a)
+	{
+		Lock pl(&pendingMutex);
+		openBatches[PendingKey(a->readyThread, a->readyStream)].blocks.push_back(a);
 	}
 
 	cudaEvent_t takeEvent()
@@ -528,6 +610,11 @@ public:
 	void resize(size_t size)
 	{
 		Lock ml(&mutex);
+		{
+			Lock pl(&pendingMutex);
+			pending.clear();
+			openBatches.clear();
+		}
 		_clear();
 		totalSize = size;
 		_setup();
@@ -536,9 +623,15 @@ public:
 
 	Alloc* alloc(size_t requestedSize)
 	{
+		// Poll the events before taking the lock that every allocation waits for
+		std::vector<Alloc*> ready;
+		_closeOwnBatches();
+		_collectReady(ready);
+
 		Lock ml(&mutex);
 
-		_freeReadyAllocs();
+		for (Alloc *a : ready)
+			_free(a);
 
 //		printf("alloc: %u ", size);
 //		_printState();
@@ -571,7 +664,7 @@ public:
 				//Try to recover before throwing error
 				for (int i = 0; i <= ALLOC_RETRY; i ++)
 				{
-					if (_syncReadyEvents() && _freeReadyAllocs())
+					if (_syncReadyEvents())
 					{
 						curAlloc = _getFirstSuitedFree(size); //Is there space now?
 						if (curAlloc != NULL)
@@ -655,8 +748,15 @@ public:
 	{
 		{
 			Lock ml(&mutex);
+			for (auto &kv : pending)
+				for (ClosedBatch &c : kv.second)
+					DEBUG_HANDLE_ERROR(cudaEventDestroy(c.event));
+			pending.clear();
+			openBatches.clear();
 			_clear();
 		}
+		omp_destroy_lock(&scanMutex);
+		omp_destroy_lock(&pendingMutex);
 		for (cudaEvent_t e : eventPool)
 			DEBUG_HANDLE_ERROR(cudaEventDestroy(e));
 		eventPool.clear();

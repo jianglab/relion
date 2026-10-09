@@ -1304,7 +1304,7 @@ public:
 	#endif
 			doFreeDevice = false;
 
-			if (alloc->getReadyEvent() == 0)
+			if (!alloc->hasReadyMark())
 				alloc->markReadyEvent(stream);
 			alloc->doFreeWhenReady();
 			alloc = NULL;
