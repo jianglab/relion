@@ -38,10 +38,24 @@ __global__ void cuda_kernel_backproject2D(
 		unsigned img_y,
 		unsigned img_xy,
 		unsigned mdl_x,
-		int mdl_inity)
+		int mdl_inity,
+		const BPClassJob *g_classes = NULL, // class batching: block -> (class, orientation)
+		const int2 *g_blocks = NULL)        // (see cuda_kernel_diff2_coarse)
 {
 	unsigned tid = threadIdx.x;
 	unsigned img = blockIdx.x;
+	if (g_blocks != NULL)
+	{
+		const int2 b = g_blocks[blockIdx.x];
+		const BPClassJob &c = g_classes[b.x];
+		img = b.y;
+		g_eulers = c.eulers;
+		g_weights = c.weights;
+		g_model_real = c.model_real;
+		g_model_imag = c.model_imag;
+		g_model_weight = c.model_weight;
+		weight_norm = c.weight_norm;
+	}
 
 	int img_y_half = img_y / 2;
 	int max_r2_out = max_r2 * padding_factor * padding_factor;
@@ -198,10 +212,24 @@ __global__ void cuda_kernel_backproject3D(
 		unsigned mdl_x,
 		unsigned mdl_y,
 		int mdl_inity,
-		int mdl_initz)
+		int mdl_initz,
+		const BPClassJob *g_classes = NULL, // class batching: block -> (class, orientation)
+		const int2 *g_blocks = NULL)        // (see cuda_kernel_diff2_coarse)
 {
 	unsigned tid = threadIdx.x;
 	unsigned img = blockIdx.x;
+	if (g_blocks != NULL)
+	{
+		const int2 b = g_blocks[blockIdx.x];
+		const BPClassJob &c = g_classes[b.x];
+		img = b.y;
+		g_eulers = c.eulers;
+		g_weights = c.weights;
+		g_model_real = c.model_real;
+		g_model_imag = c.model_imag;
+		g_model_weight = c.model_weight;
+		weight_norm = c.weight_norm;
+	}
 	
 	int img_y_half = img_y / 2;
 	int img_z_half = img_z / 2;

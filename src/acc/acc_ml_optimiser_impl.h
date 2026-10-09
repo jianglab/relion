@@ -3553,6 +3553,55 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 		#endif
 
 			classPos = 0;
+#ifdef _CUDA_ENABLED
+			// All classes in one launch (see runWavgKernelBatched); the per-class
+			// pointers are those of the loop below
+			AccPtr<char> wavgTable = ptrFactory.make<char>();
+			if (gpuClassBatching())
+			{
+				std::vector<WavgClassJob> jobs;
+				std::vector<size_t> nums;
+				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+				{
+					if((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))
+						continue;
+					int iproj = (baseMLO->mymodel.nr_bodies > 1) ? ibody : iclass;
+					long unsigned orientation_num(ProjectionData.orientation_num[iclass]);
+					WavgClassJob job = {
+						AccProjectorKernel::makeKernel(
+							accMLO->bundle->projectors[iproj],
+							op.local_Minvsigma2.xdim,
+							op.local_Minvsigma2.ydim,
+							op.local_Minvsigma2.zdim,
+							op.local_Minvsigma2.xdim-1),
+						~eulers[iclass],
+						&(~sorted_weights)[classPos],
+						&(~wdiff2s)[AA_offset+AAXA_pos],
+						&(~wdiff2s)[XA_offset+AAXA_pos] };
+					jobs.push_back(job);
+					nums.push_back(orientation_num);
+					AAXA_pos += image_size;
+					classPos += orientation_num*translation_num;
+				}
+				runWavgKernelBatched(
+						jobs, nums,
+						&(~Fimgs)[re_offset],
+						&(~Fimgs)[im_offset],
+						&(~trans_xyz)[trans_x_offset],
+						&(~trans_xyz)[trans_y_offset],
+						&(~trans_xyz)[trans_z_offset],
+						~ctfs,
+						&(~wdiff2s)[sum_offset],
+						op,
+						translation_num,
+						image_size,
+						part_scale,
+						baseMLO->refs_are_ctf_corrected,
+						accMLO->dataIs3D,
+						wavgTable);
+			}
+			else
+#endif
 			for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
 			{
 				int iproj;
@@ -3641,6 +3690,73 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			======================================================*/
 
 			classPos = 0;
+#ifdef _CUDA_ENABLED
+			// All classes in one launch (see runBackProjectKernelBatched), unless the
+			// gradient variant is needed or the class models differ in size. Not in SOM
+			// iterations: the loop below does not advance classPos past a class it skips
+			// there, which the batched version would not reproduce.
+			bool bpBatched = false;
+			AccPtr<char> bpTable = ptrFactory.make<char>();
+			if (gpuClassBatching() && !baseMLO->do_grad && !baseMLO->is_som_iter)
+			{
+				int iproj_offset = 0;
+				if (baseMLO->grad_pseudo_halfsets)
+					iproj_offset = (op.part_id % 2) * baseMLO->mymodel.nr_classes;
+				std::vector<BPClassJob> jobs;
+				std::vector<size_t> nums;
+				AccBackprojector *first = NULL;
+				bool same_dims = true;
+				size_t pos = 0;
+				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+				{
+					if((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))
+						continue;
+					long unsigned orientation_num(ProjectionData.orientation_num[iclass]);
+					size_t my_pos = pos;
+					pos += orientation_num*translation_num;
+					if ( baseMLO->is_som_iter && class_sum_weight[iclass] == 0)
+						continue;
+					int iproj = (baseMLO->mymodel.nr_bodies > 1) ? ibody : iclass;
+					AccBackprojector &BP = accMLO->bundle->backprojectors[iproj + iproj_offset];
+					if (first == NULL)
+						first = &BP;
+					else if (BP.mdlX != first->mdlX || BP.mdlY != first->mdlY || BP.mdlZ != first->mdlZ ||
+					         BP.mdlInitY != first->mdlInitY || BP.mdlInitZ != first->mdlInitZ ||
+					         BP.maxR != first->maxR || BP.padding_factor != first->padding_factor)
+						same_dims = false;
+					BPClassJob job = {
+						~eulers[iclass],
+						&(~sorted_weights)[my_pos],
+						BP.d_mdlReal, BP.d_mdlImag, BP.d_mdlWeight,
+						(XFLOAT) (baseMLO->is_som_iter ? class_sum_weight[iclass] : op.sum_weight) };
+					jobs.push_back(job);
+					nums.push_back(orientation_num);
+				}
+				if (same_dims)
+				{
+					if (first != NULL)
+						runBackProjectKernelBatched(
+							*first, jobs, nums,
+							&(~Fimgs)[re_nomask_offset],
+							&(~Fimgs)[im_nomask_offset],
+							&(~trans_xyz)[trans_x_offset],
+							&(~trans_xyz)[trans_y_offset],
+							&(~trans_xyz)[trans_z_offset],
+							~Minvsigma2s,
+							~ctfs,
+							translation_num,
+							(XFLOAT) op.significant_weight,
+							op.local_Minvsigma2.xdim,
+							op.local_Minvsigma2.ydim,
+							op.local_Minvsigma2.zdim,
+							accMLO->dataIs3D,
+							ctf_premultiplied,
+							bpTable);
+					bpBatched = true;
+				}
+			}
+			if (!bpBatched)
+#endif
 			for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
 			{
 

@@ -13,7 +13,7 @@
 template<bool REFCTF, bool REF3D, bool DATA3D, int block_sz>
 __global__ void cuda_kernel_wavg(
 		XFLOAT *g_eulers,
-		AccProjectorKernel projector,
+		AccProjectorKernel projector_arg,
 		unsigned image_size,
 		unsigned long orientation_num,
 		XFLOAT *g_img_real,
@@ -29,12 +29,28 @@ __global__ void cuda_kernel_wavg(
 		unsigned long translation_num,
 		XFLOAT weight_norm,
 		XFLOAT significant_weight,
-		XFLOAT part_scale)
+		XFLOAT part_scale,
+		const WavgClassJob *g_classes = NULL, // class batching: block -> (class, orientation)
+		const int2 *g_blocks = NULL)          // (see cuda_kernel_diff2_coarse)
 {
 	XFLOAT ref_real, ref_imag, img_real, img_imag, trans_real, trans_imag;
 
 	int bid = blockIdx.x; //block ID
 	int tid = threadIdx.x;
+
+	AccProjectorKernel *pp = &projector_arg;
+	if (g_blocks != NULL)
+	{
+		const int2 b = g_blocks[blockIdx.x];
+		const WavgClassJob &c = g_classes[b.x];
+		pp = const_cast<AccProjectorKernel *>(&c.projector);
+		g_eulers = c.eulers;
+		g_weights = c.weights;
+		g_wdiff2s_AA = c.wdiff2s_AA;
+		g_wdiff2s_XA = c.wdiff2s_XA;
+		bid = b.y;
+	}
+	AccProjectorKernel &projector = *pp;
 
 	extern __shared__ XFLOAT buffer[];
 

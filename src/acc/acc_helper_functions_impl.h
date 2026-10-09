@@ -1137,6 +1137,136 @@ void mapAllWeightsToMweights(
 }
 
 #ifdef _CUDA_ENABLED
+// Upload a class table and a block table with one block per (class, orientation),
+// in one copy; returns the number of blocks
+template <class Job>
+static size_t uploadClassBlocks(std::vector<Job> &jobs, std::vector<size_t> &nums,
+		AccPtr<char> &table, const Job *&d_jobs, const int2 *&d_blocks)
+{
+	std::vector<int2> blocks;
+	for (size_t c = 0; c < jobs.size(); c++)
+		for (size_t o = 0; o < nums[c]; o++)
+			blocks.push_back(make_int2((int) c, (int) o));
+	const size_t class_bytes = ((jobs.size() * sizeof(Job) + 15) / 16) * 16;
+	table.setSize(class_bytes + blocks.size() * sizeof(int2));
+	table.allAlloc();
+	memcpy(&table[0], jobs.data(), jobs.size() * sizeof(Job));
+	memcpy(&table[class_bytes], blocks.data(), blocks.size() * sizeof(int2));
+	table.cpToDevice();
+	d_jobs = (const Job *) ~table;
+	d_blocks = (const int2 *) &(~table)[class_bytes];
+	return blocks.size();
+}
+
+void runWavgKernelBatched(
+		std::vector<WavgClassJob> &jobs,
+		std::vector<size_t> &orientation_nums,
+		XFLOAT *Fimg_real,
+		XFLOAT *Fimg_imag,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *trans_z,
+		XFLOAT *ctfs,
+		XFLOAT *wdiff2s_parts,
+		OptimisationParamters &op,
+		long unsigned translation_num,
+		unsigned long image_size,
+		XFLOAT part_scale,
+		bool refs_are_ctf_corrected,
+		bool data_is_3D,
+		AccPtr<char> &table)
+{
+	if (jobs.empty())
+		return;
+	const WavgClassJob *d_jobs;
+	const int2 *d_blocks;
+	const size_t n = uploadClassBlocks(jobs, orientation_nums, table, d_jobs, d_blocks);
+	deviceStream_t stream = table.getStream();
+	AccProjectorKernel &projector = jobs[0].projector;
+	// The same kernel variants as runWavgKernel
+#define WAVG_BATCH(RC, R3, D3, BS) cuda_kernel_wavg<RC, R3, D3, BS><<<n, BS, (3*BS+9)*sizeof(XFLOAT), stream>>>( \
+		NULL, projector, image_size, 0, Fimg_real, Fimg_imag, trans_x, trans_y, trans_z, NULL, ctfs, \
+		wdiff2s_parts, NULL, NULL, translation_num, (XFLOAT) op.sum_weight, (XFLOAT) op.significant_weight, \
+		part_scale, d_jobs, d_blocks)
+	if (refs_are_ctf_corrected)
+	{
+		if (data_is_3D)                WAVG_BATCH(true, true, true, WAVG_BLOCK_SIZE_DATA3D);
+		else if (projector.mdlZ != 0)  WAVG_BATCH(true, true, false, WAVG_BLOCK_SIZE);
+		else                           WAVG_BATCH(true, false, false, WAVG_BLOCK_SIZE);
+	}
+	else
+	{
+		if (data_is_3D)                WAVG_BATCH(false, true, true, WAVG_BLOCK_SIZE_DATA3D);
+		else if (projector.mdlZ != 0)  WAVG_BATCH(false, true, false, WAVG_BLOCK_SIZE);
+		else                           WAVG_BATCH(false, false, false, WAVG_BLOCK_SIZE);
+	}
+#undef WAVG_BATCH
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+
+void runBackProjectKernelBatched(
+		AccBackprojector &BP,
+		std::vector<BPClassJob> &jobs,
+		std::vector<size_t> &orientation_nums,
+		XFLOAT *d_img_real,
+		XFLOAT *d_img_imag,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *trans_z,
+		XFLOAT* d_Minvsigma2s,
+		XFLOAT* d_ctfs,
+		unsigned long translation_num,
+		XFLOAT significant_weight,
+		int imgX,
+		int imgY,
+		int imgZ,
+		bool data_is_3D,
+		bool ctf_premultiplied,
+		AccPtr<char> &table)
+{
+	if (jobs.empty())
+		return;
+	const BPClassJob *d_jobs;
+	const int2 *d_blocks;
+	const size_t n = uploadClassBlocks(jobs, orientation_nums, table, d_jobs, d_blocks);
+	deviceStream_t stream = table.getStream();
+	// The same kernel variants as runBackProjectKernel (without do_grad); BP gives the
+	// dimensions shared by all classes' models, jobs their arrays
+	if (BP.mdlZ == 1)
+	{
+#define BP2D_BATCH(CP) cuda_kernel_backproject2D<CP><<<n, BP_2D_BLOCK_SIZE, 0, stream>>>( \
+			d_img_real, d_img_imag, trans_x, trans_y, NULL, d_Minvsigma2s, d_ctfs, \
+			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
+			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgX*imgY, BP.mdlX, BP.mdlInitY, \
+			d_jobs, d_blocks)
+		if (ctf_premultiplied) BP2D_BATCH(true);
+		else                   BP2D_BATCH(false);
+#undef BP2D_BATCH
+	}
+	else
+	{
+#define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<n, BS, 0, stream>>>( \
+			d_img_real, d_img_imag, trans_x, trans_y, trans_z, NULL, d_Minvsigma2s, d_ctfs, \
+			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
+			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgZ, imgX*imgY*imgZ, \
+			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ, d_jobs, d_blocks)
+		if (data_is_3D)
+		{
+			if (ctf_premultiplied) BP3D_BATCH(true, true, BP_DATA3D_BLOCK_SIZE);
+			else                   BP3D_BATCH(true, false, BP_DATA3D_BLOCK_SIZE);
+		}
+		else
+		{
+			if (ctf_premultiplied) BP3D_BATCH(false, true, BP_REF3D_BLOCK_SIZE);
+			else                   BP3D_BATCH(false, false, BP_REF3D_BLOCK_SIZE);
+		}
+#undef BP3D_BATCH
+	}
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+#endif
+
+#ifdef _CUDA_ENABLED
 // Class batching of the coarse difference kernel: the two launches (whole blocks of
 // eulers_per_block orientations, then the rest one per block) for all classes at once
 template<bool REF3D, bool DATA3D, int block_sz, int eulers_per_block, int prefetch_fraction>

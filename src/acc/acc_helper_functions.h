@@ -286,6 +286,49 @@ bool runDiff2KernelCoarseBatched(
 		AccPtr<char> &table);
 #endif
 
+#ifdef _CUDA_ENABLED
+// All classes' weighted averages / back-projections of one image in one launch
+// (one block per class and orientation); `table` is uploaded and must outlive
+// the launch. Back-projection without do_grad only.
+void runWavgKernelBatched(
+		std::vector<WavgClassJob> &jobs,
+		std::vector<size_t> &orientation_nums,
+		XFLOAT *Fimg_real,
+		XFLOAT *Fimg_imag,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *trans_z,
+		XFLOAT *ctfs,
+		XFLOAT *wdiff2s_parts,
+		OptimisationParamters &op,
+		long unsigned translation_num,
+		unsigned long image_size,
+		XFLOAT part_scale,
+		bool refs_are_ctf_corrected,
+		bool data_is_3D,
+		AccPtr<char> &table);
+
+void runBackProjectKernelBatched(
+		AccBackprojector &BP,
+		std::vector<BPClassJob> &jobs,
+		std::vector<size_t> &orientation_nums,
+		XFLOAT *d_img_real,
+		XFLOAT *d_img_imag,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *trans_z,
+		XFLOAT* d_Minvsigma2s,
+		XFLOAT* d_ctfs,
+		unsigned long translation_num,
+		XFLOAT significant_weight,
+		int imgX,
+		int imgY,
+		int imgZ,
+		bool data_is_3D,
+		bool ctf_premultiplied,
+		AccPtr<char> &table);
+#endif
+
 void runDiff2KernelFine(
 		AccProjectorKernel &projector,
 		XFLOAT *corr_img,

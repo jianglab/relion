@@ -327,6 +327,28 @@ struct CoarseClassJob
 	XFLOAT *eulers;
 	XFLOAT *diff2s;
 };
+
+// One class of a class-batched weighted-average launch (see cuda_kernel_wavg)
+struct WavgClassJob
+{
+	AccProjectorKernel projector;
+	XFLOAT *eulers;
+	XFLOAT *weights;
+	XFLOAT *wdiff2s_AA;
+	XFLOAT *wdiff2s_XA;
+};
+
+// One class of a class-batched back-projection launch (cuda_kernel_backproject2D/3D);
+// all classes' models have the same dimensions
+struct BPClassJob
+{
+	XFLOAT *eulers;
+	XFLOAT *weights;
+	XFLOAT *model_real;
+	XFLOAT *model_imag;
+	XFLOAT *model_weight;
+	XFLOAT weight_norm;
+};
 #endif
 
 
