@@ -4156,7 +4156,22 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			// its absence in other parts of the code has caused issues. It is also very low-cost.
 			accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 
-			wdiff2s.cpToHost();
+			// Only the parts read below: the sum, and (with scale correction) the AA and
+			// XA images of the classes used, which come first. All of wdiff2s was a
+			// third of a megabyte per particle with 50 classes, mostly unused.
+			{
+				size_t nr_used = 0;
+				for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
+					if ((baseMLO->mymodel.pdf_class[c] != 0.) && (ProjectionData.class_entries[c] != 0))
+						nr_used++;
+				cudaStream_t ws = wdiff2s.getStream();
+				CudaShortcuts::cpyDeviceToHost<XFLOAT>(&(~wdiff2s)[sum_offset], &wdiff2s[sum_offset], image_size, ws);
+				if (baseMLO->do_scale_correction && nr_used > 0)
+				{
+					CudaShortcuts::cpyDeviceToHost<XFLOAT>(&(~wdiff2s)[AA_offset], &wdiff2s[AA_offset], nr_used * image_size, ws);
+					CudaShortcuts::cpyDeviceToHost<XFLOAT>(&(~wdiff2s)[XA_offset], &wdiff2s[XA_offset], nr_used * image_size, ws);
+				}
+			}
 			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
 	#elif _SYCL_ENABLED
 			if (accMLO->useStream())
