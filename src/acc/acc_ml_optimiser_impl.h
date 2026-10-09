@@ -658,8 +658,10 @@ void getFourierTransformsAndCtfs(long int part_id,
 				AccPtr<XFLOAT> softMaskSum    = ptrFactory.make<XFLOAT>((size_t)SOFTMASK_BLOCK_SIZE);
 				AccPtr<XFLOAT> softMaskSum_bg = ptrFactory.make<XFLOAT>((size_t)SOFTMASK_BLOCK_SIZE);
 #else
-                AccPtr<XFLOAT> softMaskSum    = ptrFactory.make<XFLOAT>((size_t)SOFTMASK_BLOCK_SIZE, 0);
-                AccPtr<XFLOAT> softMaskSum_bg = ptrFactory.make<XFLOAT>((size_t)SOFTMASK_BLOCK_SIZE, 0);
+                // On this thread's stream: stream 0 was the legacy default stream, whose
+                // every operation waited for, and held up, all threads' GPU work
+                AccPtr<XFLOAT> softMaskSum    = ptrFactory.make<XFLOAT>((size_t)SOFTMASK_BLOCK_SIZE);
+                AccPtr<XFLOAT> softMaskSum_bg = ptrFactory.make<XFLOAT>((size_t)SOFTMASK_BLOCK_SIZE);
 #endif
                 softMaskSum.accAlloc();
                 softMaskSum_bg.accAlloc();
@@ -748,7 +750,8 @@ void getFourierTransformsAndCtfs(long int part_id,
 #ifdef _SYCL_ENABLED
 			AccPtr<XFLOAT> spectrumAndXi2 = ptrFactory.make<XFLOAT>((size_t)((baseMLO->image_full_size[optics_group]/2+1)+1));
 #else
-            AccPtr<XFLOAT> spectrumAndXi2 = ptrFactory.make<XFLOAT>((size_t)((baseMLO->image_full_size[optics_group]/2+1)+1), 0); // last +1 is the Xi2, to remove an expensive memcpy
+            // On this thread's stream (not stream 0, the legacy default stream: see softMaskSum)
+            AccPtr<XFLOAT> spectrumAndXi2 = ptrFactory.make<XFLOAT>((size_t)((baseMLO->image_full_size[optics_group]/2+1)+1)); // last +1 is the Xi2, to remove an expensive memcpy
 #endif
             spectrumAndXi2.allAlloc();
             spectrumAndXi2.accInit(0); // same stream as the kernel and the copy below

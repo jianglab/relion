@@ -2369,7 +2369,7 @@ void runCollect2jobs(	int grid_dim,
 #ifdef _CUDA_ENABLED
 	dim3 numblocks(grid_dim);
 	size_t shared_buffer = sizeof(XFLOAT)*SUMW_BLOCK_SIZE*5; // x+y+z+myp+weights
-	cuda_kernel_collect2jobs<true><<<numblocks,SUMW_BLOCK_SIZE,shared_buffer>>>(
+	cuda_kernel_collect2jobs<true><<<numblocks,SUMW_BLOCK_SIZE,shared_buffer,stream>>>(
 			oo_otrans_x,          // otrans-size -> make const
 			oo_otrans_y,          // otrans-size -> make const
 			oo_otrans_z,          // otrans-size -> make const
@@ -2469,7 +2469,7 @@ void runCollect2jobs(	int grid_dim,
 #ifdef _CUDA_ENABLED
 	dim3 numblocks(grid_dim);
 	size_t shared_buffer = sizeof(XFLOAT)*SUMW_BLOCK_SIZE*4; // x+y+myp+weights
-	cuda_kernel_collect2jobs<false><<<numblocks,SUMW_BLOCK_SIZE,shared_buffer>>>(
+	cuda_kernel_collect2jobs<false><<<numblocks,SUMW_BLOCK_SIZE,shared_buffer,stream>>>(
 			oo_otrans_x,          // otrans-size -> make const
 			oo_otrans_y,          // otrans-size -> make const
 			oo_otrans_z,          // otrans-size -> make const

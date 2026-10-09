@@ -637,7 +637,7 @@ void powerClass(int		in_gridSize,
 {
 #ifdef _CUDA_ENABLED
 dim3 grid_size(in_gridSize);
-	cuda_kernel_powerClass<DATA3D><<<grid_size,in_blocksize,0,0>>>(g_image,
+	cuda_kernel_powerClass<DATA3D><<<grid_size,in_blocksize,0,stream>>>(g_image,
 		g_spectrum,
 		image_size,
 		spectrum_size,
