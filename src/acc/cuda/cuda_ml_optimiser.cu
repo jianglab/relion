@@ -239,9 +239,17 @@ void MlOptimiserCuda::resetData()
 
 	unsigned nr_classes = baseMLO->mymodel.nr_classes;
 
+	// With class batching nearly all GPU work is issued for all classes at once on this
+	// thread's stream; the few per-class steps left then use that stream too, so that
+	// waiting for "all class streams" is one wait instead of one per class (each a
+	// driver call under the driver's per-process lock)
+	classStreamsShared = gpuClassBatching();
 	classStreams.resize(nr_classes, 0);
 	for (int i = 0; i < nr_classes; i++)
-		HANDLE_ERROR(cudaStreamCreate(&classStreams[i])); //HANDLE_ERROR(cudaStreamCreateWithFlags(&classStreams[i],cudaStreamNonBlocking));
+		if (classStreamsShared)
+			classStreams[i] = cudaStreamPerThread;
+		else
+			HANDLE_ERROR(cudaStreamCreate(&classStreams[i])); //HANDLE_ERROR(cudaStreamCreateWithFlags(&classStreams[i],cudaStreamNonBlocking));
 
 	transformer1.clear();
 	transformer2.clear();

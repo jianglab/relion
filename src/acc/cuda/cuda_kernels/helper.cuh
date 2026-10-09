@@ -87,13 +87,32 @@ __global__ void cuda_kernel_collect2jobs(	XFLOAT *g_oo_otrans_x,          // otr
 											unsigned long *d_rot_idx,
 											unsigned long *d_trans_idx,
 											unsigned long *d_job_idx,
-											unsigned long *d_job_num
+											unsigned long *d_job_num,
+											// class batching: one block per class and job; the
+											// outputs stay indexed by the global block (see
+											// cuda_kernel_diff2_coarse)
+											const CollectClassJob *g_classes = NULL,
+											const int *g_class_start = NULL,
+											int n_classes = 0
 											)
 {
-	// blockid
+	// blockid (outputs are always at blockIdx.x)
 	int bid = blockIdx.x;
 	//threadid
 	int tid = threadIdx.x;
+
+	if (n_classes > 0)
+	{
+		const CollectClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, bid)];
+		g_oo_otrans_x = c.oo_otrans_x;
+		g_oo_otrans_y = c.oo_otrans_y;
+		g_oo_otrans_z = c.oo_otrans_z;
+		g_myp_oo_otrans_x2y2z2 = c.myp_oo_otrans_x2y2z2;
+		g_i_weights = c.weights;
+		d_trans_idx = c.trans_idx;
+		d_job_idx = c.job_idx;
+		d_job_num = c.job_num;
+	}
 
 	extern __shared__ XFLOAT buffer[];
 
@@ -157,12 +176,13 @@ __global__ void cuda_kernel_collect2jobs(	XFLOAT *g_oo_otrans_x,          // otr
 		}
 		__syncthreads();
 	}
-	g_o_weights[bid]			        = s_o_weights[0];
-	g_thr_wsum_sigma2_offset[bid]       = s_thr_wsum_sigma2_offset[0];
-	g_thr_wsum_prior_offsetx_class[bid] = s_thr_wsum_prior_offsetx_class[0];
-	g_thr_wsum_prior_offsety_class[bid] = s_thr_wsum_prior_offsety_class[0];
+	const int obid = blockIdx.x;
+	g_o_weights[obid]			         = s_o_weights[0];
+	g_thr_wsum_sigma2_offset[obid]       = s_thr_wsum_sigma2_offset[0];
+	g_thr_wsum_prior_offsetx_class[obid] = s_thr_wsum_prior_offsetx_class[0];
+	g_thr_wsum_prior_offsety_class[obid] = s_thr_wsum_prior_offsety_class[0];
 	if(DATA3D)
-		g_thr_wsum_prior_offsetz_class[bid] = s_thr_wsum_prior_offsetz_class[0];
+		g_thr_wsum_prior_offsetz_class[obid] = s_thr_wsum_prior_offsetz_class[0];
 }
 
 __global__ void cuda_kernel_exponentiate_weights_fine(

@@ -1205,6 +1205,80 @@ void runWavgKernelBatched(
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 
+void runDiff2KernelFineBatched(
+		std::vector<FineClassJob> &jobs,
+		std::vector<size_t> &job_nums,
+		XFLOAT *corr_img,
+		XFLOAT *Fimgs_real,
+		XFLOAT *Fimgs_imag,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *trans_z,
+		unsigned long image_size,
+		XFLOAT sum_init,
+		long unsigned translation_num,
+		bool data_is_3D,
+		AccPtr<char> &table)
+{
+	if (jobs.empty())
+		return;
+	const FineClassJob *d_jobs;
+	const int *d_start;
+	const size_t n = uploadClassTable(jobs, job_nums, table, d_jobs, d_start);
+	const int nc = jobs.size();
+	if (n == 0)
+		return;
+	deviceStream_t stream = table.getStream();
+	AccProjectorKernel &projector = jobs[0].projector;
+	// The same kernel variants as runDiff2KernelFine (not do_CC)
+#define D2F_BATCH(R3, D3, BS, CH) cuda_kernel_diff2_fine<R3, D3, BS, CH><<<n, BS, 0, stream>>>( \
+		NULL, Fimgs_real, Fimgs_imag, trans_x, trans_y, trans_z, projector, corr_img, NULL, \
+		image_size, sum_init, 0, translation_num, 0, NULL, NULL, NULL, NULL, d_jobs, d_start, nc)
+	if (data_is_3D)               D2F_BATCH(true, true, D2F_BLOCK_SIZE_DATA3D, D2F_CHUNK_DATA3D);
+	else if (projector.mdlZ != 0) D2F_BATCH(true, false, D2F_BLOCK_SIZE_REF3D, D2F_CHUNK_REF3D);
+	else                          D2F_BATCH(false, false, D2F_BLOCK_SIZE_2D, D2F_CHUNK_2D);
+#undef D2F_BATCH
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+
+void runCollect2jobsBatched(
+		std::vector<CollectClassJob> &jobs,
+		std::vector<size_t> &block_nums,
+		XFLOAT significant_weight,
+		XFLOAT sum_weight,
+		unsigned long nr_trans,
+		unsigned long nr_oversampled_trans,
+		unsigned long nr_oversampled_rot,
+		unsigned long oversamples,
+		bool skip_rots,
+		XFLOAT * p_weights,
+		XFLOAT * p_thr_wsum_prior_offsetx_class,
+		XFLOAT * p_thr_wsum_prior_offsety_class,
+		XFLOAT * p_thr_wsum_prior_offsetz_class,
+		XFLOAT * p_thr_wsum_sigma2_offset,
+		bool data_is_3D,
+		AccPtr<char> &table)
+{
+	if (jobs.empty())
+		return;
+	const CollectClassJob *d_jobs;
+	const int *d_start;
+	const size_t n = uploadClassTable(jobs, block_nums, table, d_jobs, d_start);
+	const int nc = jobs.size();
+	if (n == 0)
+		return;
+	size_t shared_buffer = sizeof(XFLOAT)*SUMW_BLOCK_SIZE*5; // x+y+z+myp+weights
+#define C2J_BATCH(D3) cuda_kernel_collect2jobs<D3><<<n, SUMW_BLOCK_SIZE, shared_buffer, table.getStream()>>>( \
+		NULL, NULL, NULL, NULL, NULL, significant_weight, sum_weight, nr_trans, nr_oversampled_trans, \
+		nr_oversampled_rot, oversamples, skip_rots, p_weights, p_thr_wsum_prior_offsetx_class, \
+		p_thr_wsum_prior_offsety_class, p_thr_wsum_prior_offsetz_class, p_thr_wsum_sigma2_offset, \
+		NULL, NULL, NULL, NULL, d_jobs, d_start, nc)
+	if (data_is_3D) C2J_BATCH(true);
+	else            C2J_BATCH(false);
+#undef C2J_BATCH
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+
 void runBackProjectKernelBatched(
 		AccBackprojector &BP,
 		std::vector<BPClassJob> &jobs,

@@ -308,6 +308,39 @@ void runWavgKernelBatched(
 		bool data_is_3D,
 		AccPtr<char> &table);
 
+void runDiff2KernelFineBatched(
+		std::vector<FineClassJob> &jobs,
+		std::vector<size_t> &job_nums,
+		XFLOAT *corr_img,
+		XFLOAT *Fimgs_real,
+		XFLOAT *Fimgs_imag,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *trans_z,
+		unsigned long image_size,
+		XFLOAT sum_init,
+		long unsigned translation_num,
+		bool data_is_3D,
+		AccPtr<char> &table);
+
+void runCollect2jobsBatched(
+		std::vector<CollectClassJob> &jobs,
+		std::vector<size_t> &block_nums,
+		XFLOAT significant_weight,
+		XFLOAT sum_weight,
+		unsigned long nr_trans,
+		unsigned long nr_oversampled_trans,
+		unsigned long nr_oversampled_rot,
+		unsigned long oversamples,
+		bool skip_rots,
+		XFLOAT * p_weights,
+		XFLOAT * p_thr_wsum_prior_offsetx_class,
+		XFLOAT * p_thr_wsum_prior_offsety_class,
+		XFLOAT * p_thr_wsum_prior_offsetz_class,
+		XFLOAT * p_thr_wsum_sigma2_offset,
+		bool data_is_3D,
+		AccPtr<char> &table);
+
 void runBackProjectKernelBatched(
 		AccBackprojector &BP,
 		std::vector<BPClassJob> &jobs,

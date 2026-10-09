@@ -329,6 +329,32 @@ struct CoarseClassJob
 	int n_even; // orientations in whole blocks; the rest follow one per block
 };
 
+// One class of a class-batched fine difference launch (see cuda_kernel_diff2_fine);
+// the index and output arrays point at the class's part of the pass arrays
+struct FineClassJob
+{
+	AccProjectorKernel projector;
+	XFLOAT *eulers;
+	XFLOAT *diff2s;
+	unsigned long *rot_idx;
+	unsigned long *trans_idx;
+	unsigned long *job_idx;
+	unsigned long *job_num;
+};
+
+// One class of a class-batched collect2jobs launch (see cuda_kernel_collect2jobs)
+struct CollectClassJob
+{
+	XFLOAT *oo_otrans_x;
+	XFLOAT *oo_otrans_y;
+	XFLOAT *oo_otrans_z;
+	XFLOAT *myp_oo_otrans_x2y2z2;
+	XFLOAT *weights;
+	unsigned long *trans_idx;
+	unsigned long *job_idx;
+	unsigned long *job_num;
+};
+
 // One class of a class-batched weighted-average launch (see cuda_kernel_wavg)
 struct WavgClassJob
 {

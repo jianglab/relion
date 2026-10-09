@@ -1361,9 +1361,7 @@ void getAllSquaredDifferencesCoarse(
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
     #elif _CUDA_ENABLED
-   		for (int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[exp_iclass]));
-		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+   		accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 	#elif _SYCL_ENABLED
 		if (accMLO->useStream())
 			for (int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -1413,8 +1411,19 @@ void getAllSquaredDifferencesCoarse(
 					image_size,
 					accMLO->dataIs3D,
 					table);
-			// On the same stream as the differences they read
-			if (img_id == sp.nr_images - 1)
+			// On the same stream as the differences they read. Plans built together
+			// (setupBatch) hold all classes' orientations end to end, in the order of
+			// allWeights, so one launch maps them all.
+			AccProjectorPlan &batch = planBatches[img_id];
+			if (img_id == sp.nr_images - 1 && accMLO->generateProjectionPlanOnTheFly && batch.orientation_num > 0)
+				mapAllWeightsToMweights(
+					~batch.iorientclasses,
+					&(~allWeights)[0],
+					&(~Mweight)[0],
+					batch.orientation_num,
+					translation_num,
+					table.getStream());
+			else if (img_id == sp.nr_images - 1)
 				for (size_t j = 0; j < jobs.size(); j++)
 				{
 					AccProjectorPlan &plan = projectorPlans[job_iclass[j]*sp.nr_images + img_id];
@@ -1486,9 +1495,7 @@ void getAllSquaredDifferencesCoarse(
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread)); // does not appear to be NEEDED FOR NON-BLOCKING CLASS STREAMS in tests, but should be to sync against classStreams
     #elif _CUDA_ENABLED
-		for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[exp_iclass]));
-		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread)); // does not appear to be NEEDED FOR NON-BLOCKING CLASS STREAMS in tests, but should be to sync against classStreams
+		accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 	#elif _SYCL_ENABLED
 		if (accMLO->useStream())
 			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -1872,9 +1879,7 @@ void getAllSquaredDifferencesFine(
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
     #elif _CUDA_ENABLED
-		for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[exp_iclass]));
-		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+		accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 	#elif _SYCL_ENABLED
 		if (accMLO->useStream())
 			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -1882,6 +1887,53 @@ void getAllSquaredDifferencesFine(
         devAcc->waitAll();
 	#endif
 
+#ifdef _CUDA_ENABLED
+		// All classes in one launch (see runDiff2KernelFineBatched), with the same
+		// per-class pointers as the loop below
+		AccPtr<char> fineTable = ptrFactory.make<char>();
+		const bool fine_cc = (baseMLO->iter == 1 && baseMLO->do_firstiter_cc) || baseMLO->do_always_cc;
+		if (gpuClassBatching() && !fine_cc)
+		{
+			std::vector<FineClassJob> jobs;
+			std::vector<size_t> nums;
+			for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+			{
+				if (FineProjectionData.class_entries[iclass] == 0 || FPCMasks[iclass].weightNum == 0)
+					continue;
+				int iproj = (baseMLO->mymodel.nr_bodies > 1) ? ibody : iclass;
+				IndexedDataArray thisClassFinePassWeights(FinePassWeights,FPCMasks[iclass]);
+				FineClassJob job = {
+					AccProjectorKernel::makeKernel(
+						accMLO->bundle->projectors[iproj],
+						op.local_Minvsigma2.xdim,
+						op.local_Minvsigma2.ydim,
+						op.local_Minvsigma2.zdim,
+						op.local_Minvsigma2.xdim-1),
+					~eulers[iclass-sp.iclass_min],
+					~thisClassFinePassWeights.weights,
+					~thisClassFinePassWeights.rot_idx,
+					~thisClassFinePassWeights.trans_idx,
+					~FPCMasks[iclass].jobOrigin,
+					~FPCMasks[iclass].jobExtent };
+				jobs.push_back(job);
+				nums.push_back(FPCMasks[iclass].jobOrigin.getSize());
+			}
+			runDiff2KernelFineBatched(
+					jobs, nums,
+					~corr_img,
+					&(~Fimg_)[img_re_offset],
+					&(~Fimg_)[img_im_offset],
+					&(~trans_xyz)[trans_x_offset],
+					&(~trans_xyz)[trans_y_offset],
+					&(~trans_xyz)[trans_z_offset],
+					image_size,
+					op.highres_Xi2_img[img_id] / 2.,
+					translation_num,
+					accMLO->dataIs3D,
+					fineTable);
+		}
+		else
+#endif
 		for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
 		{
 			int iproj;
@@ -1961,9 +2013,7 @@ void getAllSquaredDifferencesFine(
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
     #elif _CUDA_ENABLED
-		for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[exp_iclass]));
-		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+		accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 	#elif _SYCL_ENABLED
 		if (accMLO->useStream())
 			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -2477,9 +2527,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
             DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
 #elif _CUDA_ENABLED
-            for (int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
-                DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[exp_iclass]));
-            DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+            accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 #elif defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
 			if (accMLO->useStream())
 				for (int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -2631,9 +2679,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
             DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
 #elif _CUDA_ENABLED
-            for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
-                DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[exp_iclass]));
-            DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+            accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 #elif defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
 			if (accMLO->useStream())
 				for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -2947,6 +2993,51 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     CTOC(accMLO->timer,"collect_data_2_pre_kernel");
     int partial_pos=0;
 
+#ifdef _CUDA_ENABLED
+    // All classes in one launch (see runCollect2jobsBatched): the outputs of class
+    // blocks follow each other as in the loop below, which is the global block order
+    AccPtr<char> collectTable = ptrFactory.make<char>();
+    if (gpuClassBatching())
+    {
+        std::vector<CollectClassJob> jobs;
+        std::vector<size_t> nums;
+        for (long int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
+        {
+            long int fake_class = exp_iclass-sp.iclass_min;
+            if ((baseMLO->mymodel.pdf_class[exp_iclass] == 0.) || (ProjectionData.class_entries[exp_iclass] == 0) )
+                continue;
+            IndexedDataArray thisClassFinePassWeights(FinePassWeights,FPCMasks[exp_iclass]);
+            long int cpos=fake_class*nr_transes;
+            CollectClassJob job = {
+                &(~oo_otrans)[otrans_x+cpos],
+                &(~oo_otrans)[otrans_y+cpos],
+                &(~oo_otrans)[otrans_z+cpos],
+                &(~oo_otrans)[otrans_x2y2z2+cpos],
+                ~thisClassFinePassWeights.weights,
+                ~thisClassFinePassWeights.trans_idx,
+                ~FPCMasks[exp_iclass].jobOrigin,
+                ~FPCMasks[exp_iclass].jobExtent };
+            jobs.push_back(job);
+            nums.push_back(block_nums[fake_class]);
+        }
+        runCollect2jobsBatched(jobs, nums,
+                    (XFLOAT)op.significant_weight,
+                    (XFLOAT)op.sum_weight,
+                    sp.nr_trans,
+                    sp.nr_oversampled_trans,
+                    sp.nr_oversampled_rot,
+                    oversamples,
+                    (baseMLO->do_skip_align || baseMLO->do_skip_rotate ),
+                    &(~p_weights)[0],
+                    &(~p_thr_wsum_prior_offsetxyz_class)[offsetx_class],
+                    &(~p_thr_wsum_prior_offsetxyz_class)[offsety_class],
+                    &(~p_thr_wsum_prior_offsetxyz_class)[offsetz_class],
+                    &(~p_thr_wsum_prior_offsetxyz_class)[sigma2_offset],
+                    accMLO->dataIs3D,
+                    collectTable);
+    }
+    else
+#endif
     for (long int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
     {
         long int fake_class = exp_iclass-sp.iclass_min; // if we only have the third class to do, the third class will be the "first" we do, i.e. the "fake" first.
@@ -3433,9 +3524,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
         #elif _CUDA_ENABLED
-			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
-				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[exp_iclass]));
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+			accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 		#elif _SYCL_ENABLED
 			if (accMLO->useStream())
 				for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -3543,9 +3632,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[iclass]));
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
         #elif _CUDA_ENABLED
-			for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
-				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[iclass]));
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+			accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 		#elif _SYCL_ENABLED
 			if (accMLO->useStream())
 				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
@@ -3843,9 +3930,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     #elif _CUDA_ENABLED
 			// NOTE: We've never seen that this sync is necessary, but it is needed in principle, and
 			// its absence in other parts of the code has caused issues. It is also very low-cost.
-			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
-				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(accMLO->classStreams[exp_iclass]));
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+			accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
 
 			wdiff2s.cpToHost();
 			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));

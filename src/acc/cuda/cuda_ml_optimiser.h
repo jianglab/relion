@@ -82,6 +82,16 @@ public:
 
    //Class streams ( for concurrent scheduling of class-specific kernels)
 	std::vector< cudaStream_t > classStreams;
+	bool classStreamsShared = false; // all classStreams are cudaStreamPerThread (see resetData)
+
+	// Wait for the work on the class streams of classes first..last and on this thread's stream
+	void syncClassStreams(long first, long last)
+	{
+		if (!classStreamsShared)
+			for (long c = first; c <= last; c++)
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(classStreams[c]));
+		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+	}
 	cudaError_t errorStatus;
 
 	CudaFFT transformer1;
@@ -132,7 +142,7 @@ public:
 	~MlOptimiserCuda()
 	{
 		for (int i = 0; i < classStreams.size(); i++)
-			if (classStreams[i] != NULL)
+			if (classStreams[i] != NULL && classStreams[i] != cudaStreamPerThread)
 				HANDLE_ERROR(cudaStreamDestroy(classStreams[i]));
 	}
 

@@ -226,7 +226,7 @@ __global__ void cuda_kernel_diff2_fine(
 		XFLOAT *trans_x,
 		XFLOAT *trans_y,
 		XFLOAT *trans_z,
-		AccProjectorKernel projector,
+		AccProjectorKernel projector_arg,
 		XFLOAT *g_corr_img,
 		XFLOAT *g_diff2s,
 		unsigned image_size,
@@ -237,11 +237,30 @@ __global__ void cuda_kernel_diff2_fine(
 		unsigned long *d_rot_idx,
 		unsigned long *d_trans_idx,
 		unsigned long *d_job_idx,
-		unsigned long *d_job_num
+		unsigned long *d_job_num,
+		const FineClassJob *g_classes = NULL, // class batching: one block per class and
+		const int *g_class_start = NULL,      // job (see cuda_kernel_diff2_coarse)
+		int n_classes = 0
 		)
 {
 	unsigned long bid = blockIdx.x;
 	unsigned long tid = threadIdx.x;
+
+	AccProjectorKernel *pp = &projector_arg;
+	if (n_classes > 0)
+	{
+		int local;
+		const FineClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
+		pp = const_cast<AccProjectorKernel *>(&c.projector);
+		g_eulers = c.eulers;
+		g_diff2s = c.diff2s;
+		d_rot_idx = c.rot_idx;
+		d_trans_idx = c.trans_idx;
+		d_job_idx = c.job_idx;
+		d_job_num = c.job_num;
+		bid = local;
+	}
+	AccProjectorKernel &projector = *pp;
 
 //    // Specialize BlockReduce for a 1D block of 128 threads on type XFLOAT
 //    typedef cub::BlockReduce<XFLOAT, 128> BlockReduce;
