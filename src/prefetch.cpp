@@ -21,6 +21,21 @@
 #include "src/prefetch.h"
 #include "src/error.h"
 #include <sys/time.h>
+#include <sys/resource.h>
+#include <list>
+#include <memory>
+
+// How many particle stacks the prefetcher keeps open: an eighth of the process's file
+// descriptor limit (each stack may hold two streams, and the rest is left for other
+// files), at least 8, at most 4096
+static size_t maxOpenStacks()
+{
+	struct rlimit rl;
+	size_t lim = 1024;
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+		lim = rl.rlim_cur;
+	return std::max<size_t>(8, std::min<size_t>(4096, lim / 8));
+}
 
 AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata)
 	: mydata_(mydata),
@@ -81,6 +96,14 @@ void AsyncImagePrefetcher::stop()
 
 void AsyncImagePrefetcher::workerThread()
 {
+	// Stacks stay open across pools, the least recently used closed beyond the limit.
+	// Particles come in random order, so keeping only the last stack open meant
+	// opening a stack for nearly every image - over a network filesystem the reading
+	// thread then could not keep up with the GPU, and all threads waited for it.
+	const size_t max_open = maxOpenStacks();
+	std::list<std::string> lru; // most recently used first
+	std::unordered_map<std::string, std::pair<std::unique_ptr<fImageHandler>, std::list<std::string>::iterator> > open_stacks;
+
 	while (true)
 	{
 		long int my_first, my_last;
@@ -101,9 +124,6 @@ void AsyncImagePrefetcher::workerThread()
 		buffer.clear();
 		buffer.reserve(my_last - my_first + 1);
 
-		fImageHandler hFile;
-		FileName fn_open_stack = "";
-
 		for (long int part_id_sorted = my_first; part_id_sorted <= my_last; part_id_sorted++)
 		{
 			long int part_id = mydata_->sorted_idx[part_id_sorted];
@@ -116,11 +136,22 @@ void AsyncImagePrefetcher::workerThread()
 			long int imgno;
 			FileName fn_stack;
 			fn_img.decompose(imgno, fn_stack);
-			if (fn_stack != fn_open_stack)
+			auto it = open_stacks.find(fn_stack);
+			if (it == open_stacks.end())
 			{
-				hFile.openFile(fn_stack, WRITE_READONLY);
-				fn_open_stack = fn_stack;
+				if (open_stacks.size() >= max_open)
+				{
+					open_stacks.erase(lru.back());
+					lru.pop_back();
+				}
+				std::unique_ptr<fImageHandler> h(new fImageHandler());
+				h->openFile(fn_stack, WRITE_READONLY);
+				lru.push_front(fn_stack);
+				it = open_stacks.emplace(fn_stack, std::make_pair(std::move(h), lru.begin())).first;
 			}
+			else
+				lru.splice(lru.begin(), lru, it->second.second);
+			fImageHandler &hFile = *it->second.first;
 
 			Image<RFLOAT> img;
 			struct timeval t0, t1;
