@@ -797,6 +797,9 @@ public:
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;
 	AsyncImagePrefetcher *prefetcher_ = nullptr;
+	// Stacks kept open between pools when images are read without the prefetcher
+	// (e.g. by MPI workers, which get their particles a pool at a time)
+	OpenStacks open_stacks_;
 
 	// Calculate translated images on-the-fly
 	bool do_shifts_onthefly;

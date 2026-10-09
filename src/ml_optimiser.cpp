@@ -4593,13 +4593,9 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
                 }
             }
 
-            // Only open again a new stackname
+            // Stacks stay open between pools (see OpenStacks)
             fn_img.decompose(dump, fn_stack);
-            if (fn_stack != fn_open_stack)
-            {
-                hFile.openFile(fn_stack, WRITE_READONLY);
-                fn_open_stack = fn_stack;
-            }
+            fImageHandler &hFile = open_stacks_.get(fn_stack);
             Image<RFLOAT> img;
 #ifdef DEBUG_BODIES
             std::cerr << " fn_img= " << fn_img << " part_id= " << part_id << std::endl;

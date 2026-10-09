@@ -49,6 +49,28 @@ static size_t maxOpenStacks()
 	return std::max<size_t>(8, std::min<size_t>(8192, lim / 8));
 }
 
+OpenStacks::OpenStacks() : max_open_(maxOpenStacks()) {}
+
+fImageHandler &OpenStacks::get(const FileName &fn_stack)
+{
+	auto it = open_.find(fn_stack);
+	if (it == open_.end())
+	{
+		if (open_.size() >= max_open_)
+		{
+			open_.erase(lru_.back());
+			lru_.pop_back();
+		}
+		std::unique_ptr<fImageHandler> h(new fImageHandler());
+		h->openFile(fn_stack, WRITE_READONLY);
+		lru_.push_front(fn_stack);
+		it = open_.emplace(fn_stack, std::make_pair(std::move(h), lru_.begin())).first;
+	}
+	else
+		lru_.splice(lru_.begin(), lru_, it->second.second);
+	return *it->second.first;
+}
+
 AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata)
 	: mydata_(mydata),
 	  fill_idx_(0),
@@ -108,13 +130,7 @@ void AsyncImagePrefetcher::stop()
 
 void AsyncImagePrefetcher::workerThread()
 {
-	// Stacks stay open across pools, the least recently used closed beyond the limit.
-	// Particles come in random order, so keeping only the last stack open meant
-	// opening a stack for nearly every image - over a network filesystem the reading
-	// thread then could not keep up with the GPU, and all threads waited for it.
-	const size_t max_open = maxOpenStacks();
-	std::list<std::string> lru; // most recently used first
-	std::unordered_map<std::string, std::pair<std::unique_ptr<fImageHandler>, std::list<std::string>::iterator> > open_stacks;
+	OpenStacks stacks; // kept across pools (see OpenStacks)
 
 	while (true)
 	{
@@ -148,22 +164,7 @@ void AsyncImagePrefetcher::workerThread()
 			long int imgno;
 			FileName fn_stack;
 			fn_img.decompose(imgno, fn_stack);
-			auto it = open_stacks.find(fn_stack);
-			if (it == open_stacks.end())
-			{
-				if (open_stacks.size() >= max_open)
-				{
-					open_stacks.erase(lru.back());
-					lru.pop_back();
-				}
-				std::unique_ptr<fImageHandler> h(new fImageHandler());
-				h->openFile(fn_stack, WRITE_READONLY);
-				lru.push_front(fn_stack);
-				it = open_stacks.emplace(fn_stack, std::make_pair(std::move(h), lru.begin())).first;
-			}
-			else
-				lru.splice(lru.begin(), lru, it->second.second);
-			fImageHandler &hFile = *it->second.first;
+			fImageHandler &hFile = stacks.get(fn_stack);
 
 			Image<RFLOAT> img;
 			struct timeval t0, t1;

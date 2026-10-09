@@ -28,10 +28,28 @@
 #include <queue>
 #include <vector>
 #include <unordered_map>
+#include <list>
+#include <memory>
 #include "src/filename.h"
 #include "src/image.h"
 #include "src/exp_model.h"
 #include "src/metadata_table.h"
+
+// Particle stacks kept open between reads, the least recently used closed beyond a
+// limit derived from the open-file limit (which is raised as needed). Particles are
+// read in random order, so keeping only the last stack open meant opening a stack
+// for nearly every image - slow on a network filesystem. Not thread-safe: one
+// reading thread per instance.
+class OpenStacks
+{
+public:
+	OpenStacks();
+	fImageHandler &get(const FileName &fn_stack);
+private:
+	size_t max_open_;
+	std::list<std::string> lru_; // most recently used first
+	std::unordered_map<std::string, std::pair<std::unique_ptr<fImageHandler>, std::list<std::string>::iterator> > open_;
+};
 
 class AsyncImagePrefetcher
 {
