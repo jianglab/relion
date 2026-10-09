@@ -2519,6 +2519,63 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 
                 CTOC(accMLO->timer,"sort");
 
+#ifdef _CUDA_ENABLED
+                // Total, threshold, significant weight, maximum and the significance mask
+                // on the GPU, back in one round trip (see CudaKernels::significanceOnDevice)
+                if (gpuClassBatching())
+                {
+                    typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;
+                    AccPtr<char> sigRes = ptrFactory.make<char>(sizeof(SigRes));
+                    sigRes.allAlloc();
+                    SigRes *d_r = (SigRes *) ~sigRes;
+                    CudaKernels::significanceOnDevice<XFLOAT>(sorted, cumulative_sum, unsorted_ipart,
+                            baseMLO->adaptive_fraction, (long) baseMLO->maximum_significants, d_r);
+
+                    AccPtr<bool> Mcoarse_significant = ptrFactory.make<bool>(ipart_length);
+                    Mcoarse_significant.setHostPtr(&op.Mcoarse_significant.data[offset]);
+                    CUSTOM_ALLOCATOR_REGION_NAME("CASDTW_SIG");
+                    Mcoarse_significant.deviceAlloc();
+                    CudaKernels::cuda_kernel_array_over_significant<XFLOAT><<<(int) ((ipart_length + OVER_THRESHOLD_BLOCK_SIZE - 1) / OVER_THRESHOLD_BLOCK_SIZE),
+                            OVER_THRESHOLD_BLOCK_SIZE, 0, unsorted_ipart.getStream()>>>(~unsorted_ipart, ~Mcoarse_significant, ipart_length, d_r);
+                    Mcoarse_significant.cpToHost();
+                    sigRes.cpToHost();
+                    sigRes.streamSync();
+                    SigRes r;
+                    memcpy(&r, &sigRes[0], sizeof(SigRes));
+
+                    op.sum_weight = r.sum_weight;
+                    long int my_nr_significant_coarse_samples = filteredSize - r.idx;
+                    if (my_nr_significant_coarse_samples == 0)
+                    {
+                        std::cerr << std::endl;
+                        std::cerr << " fn_img= " << sp.current_img << std::endl;
+                        std::cerr << " adaptive_fraction= " << baseMLO->adaptive_fraction << std::endl;
+                        std::cerr << " threshold= " << (1 - baseMLO->adaptive_fraction) * op.sum_weight << " thresholdIdx= " << r.idx << std::endl;
+                        std::cerr << " op.sum_weight[img_id]= " << op.sum_weight << std::endl;
+                        std::cerr << " min_diff2= " << op.min_diff2 << std::endl;
+
+                        unsorted_ipart.dumpAccToFile("error_dump_unsorted");
+                        filtered.dumpAccToFile("error_dump_filtered");
+                        sorted.dumpAccToFile("error_dump_sorted");
+                        cumulative_sum.dumpAccToFile("error_dump_cumulative_sum");
+
+                        std::cerr << "Written error_dump_unsorted, error_dump_filtered, error_dump_sorted, and error_dump_cumulative_sum." << std::endl;
+
+                        CRITICAL(ERRNOSIGNIFS); // "my_nr_significant_coarse_samples == 0"
+                    }
+                    if (baseMLO->maximum_significants > 0 &&
+                            my_nr_significant_coarse_samples > baseMLO->maximum_significants)
+                        my_nr_significant_coarse_samples = baseMLO->maximum_significants;
+
+                    op.max_index.coarseIdx = r.max.key;
+                    op.max_weight = r.max.value;
+
+                    if (baseMLO->mymodel.nr_bodies == 1)
+                        DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_NR_SIGN) = (RFLOAT) my_nr_significant_coarse_samples;
+                }
+                else
+#endif
+                {
                 op.sum_weight = cumulative_sum.getAccValueAt(cumulative_sum.getSize() - 1);
 
                 long int my_nr_significant_coarse_samples;
@@ -2591,6 +2648,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 #else	// ALTCPU
 				arrayOverThreshold<XFLOAT>(unsorted_ipart, Mcoarse_significant, significant_weight);
 #endif
+                }
             }
             else if (ipart_length == 1)
             {
@@ -2810,6 +2868,45 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 
             if(baseMLO->adaptive_oversampling!=0)
             {
+#ifdef _CUDA_ENABLED
+                typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;
+                AccPtr<char> sigRes = ptrFactory.make<char>(sizeof(SigRes));
+                SigRes r;
+                // One round trip for the total, threshold, significant weight and maximum
+                // (see CudaKernels::significanceOnDevice)
+                if (gpuClassBatching())
+                {
+                    sigRes.allAlloc();
+                    CudaKernels::significanceOnDevice<XFLOAT>(sorted, cumulative_sum, PassWeights.weights,
+                            baseMLO->adaptive_fraction, 0, (SigRes *) ~sigRes);
+                    sigRes.cpToHost();
+                    sigRes.streamSync();
+                    memcpy(&r, &sigRes[0], sizeof(SigRes));
+                    op.sum_weight = r.sum_weight;
+                if (op.sum_weight==0)
+                {
+                    std::cerr << std::endl;
+                    std::cerr << " fn_img= " << sp.current_img << std::endl;
+                    std::cerr << " op.part_id= " << op.part_id << std::endl;
+                    std::cerr << " op.min_diff2= " << op.min_diff2 << std::endl;
+                    int group_id = baseMLO->mydata.getGroupId(op.part_id);
+                    std::cerr << " group_id= " << group_id << std::endl;
+                    int optics_group = baseMLO->mydata.getOpticsGroup(op.part_id);
+                    std::cerr << " optics_group= " << optics_group << std::endl;
+                    std::cerr << " ml_model.scale_correction[group_id]= " << baseMLO->mymodel.scale_correction[group_id] << std::endl;
+                    std::cerr << " exp_significant_weight= " << op.significant_weight << std::endl;
+                    std::cerr << " exp_max_weight= " << op.max_weight << std::endl;
+                    std::cerr << " ml_model.sigma2_noise[optics_group]= " << baseMLO->mymodel.sigma2_noise[optics_group] << std::endl;
+                    CRITICAL(ERRSUMWEIGHTZERO); //"op.sum_weight[img_id]==0"
+                }
+
+                    my_significant_weight = r.significant_weight;
+                    op.max_index.fineIdx = PassWeights.ihidden_overs[r.max.key];
+                    op.max_weight = r.max.value;
+                }
+                else
+#endif
+                {
                 op.sum_weight = cumulative_sum.getAccValueAt(cumulative_sum.getSize() - 1);
 
                 if (op.sum_weight==0)
@@ -2837,6 +2934,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 CTOC(accMLO->timer,"getArgMaxOnDevice");
                 op.max_index.fineIdx = PassWeights.ihidden_overs[max_pair.first];
                 op.max_weight = max_pair.second;
+                }
             }
             else
             {

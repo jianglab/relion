@@ -355,5 +355,84 @@ if (in.getAllocator() == NULL)
 	alloc->doFreeWhenReady();
 }
 
+
+// The significance of one pass of convertAllSquaredDifferencesToWeights, computed on
+// the GPU and read back in one copy instead of one round trip per value: the total
+// weight, the threshold, its index in the cumulative sum, the significant weight and
+// the maximum weight, with the same arithmetic as the host code.
+template <typename T>
+struct SignificanceResult
+{
+	T sum_weight;                 // cumulative[n - 1]
+	T threshold;                  // (T) ((1 - adaptive_fraction) * sum_weight)
+	unsigned long long idx;       // first index with cumulative > threshold (0 if none)
+	unsigned long long idx_capped;// idx after the maximum_significants cap
+	T significant_weight;         // sorted[idx_capped]
+	cub::KeyValuePair<int, T> max;// arg max of the weights
+};
+
+template <typename T>
+__global__ void cuda_kernel_significance_threshold(const T *cumulative, size_t n, double adaptive_fraction, SignificanceResult<T> *r)
+{
+	const T sum = cumulative[n - 1];
+	r->sum_weight = sum;
+	r->threshold = (T) ((1 - adaptive_fraction) * (double) sum);
+	r->idx = 0;
+}
+
+template <typename T>
+__global__ void cuda_kernel_significance_find(const T *cumulative, size_t size_m1, SignificanceResult<T> *r)
+{
+	const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+	const T t = r->threshold;
+	if (i < size_m1 && cumulative[i] <= t && t < cumulative[i + 1])
+		r->idx = i + 1;
+}
+
+template <typename T>
+__global__ void cuda_kernel_significance_value(const T *sorted, size_t n, long max_significants, SignificanceResult<T> *r)
+{
+	unsigned long long idx = r->idx;
+	if (max_significants > 0 && (long) (n - idx) > max_significants)
+		idx = n - max_significants;
+	r->idx_capped = idx;
+	r->significant_weight = (idx < n) ? sorted[idx] : (T) 0;
+}
+
+template <typename T>
+__global__ void cuda_kernel_array_over_significant(const T *data, bool *passed, size_t size, const SignificanceResult<T> *r)
+{
+	const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+	if (i < size)
+		passed[i] = (data[i] >= r->significant_weight);
+}
+
+// Launch the above on sorted / cumulative (the sorted significant candidates and their
+// cumulative sum) and weights (for the arg max), all on weights' stream; no wait
+template <typename T>
+static void significanceOnDevice(AccPtr<T> &sorted, AccPtr<T> &cumulative, AccPtr<T> &weights,
+                                 double adaptive_fraction, long max_significants, SignificanceResult<T> *d_r)
+{
+	cudaStream_t stream = weights.getStream();
+	const size_t n = cumulative.getSize();
+	cuda_kernel_significance_threshold<T><<<1, 1, 0, stream>>>(~cumulative, n, adaptive_fraction, d_r);
+	if (n > 1)
+	{
+		const int bs = 512;
+		cuda_kernel_significance_find<T><<<(int) ((n - 1 + bs - 1) / bs), bs, 0, stream>>>(~cumulative, n - 1, d_r);
+	}
+	cuda_kernel_significance_value<T><<<1, 1, 0, stream>>>(~sorted, n, max_significants, d_r);
+
+	size_t temp_storage_size = 0;
+	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMax(NULL, temp_storage_size, ~weights, &d_r->max, weights.getSize()));
+	if (temp_storage_size == 0)
+		temp_storage_size = 1;
+	CudaCustomAllocator::Alloc *alloc = weights.getAllocator()->alloc(temp_storage_size);
+	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMax(alloc->getPtr(), temp_storage_size, ~weights, &d_r->max, weights.getSize(), stream));
+	alloc->markReadyEvent(stream);
+	alloc->doFreeWhenReady();
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+
 } // namespace CudaKernels
 #endif
