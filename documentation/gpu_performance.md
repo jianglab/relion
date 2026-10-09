@@ -8,7 +8,7 @@ than upstream RELION, with the same results:
 | One RTX 2080 Ti, 8 cores | upstream RELION | this branch |
 |---|---|---|
 | 1 process × 4 threads (`--j 4`) | 1577 s | 100 s |
-| 1 process × 8 threads (`--j 8`) | – | 81 s |
+| 1 process × 8 threads (`--j 8`) | 1471 s | 81 s |
 | 8 MPI workers × 1 thread, MPS | – | 97 s |
 
 (EMPIAR-10944 subset: 37,022 segments from 1,000 micrographs, 50 classes,
@@ -16,9 +16,10 @@ than upstream RELION, with the same results:
 upstream is `05cd1ad9` with the exact-size allocator fix `f7365189`, without
 which it aborts on this job.)
 
-After 5 iterations 99.99% (4 threads) and 99.92% (8 threads) of the segments
-are in the same class as with upstream, and the class averages correlate at
-1.0000. MPI runs differ more (92%): splitting the particles over processes
+After 5 iterations 99.99% of the segments are in the same class as with
+upstream at the same number of threads (4 or 8), and the class averages
+correlate at 1.0000; two upstream runs with 4 and with 8 threads agree on
+99.93%. MPI runs differ more (92%): splitting the particles over processes
 changes the order of floating-point sums, and after 2 iterations two MPI runs
 already differ by about 4%.
 
