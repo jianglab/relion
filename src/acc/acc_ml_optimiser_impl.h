@@ -556,6 +556,41 @@ void getFourierTransformsAndCtfs(long int part_id,
         // We are now done with the unmasked image used for reconstruction.
         // Now make the masked image used for alignment and classification.
 
+#ifdef _CUDA_ENABLED
+        // Helical mask on the GPU (2D images, zeros outside): no copy to the host and
+        // back per particle. RELION_GPU_HELICAL_MASK=off uses the CPU version.
+        static const bool gpu_helical_mask = []() {
+            const char *e = getenv("RELION_GPU_HELICAL_MASK");
+            return !(e && (std::string(e) == "off" || std::string(e) == "0"));
+        }();
+        static thread_local int *helixMaskBad = NULL; // pinned, written by the kernel
+        bool helixMaskOnGpu = false;
+        if (is_helical_segment && gpu_helical_mask && baseMLO->do_zero_mask && !op.is_tomo && !accMLO->dataIs3D)
+        {
+            CTIC(accMLO->timer,"applyHelicalMaskGpu");
+            if (helixMaskBad == NULL)
+                HANDLE_ERROR(cudaMallocHost((void **) &helixMaskBad, sizeof(int)));
+            *helixMaskBad = 0;
+            RFLOAT a10, a11, R1, R2, D1, D2;
+            helixMaskParameters2D(img.data.xdim, img.data.ydim, psi_deg, my_mask_radius,
+                                  (baseMLO->helical_tube_outer_diameter / (2. * my_pixel_size)),
+                                  baseMLO->width_mask_edge, a10, a11, R1, R2, D1, D2);
+            static thread_local double *helixPartials = NULL; // this thread's, device
+            if (helixPartials == NULL)
+                HANDLE_ERROR(cudaMalloc((void **) &helixPartials, 2 * HELIX_MASK_PARTIALS * sizeof(double)));
+            const int n = img.data.xdim * img.data.ydim;
+            cuda_kernel_helixMaskBackground2D<<<HELIX_MASK_PARTIALS, HELIX_MASK_BLOCK, 0, d_img.getStream()>>>(
+                    ~d_img, img.data.xdim, img.data.ydim, a10, a11, D1, D2,
+                    baseMLO->width_mask_edge, helixPartials);
+            cuda_kernel_helixMaskApply2D<<<(n + HELIX_MASK_BLOCK - 1) / HELIX_MASK_BLOCK, HELIX_MASK_BLOCK, 0, d_img.getStream()>>>(
+                    ~d_img, img.data.xdim, img.data.ydim, a10, a11, R1, R2, D1, D2,
+                    baseMLO->width_mask_edge, helixPartials, HELIX_MASK_PARTIALS, helixMaskBad);
+            LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
+            helixMaskOnGpu = true;
+            CTOC(accMLO->timer,"applyHelicalMaskGpu");
+        }
+        else
+#endif
         if (is_helical_segment)
         {
             CTIC(accMLO->timer,"applyHelicalMask");
@@ -691,6 +726,11 @@ void getFourierTransformsAndCtfs(long int part_id,
                                                                  current_size_x,
                                                                  current_size_y,
                                                                  current_size_z);
+#ifdef _CUDA_ENABLED
+        // (the transform waited for the GPU, so the mask kernel has finished)
+        if (helixMaskOnGpu && *helixMaskBad)
+            REPORT_ERROR("mask.cpp::softMaskOutsideMapForHelix(): No background (noise) areas found in this particle!");
+#endif
 #ifdef _HIP_ENABLED
         LAUNCH_PRIVATE_ERROR(hipGetLastError(),accMLO->errorStatus);
         CTOC(hipMLO->timer,"normalizeAndTransform");

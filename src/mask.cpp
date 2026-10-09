@@ -99,6 +99,40 @@ void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine
 }
 
 // May27,2015 - Shaoda, Helical refinement
+void helixMaskParameters2D(
+		int xdim, int ydim,
+		RFLOAT psi_deg,
+		RFLOAT mask_sphere_radius_pix,
+		RFLOAT mask_cyl_radius_pix,
+		RFLOAT cosine_width,
+		RFLOAT &a10, RFLOAT &a11,
+		RFLOAT &R1, RFLOAT &R2, RFLOAT &D1, RFLOAT &D2)
+{
+	// As softMaskOutsideMapForHelix for dim == 2 (tilt does not apply)
+	int boxsize = (xdim < ydim) ? xdim : ydim;
+	boxsize = boxsize / 2 - ((boxsize + 1) % 2);
+	if ( (cosine_width < 0.)
+			|| (mask_sphere_radius_pix < 1.) || (mask_sphere_radius_pix > boxsize)
+			|| (mask_cyl_radius_pix < 1.) || (mask_cyl_radius_pix > boxsize)
+			|| (mask_sphere_radius_pix < mask_cyl_radius_pix) ) {
+		std::cerr << " cosine_width= " << cosine_width << std::endl;
+		std::cerr << " boxsize= " << boxsize << std::endl;
+		std::cerr << " mask_sphere_radius_pix= " << mask_sphere_radius_pix << std::endl;
+		std::cerr << " mask_cyl_radius_pix= " << mask_cyl_radius_pix << std::endl;
+		REPORT_ERROR("mask.cpp::softMaskOutsideMapForHelix(): Invalid radii of spherical and cylindrical masks or soft cosine widths! Is boxsize > mask_sphere_radius > mask_cyl_radius?");
+	}
+	R1 = mask_sphere_radius_pix;
+	R2 = R1 + cosine_width;
+	D1 = mask_cyl_radius_pix;
+	D2 = D1 + cosine_width;
+	Matrix2D<RFLOAT> A;
+	A.resize(3, 3);
+	Euler_angles2matrix(0., 0., psi_deg, A, false);
+	A = A.transpose();
+	a10 = A(1, 0);
+	a11 = A(1, 1);
+}
+
 void softMaskOutsideMapForHelix(
 		MultidimArray<RFLOAT> &vol,
 		RFLOAT psi_deg,

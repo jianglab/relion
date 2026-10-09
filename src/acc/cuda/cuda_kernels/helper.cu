@@ -124,6 +124,105 @@ __global__ void cuda_kernel_exponentiate_weights_fine_batched(
 	}
 }
 
+// softMaskOutsideMapForHelix (src/mask.cpp) for a 2D image with zeros outside (no
+// noise image), on the GPU, in double precision with explicitly rounded products
+// and sums (no fused multiply-adds), as the CPU code computes it. Two kernels: the
+// first forms partial background sums per block (grid-stride, so the split is fixed
+// by the grid), the second adds them in a fixed order - every block the same way -
+// and applies the mask. Sets *bad when no background was found.
+__device__ inline double helixAxisDistance(int p, int xdim, int x0, int y0, double a10, double a11)
+{
+	const int i = p / xdim + y0, j = p % xdim + x0;
+	return fabs(__dadd_rn(__dadd_rn(0., __dmul_rn(a10, (double) j)), __dmul_rn(a11, (double) i)));
+}
+
+__global__ void cuda_kernel_helixMaskBackground2D(
+		const XFLOAT *img, int xdim, int ydim,
+		double a10, double a11, double D1, double D2, double cosine_width,
+		double *partials)
+{
+	__shared__ double sh[2 * HELIX_MASK_BLOCK];
+	const int n = xdim * ydim, x0 = -(xdim / 2), y0 = -(ydim / 2);
+	const double pi = 3.14159265358979323846;
+	double sbg = 0., s = 0.;
+	for (int p = blockIdx.x * blockDim.x + threadIdx.x; p < n; p += gridDim.x * blockDim.x)
+	{
+		const double d = helixAxisDistance(p, xdim, x0, y0, a10, a11);
+		const double v = (double) img[p];
+		if (d > D2)
+		{
+			sbg += v;
+			s += 1.;
+		}
+		else if (d > D1)
+		{
+			const double w = 0.5 + 0.5 * cos(pi * (D2 - d) / cosine_width);
+			sbg += w * v;
+			s += w;
+		}
+	}
+	sh[threadIdx.x] = sbg;
+	sh[HELIX_MASK_BLOCK + threadIdx.x] = s;
+	__syncthreads();
+	for (int k = HELIX_MASK_BLOCK / 2; k > 0; k /= 2)
+	{
+		if (threadIdx.x < k)
+		{
+			sh[threadIdx.x] += sh[threadIdx.x + k];
+			sh[HELIX_MASK_BLOCK + threadIdx.x] += sh[HELIX_MASK_BLOCK + threadIdx.x + k];
+		}
+		__syncthreads();
+	}
+	if (threadIdx.x == 0)
+	{
+		partials[2 * blockIdx.x] = sh[0];
+		partials[2 * blockIdx.x + 1] = sh[HELIX_MASK_BLOCK];
+	}
+}
+
+__global__ void cuda_kernel_helixMaskApply2D(
+		XFLOAT *img, int xdim, int ydim,
+		double a10, double a11,
+		double R1, double R2, double D1, double D2, double cosine_width,
+		const double *partials, int nr_partials, int *bad)
+{
+	const int n = xdim * ydim, x0 = -(xdim / 2), y0 = -(ydim / 2);
+	const double pi = 3.14159265358979323846;
+	double sum_bg = 0., sum = 0.;
+	for (int b = 0; b < nr_partials; b++)
+	{
+		sum_bg += partials[2 * b];
+		sum += partials[2 * b + 1];
+	}
+	if (sum < 0.00001)
+	{
+		if (blockIdx.x == 0 && threadIdx.x == 0)
+			*bad = 1;
+		return;
+	}
+	const double noise_val = sum_bg / sum;
+	const int p = blockIdx.x * blockDim.x + threadIdx.x;
+	if (p >= n)
+		return;
+	const int i = p / xdim + y0, j = p % xdim + x0;
+	const double d = helixAxisDistance(p, xdim, x0, y0, a10, a11);
+	const double r = sqrt((double) (i * i + j * j));
+	if ((r < R1) && (d < D1))
+		return;
+	if ((r > R2) || (d > D2))
+		img[p] = (XFLOAT) noise_val;
+	else
+	{
+		double w1 = 0., w2 = 0.;
+		if (r > R1)
+			w1 = 0.5 + 0.5 * cos(pi * (R2 - r) / cosine_width);
+		if (d > D1)
+			w2 = 0.5 + 0.5 * cos(pi * (D2 - d) / cosine_width);
+		const double w = (w1 > w2) ? w1 : w2;
+		img[p] = (XFLOAT) ((1. - w) * (double) img[p] + w * noise_val);
+	}
+}
+
 __global__ void cuda_kernel_initRND(unsigned long seed, curandState *States)
 {
        int tid = threadIdx.x;

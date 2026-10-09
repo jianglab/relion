@@ -50,6 +50,18 @@ void softMaskOutsideMap(
 		MultidimArray<RFLOAT> *Mnoise = NULL,
 		bool follow_box_shape = false);
 
+// The parameters of softMaskOutsideMapForHelix for a 2D image of xdim x ydim, with the
+// same checks (errors as there): the radii and the terms of the rotation that give
+// a pixel's distance to the helical axis, |a10 * x + a11 * y| (for the GPU version)
+void helixMaskParameters2D(
+		int xdim, int ydim,
+		RFLOAT psi_deg,
+		RFLOAT mask_sphere_radius_pix,
+		RFLOAT mask_cyl_radius_pix,
+		RFLOAT cosine_width,
+		RFLOAT &a10, RFLOAT &a11,
+		RFLOAT &R1, RFLOAT &R2, RFLOAT &D1, RFLOAT &D2);
+
 // May27,2015 - Shaoda, Helical refinement
 void softMaskOutsideMapForHelix(
 		MultidimArray<RFLOAT> &vol,

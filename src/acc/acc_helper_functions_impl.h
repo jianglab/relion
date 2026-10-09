@@ -2585,15 +2585,15 @@ void windowFourierTransform2(
 
 
 	deviceInitComplexValue<ACCCOMPLEX>(d_out, (XFLOAT)0.);
-#ifdef _CUDA_ENABLED
-	HANDLE_ERROR(cudaStreamSynchronize(d_out.getStream()));
-#elif _HIP_ENABLED
+	// CUDA: no wait after the clear, the copy or kernel below follows it on d_out's stream
+#ifdef _HIP_ENABLED
 	HANDLE_ERROR(hipStreamSynchronize(d_out.getStream()));
 #endif
 	if(oX==iX)
 	{
 #ifdef _CUDA_ENABLED
-		HANDLE_ERROR(cudaStreamSynchronize(d_in.getStream()));
+		if (d_in.getStream() != d_out.getStream())
+			HANDLE_ERROR(cudaStreamSynchronize(d_in.getStream()));
 		cudaCpyDeviceToDevice(&d_in(pos), ~d_out, oX*oY*oZ*Npsi, d_out.getStream() );
 #elif _HIP_ENABLED
 		HANDLE_ERROR(hipStreamSynchronize(d_in.getStream()));
