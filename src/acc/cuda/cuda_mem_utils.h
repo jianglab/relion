@@ -3,6 +3,9 @@
 
 #ifdef _CUDA_ENABLED
 #include <cuda_runtime.h>
+#include <cstring>
+#include <string>
+#include <algorithm>
 #include <curand.h>
 #include "src/acc/cuda/cuda_settings.h"
 #include "src/acc/cuda/custom_allocator.cuh"
@@ -57,11 +60,43 @@ void cudaCpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size)
 	DEBUG_HANDLE_ERROR(cudaMemcpy( h_ptr, d_ptr, size * sizeof(T), cudaMemcpyDeviceToHost));
 };
 
+// Copy from the device to (pageable) host memory through this thread's pinned staging
+// buffer. A copy to pageable memory goes through the driver's own staging buffers,
+// behind a lock held until the copy has completed, so threads copying at the same time
+// queue for it (seen in stack samples: most threads in cudaMemcpyAsync were waiting
+// for a driver mutex). Returns when the data is in h_ptr, as such a copy does.
+// RELION_GPU_PINNED_STAGING=off copies directly.
+static inline void stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t bytes, cudaStream_t stream)
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_PINNED_STAGING");
+		return !(e && (std::string(e) == "off" || std::string(e) == "0"));
+	}();
+	const size_t max_bytes = (size_t) 64 << 20;
+	thread_local void *stage = NULL;
+	thread_local size_t capacity = 0;
+	if (!on || bytes == 0 || bytes > max_bytes)
+	{
+		DEBUG_HANDLE_ERROR(cudaMemcpyAsync(h_ptr, d_ptr, bytes, cudaMemcpyDeviceToHost, stream));
+		return;
+	}
+	if (bytes > capacity)
+	{
+		if (stage != NULL)
+			DEBUG_HANDLE_ERROR(cudaFreeHost(stage));
+		capacity = std::max(bytes, (size_t) 1 << 20);
+		HANDLE_ERROR(cudaMallocHost(&stage, capacity));
+	}
+	DEBUG_HANDLE_ERROR(cudaMemcpyAsync(stage, d_ptr, bytes, cudaMemcpyDeviceToHost, stream));
+	DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+	memcpy(h_ptr, stage, bytes);
+}
+
 template< typename T>
 static inline
 void cudaCpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size, cudaStream_t &stream)
 {
-	DEBUG_HANDLE_ERROR(cudaMemcpyAsync( h_ptr, d_ptr, size * sizeof(T), cudaMemcpyDeviceToHost, stream));
+	stagedDeviceToHost(h_ptr, d_ptr, size * sizeof(T), stream);
 };
 
 template< typename T>

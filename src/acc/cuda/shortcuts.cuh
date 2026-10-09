@@ -1,6 +1,8 @@
 #ifndef CUDA_SHORTCUTS_CUH_
 #define CUDA_SHORTCUTS_CUH_
 
+#include "src/acc/cuda/cuda_mem_utils.h" // stagedDeviceToHost
+
 namespace CudaShortcuts
 {
 
@@ -43,7 +45,7 @@ template< typename T>
 static inline
 void cpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size, cudaStream_t &stream)
 {
-	DEBUG_HANDLE_ERROR(cudaMemcpyAsync( h_ptr, d_ptr, size * sizeof(T), cudaMemcpyDeviceToHost, stream));
+	stagedDeviceToHost(h_ptr, d_ptr, size * sizeof(T), stream); // see cuda_mem_utils.h
 };
 
 template< typename T>
