@@ -2,21 +2,21 @@
 
 ## Summary
 
-On a realistic helical Class2D job the GPU E-step is now 16–20 times faster
+On a realistic helical Class2D job relion_refine is now 17–20 times faster
 than upstream RELION, with the same results:
 
 | One RTX 2080 Ti, 8 cores | upstream RELION | this branch |
 |---|---|---|
-| 1 process × 4 threads (`--j 4`) | 1577 s | 100 s |
-| 1 process × 8 threads (`--j 8`) | 1471 s | 81 s |
-| 8 MPI workers × 1 thread, MPS | – | 97 s |
+| 1 process × 4 threads (`--j 4`) | 1577 s | 90 s |
+| 1 process × 8 threads (`--j 8`) | 1471 s | 73 s |
+| 8 MPI workers × 1 thread, MPS | – | 76 s |
 
 (EMPIAR-10944 subset: 37,022 segments from 1,000 micrographs, 50 classes,
 5 iterations, box 128 at 4.944 Å/pixel, `--helix --bimodal_psi --sigma_psi 2`;
 upstream is `05cd1ad9` with the exact-size allocator fix `f7365189`, without
 which it aborts on this job.)
 
-After 5 iterations 99.99% of the segments are in the same class as with
+After 5 iterations 99.95–99.97% of the segments are in the same class as with
 upstream at the same number of threads (4 or 8), and the class averages
 correlate at 1.0000; two upstream runs with 4 and with 8 threads agree on
 99.93%. MPI runs differ more (92%): splitting the particles over processes
@@ -47,15 +47,21 @@ timers and nsys timelines, in the order found:
    and back-projection were done class by class, each with allocations, copies
    and launches (about 1,150 driver calls per particle with 50 classes). Each
    step is now one call for all classes ("Class batching", below).
-4. **Image reading.** The prefetcher kept only the last stack open; particles
-   come in random order, so it reopened a stack for nearly every image. Stacks
-   now stay open (the open-file limit is raised as needed).
+4. **Image reading.** Only the last stack was kept open; particles come in
+   random order, so a stack was reopened for nearly every image. Stacks now
+   stay open across pools, in the prefetcher and in MPI workers (which read
+   without it; with 2–4 threads per worker this made them 2–3 times faster),
+   and the open-file limit is raised as needed.
 5. **Round trips per particle.** Single values were read back one at a time,
    each with a wait for the GPU, and transforms waited between steps on the
    same stream. The significance of each pass is now computed on the GPU and
    read back at once; the helical mask runs on the GPU instead of a copy to
    the host and back; needless waits are gone.
-6. **The legacy default stream.** The power spectrum buffer and the soft-mask
+6. **Copies to the host.** A copy to pageable memory goes through the
+   driver's own staging buffers behind a lock held until it completes, so the
+   threads' copies queued for it; they now go through a pinned buffer per
+   thread.
+7. **The legacy default stream.** The power spectrum buffer and the soft-mask
    sums were created on stream 0 (`ptrFactory.make(size, 0)`: the 0 is the
    stream). Every operation there waits for all threads' GPU work and holds
    up all later work: three barriers across the whole GPU per particle. They
@@ -161,12 +167,15 @@ whether the GPU is fed, not how efficiently its kernels use it.
 ## What limits it now, and what would help next
 
 An nsys timeline of one iteration (8 threads) shows the real work - the
-difference, averaging and back-projection kernels - running during 43% of
-the E-step; the rest is smaller kernels (sorting, reductions, transforms, the
-mask), copies, and gaps where every thread is busy on the CPU. With 6 to 12
-threads the time is the same, and the GPU is busy about 80% of the time, so
-the next gains are less GPU time per particle outside the real kernels, and
-faster real kernels. Back-projection and averaging are probably limited by
+difference, averaging and back-projection kernels - running during about 43%
+of the E-step; the rest is smaller kernels (sorting, reductions, transforms,
+the mask), copies, and gaps. The E-step time is now the same with 6 to 16
+threads, with pools of 30 to 300 particles, with waiting threads spinning or
+blocking, with several processes under MPS, and with a 27% faster
+back-projection kernel: what it follows is the number of CUDA driver calls,
+about 230 per particle (launches, copies, waits, events), which threads of a
+process make one at a time. The next large step is therefore fewer calls per
+particle - several particles per GPU call, the way classes are batched now. Back-projection and averaging are probably limited by
 memory traffic (atomic additions in particular); tuning them needs the GPU
 performance counters (`ncu`), which the NVIDIA driver restricts to
 administrators by default (`NVreg_RestrictProfilingToAdminUsers`, shown as
