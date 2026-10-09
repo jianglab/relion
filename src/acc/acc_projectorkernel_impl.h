@@ -326,6 +326,7 @@ struct CoarseClassJob
 	AccProjectorKernel projector;
 	XFLOAT *eulers;
 	XFLOAT *diff2s;
+	int n_even; // orientations in whole blocks; the rest follow one per block
 };
 
 // One class of a class-batched weighted-average launch (see cuda_kernel_wavg)

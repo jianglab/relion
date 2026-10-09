@@ -1137,25 +1137,25 @@ void mapAllWeightsToMweights(
 }
 
 #ifdef _CUDA_ENABLED
-// Upload a class table and a block table with one block per (class, orientation),
-// in one copy; returns the number of blocks
+// Upload the class table and the first block of each class (one block per
+// orientation), in one copy; returns the number of blocks. A few dozen bytes per
+// class, so batching never needs memory in proportion to the orientations.
 template <class Job>
-static size_t uploadClassBlocks(std::vector<Job> &jobs, std::vector<size_t> &nums,
-		AccPtr<char> &table, const Job *&d_jobs, const int2 *&d_blocks)
+static size_t uploadClassTable(std::vector<Job> &jobs, std::vector<size_t> &nums,
+		AccPtr<char> &table, const Job *&d_jobs, const int *&d_start)
 {
-	std::vector<int2> blocks;
+	std::vector<int> start(jobs.size() + 1, 0);
 	for (size_t c = 0; c < jobs.size(); c++)
-		for (size_t o = 0; o < nums[c]; o++)
-			blocks.push_back(make_int2((int) c, (int) o));
+		start[c + 1] = start[c] + (int) nums[c];
 	const size_t class_bytes = ((jobs.size() * sizeof(Job) + 15) / 16) * 16;
-	table.setSize(class_bytes + blocks.size() * sizeof(int2));
+	table.setSize(class_bytes + start.size() * sizeof(int));
 	table.allAlloc();
 	memcpy(&table[0], jobs.data(), jobs.size() * sizeof(Job));
-	memcpy(&table[class_bytes], blocks.data(), blocks.size() * sizeof(int2));
+	memcpy(&table[class_bytes], start.data(), start.size() * sizeof(int));
 	table.cpToDevice();
 	d_jobs = (const Job *) ~table;
-	d_blocks = (const int2 *) &(~table)[class_bytes];
-	return blocks.size();
+	d_start = (const int *) &(~table)[class_bytes];
+	return start.back();
 }
 
 void runWavgKernelBatched(
@@ -1179,15 +1179,16 @@ void runWavgKernelBatched(
 	if (jobs.empty())
 		return;
 	const WavgClassJob *d_jobs;
-	const int2 *d_blocks;
-	const size_t n = uploadClassBlocks(jobs, orientation_nums, table, d_jobs, d_blocks);
+	const int *d_start;
+	const size_t n = uploadClassTable(jobs, orientation_nums, table, d_jobs, d_start);
+	const int nc = jobs.size();
 	deviceStream_t stream = table.getStream();
 	AccProjectorKernel &projector = jobs[0].projector;
 	// The same kernel variants as runWavgKernel
 #define WAVG_BATCH(RC, R3, D3, BS) cuda_kernel_wavg<RC, R3, D3, BS><<<n, BS, (3*BS+9)*sizeof(XFLOAT), stream>>>( \
 		NULL, projector, image_size, 0, Fimg_real, Fimg_imag, trans_x, trans_y, trans_z, NULL, ctfs, \
 		wdiff2s_parts, NULL, NULL, translation_num, (XFLOAT) op.sum_weight, (XFLOAT) op.significant_weight, \
-		part_scale, d_jobs, d_blocks)
+		part_scale, d_jobs, d_start, nc)
 	if (refs_are_ctf_corrected)
 	{
 		if (data_is_3D)                WAVG_BATCH(true, true, true, WAVG_BLOCK_SIZE_DATA3D);
@@ -1227,8 +1228,9 @@ void runBackProjectKernelBatched(
 	if (jobs.empty())
 		return;
 	const BPClassJob *d_jobs;
-	const int2 *d_blocks;
-	const size_t n = uploadClassBlocks(jobs, orientation_nums, table, d_jobs, d_blocks);
+	const int *d_start;
+	const size_t n = uploadClassTable(jobs, orientation_nums, table, d_jobs, d_start);
+	const int nc = jobs.size();
 	deviceStream_t stream = table.getStream();
 	// The same kernel variants as runBackProjectKernel (without do_grad); BP gives the
 	// dimensions shared by all classes' models, jobs their arrays
@@ -1238,7 +1240,7 @@ void runBackProjectKernelBatched(
 			d_img_real, d_img_imag, trans_x, trans_y, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgX*imgY, BP.mdlX, BP.mdlInitY, \
-			d_jobs, d_blocks)
+			d_jobs, d_start, nc)
 		if (ctf_premultiplied) BP2D_BATCH(true);
 		else                   BP2D_BATCH(false);
 #undef BP2D_BATCH
@@ -1249,7 +1251,7 @@ void runBackProjectKernelBatched(
 			d_img_real, d_img_imag, trans_x, trans_y, trans_z, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgZ, imgX*imgY*imgZ, \
-			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ, d_jobs, d_blocks)
+			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ, d_jobs, d_start, nc)
 		if (data_is_3D)
 		{
 			if (ctf_premultiplied) BP3D_BATCH(true, true, BP_DATA3D_BLOCK_SIZE);
@@ -1271,8 +1273,8 @@ void runBackProjectKernelBatched(
 // eulers_per_block orientations, then the rest one per block) for all classes at once
 template<bool REF3D, bool DATA3D, int block_sz, int eulers_per_block, int prefetch_fraction>
 static void launchDiff2CoarseBatched(
-		size_t n_even, size_t n_rest,
-		const CoarseClassJob *d_classes, const int2 *d_even, const int2 *d_rest,
+		size_t n_even, size_t n_rest, int n_classes,
+		const CoarseClassJob *d_classes, const int *d_even, const int *d_rest,
 		AccProjectorKernel &projector,
 		XFLOAT *trans_x, XFLOAT *trans_y, XFLOAT *trans_z,
 		XFLOAT *corr_img, XFLOAT *Fimg_real, XFLOAT *Fimg_imag,
@@ -1282,11 +1284,11 @@ static void launchDiff2CoarseBatched(
 	if (n_even)
 		AccUtilities::diff2_coarse<REF3D, DATA3D, block_sz, eulers_per_block, prefetch_fraction>(
 			n_even, block_sz, NULL, trans_x, trans_y, trans_z, Fimg_real, Fimg_imag,
-			projector, corr_img, NULL, translation_num, image_size, stream, d_classes, d_even);
+			projector, corr_img, NULL, translation_num, image_size, stream, d_classes, d_even, n_classes, false);
 	if (n_rest)
 		AccUtilities::diff2_coarse<REF3D, DATA3D, block_sz, 1, prefetch_fraction>(
 			n_rest, block_sz, NULL, trans_x, trans_y, trans_z, Fimg_real, Fimg_imag,
-			projector, corr_img, NULL, translation_num, image_size, stream, d_classes, d_rest);
+			projector, corr_img, NULL, translation_num, image_size, stream, d_classes, d_rest, n_classes, true);
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 
@@ -1338,33 +1340,34 @@ bool runDiff2KernelCoarseBatched(
 		split = per_block = D2C_EULERS_PER_BLOCK_2D;
 	}
 
-	std::vector<int2> even, rest;
-	for (size_t c = 0; c < classes.size(); c++)
+	// Per class: the first block of its whole blocks and of its rest blocks
+	const size_t nc = classes.size();
+	std::vector<int> even(nc + 1, 0), rest(nc + 1, 0);
+	for (size_t c = 0; c < nc; c++)
 	{
 		const size_t n = orientation_nums[c];
 		const size_t n_even = n - n % split;
-		for (size_t o = 0; o < n_even; o += per_block)
-			even.push_back(make_int2((int) c, (int) o));
-		for (size_t o = n_even; o < n; o++)
-			rest.push_back(make_int2((int) c, (int) o));
+		classes[c].n_even = (int) n_even;
+		even[c + 1] = even[c] + (int) (n_even / per_block);
+		rest[c + 1] = rest[c] + (int) (n - n_even);
 	}
 
 	// One upload for the class table and both block tables
-	const size_t class_bytes = ((classes.size() * sizeof(CoarseClassJob) + 15) / 16) * 16;
-	const size_t bytes = class_bytes + (even.size() + rest.size()) * sizeof(int2);
+	const size_t class_bytes = ((nc * sizeof(CoarseClassJob) + 15) / 16) * 16;
+	const size_t bytes = class_bytes + 2 * (nc + 1) * sizeof(int);
 	table.setSize(bytes);
 	table.allAlloc();
-	memcpy(&table[0], classes.data(), classes.size() * sizeof(CoarseClassJob));
-	memcpy(&table[class_bytes], even.data(), even.size() * sizeof(int2));
-	memcpy(&table[class_bytes + even.size() * sizeof(int2)], rest.data(), rest.size() * sizeof(int2));
+	memcpy(&table[0], classes.data(), nc * sizeof(CoarseClassJob));
+	memcpy(&table[class_bytes], even.data(), (nc + 1) * sizeof(int));
+	memcpy(&table[class_bytes + (nc + 1) * sizeof(int)], rest.data(), (nc + 1) * sizeof(int));
 	table.cpToDevice();
 
 	const CoarseClassJob *d_classes = (const CoarseClassJob *) ~table;
-	const int2 *d_even = (const int2 *) &(~table)[class_bytes];
-	const int2 *d_rest = d_even + even.size();
+	const int *d_even = (const int *) &(~table)[class_bytes];
+	const int *d_rest = d_even + nc + 1;
 	deviceStream_t stream = table.getStream();
 
-#define D2C_BATCH(R3, D3, BS, EPB, PF) launchDiff2CoarseBatched<R3, D3, BS, EPB, PF>(even.size(), rest.size(), \
+#define D2C_BATCH(R3, D3, BS, EPB, PF) launchDiff2CoarseBatched<R3, D3, BS, EPB, PF>(even[nc], rest[nc], (int) nc, \
 		d_classes, d_even, d_rest, projector, trans_x, trans_y, trans_z, corr_img, Fimg_real, Fimg_imag, \
 		translation_num, image_size, stream)
 	if (!ref3D)

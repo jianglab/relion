@@ -30,8 +30,9 @@ __global__ void cuda_kernel_wavg(
 		XFLOAT weight_norm,
 		XFLOAT significant_weight,
 		XFLOAT part_scale,
-		const WavgClassJob *g_classes = NULL, // class batching: block -> (class, orientation)
-		const int2 *g_blocks = NULL)          // (see cuda_kernel_diff2_coarse)
+		const WavgClassJob *g_classes = NULL, // class batching: one block per class and
+		const int *g_class_start = NULL,      // orientation (see cuda_kernel_diff2_coarse)
+		int n_classes = 0)
 {
 	XFLOAT ref_real, ref_imag, img_real, img_imag, trans_real, trans_imag;
 
@@ -39,16 +40,14 @@ __global__ void cuda_kernel_wavg(
 	int tid = threadIdx.x;
 
 	AccProjectorKernel *pp = &projector_arg;
-	if (g_blocks != NULL)
+	if (n_classes > 0)
 	{
-		const int2 b = g_blocks[blockIdx.x];
-		const WavgClassJob &c = g_classes[b.x];
+		const WavgClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, bid)];
 		pp = const_cast<AccProjectorKernel *>(&c.projector);
 		g_eulers = c.eulers;
 		g_weights = c.weights;
 		g_wdiff2s_AA = c.wdiff2s_AA;
 		g_wdiff2s_XA = c.wdiff2s_XA;
-		bid = b.y;
 	}
 	AccProjectorKernel &projector = *pp;
 

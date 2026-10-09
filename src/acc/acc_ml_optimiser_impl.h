@@ -1392,7 +1392,8 @@ void getAllSquaredDifferencesCoarse(
 						op.local_Minvsigma2.zdim,
 						op.local_Minvsigma2.xdim-1),
 					~plan.eulers,
-					&(~allWeights)[allWeights_pos] };
+					&(~allWeights)[allWeights_pos],
+					0 };
 				jobs.push_back(job);
 				nums.push_back(plan.orientation_num);
 				job_iclass.push_back(iclass);

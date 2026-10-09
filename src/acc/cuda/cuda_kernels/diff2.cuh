@@ -16,11 +16,14 @@
  */
 
 /*
- * Class batching: one launch for several classes. Each block reads its class and
- * the first orientation it handles (within that class) from g_blocks, and the
- * class's projector, eulers and output from g_classes. Without g_blocks (NULL), a
- * launch is for one class, as before. A block computes exactly what it computed in
- * a per-class launch, so results do not change. (CoarseClassJob: see
+ * Class batching: one launch for several classes. A block finds its class from
+ * the first block of each class (g_class_start, n_classes entries), and takes
+ * that class's projector, eulers and output from g_classes; a launch covers either
+ * the whole blocks of eulers_per_block orientations or (rest_blocks) the remaining
+ * orientations, one per block. With n_classes == 0 a launch is for one class, as
+ * before. A block computes exactly what it computed in a per-class launch, so
+ * results do not change, and the tables take a few dozen bytes per class
+ * whatever the number of orientations. (CoarseClassJob: see
  * acc_projectorkernel_impl.h)
  */
 
@@ -43,21 +46,23 @@ __global__ void cuda_kernel_diff2_coarse(
 		int translation_num,
 		int image_size,
 		const CoarseClassJob *g_classes,
-		const int2 *g_blocks
+		const int *g_class_start,
+		int n_classes,
+		bool rest_blocks
 		)
 {
 	int tid = threadIdx.x;
 
 	AccProjectorKernel *pp = &projector_arg; // its methods are not const
 	int orient0 = blockIdx.x * eulers_per_block;
-	if (g_blocks != NULL)
+	if (n_classes > 0)
 	{
-		const int2 b = g_blocks[blockIdx.x];
-		const CoarseClassJob &c = g_classes[b.x];
+		int local;
+		const CoarseClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
 		pp = const_cast<AccProjectorKernel *>(&c.projector);
 		g_eulers = c.eulers;
 		g_diff2s = c.diff2s;
-		orient0 = b.y;
+		orient0 = rest_blocks ? c.n_even + local : local * eulers_per_block;
 	}
 	AccProjectorKernel &projector = *pp;
 

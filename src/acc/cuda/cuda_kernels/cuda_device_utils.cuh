@@ -18,6 +18,24 @@ __device__ inline double cuda_atomic_add(double* address, double val)
 	return __longlong_as_double(old);
 }
 #else
+// Class batching: the class whose blocks include `block`, given the first block of
+// every class (class_start[0] = 0, class_start[n] = total; empty classes allowed),
+// and the block's index within that class
+__device__ inline int findBatchClass(const int *class_start, int n, int block, int &local)
+{
+	int lo = 0, hi = n;
+	while (hi - lo > 1)
+	{
+		int mid = (lo + hi) / 2;
+		if (class_start[mid] <= block)
+			lo = mid;
+		else
+			hi = mid;
+	}
+	local = block - class_start[lo];
+	return lo;
+}
+
 __device__ inline void cuda_atomic_add(float* address, float value)
 {
   atomicAdd(address,value);

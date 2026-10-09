@@ -39,16 +39,17 @@ __global__ void cuda_kernel_backproject2D(
 		unsigned img_xy,
 		unsigned mdl_x,
 		int mdl_inity,
-		const BPClassJob *g_classes = NULL, // class batching: block -> (class, orientation)
-		const int2 *g_blocks = NULL)        // (see cuda_kernel_diff2_coarse)
+		const BPClassJob *g_classes = NULL, // class batching: one block per class and
+		const int *g_class_start = NULL,    // orientation (see cuda_kernel_diff2_coarse)
+		int n_classes = 0)
 {
 	unsigned tid = threadIdx.x;
 	unsigned img = blockIdx.x;
-	if (g_blocks != NULL)
+	if (n_classes > 0)
 	{
-		const int2 b = g_blocks[blockIdx.x];
-		const BPClassJob &c = g_classes[b.x];
-		img = b.y;
+		int local;
+		const BPClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
+		img = local;
 		g_eulers = c.eulers;
 		g_weights = c.weights;
 		g_model_real = c.model_real;
@@ -213,16 +214,17 @@ __global__ void cuda_kernel_backproject3D(
 		unsigned mdl_y,
 		int mdl_inity,
 		int mdl_initz,
-		const BPClassJob *g_classes = NULL, // class batching: block -> (class, orientation)
-		const int2 *g_blocks = NULL)        // (see cuda_kernel_diff2_coarse)
+		const BPClassJob *g_classes = NULL, // class batching: one block per class and
+		const int *g_class_start = NULL,    // orientation (see cuda_kernel_diff2_coarse)
+		int n_classes = 0)
 {
 	unsigned tid = threadIdx.x;
 	unsigned img = blockIdx.x;
-	if (g_blocks != NULL)
+	if (n_classes > 0)
 	{
-		const int2 b = g_blocks[blockIdx.x];
-		const BPClassJob &c = g_classes[b.x];
-		img = b.y;
+		int local;
+		const BPClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
+		img = local;
 		g_eulers = c.eulers;
 		g_weights = c.weights;
 		g_model_real = c.model_real;
