@@ -2490,6 +2490,71 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 
             pdf_offset.streamSync();
 
+#ifdef _CUDA_ENABLED
+            // All classes at once: their weights tile PassWeights, so one launch with
+            // global job positions, one maximum over the whole array (= the largest of
+            // the per-class maxima) and one rescale give the same values as per class
+            bool batched = false;
+            if (gpuClassBatching())
+            {
+                std::vector<unsigned long> job_idx, job_num;
+                std::vector<int> job_class;
+                size_t total = 0;
+                bool tiled = true;
+                for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
+                {
+                    IndexedDataArrayMask &mask = FPCMasks[exp_iclass];
+                    if (!((baseMLO->mymodel.pdf_class[exp_iclass] > 0.) && (mask.weightNum > 0)))
+                        continue;
+                    if (mask.firstPos != total)
+                        tiled = false;
+                    total += mask.weightNum;
+                    for (long int j = 0; j < mask.jobNum; j++)
+                    {
+                        job_idx.push_back(mask.firstPos + mask.jobOrigin[j]);
+                        job_num.push_back(mask.jobExtent[j]);
+                        job_class.push_back(exp_iclass - sp.iclass_min);
+                    }
+                }
+                if (tiled && total == PassWeights.weights.getSize() && !job_idx.empty())
+                {
+                    const size_t n = job_idx.size(), b1 = n * sizeof(unsigned long);
+                    AccPtr<char> jobs = ptrFactory.make<char>(2 * b1 + n * sizeof(int));
+                    jobs.setStream(PassWeights.weights.getStream());
+                    jobs.allAlloc();
+                    memcpy(&jobs[0], job_idx.data(), b1);
+                    memcpy(&jobs[b1], job_num.data(), b1);
+                    memcpy(&jobs[2 * b1], job_class.data(), n * sizeof(int));
+                    jobs.cpToDevice();
+                    long block_num = ceil((double)n / (double)SUMW_BLOCK_SIZE);
+                    cuda_kernel_exponentiate_weights_fine_batched<<<block_num, SUMW_BLOCK_SIZE, 0, jobs.getStream()>>>(
+                            ~pdf_orientation,
+                            ~pdf_orientation_zeros,
+                            ~pdf_offset,
+                            ~pdf_offset_zeros,
+                            ~PassWeights.weights,
+                            (XFLOAT)op.min_diff2,
+                            sp.nr_oversampled_rot,
+                            sp.nr_oversampled_trans,
+                            ~PassWeights.rot_id,
+                            ~PassWeights.trans_idx,
+                            (unsigned long *) &(~jobs)[0],
+                            (unsigned long *) &(~jobs)[b1],
+                            (int *) &(~jobs)[2 * b1],
+                            sp.nr_dir * sp.nr_psi,
+                            sp.nr_trans,
+                            n);
+                    LAUNCH_HANDLE_ERROR(cudaGetLastError());
+                    weights_max = AccUtilities::getMaxOnDevice<XFLOAT>(PassWeights.weights);
+                    // Add 50 to stay away from e^88 (see below)
+                    AccUtilities::kernel_exponentiate( PassWeights.weights, 50 - weights_max );
+                    batched = true;
+                }
+            }
+            if (!batched)
+#endif
+            {
+
             for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++) // TODO could use classStreams
             {
                 if ((baseMLO->mymodel.pdf_class[exp_iclass] > 0.) && (FPCMasks[exp_iclass].weightNum > 0) )
@@ -2556,6 +2621,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     */
                     AccUtilities::kernel_exponentiate( thisClassPassWeights.weights, 50 - weights_max );
                 }
+            }
             }
 
             op.min_diff2 += 50 - weights_max;

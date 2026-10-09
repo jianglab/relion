@@ -180,6 +180,24 @@ __global__ void cuda_kernel_exponentiate_weights_fine(
 		unsigned long *d_job_num,
 		long int job_num);
 
+__global__ void cuda_kernel_exponentiate_weights_fine_batched(
+		XFLOAT *g_pdf_orientation,
+		bool *g_pdf_orientation_zeros,
+		XFLOAT *g_pdf_offset,
+		bool *g_pdf_offset_zeros,
+		XFLOAT *g_weights,
+		XFLOAT min_diff2,
+		int oversamples_orient,
+		int oversamples_trans,
+		unsigned long *d_rot_id,
+		unsigned long *d_trans_idx,
+		unsigned long *d_job_idx,
+		unsigned long *d_job_num,
+		int *d_job_class,
+		long int pdf_orientation_stride,
+		long int pdf_offset_stride,
+		long int job_num);
+
 __global__ void cuda_kernel_initRND(unsigned long seed,
                                     curandState *States);
 

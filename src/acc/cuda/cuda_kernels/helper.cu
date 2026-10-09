@@ -76,6 +76,54 @@ __global__ void cuda_kernel_exponentiate_weights_fine(
 	}
 }
 
+// All classes of the fine pass in one launch: job positions are global (into the
+// whole weight array) and each job carries its class, which selects that class's
+// part of the orientation and offset priors. Otherwise as above, value for value.
+__global__ void cuda_kernel_exponentiate_weights_fine_batched(
+		XFLOAT *g_pdf_orientation,
+		bool *g_pdf_orientation_zeros,
+		XFLOAT *g_pdf_offset,
+		bool *g_pdf_offset_zeros,
+		XFLOAT *g_weights,
+		XFLOAT min_diff2,
+		int oversamples_orient,
+		int oversamples_trans,
+		unsigned long *d_rot_id,
+		unsigned long *d_trans_idx,
+		unsigned long *d_job_idx,
+		unsigned long *d_job_num,
+		int *d_job_class,
+		long int pdf_orientation_stride,
+		long int pdf_offset_stride,
+		long int job_num)
+{
+	long int jobid = blockIdx.x*SUMW_BLOCK_SIZE+threadIdx.x;
+
+	if (jobid<job_num)
+	{
+		long int pos = d_job_idx[jobid];
+		long int cls = d_job_class[jobid];
+		XFLOAT *pdf_orientation = &g_pdf_orientation[cls * pdf_orientation_stride];
+		bool *pdf_orientation_zeros = &g_pdf_orientation_zeros[cls * pdf_orientation_stride];
+		XFLOAT *pdf_offset = &g_pdf_offset[cls * pdf_offset_stride];
+		bool *pdf_offset_zeros = &g_pdf_offset_zeros[cls * pdf_offset_stride];
+		long int ix = d_rot_id   [pos];
+		long int iy = d_trans_idx[pos];
+		long int in = d_job_num  [jobid];
+
+		int c_itrans;
+		for (int itrans=0; itrans < in; itrans++, iy++)
+		{
+			c_itrans = ( iy - (iy % oversamples_trans))/ oversamples_trans;
+
+			if( g_weights[pos+itrans] < min_diff2 || pdf_orientation_zeros[ix] || pdf_offset_zeros[c_itrans])
+				g_weights[pos+itrans] = -99e99; //large negative number
+			else
+				g_weights[pos+itrans] = pdf_orientation[ix] + pdf_offset[c_itrans] + min_diff2 - g_weights[pos+itrans];
+		}
+	}
+}
+
 __global__ void cuda_kernel_initRND(unsigned long seed, curandState *States)
 {
        int tid = threadIdx.x;
