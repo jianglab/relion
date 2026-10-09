@@ -169,58 +169,81 @@ private:
 	// went waiting for that lock. When memory runs short, _syncReadyEvents() waits for the
 	// whole device instead and takes every block, open or closed: all work that used them
 	// was issued before they were handed back.
-	// Lock order: mutex, then scanMutex, then pendingMutex.
+	// Lock order: mutex, scanMutex, pendingMutex, openMutex (eventMutex innermost).
 	typedef std::pair<std::thread::id, cudaStream_t> PendingKey;
 	struct OpenBatch { std::vector<Alloc*> blocks; };
 	struct ClosedBatch { cudaEvent_t event; std::vector<Alloc*> blocks; };
 	std::map<PendingKey, OpenBatch> openBatches;
 	std::map<PendingKey, std::deque<ClosedBatch> > pending;
-	omp_lock_t pendingMutex; // guards openBatches and pending
+	omp_lock_t pendingMutex; // guards pending
+	omp_lock_t openMutex;    // guards openBatches (held only to add or take blocks)
 	omp_lock_t scanMutex;    // one thread at a time polls the pending events
 
-	// Close this thread's open batches
+	// Close this thread's open batches. The events are recorded outside the locks:
+	// recording is a driver call, and every thread freeing memory needs openMutex.
 	void _closeOwnBatches()
 	{
 		const std::thread::id me = std::this_thread::get_id();
-		Lock pl(&pendingMutex);
-		for (auto it = openBatches.lower_bound(PendingKey(me, (cudaStream_t) 0));
-		     it != openBatches.end() && it->first.first == me; )
+		std::vector<std::pair<PendingKey, std::vector<Alloc*> > > mine;
+		{
+			Lock ol(&openMutex);
+			for (auto it = openBatches.lower_bound(PendingKey(me, (cudaStream_t) 0));
+			     it != openBatches.end() && it->first.first == me; )
+			{
+				mine.push_back(std::make_pair(it->first, std::vector<Alloc*>()));
+				mine.back().second.swap(it->second.blocks);
+				it = openBatches.erase(it);
+			}
+		}
+		for (auto &kb : mine)
 		{
 			ClosedBatch c;
 			c.event = takeEvent();
-			DEBUG_HANDLE_ERROR(cudaEventRecord(c.event, it->first.second));
-			c.blocks.swap(it->second.blocks);
-			pending[it->first].push_back(std::move(c));
-			it = openBatches.erase(it);
+			DEBUG_HANDLE_ERROR(cudaEventRecord(c.event, kb.first.second));
+			c.blocks.swap(kb.second);
+			Lock pl(&pendingMutex);
+			pending[kb.first].push_back(std::move(c));
 		}
 	}
 
 	// Take the blocks whose batches' events have completed. Returns at once if another
-	// thread is already scanning: it will find the same blocks.
+	// thread is already scanning: it will find the same blocks. The events are queried
+	// outside pendingMutex (only the scanning thread removes batches, so the fronts
+	// it saw stay the fronts).
 	void _collectReady(std::vector<Alloc*> &ready)
 	{
 		if (!omp_test_lock(&scanMutex))
 			return;
+		while (true)
 		{
-			Lock pl(&pendingMutex);
-			for (auto it = pending.begin(); it != pending.end(); )
+			std::vector<std::pair<PendingKey, cudaEvent_t> > fronts;
 			{
-				std::deque<ClosedBatch> &q = it->second;
-				while (!q.empty())
-				{
-					cudaError_t e = cudaEventQuery(q.front().event);
-					if (e == cudaErrorNotReady)
-						break;
-					if (e != cudaSuccess)
-						HandleError( e, __FILE__, __LINE__ );
-					ready.insert(ready.end(), q.front().blocks.begin(), q.front().blocks.end());
-					returnEvent(q.front().event);
-					q.pop_front();
-				}
-				if (q.empty())
-					it = pending.erase(it);
-				else
-					++it;
+				Lock pl(&pendingMutex);
+				for (auto &kv : pending)
+					if (!kv.second.empty())
+						fronts.push_back(std::make_pair(kv.first, kv.second.front().event));
+			}
+			std::vector<PendingKey> done;
+			for (auto &f : fronts)
+			{
+				cudaError_t e = cudaEventQuery(f.second);
+				if (e == cudaSuccess)
+					done.push_back(f.first);
+				else if (e != cudaErrorNotReady)
+					HandleError( e, __FILE__, __LINE__ );
+			}
+			if (done.empty())
+				break;
+			Lock pl(&pendingMutex);
+			for (const PendingKey &k : done)
+			{
+				auto it = pending.find(k);
+				ClosedBatch &c = it->second.front();
+				ready.insert(ready.end(), c.blocks.begin(), c.blocks.end());
+				returnEvent(c.event);
+				it->second.pop_front();
+				if (it->second.empty())
+					pending.erase(it);
 			}
 		}
 		omp_unset_lock(&scanMutex);
@@ -239,6 +262,7 @@ private:
 				returnEvent(c.event);
 			}
 		pending.clear();
+		Lock ol(&openMutex);
 		for (auto &kv : openBatches)
 			ready.insert(ready.end(), kv.second.blocks.begin(), kv.second.blocks.end());
 		openBatches.clear();
@@ -578,12 +602,13 @@ public:
 		omp_init_lock(&mutex);
 		omp_init_lock(&eventMutex);
 		omp_init_lock(&pendingMutex);
+		omp_init_lock(&openMutex);
 		omp_init_lock(&scanMutex);
 	}
 
 	void enqueuePending(Alloc *a)
 	{
-		Lock pl(&pendingMutex);
+		Lock ol(&openMutex);
 		openBatches[PendingKey(a->readyThread, a->readyStream)].blocks.push_back(a);
 	}
 
@@ -613,6 +638,7 @@ public:
 		{
 			Lock pl(&pendingMutex);
 			pending.clear();
+			Lock ol(&openMutex);
 			openBatches.clear();
 		}
 		_clear();
@@ -756,6 +782,7 @@ public:
 			_clear();
 		}
 		omp_destroy_lock(&scanMutex);
+		omp_destroy_lock(&openMutex);
 		omp_destroy_lock(&pendingMutex);
 		for (cudaEvent_t e : eventPool)
 			DEBUG_HANDLE_ERROR(cudaEventDestroy(e));
