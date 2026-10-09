@@ -1,3 +1,4 @@
+#include <memory>
 static omp_lock_t global_mutex;
 
 #ifdef _SYCL_ENABLED
@@ -4742,4 +4743,192 @@ baseMLO->timer.toc(baseMLO->TIMING_ESP_DIFF2_E);
     }
 
 	CTOC(timer,"oneParticle");
+}
+
+
+// ----------------------------------------------------------------------------
+// ------------------- accDoExpectationParticleGroup --------------------------
+// ----------------------------------------------------------------------------
+// A group of particles through the E-step in lockstep: each stage for all particles of
+// the group before the next stage. The stages are those of accDoExpectationOneParticle
+// (single-body refinement only), per particle exactly as there; this is the structure
+// for doing a stage's GPU work for several particles in one call.
+template <class MlClass>
+struct AccParticleWork
+{
+	unsigned long part_id_sorted;
+	long int part_id;
+	SamplingParameters sp;
+	OptimisationParamters op;
+	IndexedDataArray CoarsePassWeights, FinePassWeights;
+	std::vector<IndexedDataArrayMask> FinePassClassMasks;
+	ProjectionParams FineProjectionData;
+
+	AccParticleWork(MlOptimiser *baseMLO, unsigned long id_sorted, AccPtrFactory ptrFactory):
+		part_id_sorted(id_sorted),
+		part_id(baseMLO->mydata.sorted_idx[id_sorted]),
+		op(baseMLO->mydata.numberOfImagesInParticle(baseMLO->mydata.sorted_idx[id_sorted]),
+		   baseMLO->mydata.sorted_idx[id_sorted], baseMLO->mydata.is_tomo),
+		CoarsePassWeights(ptrFactory),
+		FinePassWeights(ptrFactory),
+		FinePassClassMasks(baseMLO->mymodel.nr_classes, IndexedDataArrayMask(ptrFactory)),
+		FineProjectionData(baseMLO->mymodel.nr_classes)
+	{
+		sp.nr_images = baseMLO->mydata.numberOfImagesInParticle(part_id);
+	}
+};
+
+template <class MlClass>
+void accDoExpectationParticleGroup(MlClass *myInstance, const std::vector<unsigned long> &ids_sorted, int thread_id, AccPtrFactory ptrFactory)
+{
+	MlOptimiser *baseMLO = myInstance->baseMLO;
+	if (baseMLO->mymodel.nr_bodies != 1 || ids_sorted.size() == 1)
+	{
+		for (unsigned long id : ids_sorted)
+			accDoExpectationOneParticle<MlClass>(myInstance, id, thread_id, ptrFactory);
+		return;
+	}
+	const int ibody = 0;
+	std::vector<std::unique_ptr<AccParticleWork<MlClass> > > group;
+	for (unsigned long id : ids_sorted)
+		group.emplace_back(new AccParticleWork<MlClass>(baseMLO, id, ptrFactory));
+
+	// Preparation: classes to integrate over, images, CTFs, sampling ranges
+	for (auto &w : group)
+	{
+		SamplingParameters &sp = w->sp;
+		OptimisationParamters &op = w->op;
+		const unsigned long part_id_sorted = w->part_id_sorted;
+		if (baseMLO->mydata.is_3D)
+			op.FstMulti.resize(sp.nr_images);
+		sp.iclass_min = 0;
+		sp.iclass_max = baseMLO->mymodel.nr_classes - 1;
+		if (baseMLO->do_fix_classes)
+			sp.iclass_min = sp.iclass_max = baseMLO->fixedClassFromMetadata(part_id_sorted - baseMLO->exp_my_first_part_id);
+		if (baseMLO->do_generate_seeds)
+		{
+			if (baseMLO->do_firstiter_cc && baseMLO->iter == 1)
+				sp.iclass_min = sp.iclass_max = 0;
+			else if ( (baseMLO->do_firstiter_cc && baseMLO->iter == 2) ||
+					(!baseMLO->do_firstiter_cc && baseMLO->iter == 1))
+			{
+				long int idx = part_id_sorted - baseMLO->exp_my_first_part_id;
+				if (idx >= baseMLO->exp_random_class_some_particles.size())
+					REPORT_ERROR("BUG: expectationOneParticle idx>random_class_some_particles.size()");
+				sp.iclass_min = sp.iclass_max = baseMLO->exp_random_class_some_particles[idx];
+			}
+		}
+		op.metadata_offset = part_id_sorted - baseMLO->exp_my_first_part_id;
+
+		CTIC(timer,"getFourierTransformsAndCtfs");
+		getFourierTransformsAndCtfs<MlClass>(w->part_id, op, sp, baseMLO, myInstance, ptrFactory, ibody);
+		CTOC(timer,"getFourierTransformsAndCtfs");
+
+		if (baseMLO->do_skip_align)
+		{
+			sp.itrans_min = sp.itrans_max = sp.idir_min = sp.idir_max = sp.ipsi_min = sp.ipsi_max =
+					part_id_sorted - baseMLO->exp_my_first_part_id;
+		}
+		else
+		{
+			sp.itrans_min = 0;
+			sp.itrans_max = baseMLO->sampling.NrTranslationalSamplings() - 1;
+		}
+		if (baseMLO->do_skip_align || baseMLO->do_skip_rotate)
+		{
+			sp.idir_min = sp.idir_max = sp.ipsi_min = sp.ipsi_max =
+					part_id_sorted - baseMLO->exp_my_first_part_id;
+		}
+		else if (baseMLO->do_only_sample_tilt)
+		{
+			sp.idir_min = 0;
+			sp.idir_max = baseMLO->sampling.NrDirections(0, &op.pointer_dir_nonzeroprior) - 1;
+			sp.ipsi_min = sp.ipsi_max = part_id_sorted - baseMLO->exp_my_first_part_id;
+		}
+		else
+		{
+			sp.idir_min = sp.ipsi_min = 0;
+			sp.idir_max = baseMLO->sampling.NrDirections(0, &op.pointer_dir_nonzeroprior) - 1;
+			sp.ipsi_max = baseMLO->sampling.NrPsiSamplings(0, &op.pointer_psi_nonzeroprior ) - 1;
+		}
+		op.significant_weight = -1.;
+		if (baseMLO->adaptive_oversampling == 0 && (baseMLO->do_firstiter_cc || baseMLO->do_always_cc) )
+			REPORT_ERROR("ERROR-SHWS23sep2022: GPU code will not work for maxCC without oversampling...");
+	}
+
+	// Pass parameters (the same for coarse and fine as in accDoExpectationOneParticle)
+	auto setPass = [&](AccParticleWork<MlClass> &w, int ipass)
+	{
+		SamplingParameters &sp = w.sp;
+		sp.current_oversampling = (ipass == 0) ? 0 : baseMLO->adaptive_oversampling;
+		sp.nr_dir = (baseMLO->do_skip_align || baseMLO->do_skip_rotate) ? 1 : baseMLO->sampling.NrDirections(0, &w.op.pointer_dir_nonzeroprior);
+		sp.nr_psi = (baseMLO->do_skip_align || baseMLO->do_skip_rotate) ? 1 : baseMLO->sampling.NrPsiSamplings(0, &w.op.pointer_psi_nonzeroprior);
+		sp.nr_trans = (baseMLO->do_skip_align) ? 1 : baseMLO->sampling.NrTranslationalSamplings();
+		sp.nr_oversampled_rot = baseMLO->sampling.oversamplingFactorOrientations(sp.current_oversampling);
+		sp.nr_oversampled_trans = baseMLO->sampling.oversamplingFactorTranslations(sp.current_oversampling);
+		w.op.min_diff2 = 0.;
+	};
+
+	// Coarse pass
+	for (auto &w : group)
+	{
+		SamplingParameters &sp = w->sp;
+		OptimisationParamters &op = w->op;
+		setPass(*w, 0);
+		unsigned long weightsPerPart(baseMLO->mymodel.nr_classes * sp.nr_dir * sp.nr_psi * sp.nr_trans * sp.nr_oversampled_rot * sp.nr_oversampled_trans);
+		op.Mweight.resizeNoCp(1,1,1, weightsPerPart);
+		AccPtr<XFLOAT> Mweight = ptrFactory.make<XFLOAT>();
+		Mweight.setSize(weightsPerPart);
+		Mweight.setHostPtr(op.Mweight.data);
+		Mweight.deviceAlloc();
+		deviceInitValue<XFLOAT>(Mweight, std::numeric_limits<XFLOAT>::lowest());
+		Mweight.streamSync();
+		CTIC(timer,"getAllSquaredDifferencesCoarse");
+		getAllSquaredDifferencesCoarse<MlClass>(0, op, sp, baseMLO, myInstance, Mweight, ptrFactory, ibody);
+		CTOC(timer,"getAllSquaredDifferencesCoarse");
+		CTIC(timer,"convertAllSquaredDifferencesToWeightsCoarse");
+		convertAllSquaredDifferencesToWeights<MlClass>(0, op, sp, baseMLO, myInstance, w->CoarsePassWeights, w->FinePassClassMasks, Mweight, ptrFactory, ibody);
+		CTOC(timer,"convertAllSquaredDifferencesToWeightsCoarse");
+	}
+
+	// Fine pass
+	for (auto &w : group)
+	{
+		SamplingParameters &sp = w->sp;
+		OptimisationParamters &op = w->op;
+		ProjectionParams &FineProjectionData = w->FineProjectionData;
+		setPass(*w, 1);
+		FineProjectionData.orientationNumAllClasses = 0;
+		for (int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
+		{
+			if (exp_iclass > 0)
+				FineProjectionData.class_idx[exp_iclass] = FineProjectionData.rots.size();
+			FineProjectionData.class_entries[exp_iclass] = 0;
+			FineProjectionData.orientationNumAllClasses += generateProjectionSetupFine(op, sp, baseMLO, exp_iclass, FineProjectionData);
+		}
+		size_t dataSize = FineProjectionData.orientationNumAllClasses*sp.nr_trans*sp.nr_oversampled_trans;
+		w->FinePassWeights.setDataSize(dataSize);
+		w->FinePassWeights.dual_alloc_all();
+		CTIC(timer,"getAllSquaredDifferencesFine");
+		getAllSquaredDifferencesFine<MlClass>(1, op, sp, baseMLO, myInstance, w->FinePassWeights, w->FinePassClassMasks, FineProjectionData, ptrFactory, ibody);
+		CTOC(timer,"getAllSquaredDifferencesFine");
+		w->FinePassWeights.weights.cpToHost();
+		AccPtr<XFLOAT> Mweight = ptrFactory.make<XFLOAT>(); //DUMMY
+		CTIC(timer,"convertAllSquaredDifferencesToWeightsFine");
+		convertAllSquaredDifferencesToWeights<MlClass>(1, op, sp, baseMLO, myInstance, w->FinePassWeights, w->FinePassClassMasks, Mweight, ptrFactory, ibody);
+		CTOC(timer,"convertAllSquaredDifferencesToWeightsFine");
+	}
+
+	// Weighted sums
+	for (auto &w : group)
+	{
+		w->sp.current_image_size = baseMLO->mymodel.current_size;
+		AccPtrBundle bundleSWS(ptrFactory.makeBundle());
+		bundleSWS.setSize(2*(w->FineProjectionData.orientationNumAllClasses)*sizeof(unsigned long));
+		bundleSWS.allAlloc();
+		CTIC(timer,"storeWeightedSums");
+		storeWeightedSums<MlClass>(w->op, w->sp, baseMLO, myInstance, w->FinePassWeights, w->FineProjectionData, w->FinePassClassMasks, ptrFactory, ibody, bundleSWS);
+		CTOC(timer,"storeWeightedSums");
+		w->FinePassWeights.dual_free_all();
+	}
 }

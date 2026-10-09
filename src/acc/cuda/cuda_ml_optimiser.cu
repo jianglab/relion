@@ -277,6 +277,29 @@ void MlOptimiserCuda::doThreadExpectationSomeParticles(int thread_id)
 	//put mweight allocation here
 	size_t first_ipart = 0, last_ipart = 0;
 
+	// RELION_GPU_PARTICLE_GROUP=n: particles go through the E-step n at a time in lockstep
+	// (accDoExpectationParticleGroup); 1 (default): one at a time
+	static const int group_size = []() {
+		const char *e = getenv("RELION_GPU_PARTICLE_GROUP");
+		return std::max(1, e ? atoi(e) : 1);
+	}();
+	if (group_size > 1)
+	{
+		bool more = true;
+		while (more)
+		{
+			std::vector<unsigned long> ids;
+			while ((int) ids.size() < group_size && (more = baseMLO->exp_ipart_ThreadTaskDistributor->getTasks(first_ipart, last_ipart)))
+				for (long unsigned ipart = first_ipart; ipart <= last_ipart; ipart++)
+					ids.push_back(baseMLO->exp_my_first_part_id + ipart);
+			if (!ids.empty())
+			{
+				AccPtrFactory ptrFactory(allocator, cudaStreamPerThread);
+				accDoExpectationParticleGroup<MlOptimiserCuda>(this, ids, thread_id, ptrFactory);
+			}
+		}
+	}
+	else
 	while (baseMLO->exp_ipart_ThreadTaskDistributor->getTasks(first_ipart, last_ipart))
 	{
 		CTIC(timer,"oneTask");
