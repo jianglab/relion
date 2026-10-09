@@ -25,16 +25,28 @@
 #include <list>
 #include <memory>
 
-// How many particle stacks the prefetcher keeps open: an eighth of the process's file
-// descriptor limit (each stack may hold two streams, and the rest is left for other
-// files), at least 8, at most 4096
+// How many particle stacks the prefetcher keeps open. The soft limit on open files is
+// first raised towards the hard limit (at most 65536), as many programs do: it is
+// often 1024, while a data set can have thousands of stacks. Then an eighth of it is
+// used (each stack may hold two streams, and the rest is left for other files), at
+// least 8 and at most 8192.
 static size_t maxOpenStacks()
 {
 	struct rlimit rl;
 	size_t lim = 1024;
-	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
-		lim = rl.rlim_cur;
-	return std::max<size_t>(8, std::min<size_t>(4096, lim / 8));
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0)
+	{
+		rlim_t want = (rl.rlim_max == RLIM_INFINITY) ? 65536 : std::min<rlim_t>(rl.rlim_max, 65536);
+		if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < want)
+		{
+			struct rlimit raised = rl;
+			raised.rlim_cur = want;
+			if (setrlimit(RLIMIT_NOFILE, &raised) == 0)
+				rl = raised;
+		}
+		lim = (rl.rlim_cur == RLIM_INFINITY) ? 65536 : rl.rlim_cur;
+	}
+	return std::max<size_t>(8, std::min<size_t>(8192, lim / 8));
 }
 
 AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata)

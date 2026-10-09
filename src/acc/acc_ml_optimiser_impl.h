@@ -711,8 +711,7 @@ void getFourierTransformsAndCtfs(long int part_id,
             AccPtr<XFLOAT> spectrumAndXi2 = ptrFactory.make<XFLOAT>((size_t)((baseMLO->image_full_size[optics_group]/2+1)+1), 0); // last +1 is the Xi2, to remove an expensive memcpy
 #endif
             spectrumAndXi2.allAlloc();
-            spectrumAndXi2.accInit(0);
-            spectrumAndXi2.streamSync();
+            spectrumAndXi2.accInit(0); // same stream as the kernel and the copy below
 
             int gridSize = CEIL((float)(accMLO->transformer1.fouriers.getSize()) / (float)POWERCLASS_BLOCK_SIZE);
             if(accMLO->dataIs3D)
@@ -754,8 +753,7 @@ void getFourierTransformsAndCtfs(long int part_id,
     LAUNCH_PRIVATE_ERROR(hipGetLastError(),accMLO->errorStatus);
 #endif
 
-			spectrumAndXi2.streamSync();
-			spectrumAndXi2.cpToHost();
+			spectrumAndXi2.cpToHost(); // after the kernel on the same stream
 			spectrumAndXi2.streamSync();
 
 			op.power_img.at(img_id).resize(baseMLO->image_full_size[optics_group]/2 + 1);
@@ -1727,6 +1725,14 @@ void getAllSquaredDifferencesFine(
 		std::vector< AccPtr<XFLOAT> > eulers((size_t)(sp.iclass_max-sp.iclass_min+1), ptrFactory.make<XFLOAT>());
 
 		AccPtrBundle AllEulers = ptrFactory.makeBundle();
+#ifdef _CUDA_ENABLED
+		// With class batching, all classes' job arrays go up in one copy after the loop
+		// (each class's arrays then point into it); otherwise one allocation and copy each
+		const bool packJobs = gpuClassBatching();
+		AccPtr<char> &allJobs = FPCMasks[sp.iclass_min].packedJobs;
+#else
+		const bool packJobs = false;
+#endif
 #ifdef _SYCL_ENABLED
 		AllEulers.setStreamAccType(devAcc);
 #endif
@@ -1809,10 +1815,13 @@ void getAllSquaredDifferencesFine(
 #endif
                 FPCMasks[exp_iclass].jobOrigin.freeDeviceIfSet();
 				FPCMasks[exp_iclass].jobExtent.freeDeviceIfSet();
-				FPCMasks[exp_iclass].jobOrigin.deviceAlloc();
-				FPCMasks[exp_iclass].jobExtent.deviceAlloc();
-                FPCMasks[exp_iclass].jobOrigin.cpToDevice();
-                FPCMasks[exp_iclass].jobExtent.cpToDevice();
+				if (!packJobs)
+				{
+					FPCMasks[exp_iclass].jobOrigin.deviceAlloc();
+					FPCMasks[exp_iclass].jobExtent.deviceAlloc();
+					FPCMasks[exp_iclass].jobOrigin.cpToDevice();
+					FPCMasks[exp_iclass].jobExtent.cpToDevice();
+				}
                 CTOC(accMLO->timer,"IndexedArrayMemCp2");
 
 				Matrix2D<RFLOAT> MBL, MBR;
@@ -1869,6 +1878,37 @@ void getAllSquaredDifferencesFine(
 
 //		bundleD2.cpToDevice();
 		AllEulers.cpToDevice();
+#ifdef _CUDA_ENABLED
+		if (packJobs)
+		{
+			size_t total = 0;
+			for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
+				if (FPCMasks[c].weightNum > 0)
+					total += FPCMasks[c].jobOrigin.getSize() + FPCMasks[c].jobExtent.getSize();
+			if (total > 0)
+			{
+				allJobs.freeIfSet();
+				allJobs.setSize(total * sizeof(unsigned long));
+				allJobs.allAlloc();
+				unsigned long *h = (unsigned long *) &allJobs[0];
+				unsigned long *d = (unsigned long *) ~allJobs;
+				size_t pos = 0;
+				for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
+				{
+					if (FPCMasks[c].weightNum == 0)
+						continue;
+					AccPtr<unsigned long> &o = FPCMasks[c].jobOrigin, &e = FPCMasks[c].jobExtent;
+					memcpy(&h[pos], &o[0], o.getSize() * sizeof(unsigned long));
+					o.setDevicePtr(&d[pos]);
+					pos += o.getSize();
+					memcpy(&h[pos], &e[0], e.getSize() * sizeof(unsigned long));
+					e.setDevicePtr(&d[pos]);
+					pos += e.getSize();
+				}
+				allJobs.cpToDevice();
+			}
+		}
+#endif
 
 		FinePassWeights.rot_id.cpToDevice(); //FIXME this is not used
 		FinePassWeights.rot_idx.cpToDevice();
@@ -2879,6 +2919,12 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     int sumBlockNum =0;
 
     CTIC(accMLO->timer,"collect_data_2_pre_kernel");
+    // The oversampled translations do not depend on the class: get them once
+    std::vector<std::vector<RFLOAT> > ovs_x(sp.nr_trans), ovs_y(sp.nr_trans), ovs_z(sp.nr_trans);
+    for (long int itrans = 0; itrans < sp.nr_trans; itrans++)
+        baseMLO->sampling.getTranslationsInPixel(itrans, baseMLO->adaptive_oversampling, my_pixel_size,
+                ovs_x[itrans], ovs_y[itrans], ovs_z[itrans],
+                (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry));
     for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
     {
         unsigned long fake_class = exp_iclass-sp.iclass_min; // if we only have the third class to do, the third class will be the "first" we do, i.e. the "fake" first.
@@ -2923,9 +2969,9 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
         //Pregenerate oversampled translation objects for kernel-call
         for (long int itrans = 0, iitrans = 0; itrans < sp.nr_trans; itrans++)
         {
-            baseMLO->sampling.getTranslationsInPixel(itrans, baseMLO->adaptive_oversampling, my_pixel_size,
-                    oversampled_translations_x, oversampled_translations_y, oversampled_translations_z,
-                    (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry));
+            const std::vector<RFLOAT> &oversampled_translations_x = ovs_x[itrans];
+            const std::vector<RFLOAT> &oversampled_translations_y = ovs_y[itrans];
+            const std::vector<RFLOAT> &oversampled_translations_z = ovs_z[itrans];
             for (long int iover_trans = 0; iover_trans < sp.nr_oversampled_trans; iover_trans++, iitrans++)
             {
 
@@ -3517,6 +3563,27 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 #endif
 			sorted_weights.allAlloc();
 			std::vector<AccPtr<XFLOAT> > eulers(baseMLO->mymodel.nr_classes, ptrFactory.make<XFLOAT>());
+#ifdef _CUDA_ENABLED
+			// With class batching, all classes' euler matrices go up in one copy: each
+			// class's array is a view of its part of packedEulers
+			const bool packEulers = gpuClassBatching();
+			AccPtr<XFLOAT> packedEulers = ptrFactory.make<XFLOAT>();
+			size_t eulerPos = 0;
+			if (packEulers)
+			{
+				size_t total = 0;
+				for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
+					if ((baseMLO->mymodel.pdf_class[c] > 0.) && (ProjectionData.class_entries[c] > 0))
+						total += 9 * ProjectionData.orientation_num[c];
+				if (total > 0)
+				{
+					packedEulers.setSize(total);
+					packedEulers.allAlloc();
+				}
+			}
+#else
+			const bool packEulers = false;
+#endif
 
 			unsigned long classPos = 0;
 		#ifdef _HIP_ENABLED
@@ -3572,10 +3639,19 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 
 				eulers[iclass].setSize(orientation_num * 9);
 				eulers[iclass].setStream(accMLO->classStreams[iclass]);
+#ifdef _CUDA_ENABLED
+				if (packEulers)
+				{
+					eulers[iclass].setHostPtr(&packedEulers[eulerPos]);
+					eulers[iclass].setDevicePtr(&(~packedEulers)[eulerPos]);
+					eulerPos += orientation_num * 9;
+				}
+#endif
 #ifdef _SYCL_ENABLED
 				eulers[iclass].setAccType(accSYCL);
 #endif
-				eulers[iclass].hostAlloc();
+				if (!packEulers)
+					eulers[iclass].hostAlloc();
 
 				CTIC(accMLO->timer,"generateEulerMatricesProjector");
 
@@ -3603,8 +3679,11 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 						MBL,
 						MBR);
 
-				eulers[iclass].deviceAlloc();
-				eulers[iclass].cpToDevice();
+				if (!packEulers)
+				{
+					eulers[iclass].deviceAlloc();
+					eulers[iclass].cpToDevice();
+				}
 
 				CTOC(accMLO->timer,"generateEulerMatricesProjector");
 
@@ -3624,6 +3703,10 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				classPos+=orientation_num*translation_num;
 				CTOC(accMLO->timer,"pre_wavg_map");
 			}
+#ifdef _CUDA_ENABLED
+			if (packEulers && eulerPos > 0)
+				packedEulers.cpToDevice();
+#endif
 			sorted_weights.cpToDevice();
 
 			// These syncs are necessary (for multiple ranks on the same GPU), and (assumed) low-cost.

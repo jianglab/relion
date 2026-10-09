@@ -259,6 +259,9 @@ public:
 	//   every element in jobOrigin    is a reference to point to a position in a IndexedDataArray.weights array where that job starts RELATIVE to firstPos
 	//   every element in jobExtent    specifies the number of weights for that job
 	AccPtr<size_t> jobOrigin, jobExtent;
+	// Owns the device copy of all classes' job arrays when they are uploaded together
+	// (kept in the first class's mask, which lives as long as the others)
+	AccPtr<char> packedJobs;
 
 	size_t firstPos, lastPos; // positions in indexedDataArray data and index arrays to slice out
 	size_t weightNum, jobNum; // number of weights and jobs this class
@@ -271,6 +274,7 @@ public:
 	{
 		jobOrigin = ptrFactory.make<size_t>();
 		jobExtent = ptrFactory.make<size_t>();
+		packedJobs = ptrFactory.make<char>();
 	}
 	
 	void setNumberOfJobs(size_t newSize)
