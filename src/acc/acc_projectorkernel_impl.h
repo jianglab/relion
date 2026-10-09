@@ -319,5 +319,15 @@ __device__ __forceinline__
 	}
 };  // class AccProjectorKernel
 
+#ifdef _CUDA_ENABLED
+// One class of a class-batched coarse difference launch (see cuda_kernel_diff2_coarse)
+struct CoarseClassJob
+{
+	AccProjectorKernel projector;
+	XFLOAT *eulers;
+	XFLOAT *diff2s;
+};
+#endif
+
 
 #endif

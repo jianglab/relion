@@ -1136,6 +1136,135 @@ void mapAllWeightsToMweights(
 #endif
 }
 
+#ifdef _CUDA_ENABLED
+// Class batching of the coarse difference kernel: the two launches (whole blocks of
+// eulers_per_block orientations, then the rest one per block) for all classes at once
+template<bool REF3D, bool DATA3D, int block_sz, int eulers_per_block, int prefetch_fraction>
+static void launchDiff2CoarseBatched(
+		size_t n_even, size_t n_rest,
+		const CoarseClassJob *d_classes, const int2 *d_even, const int2 *d_rest,
+		AccProjectorKernel &projector,
+		XFLOAT *trans_x, XFLOAT *trans_y, XFLOAT *trans_z,
+		XFLOAT *corr_img, XFLOAT *Fimg_real, XFLOAT *Fimg_imag,
+		unsigned long translation_num, unsigned long image_size,
+		deviceStream_t stream)
+{
+	if (n_even)
+		AccUtilities::diff2_coarse<REF3D, DATA3D, block_sz, eulers_per_block, prefetch_fraction>(
+			n_even, block_sz, NULL, trans_x, trans_y, trans_z, Fimg_real, Fimg_imag,
+			projector, corr_img, NULL, translation_num, image_size, stream, d_classes, d_even);
+	if (n_rest)
+		AccUtilities::diff2_coarse<REF3D, DATA3D, block_sz, 1, prefetch_fraction>(
+			n_rest, block_sz, NULL, trans_x, trans_y, trans_z, Fimg_real, Fimg_imag,
+			projector, corr_img, NULL, translation_num, image_size, stream, d_classes, d_rest);
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+
+bool runDiff2KernelCoarseBatched(
+		std::vector<CoarseClassJob> &classes,
+		std::vector<size_t> &orientation_nums,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *trans_z,
+		XFLOAT *corr_img,
+		XFLOAT *Fimg_real,
+		XFLOAT *Fimg_imag,
+		unsigned long translation_num,
+		unsigned long image_size,
+		bool data_is_3D,
+		AccPtr<char> &table)
+{
+	if (classes.empty())
+		return true;
+	AccProjectorKernel &projector = classes[0].projector;
+	const bool ref3D = projector.mdlZ != 0;
+
+	// The same split as runDiff2KernelCoarse: per class, the orientations up to a
+	// multiple of `split` in blocks of `per_block`, the rest one per block
+	int per_block, split, mult = 1;
+	if (ref3D)
+	{
+		const unsigned long blocks3D = (data_is_3D ? D2C_BLOCK_SIZE_DATA3D : D2C_BLOCK_SIZE_REF3D);
+#ifdef ACC_DOUBLE_PRECISION
+		const int max_mult = 4;
+#else
+		const int max_mult = 8;
+#endif
+		while (mult < max_mult && translation_num > blocks3D * mult)
+			mult *= 2;
+		if (translation_num > blocks3D * mult)
+			CRITICAL(ERR_TRANSLIM);
+		split = blocks3D;
+		per_block = data_is_3D ? D2C_EULERS_PER_BLOCK_DATA3D : D2C_EULERS_PER_BLOCK_REF3D;
+	}
+	else
+	{
+		if (translation_num > D2C_BLOCK_SIZE_2D)
+		{
+			printf("Number of coarse translations larger than %d on the GPU not supported.\n", D2C_BLOCK_SIZE_2D);
+			fflush(stdout);
+			exit(1);
+		}
+		split = per_block = D2C_EULERS_PER_BLOCK_2D;
+	}
+
+	std::vector<int2> even, rest;
+	for (size_t c = 0; c < classes.size(); c++)
+	{
+		const size_t n = orientation_nums[c];
+		const size_t n_even = n - n % split;
+		for (size_t o = 0; o < n_even; o += per_block)
+			even.push_back(make_int2((int) c, (int) o));
+		for (size_t o = n_even; o < n; o++)
+			rest.push_back(make_int2((int) c, (int) o));
+	}
+
+	// One upload for the class table and both block tables
+	const size_t class_bytes = ((classes.size() * sizeof(CoarseClassJob) + 15) / 16) * 16;
+	const size_t bytes = class_bytes + (even.size() + rest.size()) * sizeof(int2);
+	table.setSize(bytes);
+	table.allAlloc();
+	memcpy(&table[0], classes.data(), classes.size() * sizeof(CoarseClassJob));
+	memcpy(&table[class_bytes], even.data(), even.size() * sizeof(int2));
+	memcpy(&table[class_bytes + even.size() * sizeof(int2)], rest.data(), rest.size() * sizeof(int2));
+	table.cpToDevice();
+
+	const CoarseClassJob *d_classes = (const CoarseClassJob *) ~table;
+	const int2 *d_even = (const int2 *) &(~table)[class_bytes];
+	const int2 *d_rest = d_even + even.size();
+	deviceStream_t stream = table.getStream();
+
+#define D2C_BATCH(R3, D3, BS, EPB, PF) launchDiff2CoarseBatched<R3, D3, BS, EPB, PF>(even.size(), rest.size(), \
+		d_classes, d_even, d_rest, projector, trans_x, trans_y, trans_z, corr_img, Fimg_real, Fimg_imag, \
+		translation_num, image_size, stream)
+	if (!ref3D)
+	{
+		if (data_is_3D) D2C_BATCH(false, true, D2C_BLOCK_SIZE_2D, D2C_EULERS_PER_BLOCK_2D, 2);
+		else            D2C_BATCH(false, false, D2C_BLOCK_SIZE_2D, D2C_EULERS_PER_BLOCK_2D, 2);
+	}
+	else if (data_is_3D)
+	{
+		if      (mult == 1) D2C_BATCH(true, true, D2C_BLOCK_SIZE_DATA3D,   D2C_EULERS_PER_BLOCK_DATA3D, 4);
+		else if (mult == 2) D2C_BATCH(true, true, D2C_BLOCK_SIZE_DATA3D*2, D2C_EULERS_PER_BLOCK_DATA3D, 4);
+		else if (mult == 4) D2C_BATCH(true, true, D2C_BLOCK_SIZE_DATA3D*4, D2C_EULERS_PER_BLOCK_DATA3D, 4);
+#ifndef ACC_DOUBLE_PRECISION
+		else                D2C_BATCH(true, true, D2C_BLOCK_SIZE_DATA3D*8, D2C_EULERS_PER_BLOCK_DATA3D, 4);
+#endif
+	}
+	else
+	{
+		if      (mult == 1) D2C_BATCH(true, false, D2C_BLOCK_SIZE_REF3D,   D2C_EULERS_PER_BLOCK_REF3D, 4);
+		else if (mult == 2) D2C_BATCH(true, false, D2C_BLOCK_SIZE_REF3D*2, D2C_EULERS_PER_BLOCK_REF3D, 4);
+		else if (mult == 4) D2C_BATCH(true, false, D2C_BLOCK_SIZE_REF3D*4, D2C_EULERS_PER_BLOCK_REF3D, 4);
+#ifndef ACC_DOUBLE_PRECISION
+		else                D2C_BATCH(true, false, D2C_BLOCK_SIZE_REF3D*8, D2C_EULERS_PER_BLOCK_REF3D, 4);
+#endif
+	}
+#undef D2C_BATCH
+	return true;
+}
+#endif
+
 void runDiff2KernelCoarse(
 		AccProjectorKernel &projector,
 		XFLOAT *trans_x,

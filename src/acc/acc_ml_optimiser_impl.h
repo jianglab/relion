@@ -1049,6 +1049,10 @@ void getAllSquaredDifferencesCoarse(
 #else
     std::vector< AccProjectorPlan > projectorPlans(0, (CudaCustomAllocator *)accMLO->getAllocator());
 #endif
+#ifdef _CUDA_ENABLED
+    // Own the memory of class-batched plans (see AccProjectorPlan::setupBatch)
+    std::vector< AccProjectorPlan > planBatches(sp.nr_images, AccProjectorPlan((CudaCustomAllocator *)accMLO->getAllocator()));
+#endif
 
     int optics_group = baseMLO->mydata.getOpticsGroup(op.part_id); // get optics group of first image for this particle...
     long int group_id = baseMLO->mydata.getGroupId(op.part_id);
@@ -1064,15 +1068,10 @@ void getAllSquaredDifferencesCoarse(
         projectorPlans.resize(baseMLO->mymodel.nr_classes * sp.nr_images, (CudaCustomAllocator *)accMLO->getAllocator());
 #endif
 
-		for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+		// Body orientation and magnification for image img_id (the same for all classes)
+		auto bodyMatrices = [&](unsigned long img_id, Matrix2D<RFLOAT> &MBL, Matrix2D<RFLOAT> &MBR)
 		{
-			if (baseMLO->mymodel.pdf_class[iclass] > 0.)
-			{
-
-                for (unsigned long img_id = 0; img_id < sp.nr_images; img_id++)
-		        {
-
-                    Matrix2D<RFLOAT> MBL, MBR, Aori;
+                    Matrix2D<RFLOAT> Aori;
 
                     if (baseMLO->mymodel.nr_bodies > 1)
                     {
@@ -1102,6 +1101,67 @@ void getAllSquaredDifferencesCoarse(
                         if (MBL.mdimx == 3 && MBL.mdimx ==3) MBL = mag * MBL;
                         else MBL = mag;
                     }
+
+		};
+
+#ifdef _CUDA_ENABLED
+		if (gpuClassBatching())
+		{
+			// All classes' plans of an image together (see AccProjectorPlan::setupBatch)
+			std::vector<unsigned> iclasses;
+			for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+				if (baseMLO->mymodel.pdf_class[iclass] > 0.)
+					iclasses.push_back(iclass);
+			for (unsigned long img_id = 0; img_id < sp.nr_images; img_id++)
+			{
+				Matrix2D<RFLOAT> MBL, MBR;
+				bodyMatrices(img_id, MBL, MBR);
+				std::vector<AccProjectorPlan*> plans;
+				for (unsigned iclass : iclasses)
+					plans.push_back(&projectorPlans[iclass*sp.nr_images + img_id]);
+				planBatches[img_id].setupBatch(
+                            plans,
+                            iclasses,
+                            baseMLO->sampling,
+                            op.directions_prior,
+                            op.psi_prior,
+                            op.pointer_dir_nonzeroprior,
+                            op.pointer_psi_nonzeroprior,
+                            NULL, //Mcoarse_significant
+                            baseMLO->mymodel.pdf_class,
+                            baseMLO->mymodel.pdf_direction,
+                            sp.nr_dir,
+                            sp.nr_psi,
+                            sp.idir_min,
+                            sp.idir_max,
+                            sp.ipsi_min,
+                            sp.ipsi_max,
+                            sp.itrans_min,
+                            sp.itrans_max,
+                            0, //current_oversampling
+                            1, //nr_oversampled_rot
+                            true, //coarse
+                            !IS_NOT_INV,
+                            baseMLO->do_skip_align,
+                            baseMLO->do_skip_rotate,
+                            baseMLO->mymodel.orientational_prior_mode,
+                            MBL,
+                            MBR
+                            );
+			}
+		}
+		else
+#endif
+		for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+		{
+			if (baseMLO->mymodel.pdf_class[iclass] > 0.)
+			{
+
+                for (unsigned long img_id = 0; img_id < sp.nr_images; img_id++)
+		        {
+
+                    Matrix2D<RFLOAT> MBL, MBR;
+                    bodyMatrices(img_id, MBL, MBR);
 
 #ifdef _SYCL_ENABLED
 					projectorPlans[iclass*sp.nr_images + img_id].setSyclDevice(devAcc);
@@ -1311,6 +1371,63 @@ void getAllSquaredDifferencesCoarse(
 		devAcc->waitAll();
     #endif
 
+#ifdef _CUDA_ENABLED
+		// All classes in one call: per-class launches cost more in driver calls than
+		// the GPU spends on small searches (see runDiff2KernelCoarseBatched)
+		if (gpuClassBatching() && !do_CC)
+		{
+			std::vector<CoarseClassJob> jobs;
+			std::vector<size_t> nums, job_iclass, job_pos;
+			for (unsigned long iclass = sp.iclass_min, allWeights_pos=0; iclass <= sp.iclass_max; iclass++)
+			{
+				AccProjectorPlan &plan = projectorPlans[iclass*sp.nr_images + img_id];
+				if (plan.orientation_num == 0)
+					continue;
+				int iproj = (baseMLO->mymodel.nr_bodies > 1) ? ibody : iclass;
+				CoarseClassJob job = {
+					AccProjectorKernel::makeKernel(
+						accMLO->bundle->projectors[iproj],
+						op.local_Minvsigma2.xdim,
+						op.local_Minvsigma2.ydim,
+						op.local_Minvsigma2.zdim,
+						op.local_Minvsigma2.xdim-1),
+					~plan.eulers,
+					&(~allWeights)[allWeights_pos] };
+				jobs.push_back(job);
+				nums.push_back(plan.orientation_num);
+				job_iclass.push_back(iclass);
+				job_pos.push_back(allWeights_pos);
+				allWeights_pos += plan.orientation_num*translation_num;
+			}
+			AccPtr<char> table = ptrFactory.make<char>();
+			runDiff2KernelCoarseBatched(
+					jobs, nums,
+					&(~trans_xyz)[trans_x_offset],
+					&(~trans_xyz)[trans_y_offset],
+					&(~trans_xyz)[trans_z_offset],
+					~corr_img,
+					&(~Fimg_)[img_re_offset],
+					&(~Fimg_)[img_im_offset],
+					translation_num,
+					image_size,
+					accMLO->dataIs3D,
+					table);
+			// On the same stream as the differences they read
+			if (img_id == sp.nr_images - 1)
+				for (size_t j = 0; j < jobs.size(); j++)
+				{
+					AccProjectorPlan &plan = projectorPlans[job_iclass[j]*sp.nr_images + img_id];
+					mapAllWeightsToMweights(
+						~plan.iorientclasses,
+						&(~allWeights)[job_pos[j]],
+						&(~Mweight)[0],
+						plan.orientation_num,
+						translation_num,
+						table.getStream());
+				}
+		}
+		else
+#endif
 		for (unsigned long iclass = sp.iclass_min, allWeights_pos=0; iclass <= sp.iclass_max; iclass++)
 		{
 			int iproj;

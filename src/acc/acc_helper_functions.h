@@ -257,6 +257,35 @@ void runDiff2KernelCoarse(
 		bool do_CC,
 		bool data_is_3D);
 
+#ifdef _CUDA_ENABLED
+// GPU class batching (several classes per kernel launch) is on by default;
+// RELION_GPU_CLASS_BATCH=off goes back to one launch per class, e.g. to compare
+inline bool gpuClassBatching()
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_CLASS_BATCH");
+		return !(e && (std::string(e) == "off" || std::string(e) == "0"));
+	}();
+	return on;
+}
+
+// All classes of one coarse pass in one call (two launches); `table` is uploaded and
+// must outlive the launches (CUDA only, not for do_CC)
+bool runDiff2KernelCoarseBatched(
+		std::vector<CoarseClassJob> &classes,
+		std::vector<size_t> &orientation_nums,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *trans_z,
+		XFLOAT *corr_img,
+		XFLOAT *Fimg_real,
+		XFLOAT *Fimg_imag,
+		unsigned long translation_num,
+		unsigned long image_size,
+		bool data_is_3D,
+		AccPtr<char> &table);
+#endif
+
 void runDiff2KernelFine(
 		AccProjectorKernel &projector,
 		XFLOAT *corr_img,

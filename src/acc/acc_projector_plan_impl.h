@@ -96,7 +96,8 @@ void AccProjectorPlan::setSyclDevice(deviceStream_t dev)
 }
 #endif
 
-void AccProjectorPlan::setup(
+// The orientations of one class that a plan holds (shared by setup() and setupBatch())
+static unsigned long collectPlanOrientations(
 		HealpixSampling &sampling,
 		std::vector<RFLOAT> &directions_prior,
 		std::vector<RFLOAT> &psi_prior,
@@ -117,70 +118,14 @@ void AccProjectorPlan::setup(
 		unsigned long nr_oversampled_rot,
 		unsigned iclass,
 		bool coarse,
-		bool inverseMatrix,
 		bool do_skip_align,
 		bool do_skip_rotate,
 		int orientational_prior_mode,
-		Matrix2D<RFLOAT> &L_,
-		Matrix2D<RFLOAT> &R_)
+		RFLOAT myperturb,
+		XFLOAT *alphas, XFLOAT *betas, XFLOAT *gammas, long unsigned *iorientclasses)
 {
-	TIMING_TIC(TIMING_TOP);
-
 	std::vector< RFLOAT > oversampled_rot, oversampled_tilt, oversampled_psi;
-
-	AccPtr<XFLOAT> alphas =  eulers.make<XFLOAT>(nr_dir * nr_psi * nr_oversampled_rot * 9);
-	AccPtr<XFLOAT> betas =   eulers.make<XFLOAT>(nr_dir * nr_psi * nr_oversampled_rot * 9);
-	AccPtr<XFLOAT> gammas =  eulers.make<XFLOAT>(nr_dir * nr_psi * nr_oversampled_rot * 9);
-	AccPtr<XFLOAT> adjustL = eulers.make<XFLOAT>((size_t)9);
-	AccPtr<XFLOAT> adjustR = eulers.make<XFLOAT>((size_t)9);
-
-	alphas.hostAlloc();
-	betas.hostAlloc();
-	gammas.hostAlloc();
-
-	eulers.freeIfSet();
-	eulers.setSize(nr_dir * nr_psi * nr_oversampled_rot * 9);
-	eulers.hostAlloc();
-
-	iorientclasses.freeIfSet();
-	iorientclasses.setSize(nr_dir * nr_psi * nr_oversampled_rot);
-	iorientclasses.hostAlloc();
-
-	orientation_num = 0;
-
-	Matrix2D<RFLOAT> L(3,3);
-	Matrix2D<RFLOAT> R(3,3);
-
-	L.initIdentity();
-	R.initIdentity();
-
-	bool doL(false), doR(false);
-	RFLOAT myperturb(0.);
-
-	if (L_.mdimx == L.mdimx && L_.mdimy == L.mdimy)
-	{
-		doL = true;
-		L = L_ * L;
-	}
-
-	if (ABS(sampling.random_perturbation) > 0.)
-	{
-		myperturb = sampling.random_perturbation * sampling.getAngularSampling();
-		if (sampling.is_3D)
-		{
-			Euler_angles2matrix(myperturb, myperturb, myperturb, R);
-		}
-		doR = true;
-	}
-
-	if (R_.mdimx == R.mdimx && R_.mdimy == R.mdimy)
-	{
-		doR = true;
-		R = R * R_;
-	}
-
-	TIMING_TIC(TIMING_SAMPLING);
-
+	unsigned long n = 0;
 	for (long int idir = idir_min, iorient = 0; idir <= idir_max; idir++)
 	{
 		for (long int ipsi = ipsi_min, ipart = 0; ipsi <= ipsi_max; ipsi++, iorient++)
@@ -246,60 +191,32 @@ void AccProjectorPlan::setup(
 				{
 					if (sampling.is_3D)
 					{
-						alphas[orientation_num] = oversampled_rot[iover_rot];
-					    betas[orientation_num]  = oversampled_tilt[iover_rot];
-					    gammas[orientation_num] = oversampled_psi[iover_rot];
+						alphas[n] = oversampled_rot[iover_rot];
+					    betas[n]  = oversampled_tilt[iover_rot];
+					    gammas[n] = oversampled_psi[iover_rot];
 					}
 					else
 					{
-						alphas[orientation_num] = oversampled_psi[iover_rot] + myperturb;
+						alphas[n] = oversampled_psi[iover_rot] + myperturb;
 					}
 
-					iorientclasses[orientation_num] = iorientclass;
-					orientation_num ++;
+					iorientclasses[n] = iorientclass;
+					n++;
 				}
 			}
 			TIMING_TOC(TIMING_PROC);
 		}
 	}
-	TIMING_TOC(TIMING_SAMPLING);
+	return n;
+}
 
-	iorientclasses.resizeHostCopy(orientation_num);
-#if defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
-	iorientclasses.setStreamAccType(devAcc);
-#endif
-	iorientclasses.putOnDevice();
-
-	eulers.resizeHostCopy(orientation_num * 9);
-	eulers.deviceAlloc();
-
-	alphas.resizeHostCopy(orientation_num);
-	alphas.putOnDevice();
-
-	if(sampling.is_3D)
-	{
-		betas.resizeHostCopy(orientation_num);
-		betas.putOnDevice();
-		gammas.resizeHostCopy(orientation_num);
-		gammas.putOnDevice();
-	}
-
-	if (doL)
-	{
-		adjustL.hostAlloc();
-		for (int i = 0; i < 9; i ++)
-			adjustL[i] = (XFLOAT) L.mdata[i];
-		adjustL.putOnDevice();
-	}
-
-	if (doR)
-	{
-		adjustR.hostAlloc();
-		for (int i = 0; i < 9; i ++)
-			adjustR[i] = (XFLOAT) R.mdata[i];
-		adjustR.putOnDevice();
-	}
-
+// Euler matrices from the angles (shared by setup() and setupBatch())
+static void makePlanEulers(
+		HealpixSampling &sampling, bool inverseMatrix, bool doL, bool doR,
+		AccPtr<XFLOAT> &alphas, AccPtr<XFLOAT> &betas, AccPtr<XFLOAT> &gammas,
+		AccPtr<XFLOAT> &adjustL, AccPtr<XFLOAT> &adjustR,
+		AccPtr<XFLOAT> &eulers, unsigned long orientation_num)
+{
 	int grid_size = ceil((float)orientation_num/(float)BLOCK_SIZE);
 
 	if(inverseMatrix)
@@ -405,6 +322,137 @@ void AccProjectorPlan::setup(
 					~eulers,
 					orientation_num);
 	}
+}
+
+void AccProjectorPlan::setup(
+		HealpixSampling &sampling,
+		std::vector<RFLOAT> &directions_prior,
+		std::vector<RFLOAT> &psi_prior,
+		std::vector<int> &pointer_dir_nonzeroprior,
+		std::vector<int> &pointer_psi_nonzeroprior,
+		MultidimArray<bool> *Mcoarse_significant,
+		std::vector<RFLOAT > &pdf_class,
+		std::vector<MultidimArray<RFLOAT> > &pdf_direction,
+		unsigned long nr_dir,
+		unsigned long nr_psi,
+		unsigned long idir_min,
+		unsigned long idir_max,
+		unsigned long ipsi_min,
+		unsigned long ipsi_max,
+		unsigned long itrans_min,
+		unsigned long itrans_max,
+		unsigned long current_oversampling,
+		unsigned long nr_oversampled_rot,
+		unsigned iclass,
+		bool coarse,
+		bool inverseMatrix,
+		bool do_skip_align,
+		bool do_skip_rotate,
+		int orientational_prior_mode,
+		Matrix2D<RFLOAT> &L_,
+		Matrix2D<RFLOAT> &R_)
+{
+	TIMING_TIC(TIMING_TOP);
+
+	AccPtr<XFLOAT> alphas =  eulers.make<XFLOAT>(nr_dir * nr_psi * nr_oversampled_rot * 9);
+	AccPtr<XFLOAT> betas =   eulers.make<XFLOAT>(nr_dir * nr_psi * nr_oversampled_rot * 9);
+	AccPtr<XFLOAT> gammas =  eulers.make<XFLOAT>(nr_dir * nr_psi * nr_oversampled_rot * 9);
+	AccPtr<XFLOAT> adjustL = eulers.make<XFLOAT>((size_t)9);
+	AccPtr<XFLOAT> adjustR = eulers.make<XFLOAT>((size_t)9);
+
+	alphas.hostAlloc();
+	betas.hostAlloc();
+	gammas.hostAlloc();
+
+	eulers.freeIfSet();
+	eulers.setSize(nr_dir * nr_psi * nr_oversampled_rot * 9);
+	eulers.hostAlloc();
+
+	iorientclasses.freeIfSet();
+	iorientclasses.setSize(nr_dir * nr_psi * nr_oversampled_rot);
+	iorientclasses.hostAlloc();
+
+	orientation_num = 0;
+
+	Matrix2D<RFLOAT> L(3,3);
+	Matrix2D<RFLOAT> R(3,3);
+
+	L.initIdentity();
+	R.initIdentity();
+
+	bool doL(false), doR(false);
+	RFLOAT myperturb(0.);
+
+	if (L_.mdimx == L.mdimx && L_.mdimy == L.mdimy)
+	{
+		doL = true;
+		L = L_ * L;
+	}
+
+	if (ABS(sampling.random_perturbation) > 0.)
+	{
+		myperturb = sampling.random_perturbation * sampling.getAngularSampling();
+		if (sampling.is_3D)
+		{
+			Euler_angles2matrix(myperturb, myperturb, myperturb, R);
+		}
+		doR = true;
+	}
+
+	if (R_.mdimx == R.mdimx && R_.mdimy == R.mdimy)
+	{
+		doR = true;
+		R = R * R_;
+	}
+
+	TIMING_TIC(TIMING_SAMPLING);
+
+	orientation_num = collectPlanOrientations(sampling, directions_prior, psi_prior,
+			pointer_dir_nonzeroprior, pointer_psi_nonzeroprior, Mcoarse_significant,
+			pdf_class, pdf_direction, nr_dir, nr_psi, idir_min, idir_max, ipsi_min, ipsi_max,
+			itrans_min, itrans_max, current_oversampling, nr_oversampled_rot, iclass, coarse,
+			do_skip_align, do_skip_rotate, orientational_prior_mode, myperturb,
+			&alphas[0], &betas[0], &gammas[0], &iorientclasses[0]);
+	TIMING_TOC(TIMING_SAMPLING);
+
+	iorientclasses.resizeHostCopy(orientation_num);
+#if defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
+	iorientclasses.setStreamAccType(devAcc);
+#endif
+	iorientclasses.putOnDevice();
+
+	eulers.resizeHostCopy(orientation_num * 9);
+	eulers.deviceAlloc();
+
+	alphas.resizeHostCopy(orientation_num);
+	alphas.putOnDevice();
+
+	if(sampling.is_3D)
+	{
+		betas.resizeHostCopy(orientation_num);
+		betas.putOnDevice();
+		gammas.resizeHostCopy(orientation_num);
+		gammas.putOnDevice();
+	}
+
+	if (doL)
+	{
+		adjustL.hostAlloc();
+		for (int i = 0; i < 9; i ++)
+			adjustL[i] = (XFLOAT) L.mdata[i];
+		adjustL.putOnDevice();
+	}
+
+	if (doR)
+	{
+		adjustR.hostAlloc();
+		for (int i = 0; i < 9; i ++)
+			adjustR[i] = (XFLOAT) R.mdata[i];
+		adjustR.putOnDevice();
+	}
+
+	makePlanEulers(sampling, inverseMatrix, doL, doR, alphas, betas, gammas,
+			adjustL, adjustR, eulers, orientation_num);
 #ifdef _SYCL_ENABLED
 	eulers.setStreamAccType(devAcc);
 	eulers.putOnDevice();
@@ -412,6 +460,150 @@ void AccProjectorPlan::setup(
 #endif
 
 	TIMING_TOC(TIMING_TOP);
+}
+
+// The plans of several classes in one go: the orientations of all classes are
+// concatenated in this plan, uploaded once and turned into euler matrices by one
+// kernel, and plans[k] becomes a view of class iclasses[k]'s part. Per class that
+// was a handful of allocations, copies and a launch for each particle. Same
+// arguments as setup() otherwise; the result per class is identical.
+void AccProjectorPlan::setupBatch(
+		std::vector<AccProjectorPlan*> &plans,
+		std::vector<unsigned> &iclasses,
+		HealpixSampling &sampling,
+		std::vector<RFLOAT> &directions_prior,
+		std::vector<RFLOAT> &psi_prior,
+		std::vector<int> &pointer_dir_nonzeroprior,
+		std::vector<int> &pointer_psi_nonzeroprior,
+		MultidimArray<bool> *Mcoarse_significant,
+		std::vector<RFLOAT > &pdf_class,
+		std::vector<MultidimArray<RFLOAT> > &pdf_direction,
+		unsigned long nr_dir,
+		unsigned long nr_psi,
+		unsigned long idir_min,
+		unsigned long idir_max,
+		unsigned long ipsi_min,
+		unsigned long ipsi_max,
+		unsigned long itrans_min,
+		unsigned long itrans_max,
+		unsigned long current_oversampling,
+		unsigned long nr_oversampled_rot,
+		bool coarse,
+		bool inverseMatrix,
+		bool do_skip_align,
+		bool do_skip_rotate,
+		int orientational_prior_mode,
+		Matrix2D<RFLOAT> &L_,
+		Matrix2D<RFLOAT> &R_)
+{
+	const size_t per_class = nr_dir * nr_psi * nr_oversampled_rot;
+	const size_t max_total = per_class * iclasses.size();
+
+	AccPtr<XFLOAT> alphas =  eulers.make<XFLOAT>(max_total);
+	AccPtr<XFLOAT> betas =   eulers.make<XFLOAT>(max_total);
+	AccPtr<XFLOAT> gammas =  eulers.make<XFLOAT>(max_total);
+	AccPtr<XFLOAT> adjustL = eulers.make<XFLOAT>((size_t)9);
+	AccPtr<XFLOAT> adjustR = eulers.make<XFLOAT>((size_t)9);
+
+	alphas.hostAlloc();
+	betas.hostAlloc();
+	gammas.hostAlloc();
+
+	eulers.freeIfSet();
+	eulers.setSize(max_total * 9);
+	eulers.hostAlloc();
+
+	iorientclasses.freeIfSet();
+	iorientclasses.setSize(max_total);
+	iorientclasses.hostAlloc();
+
+	// As in setup()
+	Matrix2D<RFLOAT> L(3,3);
+	Matrix2D<RFLOAT> R(3,3);
+	L.initIdentity();
+	R.initIdentity();
+	bool doL(false), doR(false);
+	RFLOAT myperturb(0.);
+	if (L_.mdimx == L.mdimx && L_.mdimy == L.mdimy)
+	{
+		doL = true;
+		L = L_ * L;
+	}
+	if (ABS(sampling.random_perturbation) > 0.)
+	{
+		myperturb = sampling.random_perturbation * sampling.getAngularSampling();
+		if (sampling.is_3D)
+			Euler_angles2matrix(myperturb, myperturb, myperturb, R);
+		doR = true;
+	}
+	if (R_.mdimx == R.mdimx && R_.mdimy == R.mdimy)
+	{
+		doR = true;
+		R = R * R_;
+	}
+
+	std::vector<size_t> offset(iclasses.size()), count(iclasses.size());
+	orientation_num = 0;
+	for (size_t k = 0; k < iclasses.size(); k++)
+	{
+		offset[k] = orientation_num;
+		count[k] = collectPlanOrientations(sampling, directions_prior, psi_prior,
+				pointer_dir_nonzeroprior, pointer_psi_nonzeroprior, Mcoarse_significant,
+				pdf_class, pdf_direction, nr_dir, nr_psi, idir_min, idir_max, ipsi_min, ipsi_max,
+				itrans_min, itrans_max, current_oversampling, nr_oversampled_rot, iclasses[k], coarse,
+				do_skip_align, do_skip_rotate, orientational_prior_mode, myperturb,
+				&alphas[orientation_num], &betas[orientation_num], &gammas[orientation_num],
+				&iorientclasses[orientation_num]);
+		orientation_num += count[k];
+	}
+
+	if (orientation_num > 0)
+	{
+		iorientclasses.resizeHostCopy(orientation_num);
+		iorientclasses.putOnDevice();
+
+		eulers.resizeHostCopy(orientation_num * 9);
+		eulers.deviceAlloc();
+
+		alphas.resizeHostCopy(orientation_num);
+		alphas.putOnDevice();
+		if(sampling.is_3D)
+		{
+			betas.resizeHostCopy(orientation_num);
+			betas.putOnDevice();
+			gammas.resizeHostCopy(orientation_num);
+			gammas.putOnDevice();
+		}
+		if (doL)
+		{
+			adjustL.hostAlloc();
+			for (int i = 0; i < 9; i ++)
+				adjustL[i] = (XFLOAT) L.mdata[i];
+			adjustL.putOnDevice();
+		}
+		if (doR)
+		{
+			adjustR.hostAlloc();
+			for (int i = 0; i < 9; i ++)
+				adjustR[i] = (XFLOAT) R.mdata[i];
+			adjustR.putOnDevice();
+		}
+
+		makePlanEulers(sampling, inverseMatrix, doL, doR, alphas, betas, gammas,
+				adjustL, adjustR, eulers, orientation_num);
+	}
+
+	for (size_t k = 0; k < iclasses.size(); k++)
+	{
+		AccProjectorPlan &p = *plans[k];
+		p.clear();
+		p.orientation_num = count[k];
+		if (count[k] > 0)
+		{
+			p.eulers = AccPtr<XFLOAT>(eulers, offset[k] * 9, count[k] * 9);
+			p.iorientclasses = AccPtr<long unsigned>(iorientclasses, offset[k], count[k]);
+		}
+	}
 }
 
 void AccProjectorPlan::printTo(std::ostream &os) // print

@@ -117,6 +117,37 @@ public:
 			dummyRL, dummyRL);
 	}
 
+	// Plans of several classes built together; this plan owns the memory and must
+	// outlive them (see the definition). Not for SYCL.
+	void setupBatch(
+			std::vector<AccProjectorPlan*> &plans,
+			std::vector<unsigned> &iclasses,
+			HealpixSampling &sampling,
+			std::vector<RFLOAT> &directions_prior,
+			std::vector<RFLOAT> &psi_prior,
+			std::vector<int> &pointer_dir_nonzeroprior,
+			std::vector<int> &pointer_psi_nonzeroprior,
+			MultidimArray<bool> *Mcoarse_significant,
+			std::vector<RFLOAT > &pdf_class,
+			std::vector<MultidimArray<RFLOAT> > &pdf_direction,
+			unsigned long nr_dir,
+			unsigned long nr_psi,
+			unsigned long idir_min,
+			unsigned long idir_max,
+			unsigned long ipsi_min,
+			unsigned long ipsi_max,
+			unsigned long itrans_min,
+			unsigned long itrans_max,
+			unsigned long current_oversampling,
+			unsigned long nr_oversampled_rot,
+			bool coarse,
+			bool inverseMatrix,
+			bool do_skip_align,
+			bool do_skip_rotate,
+			int orientational_prior_mode,
+			Matrix2D<RFLOAT> &L_,
+			Matrix2D<RFLOAT> &R_);
+
 #ifdef _SYCL_ENABLED
 	void setSyclDevice(deviceStream_t dev);
 #endif

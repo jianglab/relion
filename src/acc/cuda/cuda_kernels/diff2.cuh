@@ -16,6 +16,15 @@
  */
 
 /*
+ * Class batching: one launch for several classes. Each block reads its class and
+ * the first orientation it handles (within that class) from g_blocks, and the
+ * class's projector, eulers and output from g_classes. Without g_blocks (NULL), a
+ * launch is for one class, as before. A block computes exactly what it computed in
+ * a per-class launch, so results do not change. (CoarseClassJob: see
+ * acc_projectorkernel_impl.h)
+ */
+
+/*
  * Assuming block_sz % prefetch_fraction == 0 and prefetch_fraction < block_sz
  * Assuming block_sz % eulers_per_block == 0
  * Assuming eulers_per_block * 3 < block_sz
@@ -28,14 +37,29 @@ __global__ void cuda_kernel_diff2_coarse(
 		XFLOAT *trans_z,
 		XFLOAT *g_real,
 		XFLOAT *g_imag,
-		AccProjectorKernel projector,
+		AccProjectorKernel projector_arg,
 		XFLOAT *g_corr,
 		XFLOAT *g_diff2s,
 		int translation_num,
-		int image_size
+		int image_size,
+		const CoarseClassJob *g_classes,
+		const int2 *g_blocks
 		)
 {
 	int tid = threadIdx.x;
+
+	AccProjectorKernel *pp = &projector_arg; // its methods are not const
+	int orient0 = blockIdx.x * eulers_per_block;
+	if (g_blocks != NULL)
+	{
+		const int2 b = g_blocks[blockIdx.x];
+		const CoarseClassJob &c = g_classes[b.x];
+		pp = const_cast<AccProjectorKernel *>(&c.projector);
+		g_eulers = c.eulers;
+		g_diff2s = c.diff2s;
+		orient0 = b.y;
+	}
+	AccProjectorKernel &projector = *pp;
 
 	//Prefetch euler matrices
 	__shared__ XFLOAT s_eulers[eulers_per_block * 9];
@@ -44,7 +68,7 @@ __global__ void cuda_kernel_diff2_coarse(
 
 	for (int i = tid; i < max_block_pass_euler; i += block_sz)
 		if (i < eulers_per_block * 9)
-			s_eulers[i] = g_eulers[blockIdx.x * eulers_per_block * 9 + i];
+			s_eulers[i] = g_eulers[orient0 * 9 + i];
 
 
 	//Setup variables
@@ -185,7 +209,7 @@ __global__ void cuda_kernel_diff2_coarse(
 	//Set global
 	#pragma unroll
 	for (int i = 0; i < eulers_per_block; i ++)
-		cuda_atomic_add(&g_diff2s[(blockIdx.x * eulers_per_block + i) * translation_num + tid % translation_num], diff2s[i]);
+		cuda_atomic_add(&g_diff2s[(orient0 + i) * translation_num + tid % translation_num], diff2s[i]);
 }
 
 
