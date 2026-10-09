@@ -407,6 +407,38 @@ __global__ void cuda_kernel_array_over_significant(const T *data, bool *passed, 
 		passed[i] = (data[i] >= r->significant_weight);
 }
 
+// The three kernels above in one block, for up to a few tens of thousands of weights:
+// the same values (the crossing found is unique, the cumulative sum being ordered)
+template <typename T>
+__global__ void cuda_kernel_significance_one_block(const T *cumulative, const T *sorted, size_t n,
+		double adaptive_fraction, long max_significants, SignificanceResult<T> *r)
+{
+	__shared__ T t;
+	__shared__ unsigned long long found;
+	if (threadIdx.x == 0)
+	{
+		const T sum = cumulative[n - 1];
+		r->sum_weight = sum;
+		t = (T) ((1 - adaptive_fraction) * (double) sum);
+		r->threshold = t;
+		found = 0;
+	}
+	__syncthreads();
+	for (size_t i = threadIdx.x; i + 1 < n; i += blockDim.x)
+		if (cumulative[i] <= t && t < cumulative[i + 1])
+			found = i + 1;
+	__syncthreads();
+	if (threadIdx.x == 0)
+	{
+		unsigned long long idx = found;
+		r->idx = idx;
+		if (max_significants > 0 && (long) (n - idx) > max_significants)
+			idx = n - max_significants;
+		r->idx_capped = idx;
+		r->significant_weight = (idx < n) ? sorted[idx] : (T) 0;
+	}
+}
+
 // Launch the above on sorted / cumulative (the sorted significant candidates and their
 // cumulative sum) and weights (for the arg max), all on weights' stream; no wait
 template <typename T>
@@ -415,13 +447,15 @@ static void significanceOnDevice(AccPtr<T> &sorted, AccPtr<T> &cumulative, AccPt
 {
 	cudaStream_t stream = weights.getStream();
 	const size_t n = cumulative.getSize();
-	cuda_kernel_significance_threshold<T><<<1, 1, 0, stream>>>(~cumulative, n, adaptive_fraction, d_r);
-	if (n > 1)
+	if (n <= ((size_t) 1 << 16))
+		cuda_kernel_significance_one_block<T><<<1, 512, 0, stream>>>(~cumulative, ~sorted, n, adaptive_fraction, max_significants, d_r);
+	else
 	{
+		cuda_kernel_significance_threshold<T><<<1, 1, 0, stream>>>(~cumulative, n, adaptive_fraction, d_r);
 		const int bs = 512;
 		cuda_kernel_significance_find<T><<<(int) ((n - 1 + bs - 1) / bs), bs, 0, stream>>>(~cumulative, n - 1, d_r);
+		cuda_kernel_significance_value<T><<<1, 1, 0, stream>>>(~sorted, n, max_significants, d_r);
 	}
-	cuda_kernel_significance_value<T><<<1, 1, 0, stream>>>(~sorted, n, max_significants, d_r);
 
 	size_t temp_storage_size = 0;
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMax(NULL, temp_storage_size, ~weights, &d_r->max, weights.getSize()));

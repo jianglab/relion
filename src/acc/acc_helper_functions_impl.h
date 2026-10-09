@@ -2587,6 +2587,10 @@ void windowFourierTransform2(
 //		REPORT_ERROR("windowFourierTransform ERROR: there is a one-to-one map between input and output!");
 
 
+#ifdef _CUDA_ENABLED
+	// Only enlarging leaves output values unwritten (copying and shrinking write all)
+	if (oX > iX)
+#endif
 	deviceInitComplexValue<ACCCOMPLEX>(d_out, (XFLOAT)0.);
 	// CUDA: no wait after the clear, the copy or kernel below follows it on d_out's stream
 #ifdef _HIP_ENABLED

@@ -1260,9 +1260,18 @@ void getAllSquaredDifferencesCoarse(
 #else
 	allWeights.accAlloc();
 #endif
-	deviceInitValue<XFLOAT>(allWeights, 0);  // Make sure entire array initialized
-
     bool do_CC = (baseMLO->iter == 1 && baseMLO->do_firstiter_cc) || baseMLO->do_always_cc;
+
+#ifdef _CUDA_ENABLED
+	// One image: start from Xi2/2 instead of 0 and adding Xi2/2 below (0 + x = x exactly)
+	const bool init_with_xi2 = !do_CC && sp.nr_images == 1;
+	if (init_with_xi2)
+		deviceInitValue<XFLOAT>(allWeights, (XFLOAT) (op.highres_Xi2_img[0] / 2.));
+	else
+#else
+	const bool init_with_xi2 = false;
+#endif
+	deviceInitValue<XFLOAT>(allWeights, 0);  // Make sure entire array initialized
     long unsigned translation_num((sp.itrans_max - sp.itrans_min + 1) * sp.nr_oversampled_trans);
 
     unsigned long image_size = op.local_Minvsigma2.nzyxdim;
@@ -1401,7 +1410,7 @@ void getAllSquaredDifferencesCoarse(
 #endif
 
         // do_CC does not seem Xi2 in the input allWeights!
-        if (!do_CC)
+        if (!do_CC && !init_with_xi2)
         {
             AccUtilities::add<XFLOAT>(
                 BLOCK_SIZE,
