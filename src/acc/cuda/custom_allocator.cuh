@@ -249,23 +249,27 @@ private:
 		omp_unset_lock(&scanMutex);
 	}
 
-	// Wait for the device, then take every handed-back block, open or closed
+	// Take every handed-back block, open or closed, then wait for the device: their work
+	// was all issued before they were handed back. (Taken first: a block handed back
+	// after the wait could still be in use, and must not be freed here.)
 	void _collectAll(std::vector<Alloc*> &ready)
 	{
 		Lock sl(&scanMutex);
+		{
+			Lock pl(&pendingMutex);
+			for (auto &kv : pending)
+				for (ClosedBatch &c : kv.second)
+				{
+					ready.insert(ready.end(), c.blocks.begin(), c.blocks.end());
+					returnEvent(c.event);
+				}
+			pending.clear();
+			Lock ol(&openMutex);
+			for (auto &kv : openBatches)
+				ready.insert(ready.end(), kv.second.blocks.begin(), kv.second.blocks.end());
+			openBatches.clear();
+		}
 		DEBUG_HANDLE_ERROR(cudaDeviceSynchronize());
-		Lock pl(&pendingMutex);
-		for (auto &kv : pending)
-			for (ClosedBatch &c : kv.second)
-			{
-				ready.insert(ready.end(), c.blocks.begin(), c.blocks.end());
-				returnEvent(c.event);
-			}
-		pending.clear();
-		Lock ol(&openMutex);
-		for (auto &kv : openBatches)
-			ready.insert(ready.end(), kv.second.blocks.begin(), kv.second.blocks.end());
-		openBatches.clear();
 	}
 
 	//Look for the first suited space
