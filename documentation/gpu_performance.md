@@ -184,6 +184,43 @@ Together these made one process 1.6–1.8× faster on the GPU above (1 × 4
 threads 46 s → 26 s, 1 × 8 threads 49 s → 31 s, small test); MPS is the
 larger gain.
 
+## Class batching (one GPU call for all classes)
+
+For each particle the GPU code used to work class by class: build an
+orientation plan, launch the difference kernel, convert the weights, average
+and back-project, each with its own allocations, copies and launches. With
+small searches those driver calls cost more than the GPU work, and threads in
+one process queue for the driver's lock. Now (CUDA) each of these steps is one
+call for all classes:
+
+- coarse pass: the plans of all classes are built together
+  (`AccProjectorPlan::setupBatch`) and the difference kernel covers all
+  classes in one launch;
+- fine pass: the weights of all classes are converted in one go;
+- weighted sums: one weighted-average and one back-projection launch for all
+  classes (back-projection stays per class with `--grad` and in SOM
+  iterations).
+
+Each GPU block looks up its class in a small table (a few dozen bytes per
+class), so batching needs no extra GPU memory as the number of classes grows;
+the large per-particle arrays are the ones upstream already allocates for all
+classes. A block computes exactly what it computed in a per-class launch.
+`RELION_GPU_CLASS_BATCH=off` restores the per-class calls.
+
+| Same test (4,590 segments, 50 classes) | per class | batched |
+|---|---|---|
+| 1 process × 4 threads | 26 s | 18 s |
+| 1 process × 8 threads | 28 s | 18.5 s |
+| 8 MPI workers × 1 thread, MPS | 16 s | 13.5 s |
+
+Results are the same as upstream RELION: every particle in the same class in
+helical Class2D, and Class3D (tutorial data) as close to upstream as two
+upstream runs are to each other.
+
+One process still leaves the GPU idle about half the time: its threads share
+the CUDA driver's per-process lock and wait on many small round trips per
+particle. Several MPI processes under MPS (started automatically) avoid that.
+
 ## What limits it now, and what would help next
 
 With MPS the GPU is busy about 94% of the time, and the time is inside two
