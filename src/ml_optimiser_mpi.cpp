@@ -130,6 +130,7 @@ void MlOptimiserMpi::initialise()
 	std::cerr<<"MlOptimiserMpi::initialise Entering"<<std::endl;
 #endif
 
+
 	// Print information about MPI nodes:
 	printMpiNodesMachineNames(*node, nr_threads);
 
@@ -4240,6 +4241,11 @@ void MlOptimiserMpi::iterate()
 	// Launch threads etc.
 	MlOptimiser::iterateSetup();
 
+	// Filament context / polarity: every rank builds the chains (the followers still have the metadata here)
+	if (do_helical_context || do_helical_polarity)
+		initialiseHelicalContext();
+
+
 	// Initialize the current resolution
 	updateCurrentResolution();
 
@@ -4300,6 +4306,8 @@ void MlOptimiserMpi::iterate()
 			std::cerr << " WARNING: skipping randomisation of particle order because random_seed equals zero..." << std::endl;
 		}
 
+		if (do_helical_context || do_helical_polarity)
+			helical_context.resetEvidence();
 		startResourceMonitor();
 		expectation();
 		stopResourceMonitor();
@@ -4526,6 +4534,9 @@ void MlOptimiserMpi::iterate()
 		}
 		MPI_Barrier(MPI_COMM_WORLD);
 
+		if (do_helical_context || do_helical_polarity)
+			updateHelicalContextMpi();
+
 		// Skip center classes in the final stages of gradient refinement
 		if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
 			centerClasses();
@@ -4572,6 +4583,14 @@ void MlOptimiserMpi::iterate()
 		{
 			// The leader only writes the data file (he's the only one who has and manages these data!)
 			MlOptimiser::write(DONT_WRITE_SAMPLING, DO_WRITE_DATA, DONT_WRITE_OPTIMISER, DONT_WRITE_MODEL, node->rank);
+		}
+
+		// Files per helical type: the leader has the labels, rank 1 has just written the class averages
+		if (do_helical_context)
+		{
+			MPI_Barrier(MPI_COMM_WORLD);
+			if (node->isLeader())
+				writeHelicalTypeFiles();
 		}
 
 		// Every rank has written its part of this iteration: the older ones can go
@@ -4658,5 +4677,59 @@ void MlOptimiserMpi::iterate()
 
 	// delete threads etc.
 	MlOptimiser::iterateWrapUp();
+	MPI_Barrier(MPI_COMM_WORLD);
+}
+
+// Sum the per-segment evidence of all ranks (each segment is seen by exactly one follower; NaN: not seen)
+static void helicalContextAllreduce(MpiNode *node, std::vector<float> &v, long int N, int K)
+{
+	std::vector<float> buf(v.size()), seen(N, 0.f);
+	for (long int i = 0; i < N; i++)
+	{
+		bool has = !std::isnan(v[i * K]);
+		seen[i] = has ? 1.f : 0.f;
+		for (int k = 0; k < K; k++)
+			buf[i * K + k] = has ? v[i * K + k] : 0.f;
+	}
+	std::vector<float> sum_buf(v.size()), sum_seen(N);
+	MPI_Allreduce(&buf[0], &sum_buf[0], (int)buf.size(), MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Allreduce(&seen[0], &sum_seen[0], (int)N, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+	for (long int i = 0; i < N; i++)
+		for (int k = 0; k < K; k++)
+			v[i * K + k] = (sum_seen[i] > 0.f) ? sum_buf[i * K + k] / sum_seen[i] : std::numeric_limits<float>::quiet_NaN();
+}
+
+void MlOptimiserMpi::updateHelicalContextMpi()
+{
+	long int N = helical_context.N;
+	if (do_helical_context)
+		helicalContextAllreduce(node, helical_context.loglik, N, helical_context.K);
+	if (do_helical_polarity)
+		helicalContextAllreduce(node, helical_context.pol_llr, N, 1);
+
+	// The leader has the metadata; the followers have the references
+	if (do_helical_polarity)
+	{
+		std::vector<int> sc(mymodel.nr_classes, 1);
+		if (node->isLeader())
+			helicalPolarityGaugeSigns(sc);
+		node->relion_MPI_Bcast(&sc[0], sc.size(), MPI_INT, 0, MPI_COMM_WORLD);
+		helicalPolarityGaugeModel(sc);
+		if (node->isLeader())
+		{
+			helicalPolarityGaugeData(sc);
+			updateHelicalPolarity();
+		}
+		node->relion_MPI_Bcast(&helical_context.pol_prior[0], N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+	}
+	if (do_helical_context)
+	{
+		if (node->isLeader())
+			updateHelicalContext();
+		int have = helical_context.have_prior ? 1 : 0;
+		node->relion_MPI_Bcast(&have, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		helical_context.have_prior = (have == 1);
+		node->relion_MPI_Bcast(&helical_context.prior[0], helical_context.prior.size(), MPI_FLOAT, 0, MPI_COMM_WORLD);
+	}
 	MPI_Barrier(MPI_COMM_WORLD);
 }

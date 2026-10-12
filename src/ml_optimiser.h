@@ -41,6 +41,7 @@
 #include "src/mask.h"
 #include "src/healpix_sampling.h"
 #include "src/helix.h"
+#include "src/helix_context.h"
 #include "src/local_symmetry.h"
 #include "src/acc/settings.h"
 #include <src/jaz/tomography/optimisation_set.h>
@@ -607,6 +608,9 @@ public:
 	/* Flag to use bimodal prior distributions on psi (2D classification of helical segments) */
 	bool do_bimodal_psi;
 
+	/* The GPU path of 2D classification ignored --bimodal_psi (searched around the psi prior only); opt-in fix */
+	bool do_fix_gpu_bimodal_psi;
+
 	/* Flag to center classes */
 	bool do_center_classes;
 
@@ -683,6 +687,30 @@ public:
 
 	// Outer diameter of helical tubes in Angstroms (for masks of helical references and particles)
 	RFLOAT helical_tube_outer_diameter;
+
+	// Filament context in helical 2D classification (see src/helix_context.h): the classes of
+	// the segments of a filament form a Markov chain, whose prior over the classes of a segment
+	// (from the other segments of its filament) is used as its class prior in the E-step
+	bool do_helical_context;
+	int helical_context_start_iter;
+	bool helical_context_warm;
+	int helical_context_types_max;     // > nr_types: choose the number of types by cross-validation (once)
+	RFLOAT helical_context_types_tol;  // ... the fewest types within this (nats per segment) of the best
+	int helical_context_types_min;     // lower bound of the search (the initial --helical_context_types)
+	int helical_context_types_every;   // re-select every this many iterations (near the current number) and at the last iteration (full range)
+	int helical_context_types_last_iter; // iteration of the last selection (-1: none yet)
+	bool helical_context_types_selected;
+	RFLOAT helical_context_class_min_frac; // per-type class files: classes with at least this share of their segments in the type
+	long int helical_context_class_min_segs; // ... and at least this many segments of the type
+	HelicalContext helical_context;
+	std::vector<long int> helical_context_rows; // MDimg row of each particle
+
+	// Filament polarity in helical 2D classification: all segments of a filament share one
+	// polarity (psi = psi prior or psi prior + 180); its prior from the rest of the filament is
+	// the flip ratio of the bimodal psi prior (see src/helix_context.h)
+	bool do_helical_polarity;
+	int helical_polarity_start_iter;
+	std::vector<RFLOAT> helical_polarity_psi_prior; // per particle: the psi prior of its last E-step
 
 	// Flag whether to do local refinement of helical parameters
 	bool do_helical_symmetry_local_refinement;
@@ -946,6 +974,18 @@ public:
             fix_sigma_offset(0),
             do_firstiter_cc(0),
             do_bimodal_psi(0),
+            do_fix_gpu_bimodal_psi(0),
+            do_helical_polarity(0),
+            helical_polarity_start_iter(3),
+            do_helical_context(0),
+            helical_context_types_max(-1),
+            helical_context_types_tol(0.01),
+            helical_context_types_min(4),
+            helical_context_types_every(5),
+            helical_context_types_last_iter(-1),
+            helical_context_types_selected(false),
+            helical_context_class_min_frac(0.1),
+            helical_context_class_min_segs(20),
             do_center_classes(0),
             do_align_classes(1),
             do_keep_full_filaments(0),
@@ -1177,6 +1217,55 @@ public:
 	 * Do rise and twist for all asymmetrical units in Fourier space
 	 * */
 	void symmetriseReconstructions();
+
+	// Filament context: set up the chains, update them after the E-step, class prior factors
+	void initialiseHelicalContext();
+	void updateHelicalContext();
+	inline RFLOAT helicalContextPrior(long int part_id, int iclass) const
+	{
+		return (do_helical_context && iter >= helical_context_start_iter) ? helical_context.getPrior(part_id, iclass) : 1.;
+	}
+	// The class prior that was applied to a particle (context factor times the class part of
+	// pdf_direction without orientational priors), to get its class likelihoods back
+	void helicalContextStore(long int part_id, const std::vector<RFLOAT> &class_post);
+
+	// Filament polarity: 0 / 1 for a psi angle (index in sampling.psi_angles) that is not / is
+	// flipped with respect to the psi prior of the particle; the prior factor of a mode; the psi
+	// prior of the E-step times these factors; the polarity evidence from the coarse pass
+	inline int helicalPolarityMode(long int part_id, int ipsi_global) const
+	{
+		RFLOAT d = fabs(sampling.psi_angles[ipsi_global] - helical_polarity_psi_prior[part_id]);
+		d = fmod(d, (RFLOAT)360.);
+		if (d > 180.)
+			d = 360. - d;
+		return (d > 90.) ? 1 : 0;
+	}
+	inline RFLOAT helicalPolarityFactor(long int part_id, int mode) const
+	{
+		if (!do_helical_polarity || iter < helical_polarity_start_iter)
+			return 1.;
+		RFLOAT r = helical_context.getPolarityPrior(part_id);
+		return 2. * ((mode == 1) ? r : 1. - r);
+	}
+	void helicalPolarityAdjustPsiPrior(long int part_id, RFLOAT prior_psi,
+			const std::vector<int> &pointer_psi_nonzeroprior, std::vector<RFLOAT> &psi_prior);
+	void helicalPolarityStore(long int part_id, double w_noflip, double w_flip)
+	{
+		helical_context.storePolarity(part_id, w_noflip, w_flip,
+				helicalPolarityFactor(part_id, 0), helicalPolarityFactor(part_id, 1));
+	}
+	void updateHelicalPolarity();
+	// One particle star file and one class-average stack per helical type, next to the data.star of this iteration
+	void writeHelicalTypeFiles();
+	// The frame of a 2D class is arbitrary up to a rotation by 180 degrees, so "flipped with respect
+	// to the picking direction" only means the polarity of a filament within a common frame. Choose the
+	// frames (class c rotated by 180 or not) that make the filaments most consistent (Z2 synchronisation
+	// of classes and filaments), and rotate those classes and the psi angles of their segments
+	void helicalPolarityGauge();
+	void helicalPolarityGaugeSigns(std::vector<int> &sc); // from the metadata (leader)
+	void helicalPolarityGaugeModel(const std::vector<int> &sc); // rotate the references (ranks with the model)
+	void helicalPolarityGaugeData(const std::vector<int> &sc); // psi angles and polarity evidence (leader)
+	double helical_polarity_gauge_before, helical_polarity_gauge_after;
 
 	/* Apply local symmetry according to a list of masks and their operators
 	 * */

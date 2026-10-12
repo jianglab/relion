@@ -501,6 +501,11 @@ enum EMDLabel
 	EMDL_PARTICLE_HELICAL_TUBE_PITCH,
 	EMDL_PARTICLE_HELICAL_TRACK_LENGTH, //deprecated
 	EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM,
+	EMDL_PARTICLE_HELICAL_TYPE,
+	EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY,
+	EMDL_PARTICLE_HELICAL_SECTION_ID,
+	EMDL_PARTICLE_HELICAL_CONTEXT_PROBABILITY,
+	EMDL_PARTICLE_HELICAL_POLARITY_FLIP_PROBABILITY,
 	EMDL_PARTICLE_SELECTION_TYPE,
 	EMDL_PARTICLE_CLASS,
 	EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY,
@@ -1295,6 +1300,11 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TUBE_PITCH, EMDL_DOUBLE, "rlnHelicalTubePitch", "Cross-over distance for a helical segment (A)");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH, EMDL_DOUBLE, "rlnHelicalTrackLength", "Distance (in pix) from the position of this helical segment to the starting point of the tube");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, EMDL_DOUBLE, "rlnHelicalTrackLengthAngst", "Distance (in A) from the position of this helical segment to the starting point of the tube");
+		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TYPE, EMDL_INT, "rlnHelicalType", "Helical type of a segment from the filament context of 2D classification (0: none)");
+		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY, EMDL_DOUBLE, "rlnHelicalTypeProbability", "Posterior probability of rlnHelicalType given the whole filament");
+		EMDL::addLabel(EMDL_PARTICLE_HELICAL_SECTION_ID, EMDL_INT, "rlnHelicalSectionID", "Section of a filament with one helical type (unique over the data set; 0: none)");
+		EMDL::addLabel(EMDL_PARTICLE_HELICAL_CONTEXT_PROBABILITY, EMDL_DOUBLE, "rlnHelicalContextProbability", "Probability of the assigned class from the segments of the same filament only (filament context prior)");
+		EMDL::addLabel(EMDL_PARTICLE_HELICAL_POLARITY_FLIP_PROBABILITY, EMDL_DOUBLE, "rlnHelicalPolarityFlipProbability", "Probability (given the whole filament) that the polarity of a helical segment is opposite to its picking direction (psi = psi prior + 180)");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS, EMDL_INT, "rlnClassNumber", "Class number for which a particle has its highest probability");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY, EMDL_DOUBLE, "rlnClass2DConsensusProbability", "Posterior probability of the assigned Class2D consensus class");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, EMDL_DOUBLE, "rlnClass2DConsensusEntropy", "Normalised entropy of the consensus posterior (categorical EM) or membership (sparse NMF) distribution");

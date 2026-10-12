@@ -145,6 +145,9 @@ public:
      */
     void iterate();
 
+    // Filament context / polarity: gather the evidence, update on the leader, broadcast priors and class rotations
+    void updateHelicalContextMpi();
+
     // Gather each process's CPU/GPU use of the E-step on the leader, which reports it
     void gatherResourceReport(const resrep::ProcessStats &mine);
 

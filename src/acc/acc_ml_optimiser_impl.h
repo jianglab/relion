@@ -168,8 +168,11 @@ void getFourierTransformsAndCtfs(long int part_id,
         {
             baseMLO->sampling.selectOrientationsWithNonZeroPriorProbability(prior_rot, prior_tilt, prior_psi,
                                                                             sqrt(baseMLO->mymodel.sigma2_rot), sqrt(baseMLO->mymodel.sigma2_tilt), sqrt(baseMLO->mymodel.sigma2_psi),
-                                                                            op.pointer_dir_nonzeroprior, op.directions_prior, op.pointer_psi_nonzeroprior, op.psi_prior);
+                                                                            op.pointer_dir_nonzeroprior, op.directions_prior, op.pointer_psi_nonzeroprior, op.psi_prior,
+                                                                            (baseMLO->do_fix_gpu_bimodal_psi && baseMLO->do_bimodal_psi && baseMLO->mymodel.sigma2_psi > 0.));
         }
+        if (baseMLO->do_helical_polarity && baseMLO->mymodel.ref_dim == 2)
+            baseMLO->helicalPolarityAdjustPsiPrior(op.part_id, prior_psi, op.pointer_psi_nonzeroprior, op.psi_prior);
 
         long int nr_orients = baseMLO->sampling.NrDirections(0, &op.pointer_dir_nonzeroprior) * baseMLO->sampling.NrPsiSamplings(0, &op.pointer_psi_nonzeroprior);
         if (nr_orients == 0)
@@ -2258,6 +2261,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 					pdf = DIRECT_MULTIDIM_ELEM(baseMLO->mymodel.pdf_direction[exp_iclass], idir);
 				else
 					pdf = op.directions_prior[idir] * op.psi_prior[ipsi];
+				pdf *= baseMLO->helicalContextPrior(op.part_id, exp_iclass);
 
 				pdfs[iorientclass] = pdf;
 			}
@@ -2494,6 +2498,28 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
              * Dari - 201710
             */
             AccUtilities::kernel_exponentiate( ipartMweight, 50 - weights_max);
+
+            // Filament polarity: sums of the coarse weights over psi angles that are not / are
+            // flipped (layout class, direction, psi, translation)
+            if (baseMLO->do_helical_polarity && !(baseMLO->do_skip_align || baseMLO->do_skip_rotate))
+            {
+                size_t n = ipartMweight.getSize();
+                std::vector<XFLOAT> w(n);
+#if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED) || defined(_SYCL_ENABLED)
+                ipartMweight.cpToHost(&w[0], n);
+                ipartMweight.streamSync();
+#else
+                memcpy(&w[0], ~ipartMweight, n * sizeof(XFLOAT));
+#endif
+                double wsum[2] = {0., 0.};
+                for (size_t k = 0; k < n; k++)
+                    if (w[k] > 0.)
+                    {
+                        long int ipsi = (k / sp.nr_trans) % sp.nr_psi + sp.ipsi_min;
+                        wsum[baseMLO->helicalPolarityMode(op.part_id, op.pointer_psi_nonzeroprior[ipsi])] += w[k];
+                    }
+                baseMLO->helicalPolarityStore(op.part_id, wsum[0], wsum[1]);
+            }
 
             CTIC(accMLO->timer,"sort");
 #ifdef _HIP_ENABLED
@@ -4416,6 +4442,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
                 baseMLO->wsum_model.wsum_signal_product[igroup] += thr_wsum_signal_product_spectra;
                 baseMLO->wsum_model.wsum_reference_power[igroup] += thr_wsum_reference_power_spectra;
             }
+            if (baseMLO->do_helical_context)
+                baseMLO->helicalContextStore(op.part_id, thr_wsum_pdf_class);
             for (int n = 0; n < baseMLO->mymodel.nr_classes; n++) {
                 baseMLO->wsum_model.pdf_class[n] += thr_wsum_pdf_class[n];
                 if (baseMLO->mymodel.ref_dim == 2) {
