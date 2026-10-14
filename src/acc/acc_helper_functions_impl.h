@@ -36,8 +36,10 @@ long int makeJobsForDiff2Fine(
 {
 	long unsigned w_base = dataMask.firstPos, w(0), k(0);
 	// be on the safe side with the jobArrays: make them as large as they could possibly be
-	// (this will be reduced at exit of this function)
-	dataMask.setNumberOfJobs(orientation_num*translation_num);
+	// (this will be reduced at exit of this function). The loop below always opens the
+	// element after the last job, so one more than the number of jobs: with one
+	// orientation and one translation (--skip_align on the GPU) it wrote past the end.
+	dataMask.setNumberOfJobs(orientation_num*translation_num + 1);
 	dataMask.setNumberOfWeights(orientation_num*translation_num);
 	dataMask.jobOrigin.freeHostIfSet();
 	dataMask.jobExtent.freeHostIfSet();

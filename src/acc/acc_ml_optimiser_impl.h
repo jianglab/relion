@@ -1323,7 +1323,8 @@ void getAllSquaredDifferencesCoarse(
 
 		for (long int itrans = 0; itrans < translation_num; itrans++)
 		{
-			baseMLO->sampling.getTranslationsInPixel(itrans, 0, my_pixel_size, oversampled_translations_x,
+			// (sp.itrans_min + itrans: see getAllSquaredDifferencesFine)
+			baseMLO->sampling.getTranslationsInPixel(sp.itrans_min + itrans, 0, my_pixel_size, oversampled_translations_x,
 					oversampled_translations_y, oversampled_translations_z,
 					(baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry));
 
@@ -1711,7 +1712,9 @@ void getAllSquaredDifferencesFine(
 		int j = 0;
 		for (long int itrans = 0; itrans < (sp.itrans_max - sp.itrans_min + 1); itrans++)
 		{
-			baseMLO->sampling.getTranslationsInPixel(itrans, baseMLO->adaptive_oversampling, my_pixel_size, oversampled_translations_x,
+			// The sampling's translation sp.itrans_min + itrans: with --skip_align, the
+			// particle's own stored offset (itrans_min is its place in the pool)
+			baseMLO->sampling.getTranslationsInPixel(sp.itrans_min + itrans, baseMLO->adaptive_oversampling, my_pixel_size, oversampled_translations_x,
 					oversampled_translations_y, oversampled_translations_z,
 					(baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry));
 
@@ -2459,8 +2462,10 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     pdf = tdiff2;
                 }
 
-                pdf_offset_zeros[(exp_iclass-sp.iclass_min)*sp.nr_trans + itrans] = pdf_zeros;
-                pdf_offset     [(exp_iclass-sp.iclass_min)*sp.nr_trans + itrans] = pdf;
+                // itrans counts from itrans_min: with --skip_align that is the particle's
+                // place in the pool (its own stored offset), not 0
+                pdf_offset_zeros[(exp_iclass-sp.iclass_min)*sp.nr_trans + (itrans - sp.itrans_min)] = pdf_zeros;
+                pdf_offset     [(exp_iclass-sp.iclass_min)*sp.nr_trans + (itrans - sp.itrans_min)] = pdf;
             }
         }
 
@@ -3005,7 +3010,27 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             }
             else
             {
+                // Without oversampling (as --skip_align sets) every sample of this pass is
+                // significant, but the sum and the maximum are still this pass's, as on
+                // the CPU: the coarse pass leaves the sum at its initial 1 when each class
+                // has a single sample, and the weights here are scaled by exp(50)
+                op.sum_weight = cumulative_sum.getAccValueAt(cumulative_sum.getSize() - 1);
+                if (op.sum_weight==0)
+                    CRITICAL(ERRSUMWEIGHTZERO); //"op.sum_weight[img_id]==0"
                 my_significant_weight = sorted.getAccValueAt(0);
+                std::pair<size_t, XFLOAT> max_pair = AccUtilities::getArgMaxOnDevice<XFLOAT>(PassWeights.weights);
+                op.max_index.fineIdx = PassWeights.ihidden_overs[max_pair.first];
+                // setMetadata decodes coarseIdx without oversampling; with oversampling
+                // factors of 1 the fine and coarse indices are the same
+                op.max_index.coarseIdx = op.max_index.fineIdx;
+                op.max_weight = max_pair.second;
+                // With --skip_align the coarse pass has one sample per class and does not
+                // count the significant samples; count them here as the CPU does
+                if (baseMLO->do_skip_align && baseMLO->mymodel.nr_bodies == 1)
+                {
+                    size_t thresholdIdx = findThresholdIdxInCumulativeSum<XFLOAT>(cumulative_sum, (1 - baseMLO->adaptive_fraction) * op.sum_weight);
+                    DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_NR_SIGN) = (RFLOAT) (weightSize - thresholdIdx);
+                }
             }
         }
         CTOC(accMLO->timer,"sumweight1");
@@ -3127,7 +3152,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     // The oversampled translations do not depend on the class: get them once
     std::vector<std::vector<RFLOAT> > ovs_x(sp.nr_trans), ovs_y(sp.nr_trans), ovs_z(sp.nr_trans);
     for (long int itrans = 0; itrans < sp.nr_trans; itrans++)
-        baseMLO->sampling.getTranslationsInPixel(itrans, baseMLO->adaptive_oversampling, my_pixel_size,
+        baseMLO->sampling.getTranslationsInPixel(sp.itrans_min + itrans, baseMLO->adaptive_oversampling, my_pixel_size,
                 ovs_x[itrans], ovs_y[itrans], ovs_z[itrans],
                 (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry));
     for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -3356,15 +3381,20 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
         for (long int n = partial_pos; n < partial_pos+block_num; n++)
         {
             iorient= FinePassWeights.rot_id[FPCMasks[iclass].jobOrigin[n-partial_pos]+FPCMasks[iclass].firstPos];
-            long int mydir, idir=floor(iorient/sp.nr_psi);
-            if (baseMLO->mymodel.orientational_prior_mode == NOPRIOR)
-                mydir = idir;
-            else
-                mydir = op.pointer_dir_nonzeroprior[idir];
+            // As on the CPU, the directions are not counted with --skip_align / --skip_rotate (there
+            // idir would count from 0 instead of from the particle's own orientation)
+            if (!(baseMLO->do_skip_align || baseMLO->do_skip_rotate))
+            {
+                long int mydir, idir=floor(iorient/sp.nr_psi);
+                if (baseMLO->mymodel.orientational_prior_mode == NOPRIOR)
+                    mydir = idir;
+                else
+                    mydir = op.pointer_dir_nonzeroprior[idir];
 
-            // store partials according to indices of the relevant dimension
-            unsigned ithr_wsum_pdf_direction = baseMLO->mymodel.nr_bodies > 1 ? ibody : iclass;
-            DIRECT_MULTIDIM_ELEM(thr_wsum_pdf_direction[ithr_wsum_pdf_direction], mydir) += p_weights[n];
+                // store partials according to indices of the relevant dimension
+                unsigned ithr_wsum_pdf_direction = baseMLO->mymodel.nr_bodies > 1 ? ibody : iclass;
+                DIRECT_MULTIDIM_ELEM(thr_wsum_pdf_direction[ithr_wsum_pdf_direction], mydir) += p_weights[n];
+            }
             thr_sumw_group                                                               += p_weights[n];
             thr_wsum_pdf_class[iclass]                                                   += p_weights[n];
 
@@ -3392,7 +3422,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     else
         op.max_index.coarseIndexToCoarseIndices(sp);
 
-    baseMLO->sampling.getTranslationsInPixel(op.max_index.itrans, baseMLO->adaptive_oversampling, my_pixel_size,
+    // max_index.itrans counts from sp.itrans_min (with --skip_align, the particle's place in the pool)
+    baseMLO->sampling.getTranslationsInPixel(sp.itrans_min + op.max_index.itrans, baseMLO->adaptive_oversampling, my_pixel_size,
             oversampled_translations_x, oversampled_translations_y, oversampled_translations_z,
             (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry));
 
@@ -3403,9 +3434,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     else
            baseMLO->sampling.getOrientations(op.max_index.idir, op.max_index.ipsi, baseMLO->adaptive_oversampling, oversampled_rot, oversampled_tilt, oversampled_psi,
                 op.pointer_dir_nonzeroprior, op.directions_prior, op.pointer_psi_nonzeroprior, op.psi_prior);
-
-    baseMLO->sampling.getOrientations(op.max_index.idir, op.max_index.ipsi, baseMLO->adaptive_oversampling, oversampled_rot, oversampled_tilt, oversampled_psi,
-            op.pointer_dir_nonzeroprior, op.directions_prior, op.pointer_psi_nonzeroprior, op.psi_prior);
+    // (A third, unconditional getOrientations(op.max_index.idir, ...) here overwrote the
+    // --skip_align/--skip_rotate orientation with the pool's first particle's)
 
     RFLOAT rot = oversampled_rot[op.max_index.ioverrot];
     RFLOAT tilt = oversampled_tilt[op.max_index.ioverrot];
@@ -3590,7 +3620,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			for (long int itrans = 0; itrans < (sp.itrans_max - sp.itrans_min + 1); itrans++)
 			{
 				//TODO Called multiple time to generate same list, reuse the same list
-				baseMLO->sampling.getTranslationsInPixel(itrans, baseMLO->adaptive_oversampling, my_pixel_size,
+				// (sp.itrans_min + itrans: see getAllSquaredDifferencesFine)
+				baseMLO->sampling.getTranslationsInPixel(sp.itrans_min + itrans, baseMLO->adaptive_oversampling, my_pixel_size,
 						oversampled_translations_x, oversampled_translations_y, oversampled_translations_z,
 						(baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry));
 

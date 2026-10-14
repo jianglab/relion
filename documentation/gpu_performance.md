@@ -100,6 +100,20 @@ All on by default; for comparisons or if a problem is suspected:
 | `RELION_AUTO_MPS=off` | `relion_refine_mpi` does not start MPS |
 | `RELION_RESOURCE_REPORT=off` | no resource report at the end |
 
+Opt-in (off by default):
+
+| Variable | Effect |
+|---|---|
+| `RELION_GPU_SKIP_ALIGN=1` | keep the GPU for `--skip_align` / `--skip_rotate` (Class3D without alignment); upstream switches the GPU off for these jobs |
+
+The GPU code for `--skip_align` had several defects that never showed because upstream
+never runs it: the job arrays of the fine pass were one element too short with a single
+orientation and translation (a heap overflow), the translation of a particle was looked up
+from 0 instead of from its own stored offset (`itrans_min`, its place in the pool), the sum
+of the weights, the maximum, the best orientation and the count of significant samples were
+not those of the fine pass, and the best orientation was overwritten by that of the first
+particle of the pool. All are fixed, and the directions are not counted, as on the CPU.
+
 ## Automatic MPS
 
 Without MPS, GPU work from different processes is time-sliced: several MPI

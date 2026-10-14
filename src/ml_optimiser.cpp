@@ -2238,7 +2238,11 @@ void MlOptimiser::initialiseGeneral(int rank)
     else
         blush_args = blush_args + " --gpu -1 ";
 
-    if (do_skip_align || do_skip_rotate)
+    // RELION_GPU_SKIP_ALIGN=1 keeps the GPU for --skip_align / --skip_rotate (opt-in while it is
+    // being validated: upstream switches the accelerators off here)
+    const char *gpu_skip_align = getenv("RELION_GPU_SKIP_ALIGN");
+    const bool keep_gpu_skip_align = gpu_skip_align != NULL && std::string(gpu_skip_align) == "1";
+    if ((do_skip_align || do_skip_rotate) && !(keep_gpu_skip_align && do_gpu))
     {
         do_gpu = false;
         do_sycl = false;
@@ -2247,6 +2251,8 @@ void MlOptimiser::initialiseGeneral(int rank)
         std::cerr << "WARNING: you cannot use accelerators (like the GPU) when skipping alignments." << std::endl
                   << "Will continue without accelerators and maintain setting for external tasks (like Blush regularization)." << std::endl;
     }
+    else if (do_skip_align || do_skip_rotate)
+        std::cout << " Using the GPU although alignments are skipped (RELION_GPU_SKIP_ALIGN=1)." << std::endl;
 
     if (do_always_cc)
         do_calculate_initial_sigma_noise = false;
