@@ -20,6 +20,7 @@
 #include "src/ml_optimiser_mpi.h"
 #include <chrono>
 #include "src/gpu_reconstruct.h"
+#include "src/gpu_switch.h"
 #include "src/mps_auto.h"
 #include "src/ml_optimiser.h"
 #ifdef _CUDA_ENABLED
@@ -2648,9 +2649,8 @@ void MlOptimiserMpi::combineWeightedSumsTwoRandomHalves()
 
 	// With two followers, rank 2 only reads back its own unregularised half when auto-refine has
 	// converged, which overwrites BPref, so the summed BPref need not be sent back to it (and
-	// rank 1 keeps its sum as it is). RELION_JOIN_SKIP_BPREF=1 turns this on.
-	const char *jsb = getenv("RELION_JOIN_SKIP_BPREF");
-	const bool skip_bpref = jsb && atoi(jsb) != 0 && node->size == 3 && do_auto_refine && has_converged &&
+	// rank 1 keeps its sum as it is). On unless RELION_JOIN_SKIP_BPREF=0.
+	const bool skip_bpref = gpuswitch::on("RELION_JOIN_SKIP_BPREF") && node->size == 3 && do_auto_refine && has_converged &&
 			do_join_random_halves && !do_grad && !do_external_reconstruct && !do_blush && mymodel.nr_bodies == 1;
 	if (!node->isLeader())
 		wsum_model.pack_skip_bpref = skip_bpref;

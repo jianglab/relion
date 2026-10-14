@@ -1,4 +1,8 @@
 #include <atomic>
+#include <map>
+#include <mutex>
+#include <string>
+#include "src/gpu_switch.h"
 /*
 #undef ALTCPU
 #ifdef _CUDA_ENABLED
@@ -1290,15 +1294,47 @@ static int envChunkOverride(const char *name)
 	return e ? atoi(e) : 0;
 }
 
-// Blocks per multiprocessor that pixel chunks aim for (RELION_GPU_BLOCKS_PER_SM, default 3)
+// Blocks per multiprocessor that pixel chunks aim for. RELION_GPU_BLOCKS_PER_SM=N overrides. By
+// default one full wave of 128-thread blocks per multiprocessor (as many as the device keeps
+// resident: 12 on sm_86, 16 on sm_80/90, 8 on sm_75), and the old 3 when the GPU has under 2 GiB
+// free, because the chunks need partial-sum buffers. Chosen once per device and said once.
 static size_t gpuBlocksPerSM()
 {
-	static const size_t b = []()
+	static std::mutex mutex;
+	static std::map<int, size_t> chosen;
+	int dev = 0;
+	DEBUG_HANDLE_ERROR(cudaGetDevice(&dev));
+	std::lock_guard<std::mutex> lock(mutex);
+	auto it = chosen.find(dev);
+	if (it != chosen.end())
+		return it->second;
+	size_t b = 3;
+	std::string why;
+	const char *e = getenv("RELION_GPU_BLOCKS_PER_SM");
+	const int v = (e != NULL) ? atoi(e) : 0;
+	if (v > 0)
 	{
-		const char *e = getenv("RELION_GPU_BLOCKS_PER_SM");
-		const int v = (e != NULL) ? atoi(e) : 0;
-		return (size_t) ((v > 0) ? v : 3);
-	}();
+		b = (size_t) v;
+		why = "RELION_GPU_BLOCKS_PER_SM";
+	}
+	else
+	{
+		int threads = 0, sms = 0;
+		size_t free_b = 0, total_b = 0;
+		cudaDeviceGetAttribute(&threads, cudaDevAttrMaxThreadsPerMultiProcessor, dev);
+		cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+		cudaMemGetInfo(&free_b, &total_b);
+		if (threads > 0 && free_b >= ((size_t) 2 << 30))
+		{
+			b = (size_t) std::max(3, threads / 128);
+			why = "device " + std::to_string(dev) + ": " + std::to_string(sms) + " multiprocessors, up to " +
+			      std::to_string(threads) + " threads each";
+		}
+		else
+			why = "device " + std::to_string(dev) + " has " + std::to_string(free_b >> 20) + " MiB free, safe default";
+	}
+	chosen[dev] = b;
+	std::cout << " GPU pixel chunks: " << b << " blocks per multiprocessor (" << why << "; RELION_GPU_BLOCKS_PER_SM=N overrides)." << std::endl;
 	return b;
 }
 
@@ -2004,12 +2040,18 @@ bool runDiff2KernelCoarseBatched(
 	// RELION_GPU_COARSE_XT=1: cross-term form of the coarse differences (cuda_kernel_diff2_coarse_xt);
 	// =check runs both and reports how far they differ
 	static const int xt_mode = [] {
-		const char *e = getenv("RELION_GPU_COARSE_XT");
-		if (!e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
-		return strcmp(e, "check") ? 1 : 2;
+		return gpuswitch::mode("RELION_GPU_COARSE_XT");
 	}();
 	const size_t xt_tpad = ((translation_num + XT_TRANS - 1) / XT_TRANS) * XT_TRANS;
 	const bool use_xt = xt_mode && ref3D && !data_is_3D && image_size * xt_tpad * sizeof(float2) <= ((size_t) 128 << 20);
+	if (xt_mode)
+	{
+		static std::atomic<int> reported_xt(-1);
+		const int now = use_xt ? 1 : 0;
+		if (reported_xt.exchange(now) != now)
+			std::cout << " GPU coarse pass: " << (use_xt ? "cross-term kernel (RELION_GPU_COARSE_XT=0 for the direct one)"
+			          : "direct kernel (the cross-term kernel is for 3D references and 2D images with a table up to 128 MB)") << "." << std::endl;
+	}
 #else
 	const bool use_xt = false;
 #endif

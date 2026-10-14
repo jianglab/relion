@@ -1,4 +1,5 @@
 #include "src/acc/acc_projector.h"
+#include "src/gpu_switch.h"
 #include <signal.h>
 
 
@@ -57,8 +58,13 @@ bool AccProjector::setMdlDim(
 			texArrayReal = new cudaArray_t();
 #ifndef ACC_DOUBLE_PRECISION
 			{
-				const char *e = getenv("RELION_GPU_FLOAT2_TEX");
-				cplx2 = e && strcmp(e, "0") && strcmp(e, "off");
+				cplx2 = gpuswitch::on("RELION_GPU_FLOAT2_TEX");
+				static bool reported = false;
+				if (!reported)
+				{
+					reported = true;
+					std::cout << " GPU projection texture: " << (cplx2 ? "one two-channel texture for real and imaginary part (RELION_GPU_FLOAT2_TEX=0 for two)" : "two single-channel textures") << "." << std::endl;
+				}
 			}
 #endif
 			if (!cplx2) texArrayImag = new cudaArray_t();

@@ -52,6 +52,7 @@
 #include <sched.h>
 #endif
 #include "src/gpu_reconstruct.h"
+#include "src/gpu_switch.h"
 #include "src/fixed_class_initialisation.h"
 #include "src/class2d_consensus_metadata.h"
 #include "src/spatial_frequency_grid.h"
@@ -2283,6 +2284,16 @@ void MlOptimiser::initialiseGeneral(int rank)
     // being validated: upstream switches the accelerators off here)
     // (before --skip_align switches the GPU off: the M-step can still use it, RELION_GPU_RECONSTRUCT=1)
     gpurec::setGpuRequested(do_gpu);
+    if (do_gpu && verb > 0)
+    {
+        const char *names[] = {"RELION_GPU_FLOAT2_TEX", "RELION_GPU_COARSE_XT", "RELION_GPU_RECONSTRUCT", "RELION_GPU_SYMMETRISE", "RELION_JOIN_SKIP_BPREF"};
+        std::string off;
+        for (const char *n : names)
+            if (!gpuswitch::on(n))
+                off += std::string(off.empty() ? "" : ", ") + n;
+        std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join) are on by default, each backing off to the older path when its conditions are not met; "
+                  << (off.empty() ? "none is switched off" : "switched off: " + off) << " (VAR=0 turns one off)." << std::endl;
+    }
     const char *gpu_skip_align = getenv("RELION_GPU_SKIP_ALIGN");
     const bool keep_gpu_skip_align = gpu_skip_align != NULL && std::string(gpu_skip_align) == "1";
     if ((do_skip_align || do_skip_rotate) && !(keep_gpu_skip_align && do_gpu))
