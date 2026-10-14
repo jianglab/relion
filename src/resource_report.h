@@ -28,6 +28,8 @@
 #include <atomic>
 #include <string>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <vector>
 
 namespace resrep
@@ -81,7 +83,10 @@ private:
 	std::vector<void*> handles_;
 	std::vector<double> sum_;
 	std::vector<long> n_;
+	void requestStop();
 	std::atomic<bool> running_{false};
+	std::mutex mtx_;
+	std::condition_variable cv_;
 	std::thread thread_;
 	double t0_ = 0., cpu0_ = 0.;
 };

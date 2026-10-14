@@ -24,6 +24,7 @@
 #include <sys/resource.h>
 #include <list>
 #include <memory>
+#include <algorithm>
 
 // How many particle stacks the prefetcher keeps open. The soft limit on open files is
 // first raised towards the hard limit (at most 65536), as many programs do: it is
@@ -50,6 +51,7 @@ static size_t maxOpenStacks()
 }
 
 OpenStacks::OpenStacks() : max_open_(maxOpenStacks()) {}
+OpenStacks::OpenStacks(size_t max_open) : max_open_(std::max<size_t>(2, std::min(max_open, maxOpenStacks()))) {}
 
 fImageHandler &OpenStacks::get(const FileName &fn_stack)
 {
@@ -71,8 +73,9 @@ fImageHandler &OpenStacks::get(const FileName &fn_stack)
 	return *it->second.first;
 }
 
-AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata)
+AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata, int max_readers)
 	: mydata_(mydata),
+	  max_readers_(std::max(1, max_readers)),
 	  fill_idx_(0),
 	  ready_idx_(-1),
 	  first_part_id_(0),
@@ -96,21 +99,44 @@ void AsyncImagePrefetcher::startPrefetch(long int first_part_id, long int last_p
 	last_part_id_ = last_part_id;
 	has_work_ = true;
 	work_done_ = false;
+	pending_ = true;
 	cv_start_.notify_one();
 }
 
-bool AsyncImagePrefetcher::waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target, long int first_part_id, long int last_part_id)
+bool AsyncImagePrefetcher::waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target, long int first_part_id, long int last_part_id, bool speculative)
 {
 	std::unique_lock<std::mutex> lock(mtx_);
+	if (speculative && !pending_)
+		return false;
+	struct timeval w0, w1;
+	gettimeofday(&w0, NULL);
+	bool late = (ready_idx_ == -1);
 	cv_done_.wait(lock, [this]() { return ready_idx_ != -1 || shutdown_; });
+	gettimeofday(&w1, NULL);
+	wait_time_us_ += (w1.tv_sec - w0.tv_sec) * 1000000 + (w1.tv_usec - w0.tv_usec);
+	nr_pools_++;
+	if (late)
+	{
+		nr_late_pools_++;
+		last_pool_late_ = true;
+	}
 	if (shutdown_)
 		return false;
+	if (speculative && (ready_first_ != first_part_id || ready_last_ != last_part_id))
+	{
+		ready_idx_ = -1;
+		work_done_ = false;
+		has_work_ = false;
+		pending_ = false;
+		return false;
+	}
 	if (ready_first_ != first_part_id || ready_last_ != last_part_id)
 		REPORT_ERROR("AsyncImagePrefetcher: the prefetched images are for particles " + integerToString(ready_first_) + "-" +
 		             integerToString(ready_last_) + ", not the requested " + integerToString(first_part_id) + "-" + integerToString(last_part_id));
 
 	target.swap(buffers_[ready_idx_]);
 	ready_idx_ = -1;
+	pending_ = false;
 	work_done_ = false;
 	has_work_ = false;
 
@@ -130,7 +156,10 @@ void AsyncImagePrefetcher::stop()
 
 void AsyncImagePrefetcher::workerThread()
 {
-	OpenStacks stacks; // kept across pools (see OpenStacks)
+	// one set of open stacks per reader, kept across pools (see OpenStacks); they share the open-file budget
+	std::vector<std::unique_ptr<OpenStacks> > readers;
+	for (int r = 0; r < max_readers_; r++)
+		readers.emplace_back(new OpenStacks(maxOpenStacks() / max_readers_));
 
 	while (true)
 	{
@@ -148,41 +177,61 @@ void AsyncImagePrefetcher::workerThread()
 			has_work_ = false;
 		}
 
+		struct timeval p0, p1;
+		gettimeofday(&p0, NULL);
 		std::vector<MultidimArray<RFLOAT>>& buffer = buffers_[fill_idx_];
 		buffer.clear();
-		buffer.reserve(my_last - my_first + 1);
+		const long int n_img = my_last - my_first + 1;
+		buffer.resize(n_img);
 
-		for (long int part_id_sorted = my_first; part_id_sorted <= my_last; part_id_sorted++)
+		// more readers while the E-step had to wait for the last pool
+		if (last_pool_late_.exchange(false) && active_readers_ < max_readers_)
+			active_readers_ = std::min(max_readers_, active_readers_ * 2);
+		const int nr = std::min<long int>(active_readers_, n_img);
+
+		std::atomic<long int> next(0);
+		auto read_some = [&](int rid)
 		{
-			long int part_id = mydata_->sorted_idx[part_id_sorted];
+			long int i;
+			while ((i = next++) < n_img)
+			{
+				long int part_id = mydata_->sorted_idx[my_first + i];
 
-			FileName fn_img;
-			bool on_scratch = mydata_->getImageNameOnScratch(part_id, fn_img);
-			if (!on_scratch)
-				fn_img = mydata_->particles[part_id].name;
+				FileName fn_img;
+				bool on_scratch = mydata_->getImageNameOnScratch(part_id, fn_img);
+				if (!on_scratch)
+					fn_img = mydata_->particles[part_id].name;
 
-			long int imgno;
-			FileName fn_stack;
-			fn_img.decompose(imgno, fn_stack);
-			fImageHandler &hFile = stacks.get(fn_stack);
+				long int imgno;
+				FileName fn_stack;
+				fn_img.decompose(imgno, fn_stack);
+				fImageHandler &hFile = readers[rid]->get(fn_stack);
 
-			Image<RFLOAT> img;
-			struct timeval t0, t1;
-			gettimeofday(&t0, NULL);
-			img.readFromOpenFile(fn_img, hFile, -1, false);
-			gettimeofday(&t1, NULL);
-			long int dt = (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_usec - t0.tv_usec);
-			if (mydata_->cacheMode)
-				read_time_cache_us_ += dt;
-			else if (!on_scratch)
-				read_time_original_us_ += dt;
-			else
-				read_time_scratch_us_ += dt;
+				Image<RFLOAT> img;
+				struct timeval t0, t1;
+				gettimeofday(&t0, NULL);
+				img.readFromOpenFile(fn_img, hFile, -1, false);
+				gettimeofday(&t1, NULL);
+				long int dt = (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_usec - t0.tv_usec);
+				if (mydata_->cacheMode)
+					read_time_cache_us_ += dt;
+				else if (!on_scratch)
+					read_time_original_us_ += dt;
+				else
+					read_time_scratch_us_ += dt;
 
-			img().setXmippOrigin();
-			buffer.push_back(img());
-		}
+				img().setXmippOrigin();
+				buffer[i] = img();
+			}
+		};
+		std::vector<std::thread> helpers;
+		for (int r = 1; r < nr; r++)
+			helpers.emplace_back(read_some, r);
+		read_some(0);
+		for (auto &h : helpers) h.join();
 
+		gettimeofday(&p1, NULL);
+		pool_read_time_us_ += (p1.tv_sec - p0.tv_sec) * 1000000 + (p1.tv_usec - p0.tv_usec);
 		{
 			std::lock_guard<std::mutex> lock(mtx_);
 			ready_idx_ = fill_idx_;

@@ -295,6 +295,7 @@ public:
 
 	// Read a STAR loop structure
 	long int readStarLoop(std::ifstream& in, bool do_only_count = false);
+	long int readStarLoopRows(std::ifstream& in, const std::string &first_line);
 
 	/* Read a STAR list
 	 * The function returns true if the list is followed by a loop, false otherwise */

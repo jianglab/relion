@@ -27,6 +27,7 @@
 #include "src/time.h"
 #include "src/ctf.h"
 #include <src/jaz/single_particle/obs_model.h>
+#include <random>
 #include <src/jaz/tomography/tomogram_set.h>
 #include <src/jaz/tomography/tomo_ctf_helper.h>
 #include <src/jaz/tomography/tomogram.h>
@@ -209,6 +210,10 @@ public:
 
 	// Indices of the sorted particles
 	std::vector<long int> sorted_idx;
+
+	// Shuffle whole micrographs in [first, last), keeping each one's particles together in file
+	// order (RELION_PARTICLE_ORDER=micrograph, see randomiseParticlesOrder)
+	void shuffleMicrographs(std::vector<long int>::iterator first, std::vector<long int>::iterator last, std::mt19937 &rng);
 
 	// Number of particles in random subsets 1 and 2;
 	long int nr_particles_subset1, nr_particles_subset2;
@@ -399,7 +404,7 @@ public:
         bool set_offset_priors_to_offsets = false, int verb = 0);
 
 	// Write
-	void write(FileName fn_root, bool remove_offset_priors = false);
+	void write(FileName fn_root, bool remove_offset_priors = false, bool allow_async = false);
 
 
 private:

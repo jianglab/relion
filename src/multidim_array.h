@@ -55,6 +55,10 @@
 #include "src/matrix1d.h"
 #include "src/matrix2d.h"
 #include "src/complex.h"
+
+/// memset(p, 0, bytes), over several threads for large blocks (page faults of fresh memory are the cost);
+/// only called outside the particle loops. Defined in fftw.cpp.
+void relionZeroMemory(void *p, size_t bytes);
 #include <limits>
 
 // Intel MKL provides an FFTW-like interface, so this is enough.
@@ -1151,6 +1155,9 @@ public:
         }
 
         // Copy needed elements, fill with 0 if necessary
+        if (data == NULL || NZYXSIZE(*this) == 0)
+            relionZeroMemory(new_data, sizeof(T) * NZYXdim); // nothing to copy: all zeros
+        else
         for (long int l = 0; l < Ndim; l++)
             for (long int k = 0; k < Zdim; k++)
                 for (long int i = 0; i < Ydim; i++)
@@ -3329,7 +3336,7 @@ public:
     {
         if (data == NULL || !sameShape(op))
             reshape(op);
-        memset(data,0,nzyxdim*sizeof(T));
+        relionZeroMemory(data, nzyxdim*sizeof(T));
     }
 
     /** Initialize to zeros with current size.
@@ -3343,7 +3350,7 @@ public:
      */
     inline void initZeros()
     {
-        memset(data,0,nzyxdim*sizeof(T));
+        relionZeroMemory(data, nzyxdim*sizeof(T));
     }
 
     /** Initialize to zeros with a given size.
@@ -3352,7 +3359,7 @@ public:
     {
         if (xdim!=Xdim || ydim!=Ydim || zdim!=Zdim || ndim!=Ndim)
             reshape(Ndim, Zdim,Ydim,Xdim);
-        memset(data,0,nzyxdim*sizeof(T));
+        relionZeroMemory(data, nzyxdim*sizeof(T));
     }
 
     /** Initialize to zeros with a given size.

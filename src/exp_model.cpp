@@ -19,6 +19,11 @@
  ***************************************************************************/
 
 #include <random>
+#include <sstream>
+#include <memory>
+#include "src/async_file_writer.h"
+#include <map>
+#include <algorithm>
 #include <set>
 #include <thread>
 #include <mutex>
@@ -422,6 +427,50 @@ void Experiment::divideParticlesInRandomHalves(int seed, bool do_helical_refine)
 
 }
 
+// RELION_PARTICLE_ORDER=micrograph: in runs that visit every particle (no random subsets), shuffle
+// whole micrographs and keep each micrograph's particles together in file order, so that a pool reads
+// a few long stretches of few stack files instead of single images from many. The sums over particles
+// do not depend on the order (apart from rounding); runs with random subsets keep the particle-level
+// shuffle, since a subset should be a random sample.
+static bool particleOrderByMicrograph()
+{
+	static const bool by_micrograph = []()
+	{
+		const char *e = getenv("RELION_PARTICLE_ORDER");
+		return e != NULL && std::string(e) == "micrograph";
+	}();
+	return by_micrograph;
+}
+
+void Experiment::shuffleMicrographs(std::vector<long int>::iterator first, std::vector<long int>::iterator last, std::mt19937 &rng)
+{
+	// micrograph (or, without micrograph names, stack file) -> (stack, image number, particle)
+	std::map<std::string, std::vector<std::pair<std::pair<std::string, long int>, long int> > > by_mic;
+	std::vector<std::string> order;
+	for (auto it = first; it != last; ++it)
+	{
+		long int imgno;
+		FileName stack;
+		particles[*it].name.decompose(imgno, stack);
+		std::string key = getMicrographName(*it);
+		if (key.empty())
+			key = stack;
+		auto &v = by_mic[key];
+		if (v.empty())
+			order.push_back(key);
+		v.push_back(std::make_pair(std::make_pair(std::string(stack), imgno), *it));
+	}
+	std::shuffle(order.begin(), order.end(), rng);
+	auto out = first;
+	for (const std::string &key : order)
+	{
+		auto &v = by_mic[key];
+		std::sort(v.begin(), v.end());
+		for (const auto &p : v)
+			*out++ = p.second;
+	}
+}
+
 void Experiment::randomiseParticlesOrder(int seed, bool do_split_random_halves, int subsets_size)
 {
 	//This static flag is for only randomize once
@@ -454,8 +503,16 @@ void Experiment::randomiseParticlesOrder(int seed, bool do_split_random_halves, 
 				REPORT_ERROR("ERROR Experiment::randomiseParticlesOrder: invalid half2 size:" + integerToString(nr_half2) + " != " + integerToString(nr_particles_subset2));
 
 			// Randomise the two particle lists
-			std::shuffle(sorted_idx.begin(), sorted_idx.begin() + nr_half1, rng);
-			std::shuffle(sorted_idx.begin() + nr_half1, sorted_idx.end(), rng);
+			if (particleOrderByMicrograph() && !doing_subset)
+			{
+				shuffleMicrographs(sorted_idx.begin(), sorted_idx.begin() + nr_half1, rng);
+				shuffleMicrographs(sorted_idx.begin() + nr_half1, sorted_idx.end(), rng);
+			}
+			else
+			{
+				std::shuffle(sorted_idx.begin(), sorted_idx.begin() + nr_half1, rng);
+				std::shuffle(sorted_idx.begin() + nr_half1, sorted_idx.end(), rng);
+			}
 
 			// Make sure the particles are sorted on their optics_group.
 			// Otherwise CudaFFT re-calculation of plans every time image size changes slows down things a lot!
@@ -467,7 +524,10 @@ void Experiment::randomiseParticlesOrder(int seed, bool do_split_random_halves, 
 		else
 		{
 			// Just randomise the entire vector
-			std::shuffle(sorted_idx.begin(), sorted_idx.end(), rng);
+			if (particleOrderByMicrograph() && !doing_subset)
+				shuffleMicrographs(sorted_idx.begin(), sorted_idx.end(), rng);
+			else
+				std::shuffle(sorted_idx.begin(), sorted_idx.end(), rng);
 
 			// Make sure the particles are sorted on their optics_group.
 			// Otherwise CudaFFT re-calculation of plans every time image size changes slows down things a lot!
@@ -1291,9 +1351,11 @@ bool Experiment::read(FileName fn_exp, FileName fn_tomo, FileName fn_motion,
 }
 
 // Write to file
-void Experiment::write(FileName fn_out, bool remove_offset_priors)
+void Experiment::write(FileName fn_out, bool remove_offset_priors, bool allow_async)
 {
-    std::ofstream ofs(fn_out);
+    // Format in memory now (the tables change in the next iteration), let a
+    // background thread put the text on disk
+    std::ostringstream ofs;
 
     if (is_tomo) obsModel.generalMdt.write(ofs);
 
@@ -1317,4 +1379,11 @@ void Experiment::write(FileName fn_out, bool remove_offset_priors)
         }
     }
 
+    std::shared_ptr<std::string> text = std::make_shared<std::string>(ofs.str());
+    auto put = [text, fn_out]
+    {
+        std::ofstream out(fn_out);
+        out.write(text->data(), text->size());
+    };
+    if (allow_async) AsyncFileWriter::instance().submit(put); else put();
 }

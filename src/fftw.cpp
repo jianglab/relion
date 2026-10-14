@@ -49,6 +49,14 @@
 #include "src/args.h"
 #include <string.h>
 #include <math.h>
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <string>
+#include <stdint.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 //#define TIMING_FFTW
 #ifdef TIMING_FFTW
@@ -66,6 +74,241 @@
 #endif
 
 //#define DEBUG_PLANS
+
+// FFTW plans ---------------------------------------------------------------
+// RELION plans with FFTW_ESTIMATE, a guess that can be several times slower than a plan FFTW has
+// measured (FFTW_MEASURE). Measuring takes from a fraction of a second (2D particle images) to tens
+// of seconds (large 3D maps), and it overwrites the arrays it is given, so with
+// RELION_FFTW_PLANS=measure a plan is measured once on scratch arrays with the same alignment, and
+// kept in a wisdom file per CPU model that later runs read. If anything fails, the plan is the
+// FFTW_ESTIMATE one, as before.
+//   RELION_FFTW_PLANS=measure|estimate (default estimate, until validated)
+//   RELION_FFTW_WISDOM=<file> (default $XDG_CACHE_HOME or ~/.cache, relion/fftw_wisdom_<precision>_<cpu>.txt)
+//   RELION_FFTW_PLAN_TIMELIMIT=<seconds per measured plan> (default 30)
+#if defined(RELION_SINGLE_PRECISION)
+	#define RFFTW(f) fftwf_##f
+	typedef fftwf_complex rfftw_complex;
+	typedef fftwf_plan rfftw_plan;
+#else
+	#define RFFTW(f) fftw_##f
+	typedef fftw_complex rfftw_complex;
+	typedef fftw_plan rfftw_plan;
+#endif
+
+namespace
+{
+
+enum PlanKind { PLAN_R2C, PLAN_C2R, PLAN_C2C };
+
+// Set once relionFftwInitThreads() has switched on FFTW's threads (see FourierTransformer::cleanup)
+bool g_fftw_threads_inited = false;
+
+struct PlanSettings
+{
+	bool measure = false;
+	std::string wisdom_file;
+	double timelimit = 30.;
+	bool loaded = false;
+};
+
+std::string cpuModelName()
+{
+	std::ifstream in("/proc/cpuinfo");
+	std::string line;
+	while (std::getline(in, line))
+		if (line.compare(0, 10, "model name") == 0)
+		{
+			std::string name = line.substr(line.find(':') + 1), out;
+			for (char c : name)
+				if (isalnum((unsigned char)c)) out += c;
+				else if (!out.empty() && out.back() != '_') out += '_';
+			while (!out.empty() && out.back() == '_') out.pop_back();
+			return out.empty() ? "unknown_cpu" : out;
+		}
+	return "unknown_cpu";
+}
+
+PlanSettings &planSettings()
+{
+	static PlanSettings ps = []()
+	{
+		PlanSettings p;
+#ifndef MKLFFT
+		const char *mode = getenv("RELION_FFTW_PLANS");
+		p.measure = (mode != NULL && std::string(mode) == "measure");
+		const char *tl = getenv("RELION_FFTW_PLAN_TIMELIMIT");
+		if (tl != NULL && atof(tl) > 0.) p.timelimit = atof(tl);
+		const char *wf = getenv("RELION_FFTW_WISDOM");
+		if (wf != NULL && wf[0] != '\0')
+			p.wisdom_file = wf;
+		else
+		{
+			const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+			std::string dir = (xdg != NULL && xdg[0] != '\0') ? std::string(xdg) :
+			                  (home != NULL ? std::string(home) + "/.cache" : std::string());
+			if (!dir.empty())
+				p.wisdom_file = dir + "/relion/fftw_wisdom_" +
+#ifdef RELION_SINGLE_PRECISION
+					"single_" +
+#else
+					"double_" +
+#endif
+					cpuModelName() + ".txt";
+		}
+#endif
+		return p;
+	}();
+	return ps;
+}
+
+// Called inside the planner's critical section
+void loadWisdomOnce(PlanSettings &ps)
+{
+	if (ps.loaded) return;
+	ps.loaded = true;
+	if (!ps.wisdom_file.empty())
+		RFFTW(import_wisdom_from_filename)(ps.wisdom_file.c_str()); // a missing file is fine
+	// Measured plans and the lookups of saved ones use the same limit (FFTW keeps it with the wisdom)
+	RFFTW(set_timelimit)(ps.timelimit);
+}
+
+// Merge with what other processes saved meanwhile, then replace the file in one step
+void saveWisdom(const PlanSettings &ps)
+{
+	if (ps.wisdom_file.empty()) return;
+	const std::string dir = ps.wisdom_file.substr(0, ps.wisdom_file.rfind('/'));
+	if (!dir.empty()) { mkdir(dir.substr(0, dir.rfind('/')).c_str(), 0755); mkdir(dir.c_str(), 0755); }
+	RFFTW(import_wisdom_from_filename)(ps.wisdom_file.c_str());
+	const std::string tmp = ps.wisdom_file + ".tmp" + std::to_string((long)getpid());
+	if (RFFTW(export_wisdom_to_filename)(tmp.c_str()))
+		rename(tmp.c_str(), ps.wisdom_file.c_str());
+	else
+		remove(tmp.c_str());
+}
+
+rfftw_plan planWith(PlanKind kind, int ndim, const int *N, void *in, void *out, int sign, unsigned flags)
+{
+	switch (kind)
+	{
+	case PLAN_R2C: return RFFTW(plan_dft_r2c)(ndim, N, (RFLOAT*)in, (rfftw_complex*)out, flags);
+	case PLAN_C2R: return RFFTW(plan_dft_c2r)(ndim, N, (rfftw_complex*)in, (RFLOAT*)out, flags);
+	default:       return RFFTW(plan_dft)(ndim, N, (rfftw_complex*)in, (rfftw_complex*)out, sign, flags);
+	}
+}
+
+// Scratch memory whose address has the same remainder modulo 64 bytes as p: FFTW's plans depend on
+// the alignment of the arrays, and RELION executes them on its own arrays
+struct Scratch
+{
+	char *base = NULL;
+	void *ptr = NULL;
+	Scratch(const void *p, size_t bytes)
+	{
+		base = (char*)malloc(bytes + 128);
+		if (base == NULL) return;
+		char *aligned = base + (64 - ((uintptr_t)base % 64)) % 64;
+		ptr = aligned + ((uintptr_t)p % 64);
+	}
+	~Scratch() { free(base); }
+};
+
+// Make a plan (called inside the planner's critical section)
+rfftw_plan makePlan(PlanKind kind, int ndim, const int *N, void *in, void *out, int sign = FFTW_FORWARD)
+{
+	PlanSettings &ps = planSettings();
+	if (getenv("RELION_FFTW_DEBUG") != NULL)
+	{
+		size_t n = 1;
+		for (int d = 0; d < ndim; d++) n *= N[d];
+		if (n >= (1 << 21))
+		{
+			std::string dims;
+			for (int d = 0; d < ndim; d++) dims += (d ? "x" : "") + std::to_string(N[d]);
+#if defined(RELION_HAVE_FFTW_THREADS) && !defined(MKLFFT)
+			const int nt = RFFTW(planner_nthreads)();
+#else
+			const int nt = 1;
+#endif
+			std::cerr << " FFTW debug: plan " << dims << " kind " << kind << " on " << nt << " threads" << std::endl;
+		}
+	}
+	if (!ps.measure)
+		return planWith(kind, ndim, N, in, out, sign, FFTW_ESTIMATE);
+
+	loadWisdomOnce(ps);
+	rfftw_plan p = planWith(kind, ndim, N, in, out, sign, FFTW_MEASURE | FFTW_WISDOM_ONLY);
+	if (p != NULL) return p;
+
+	// Measure on scratch arrays of the same sizes and alignment
+	size_t n = 1;
+	for (int d = 0; d < ndim; d++) n *= N[d];
+	const size_t nhalf = n / N[ndim - 1] * (N[ndim - 1] / 2 + 1);
+	size_t in_bytes, out_bytes;
+	switch (kind)
+	{
+	case PLAN_R2C: in_bytes = n * sizeof(RFLOAT); out_bytes = nhalf * sizeof(rfftw_complex); break;
+	case PLAN_C2R: in_bytes = nhalf * sizeof(rfftw_complex); out_bytes = n * sizeof(RFLOAT); break;
+	default:       in_bytes = out_bytes = n * sizeof(rfftw_complex); break;
+	}
+	{
+		Scratch sin(in, in_bytes), sout(out, out_bytes);
+		if (sin.ptr != NULL && sout.ptr != NULL)
+		{
+			const auto t0 = std::chrono::steady_clock::now();
+			rfftw_plan m = planWith(kind, ndim, N, sin.ptr, (in == out) ? sin.ptr : sout.ptr, sign, FFTW_MEASURE);
+			const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+			if (m != NULL)
+			{
+				RFFTW(destroy_plan)(m);
+				saveWisdom(ps);
+				if (secs > 1.)
+				{
+					std::string dims;
+					for (int d = 0; d < ndim; d++) dims += (d ? "x" : "") + std::to_string(N[d]);
+					std::cout << " FFTW: measured the best plan for a " << dims << " transform in "
+					          << std::fixed << std::setprecision(1) << secs << " s (once per CPU model; kept in "
+					          << ps.wisdom_file << ")" << std::endl;
+				}
+			}
+		}
+	}
+	p = planWith(kind, ndim, N, in, out, sign, FFTW_MEASURE | FFTW_WISDOM_ONLY);
+	if (p != NULL) return p;
+	return planWith(kind, ndim, N, in, out, sign, FFTW_ESTIMATE);
+}
+
+}
+
+// Threads for RELION's own loops over a transform (normalisation): as many as FFTW plans with,
+// so one inside the particle loop and all of them outside it
+static int relionFftwLoopThreads()
+{
+#if defined(RELION_HAVE_FFTW_THREADS) && !defined(MKLFFT)
+	return std::max(1, RFFTW(planner_nthreads)());
+#else
+	return 1;
+#endif
+}
+
+// RELION_FFTW_DEBUG=1: report plans and execution times of large transforms
+static bool relionFftwDebug()
+{
+	static const bool d = getenv("RELION_FFTW_DEBUG") != NULL;
+	return d;
+}
+
+void relionFftwSetPlanMode(bool measure, const std::string &wisdom_file, double timelimit_s)
+{
+	#pragma omp critical(FourierTransformer_fftw_plan)
+	{
+		PlanSettings &ps = planSettings();
+		ps.measure = measure;
+		ps.wisdom_file = wisdom_file;
+		ps.timelimit = timelimit_s;
+		ps.loaded = false;
+	}
+}
+
 
 // Constructors and destructors --------------------------------------------
 FourierTransformer::FourierTransformer():
@@ -121,11 +364,26 @@ void FourierTransformer::cleanup()
 	clear();
 	// Then clean up all the junk fftw keeps lying around
 	// SOMEHOW THE FOLLOWING IS NOT ALLOWED WHEN USING MULTPLE TRANSFORMER OBJECTS....
-#ifdef RELION_SINGLE_PRECISION
-	fftwf_cleanup();
-#else
-	fftw_cleanup();
+	// fftw_cleanup() also replaces FFTW's planner. The new planner plans on one thread, has forgotten
+	// the wisdom and, worse, lacks FFTW's threaded algorithms, which fftw_init_threads() registers on
+	// the planner of the moment: every later transform then ran mostly on one core, whatever the number
+	// of threads. With threads on, clean up through FFTW's thread layer and switch it on again.
+	#pragma omp critical(FourierTransformer_fftw_plan)
+	{
+#if defined(MKLFFT) || defined(RELION_HAVE_FFTW_THREADS)
+		if (g_fftw_threads_inited)
+		{
+			const int nthreads = relionFftwLoopThreads();
+			RFFTW(cleanup_threads)();
+			if (0 == RFFTW(init_threads)())
+				REPORT_ERROR("Multithreaded FFTW failed to initialize");
+			RFFTW(plan_with_nthreads)(nthreads);
+		}
+		else
 #endif
+			RFFTW(cleanup)();
+		planSettings().loaded = false;
+	}
 
 #ifdef DEBUG_PLANS
 	std::cerr << "CLEANED-UP this= "<<this<< std::endl;
@@ -216,19 +474,8 @@ void FourierTransformer::setReal(MultidimArray<RFLOAT> &input, bool force_new_pl
 
 		#pragma omp critical(FourierTransformer_fftw_plan)
 		{
-#ifdef RELION_SINGLE_PRECISION
-			fPlanForward = fftwf_plan_dft_r2c(ndim, N, MULTIDIM_ARRAY(*fReal),
-							  (fftwf_complex*) MULTIDIM_ARRAY(fFourier), FFTW_ESTIMATE);
-			fPlanBackward = fftwf_plan_dft_c2r(ndim, N,
-							   (fftwf_complex*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal),
-							   FFTW_ESTIMATE);
-#else
-			fPlanForward = fftw_plan_dft_r2c(ndim, N, MULTIDIM_ARRAY(*fReal),
-							 (fftw_complex*) MULTIDIM_ARRAY(fFourier), FFTW_ESTIMATE);
-			fPlanBackward = fftw_plan_dft_c2r(ndim, N,
-							  (fftw_complex*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal),
-							  FFTW_ESTIMATE);
-#endif
+			fPlanForward = makePlan(PLAN_R2C, ndim, N, MULTIDIM_ARRAY(*fReal), MULTIDIM_ARRAY(fFourier));
+			fPlanBackward = makePlan(PLAN_C2R, ndim, N, MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal));
 		}	
 		RCTOC(TIMING_FFTW_PLAN);
 
@@ -293,17 +540,8 @@ void FourierTransformer::setReal(MultidimArray<Complex > &input, bool force_new_
 		RCTIC(TIMING_FFTW_PLAN);
 		#pragma omp critical(FourierTransformer_fftw_plan)
 		{
-#ifdef RELION_SINGLE_PRECISION
-			fPlanForward = fftwf_plan_dft(ndim, N, (fftwf_complex*) MULTIDIM_ARRAY(*fComplex),
-						      (fftwf_complex*) MULTIDIM_ARRAY(fFourier), FFTW_FORWARD, FFTW_ESTIMATE);
-			fPlanBackward = fftwf_plan_dft(ndim, N, (fftwf_complex*) MULTIDIM_ARRAY(fFourier),
-						       (fftwf_complex*) MULTIDIM_ARRAY(*fComplex), FFTW_BACKWARD, FFTW_ESTIMATE);
-#else
-			fPlanForward = fftw_plan_dft(ndim, N, (fftw_complex*) MULTIDIM_ARRAY(*fComplex),
-						     (fftw_complex*) MULTIDIM_ARRAY(fFourier), FFTW_FORWARD, FFTW_ESTIMATE);
-			fPlanBackward = fftw_plan_dft(ndim, N, (fftw_complex*) MULTIDIM_ARRAY(fFourier),
-						      (fftw_complex*) MULTIDIM_ARRAY(*fComplex), FFTW_BACKWARD, FFTW_ESTIMATE);
-#endif
+			fPlanForward = makePlan(PLAN_C2C, ndim, N, MULTIDIM_ARRAY(*fComplex), MULTIDIM_ARRAY(fFourier), FFTW_FORWARD);
+			fPlanBackward = makePlan(PLAN_C2C, ndim, N, MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fComplex), FFTW_BACKWARD);
 		}		
 		RCTOC(TIMING_FFTW_PLAN);
 
@@ -333,6 +571,17 @@ void FourierTransformer::setFourier(const MultidimArray<Complex> &inputFourier)
 // Transform ---------------------------------------------------------------
 void FourierTransformer::Transform(int sign)
 {
+	const bool debug_time = relionFftwDebug() && fReal != NULL && MULTIDIM_SIZE(*fReal) >= (1 << 21);
+	const auto debug_t0 = std::chrono::steady_clock::now();
+	TransformTimed(sign);
+	if (debug_time)
+		std::cerr << " FFTW debug: " << (sign == FFTW_FORWARD ? "forward " : "inverse ")
+		          << ZSIZE(*fReal) << "x" << YSIZE(*fReal) << "x" << XSIZE(*fReal) << " "
+		          << std::chrono::duration<double>(std::chrono::steady_clock::now() - debug_t0).count() << " s" << std::endl;
+}
+
+void FourierTransformer::TransformTimed(int sign)
+{
 	if (sign == FFTW_FORWARD)
 	{
 		RCTIC(TIMING_FFTW_EXECUTE);
@@ -355,8 +604,13 @@ void FourierTransformer::Transform(int sign)
 			REPORT_ERROR("No complex nor real data defined");
 
 		RCTIC(TIMING_FFTW_NORMALISE);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(fFourier)
-			DIRECT_MULTIDIM_ELEM(fFourier,n) /= size;
+		// Every element is divided exactly as before, so the result does not depend on the threads
+		const long int nF = MULTIDIM_SIZE(fFourier);
+		Complex *pF = MULTIDIM_ARRAY(fFourier);
+		const int nt = (nF > (1 << 20)) ? relionFftwLoopThreads() : 1;
+		#pragma omp parallel for num_threads(nt) if(nt > 1)
+		for (long int n = 0; n < nF; n++)
+			pF[n] /= size;
 		RCTOC(TIMING_FFTW_NORMALISE);
 	}
 	else if (sign == FFTW_BACKWARD)
@@ -1818,4 +2072,74 @@ void generateBinaryHelicalFourierMask(MultidimArray<RFLOAT> &mask, std::vector<R
 		}
 	}
 
+}
+
+#if defined(MKLFFT) || defined(RELION_HAVE_FFTW_THREADS)
+#if defined(RELION_SINGLE_PRECISION) && !defined(MKLFFT)
+#define RELION_FFTW_THREADS_API(f) fftwf_##f
+#else
+#define RELION_FFTW_THREADS_API(f) fftw_##f
+#endif
+
+// RELION_FFTW_THREADS=1 keeps every transform single-threaded
+static bool relionFftwThreadsAllowed()
+{
+	static const bool allowed = []()
+	{
+		const char *e = getenv("RELION_FFTW_THREADS");
+		return !(e != NULL && atoi(e) == 1);
+	}();
+	return allowed;
+}
+
+void relionFftwInitThreads()
+{
+	if (!relionFftwThreadsAllowed())
+		return;
+	if (0 == RELION_FFTW_THREADS_API(init_threads)())
+		REPORT_ERROR("Multithreaded FFTW failed to initialize");
+	g_fftw_threads_inited = true;
+}
+
+void relionFftwPlanThreads(int nr_threads)
+{
+	if (relionFftwThreadsAllowed())
+		RELION_FFTW_THREADS_API(plan_with_nthreads)(nr_threads);
+}
+
+void relionFftwCleanupThreads()
+{
+	if (relionFftwThreadsAllowed())
+		RELION_FFTW_THREADS_API(cleanup_threads)();
+	g_fftw_threads_inited = false;
+}
+#else
+// Without FFTW's thread library every transform is single-threaded
+void relionFftwInitThreads() {}
+void relionFftwPlanThreads(int) {}
+void relionFftwCleanupThreads() {}
+#endif
+
+int relionBulkThreads(size_t n)
+{
+	return (n >= ((size_t)1 << 20)) ? relionFftwLoopThreads() : 1;
+}
+
+void relionZeroMemory(void *p, size_t bytes)
+{
+	if (bytes == 0)
+		return;
+	const int nt = (bytes >= ((size_t)32 << 20)) ? relionBulkThreads(bytes) : 1;
+	if (nt <= 1)
+	{
+		memset(p, 0, bytes);
+		return;
+	}
+	char *c = (char *)p;
+	#pragma omp parallel for num_threads(nt)
+	for (int t = 0; t < nt; t++)
+	{
+		const size_t b0 = bytes / nt * t, b1 = (t == nt - 1) ? bytes : bytes / nt * (t + 1);
+		memset(c + b0, 0, b1 - b0);
+	}
 }

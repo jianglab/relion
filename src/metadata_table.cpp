@@ -43,6 +43,15 @@
  ***************************************************************************/
 
 #include <random>
+#include <charconv>
+#include <cmath>
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <exception>
+#include <sched.h>
+
+static int starParseThreads(size_t rows);
 #include "src/metadata_table.h"
 #include "src/metadata_label.h"
 
@@ -451,6 +460,34 @@ bool MetaDataTable::setValueFromString(
 	}
 	else
 	{
+		// Plain numbers are converted with std::from_chars, which gives the same values as the
+		// istringstream below (both round correctly) and is about 20 times faster. Anything unusual
+		// (signs other than '-', nan/inf, trailing text, out of range, denormals) takes the slow path.
+		if (!value.empty())
+		{
+			const char *b = value.data(), *e = b + value.size();
+			const char c0 = *b;
+			const bool plain = (c0 >= '0' && c0 <= '9') || c0 == '-' || c0 == '.';
+			if (plain && EMDL::isDouble(label))
+			{
+				double v;
+				auto r = std::from_chars(b, e, v);
+				if (r.ec == std::errc() && r.ptr == e && std::isfinite(v) && (v == 0. || std::fabs(v) > 1e-300))
+					return setValue(label, v, objectID);
+			}
+			else if (plain && EMDL::isInt(label))
+			{
+				long v;
+				auto r = std::from_chars(b, e, v);
+				if (r.ec == std::errc() && r.ptr == e)
+					return setValue(label, v, objectID);
+			}
+			else if (EMDL::isBool(label) && value.size() == 1 && (c0 == '0' || c0 == '1'))
+			{
+				return setValue(label, c0 == '1', objectID);
+			}
+		}
+
 		std::istringstream i(value);
 
 		if (EMDL::isDouble(label))
@@ -1051,6 +1088,205 @@ long int MetaDataTable::goToObject(long int objectID)
 	return current_objectID;
 }
 
+// The same as simplify(): control characters removed, tabs become blanks, runs of blanks collapse
+// into one, no blank at the start or the end. Works on a buffer and reuses `out`.
+static void simplifyInto(const char *s, size_t n, std::string &out)
+{
+	out.clear();
+	out.reserve(n);
+	bool pending_blank = false;
+	for (size_t i = 0; i < n; i++)
+	{
+		char c = s[i];
+		if (c == '\t') c = ' ';
+		else if (c == '\n' || c == '\v' || c == '\b' || c == '\r' || c == '\f' || c == '\a') continue;
+		if (c == ' ')
+		{
+			if (!out.empty()) pending_blank = true;
+		}
+		else
+		{
+			if (pending_blank) { out.push_back(' '); pending_blank = false; }
+			out.push_back(c);
+		}
+	}
+}
+
+static bool isBlankLine(const char *s, size_t n)
+{
+	for (size_t i = 0; i < n; i++)
+	{
+		const char c = s[i];
+		if (!(c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\b' || c == '\r' || c == '\f' || c == '\a'))
+			return false;
+	}
+	return true;
+}
+
+// Number of threads for reading a table of this many rows: RELION_STARTUP_THREADS (0 = the original
+// one-line-at-a-time parser), else the cores this process may use, up to 8, and no more than one
+// thread per 8192 rows
+static int starParseThreads(size_t rows)
+{
+	if (const char *e = getenv("RELION_STARTUP_THREADS"))
+		return atoi(e) <= 0 ? 0 : (int)std::min<size_t>(atoi(e), std::max<size_t>(1, rows));
+	int cores = 1;
+	cpu_set_t set;
+	if (sched_getaffinity(0, sizeof(set), &set) == 0)
+		cores = std::max(1, CPU_COUNT(&set));
+	return (int)std::max<size_t>(1, std::min<size_t>(std::min(cores, 8), rows / 8192));
+}
+
+// Reads the rows of a loop: the lines are read in blocks, then converted by several threads, each
+// row into its own container (rows do not depend on each other). Returns the number of rows, or -1
+// with the stream where it was when anything is out of the ordinary (an error in a line, or
+// RELION_STARTUP_THREADS=0), so that the line-by-line code reports it exactly as before.
+long int MetaDataTable::readStarLoopRows(std::ifstream& in, const std::string &first_line)
+{
+	if (starParseThreads(1 << 30) == 0)
+		return -1;
+
+	const int num_labels = activeLabels.size();
+	const std::streampos start = in.tellg();
+	if (start == std::streampos(-1))
+		return -1;
+
+	// Text of the table: the first line, then blocks of the file until the first blank line
+	std::string buf = first_line;
+	buf.push_back('\n');
+	std::vector<size_t> line_start(1, 0);
+	size_t end_of_table = 0;    // offset in buf after the blank line, when found
+	bool terminated = false, at_eof = false;
+	const size_t first_len = buf.size();
+	line_start.push_back(first_len);
+	{
+		const size_t block = 8 << 20;
+		std::vector<char> chunk(block);
+		while (!terminated && !at_eof)
+		{
+			in.read(chunk.data(), block);
+			const size_t got = in.gcount();
+			if (got == 0) { at_eof = true; break; }
+			if (got < block) at_eof = true;
+			buf.append(chunk.data(), got);
+			// close the lines that now end inside the buffer
+			size_t pos = line_start.back();
+			while (true)
+			{
+				const char *nl = (const char *)memchr(buf.data() + pos, '\n', buf.size() - pos);
+				if (!nl) break;
+				const size_t nl_off = nl - buf.data();
+				const size_t k = line_start.size() - 1;
+				if (isBlankLine(buf.data() + line_start[k], nl_off - line_start[k]))
+				{
+					end_of_table = nl_off + 1;
+					terminated = true;
+					line_start.pop_back(); // the blank line is not a row
+					break;
+				}
+				pos = nl_off + 1;
+				line_start.push_back(pos);
+			}
+		}
+		if (!terminated)
+		{
+			// the last line has no newline: a row unless blank
+			const size_t k = line_start.size() - 1;
+			if (line_start[k] >= buf.size() || isBlankLine(buf.data() + line_start[k], buf.size() - line_start[k]))
+				line_start.pop_back();
+			end_of_table = buf.size();
+		}
+	}
+	// line_start now holds one entry per row; row r is buf[line_start[r], next start)
+	const size_t nr_rows = line_start.size();
+	std::vector<size_t> line_end(nr_rows);
+	for (size_t r = 0; r < nr_rows; r++)
+	{
+		size_t e = (r + 1 < nr_rows) ? line_start[r + 1] : (terminated ? end_of_table : buf.size());
+		const char *nl = (const char *)memchr(buf.data() + line_start[r], '\n', e - line_start[r]);
+		line_end[r] = nl ? (nl - buf.data()) : e;
+	}
+
+	const size_t base = objects.size();
+	objects.resize(base + nr_rows, nullptr);
+
+	const int nthreads = starParseThreads(nr_rows);
+	std::atomic<size_t> first_bad(nr_rows);
+	auto work = [&](size_t r0, size_t r1)
+	{
+		try
+		{
+			std::string line, value;
+			for (size_t r = r0; r < r1; r++)
+			{
+				if (r >= first_bad.load(std::memory_order_relaxed)) return;
+				MetaDataContainer *obj = new MetaDataContainer(
+					this, doubleLabels, intLabels, boolLabels, stringLabels,
+					intVectorLabels, doubleVectorLabels, unknownLabels);
+				objects[base + r] = obj;
+				simplifyInto(buf.data() + line_start[r], line_end[r] - line_start[r], line);
+				int pos = 0, labelPosition = 0;
+				while (nextTokenInSTAR(line, pos, value))
+				{
+					if (labelPosition >= num_labels)
+						throw 1;
+					if (activeLabels[labelPosition] == EMDL_UNKNOWN_LABEL)
+					{
+						const long offset = unknownLabelPosition2Offset[labelPosition];
+						if (offset < 0)
+							throw 1;
+						obj->unknowns[offset] = value;
+					}
+					else
+						setValueFromString(activeLabels[labelPosition], value, base + r);
+					labelPosition++;
+				}
+				if (labelPosition < num_labels && num_labels > 2)
+					throw 1;
+			}
+		}
+		catch (...)
+		{
+			// remember the lowest failing row; any failure sends everything to the slow path
+			first_bad.store(0);
+		}
+	};
+
+	if (nthreads <= 1)
+		work(0, nr_rows);
+	else
+	{
+		std::vector<std::thread> pool;
+		for (int t = 0; t < nthreads; t++)
+		{
+			const size_t r0 = nr_rows * t / nthreads, r1 = nr_rows * (t + 1) / nthreads;
+			pool.emplace_back(work, r0, r1);
+		}
+		for (auto &th : pool) th.join();
+	}
+
+	if (first_bad.load() < nr_rows)
+	{
+		for (size_t r = base; r < objects.size(); r++)
+			delete objects[r];
+		objects.resize(base);
+		current_objectID = objects.size() - 1;
+		in.clear();
+		in.seekg(start);
+		return -1;
+	}
+
+	current_objectID = objects.size() - 1;
+
+	// leave the stream just after the blank line that ended the table
+	if (terminated)
+	{
+		in.clear();
+		in.seekg(start + std::streamoff(end_of_table - first_len));
+	}
+	return (long int)nr_rows;
+}
+
 long int MetaDataTable::readStarLoop(std::ifstream& in, bool do_only_count)
 {
 	setIsList(false);
@@ -1058,6 +1294,7 @@ long int MetaDataTable::readStarLoop(std::ifstream& in, bool do_only_count)
 	//Read column labels
 	int labelPosition = 0;
 	std::string line, token;
+	bool found_data = false;
 
 	// First read all the column labels
 	while (getline(in, line, '\n'))
@@ -1089,8 +1326,17 @@ long int MetaDataTable::readStarLoop(std::ifstream& in, bool do_only_count)
 		}
 		else // found first data line
 		{
+			found_data = true;
 			break;
 		}
+	}
+
+	if (!do_only_count && found_data)
+	{
+		const long int nr = readStarLoopRows(in, line);
+		if (nr >= 0)
+			return nr;
+		// otherwise the stream is back where it was, and the lines are parsed one by one below
 	}
 
 	// Then fill the table (dont read another line until the one from above has been handled)
@@ -1424,61 +1670,102 @@ void MetaDataTable::write(std::ostream& out) const
 			}
 		}
 
-		// Write actual data block
-        //SHWS 31jul2024: writing of large STAR files on our ceph file system was very slow.
-        //SHWS 31jul2024: writing big data blocks (10,000 lines) in one go is much, much faster
-        std::ostringstream dataBlockStream;
-		for (long int idx = 0; idx < objects.size(); idx++)
+		// Write actual data block. Large blocks are written in one go (SHWS 31jul2024: writing big
+		// STAR files on a network file system one value at a time was very slow). The rows are
+		// formatted into text by several threads, a batch of blocks at a time, and written in order.
+		auto formatRows = [&](long int r0, long int r1, std::string &dst)
 		{
-			std::string entryComment = "";
-
-            for (long i = 0; i < activeLabels.size(); i++)
+			dst.clear();
+			std::string val, entryComment;
+			auto put = [&dst](const std::string &v)
 			{
-				EMDLabel l = activeLabels[i];
-
-				if (l == EMDL_UNKNOWN_LABEL)
-				{
-					std::string token, val;
-					long offset = unknownLabelPosition2Offset[i];
-					val = objects[idx]->unknowns[offset];
-					escapeStringForSTAR(val);
-					dataBlockStream << std::setw(10) << val << " ";
-                    //out.width(10);
-                    //out << val << " ";
-				}
-				else if (l != EMDL_COMMENT && l != EMDL_SORTED_IDX)
-				{
-					std::string val;
-					getValueToString(l, val, idx, true); // escape=true
-					dataBlockStream << std::setw(10) << val << " ";
-                    //out.width(10);
-                    //out << val << " ";
-				}
-				if (l == EMDL_COMMENT)
-				{
-					getValue(EMDL_COMMENT, entryComment, idx);
-				}
-			}
-			if (entryComment != std::string(""))
+				if (v.size() < 10) dst.append(10 - v.size(), ' ');
+				dst += v;
+				dst += ' ';
+			};
+			for (long int idx = r0; idx < r1; idx++)
 			{
-				dataBlockStream << "# " << entryComment;
-                //out << "# " << entryComment;
+				entryComment.clear();
+				for (long i = 0; i < activeLabels.size(); i++)
+				{
+					EMDLabel l = activeLabels[i];
+
+					if (l == EMDL_UNKNOWN_LABEL)
+					{
+						val = objects[idx]->unknowns[unknownLabelPosition2Offset[i]];
+						escapeStringForSTAR(val);
+						put(val);
+					}
+					else if (l != EMDL_COMMENT && l != EMDL_SORTED_IDX)
+					{
+						val.clear();
+						getValueToString(l, val, idx, true); // escape=true
+						put(val);
+					}
+					if (l == EMDL_COMMENT)
+					{
+						getValue(EMDL_COMMENT, entryComment, idx);
+					}
+				}
+				if (!entryComment.empty())
+				{
+					dst += "# ";
+					dst += entryComment;
+				}
+				dst += '\n';
 			}
-            dataBlockStream << "\n";
-			//out << "\n";
+		};
 
-            if ((idx+1)%100000 == 0)
-            {
-                out << dataBlockStream.str();
-                dataBlockStream.str("");
-                dataBlockStream.clear();
-            }
-
+		const long int nrows = objects.size();
+		const long int block = 4096;
+		const long int nblocks = (nrows + block - 1) / block;
+		const int nt = (nblocks > 1) ? starParseThreads(nrows) : 1;
+		if (nt <= 1)
+		{
+			std::string text;
+			for (long int r0 = 0; r0 < nrows; r0 += block)
+			{
+				formatRows(r0, std::min(nrows, r0 + block), text);
+				out << text;
+			}
+		}
+		else
+		{
+			const long int batch = nt * 4;
+			std::vector<std::string> texts(batch);
+			for (long int b0 = 0; b0 < nblocks; b0 += batch)
+			{
+				const long int nb = std::min(batch, nblocks - b0);
+				std::atomic<long int> next(0);
+				std::exception_ptr failure;
+				std::mutex failure_mutex;
+				std::vector<std::thread> pool;
+				for (int t = 0; t < nt; t++)
+					pool.emplace_back([&]()
+					{
+						try
+						{
+							for (long int k; (k = next.fetch_add(1)) < nb; )
+							{
+								const long int r0 = (b0 + k) * block;
+								formatRows(r0, std::min(nrows, r0 + block), texts[k]);
+							}
+						}
+						catch (...)
+						{
+							std::lock_guard<std::mutex> lock(failure_mutex);
+							if (!failure) failure = std::current_exception();
+							next.store(nb);
+						}
+					});
+				for (auto &th : pool) th.join();
+				if (failure) std::rethrow_exception(failure);
+				for (long int k = 0; k < nb; k++)
+					out << texts[k];
+			}
 		}
 		// Finish table with a white-line
-        dataBlockStream << " \n";
-        //out << " \n";
-        out << dataBlockStream.str();
+		out << " \n";
 
 	}
 	else // isList

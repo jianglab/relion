@@ -44,6 +44,8 @@ class OpenStacks
 {
 public:
 	OpenStacks();
+	/// at most max_open stacks (several instances share the open-file budget)
+	explicit OpenStacks(size_t max_open);
 	fImageHandler &get(const FileName &fn_stack);
 private:
 	size_t max_open_;
@@ -54,18 +56,29 @@ private:
 class AsyncImagePrefetcher
 {
 public:
-	AsyncImagePrefetcher(Experiment *mydata);
+	/// max_readers: the most threads that may read one pool; starts with one and adds readers while the
+	/// E-step has to wait for pools (a network file system answers many requests at once)
+	AsyncImagePrefetcher(Experiment *mydata, int max_readers = 1);
 	~AsyncImagePrefetcher();
 
 	void startPrefetch(long int first_part_id, long int last_part_id);
 	/// Wait for the images of particles [first_part_id, last_part_id] (the range passed to
-	/// the last startPrefetch) and swap them into `target`. Any other range is an error.
-	bool waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target, long int first_part_id, long int last_part_id);
+	/// the last startPrefetch) and swap them into `target`. Any other range is an error, unless
+	/// `speculative` (the range was only a guess): then nothing is swapped, the guess is dropped and
+	/// false is returned (also when no pool was started).
+	bool waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target, long int first_part_id, long int last_part_id, bool speculative = false);
 	void stop();
 
 	long int readTimeOriginalUs() const { return read_time_original_us_; }
 	long int readTimeScratchUs() const  { return read_time_scratch_us_; }
 	long int readTimeCacheUs() const    { return read_time_cache_us_; }
+	/// Time the main thread spent waiting for a pool, and the number of pools and of pools that were late
+	long int waitTimeUs() const { return wait_time_us_; }
+	long int nrPools() const    { return nr_pools_; }
+	long int nrLatePools() const { return nr_late_pools_; }
+	/// Wall time the reader needed for each pool, summed
+	long int poolReadTimeUs() const { return pool_read_time_us_; }
+	int readers() const { return active_readers_; }
 
 private:
 	void workerThread();
@@ -81,6 +94,7 @@ private:
 	long int ready_first_ = -1, ready_last_ = -1; // range held by buffers_[ready_idx_]
 	bool has_work_;
 	bool work_done_;
+	bool pending_ = false; // a pool was started and not yet taken
 
 	std::mutex mtx_;
 	std::condition_variable cv_start_;
@@ -92,6 +106,11 @@ private:
 	std::atomic<long int> read_time_original_us_{0};
 	std::atomic<long int> read_time_scratch_us_{0};
 	std::atomic<long int> read_time_cache_us_{0};
+	std::atomic<long int> pool_read_time_us_{0};
+	int max_readers_ = 1;
+	std::atomic<int> active_readers_{1};
+	std::atomic<bool> last_pool_late_{false};
+	long int wait_time_us_ = 0, nr_pools_ = 0, nr_late_pools_ = 0;
 };
 
 class AsyncReconstructPrefetcher

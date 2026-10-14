@@ -110,9 +110,18 @@ std::vector<int> allowedCores()
 	return out;
 }
 
+void Monitor::requestStop()
+{
+	{
+		std::lock_guard<std::mutex> lk(mtx_);
+		running_ = false;
+	}
+	cv_.notify_all();
+}
+
 Monitor::~Monitor()
 {
-	running_ = false;
+	requestStop();
 	if (thread_.joinable()) thread_.join();
 }
 
@@ -149,14 +158,14 @@ void Monitor::sample()
 				n_[i]++;
 			}
 		}
-		for (int k = 0; k < 5 && running_; k++)
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		std::unique_lock<std::mutex> lk(mtx_);
+		cv_.wait_for(lk, std::chrono::milliseconds(500), [this] { return !running_; });
 	}
 }
 
 ProcessStats Monitor::stop(int threads)
 {
-	running_ = false;
+	requestStop();
 	if (thread_.joinable()) thread_.join();
 	ProcessStats s;
 	char host[256] = "";

@@ -1129,6 +1129,107 @@ void HealpixSampling::findSymmetryMate(long int idir_, RFLOAT prior_,
 	}
 }
 
+// Unit vectors of all directions of a sampling, of their copies under the symmetry operators,
+// and of the same with tilt 180 - tilt: they depend only on the sampling, so they are computed
+// once per thread and sampling, with the same functions as the loop over directions below.
+namespace
+{
+struct HelicalDirectionCache
+{
+	const void *owner = NULL;
+	size_t n = 0, nsym = 0;
+	double checksum = 0.;
+	std::vector<double> v;    // per direction: 3 * (1 + nsym) for the direction, then the same for 180 - tilt
+};
+
+double samplingChecksum(const std::vector<RFLOAT> &rot, const std::vector<RFLOAT> &tilt)
+{
+	double s = 0.;
+	for (size_t i = 0; i < rot.size(); i++)
+		s += (double)rot[i] * (double)(i + 1) + (double)tilt[i] * (double)(i + 2);
+	return s;
+}
+}
+
+// Directions whose prior probability can be non-zero, a superset of those selected below: the
+// great-circle angle between two directions is at most their difference in tilt plus their difference
+// in rot (along a meridian, then along a parallel, which is no longer than the difference in rot).
+// So a direction more than sigma_cutoff * (sigma_rot + sigma_tilt) away from the prior (and, when rot
+// may be flipped, from the prior turned by 180 degrees in rot) cannot pass both cut-offs.
+static void helicalDirectionCandidates(
+		const std::vector<RFLOAT> &rot_angles, const std::vector<RFLOAT> &tilt_angles,
+		const std::vector<Matrix2D<RFLOAT> > &R_repository, const std::vector<Matrix2D<RFLOAT> > &L_repository,
+		const void *owner, RFLOAT prior_rot, RFLOAT prior_tilt, RFLOAT max_angle,
+		bool do_auto_refine_local_searches, std::vector<char> &candidate)
+{
+	thread_local HelicalDirectionCache cache;
+	const size_t n = rot_angles.size(), nsym = R_repository.size(), stride = 3 * (1 + nsym);
+	const double checksum = samplingChecksum(rot_angles, tilt_angles);
+	if (cache.owner != owner || cache.n != n || cache.nsym != nsym || cache.checksum != checksum)
+	{
+		cache.owner = owner;
+		cache.n = n;
+		cache.nsym = nsym;
+		cache.checksum = checksum;
+		cache.v.assign(2 * stride * n, 0.);
+		Matrix1D<RFLOAT> my_direction, sym_direction;
+		for (size_t idir = 0; idir < n; idir++)
+			for (int flip = 0; flip < 2; flip++)
+			{
+				double *out = &cache.v[(2 * idir + flip) * stride];
+				Euler_angles2direction(rot_angles[idir], flip ? (180. - tilt_angles[idir]) : tilt_angles[idir], my_direction);
+				for (int k = 0; k < 3; k++) out[k] = my_direction(k);
+				for (size_t j = 0; j < nsym; j++)
+				{
+					sym_direction = L_repository[j] * (my_direction.transpose() * R_repository[j]).transpose();
+					for (int k = 0; k < 3; k++) out[3 * (1 + j) + k] = sym_direction(k);
+				}
+			}
+	}
+
+	Matrix1D<RFLOAT> prior_direction;
+	Euler_angles2direction(prior_rot, prior_tilt, prior_direction);
+	const double p0 = prior_direction(0), p1 = prior_direction(1), p2 = prior_direction(2);
+	// as dotProduct(prior_direction, v): the same products, summed in the same order
+	auto dot = [&](const double *v) { RFLOAT a = 0; a += p0 * v[0]; a += p1 * v[1]; a += p2 * v[2]; return a; };
+	const double cos_max = cos(DEG2RAD(std::min((double)max_angle + 1e-3, 180.)));
+
+	candidate.assign(n, 0);
+	for (size_t idir = 0; idir < n; idir++)
+	{
+		// The direction (or symmetry copy) nearest to the prior, chosen as the loop below chooses it
+		const double *base = &cache.v[2 * idir * stride];
+		const double *best = base;
+		RFLOAT best_dot = dot(base);
+		for (size_t j = 0; j < nsym; j++)
+		{
+			const RFLOAT d = dot(base + 3 * (1 + j));
+			if (d > best_dot) { best_dot = d; best = base + 3 * (1 + j); }
+		}
+		if (!do_auto_refine_local_searches)
+		{
+			const double *base2 = base + stride;
+			const double *best2 = base2;
+			RFLOAT best_dot2 = dot(base2);
+			for (size_t j = 0; j < nsym; j++)
+			{
+				const RFLOAT d = dot(base2 + 3 * (1 + j));
+				if (d > best_dot2) { best_dot2 = d; best2 = base2 + 3 * (1 + j); }
+			}
+			if (best_dot2 > best_dot) { best_dot = best_dot2; best = best2; }
+		}
+		if (best_dot >= cos_max)
+			candidate[idir] = 1;
+		else if (!do_auto_refine_local_searches)
+		{
+			// rot may be flipped by 180 degrees: the prior direction at rot + 180
+			const double d_flip = -p0 * best[0] - p1 * best[1] + p2 * best[2];
+			if (d_flip >= cos_max)
+				candidate[idir] = 1;
+		}
+	}
+}
+
 void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalReconstruction(
 		RFLOAT prior_rot, RFLOAT prior_tilt, RFLOAT prior_psi,
 		RFLOAT sigma_rot, RFLOAT sigma_tilt, RFLOAT sigma_psi,
@@ -1165,6 +1266,23 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 		//			<< " degrees. It will probably impact searches of orientations in 3D helical reconstruction."<< std::endl;
 		//}
 
+		// With priors on both rot and tilt, only directions that can pass both cut-offs are
+		// examined (helicalDirectionCandidates); if none can, all are, to find the nearest one
+		std::vector<char> candidate;
+		const bool use_candidates = (sigma_rot > 0.) && (sigma_tilt > 0.);
+		if (use_candidates)
+			helicalDirectionCandidates(rot_angles, tilt_angles, R_repository, L_repository, this,
+			                           prior_rot, prior_tilt, sigma_cutoff * (sigma_rot + sigma_tilt),
+			                           do_auto_refine_local_searches, candidate);
+		for (int pass = 0; pass < 2; pass++)
+		{
+		if (pass == 1)
+		{
+			if (!use_candidates || !pointer_dir_nonzeroprior.empty())
+				break;
+			candidate.assign(rot_angles.size(), 1);
+		}
+
 		// Loop over all directions
 		RFLOAT sumprior = 0.;
 		// Keep track of the closest distance to prevent 0 orientations
@@ -1175,6 +1293,8 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 			// Any prior involving BOTH rot and tilt.
 			if ( (sigma_rot > 0.) && (sigma_tilt > 0.) )
 			{
+				if (!candidate[idir])
+					continue;
 				Matrix1D<RFLOAT> prior_direction, my_direction, sym_direction, best_direction;
 
 				// Get the direction of the prior
@@ -1296,8 +1416,9 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 				Matrix1D<RFLOAT> my_direction, sym_direction;
 				RFLOAT sym_rot, sym_tilt;
 
-				// Get the current direction in the loop
-				Euler_angles2direction(rot_angles[idir], tilt_angles[idir], my_direction);
+				// Get the current direction in the loop (only used with symmetry operators)
+				if (!R_repository.empty())
+					Euler_angles2direction(rot_angles[idir], tilt_angles[idir], my_direction);
 
 				// Loop over all symmetry operators to find the operator that brings this direction nearest to the prior
 				RFLOAT diffang = ABS(tilt_angles[idir] - prior_tilt);
@@ -1330,7 +1451,8 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 
 						// Get the current direction in the loop
 						sym_tilt = 180. - tilt_angles[idir]; // Shaoda want the prior on tilt, centered around 90 degrees, so P(87) == P(93)
-						Euler_angles2direction(rot_angles[idir], sym_tilt, my_direction2);
+						if (!R_repository.empty())
+							Euler_angles2direction(rot_angles[idir], sym_tilt, my_direction2);
 
 						// Loop over all symmetry operators to find the operator that brings this direction nearest to the prior
 						diffang = ABS(sym_tilt - prior_tilt);
@@ -1403,14 +1525,16 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 		for (long int idir = 0; idir < directions_prior.size(); idir++)
 			directions_prior[idir] /= sumprior;
 
-		// If there were no directions at all, just select the single nearest one:
-		if (directions_prior.size() == 0)
+		// If there were no directions at all, just select the single nearest one (after the pass
+		// over all directions: the candidates are only a shortcut)
+		if (directions_prior.size() == 0 && (pass == 1 || !use_candidates))
 		{
 			if (best_idir < 0)
 				REPORT_ERROR("HealpixSampling::selectOrientationsWithNonZeroPriorProbability BUG: best_idir < 0");
 			pointer_dir_nonzeroprior.push_back(best_idir);
 			directions_prior.push_back(1.);
 		}
+		} // end for pass
 
 #ifdef  DEBUG_SAMPLING
 		writeNonZeroPriorOrientationsToBild("orients_local.bild", prior_rot, prior_tilt, pointer_dir_nonzeroprior, "0 0 1", 0.023);

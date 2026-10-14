@@ -148,6 +148,19 @@
  *	Vmag(k,i,j)=20*log10(abs(Vfft(k,i,j)));
  * @endcode
  */
+// Multi-threaded FFTW for the transforms outside the parallel loops (the reference and
+// reconstruction transforms), single-threaded inside them, where every thread does its own.
+// RELION used to do this only in MKL builds; FFTW's own thread library does the same.
+// RELION_FFTW_THREADS=1 keeps all transforms single-threaded.
+void relionFftwInitThreads();
+void relionFftwPlanThreads(int nr_threads);
+void relionFftwCleanupThreads();
+// Threads for RELION's own loops over an array of n elements: as many as FFTW plans with (one inside
+// the particle loop, all outside), and one for small arrays
+int relionBulkThreads(size_t n);
+// Measured FFTW plans with a wisdom file (RELION_FFTW_PLANS=measure, see fftw.cpp); for tests
+void relionFftwSetPlanMode(bool measure, const std::string &wisdom_file, double timelimit_s = 30.);
+
 class FourierTransformer
 {
 public:
@@ -353,6 +366,7 @@ public:
 	    the image is scaled by the number of pixels.
 	*/
 	void Transform(int sign);
+	void TransformTimed(int sign);
 
 	/** Get the Multidimarray that is being used as input. */
 	const MultidimArray<RFLOAT> &getReal() const;
@@ -393,7 +407,12 @@ void CenterFFTbySign(MultidimArray <T> &v)
     // Unfortunately, this cannot be checked within this function...
     // Forward and backward shifts are equivalent.
 
-    FOR_ALL_ELEMENTS_IN_ARRAY3D(v)
+    // Every element is changed independently, so the result does not depend on the threads
+    const int nt = relionBulkThreads(MULTIDIM_SIZE(v));
+    #pragma omp parallel for num_threads(nt) if(nt > 1)
+    for (long int k = STARTINGZ(v); k <= FINISHINGZ(v); k++)
+    for (long int i = STARTINGY(v); i <= FINISHINGY(v); i++)
+    for (long int j = STARTINGX(v); j <= FINISHINGX(v); j++)
     {
 	// NOTE: != has higher precedence than & in C as pointed out in GitHub issue #637.
 	// So (k ^ i ^ j) & 1 != 0 is not good (fortunately in this case the behaviour happened to be the same)
@@ -832,8 +851,36 @@ void windowFourierTransform(MultidimArray<T > &in, MultidimArray<T > &out, long 
 		out.initZeros(newdim, newhdim);
 		break;
 	case 3:
+	{
+		// Large 3D arrays: the same copy, over threads (every element written by one thread)
+		const int nt = relionBulkThreads(newdim * newdim * newhdim + MULTIDIM_SIZE(in));
+		if (nt > 1)
+		{
+			out.reshape(newdim, newdim, newhdim);
+			const long int nyx = YXSIZE(out);
+			#pragma omp parallel for num_threads(nt)
+			for (long int k = 0; k < ZSIZE(out); k++)
+				memset(&DIRECT_A3D_ELEM(out, k, 0, 0), 0, nyx * sizeof(T));
+			const bool grow = newhdim > XSIZE(in);
+			const MultidimArray<T> &src = grow ? in : out;   // the loop runs over the smaller array
+			const long int max_r2 = (XSIZE(in) -1) * (XSIZE(in) - 1);
+			#pragma omp parallel for num_threads(nt)
+			for (long int k = 0; k < ZSIZE(src); k++)
+			{
+				const long int kp = (k < XSIZE(src)) ? k : k - ZSIZE(src);
+				for (long int i = 0; i < YSIZE(src); i++)
+				{
+					const long int ip = (i < XSIZE(src)) ? i : i - YSIZE(src);
+					for (long int jp = 0; jp < XSIZE(src); jp++)
+						if (!grow || kp*kp + ip*ip + jp*jp <= max_r2)
+							FFTW_ELEM(out, kp, ip, jp) = FFTW_ELEM(in, kp, ip, jp);
+				}
+			}
+			return;
+		}
 		out.initZeros(newdim, newdim, newhdim);
 		break;
+	}
 	default:
 		REPORT_ERROR("windowFourierTransform ERROR: dimension should be 1, 2 or 3!");
 	}
