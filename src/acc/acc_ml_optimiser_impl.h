@@ -624,8 +624,7 @@ void getFourierTransformsAndCtfs(long int part_id,
             CTIC(accMLO->timer,"applyHelicalMask");
             
             // download img...
-            d_img.cpToHost();
-            d_img.streamSync();
+            d_img.cpToHostWait();
             d_img.getHost(img());
 
             RFLOAT myrot_deg, mytilt_deg, mypsi_deg;
@@ -847,8 +846,7 @@ void getFourierTransformsAndCtfs(long int part_id,
     LAUNCH_PRIVATE_ERROR(hipGetLastError(),accMLO->errorStatus);
 #endif
 
-			spectrumAndXi2.cpToHost();
-			spectrumAndXi2.streamSync();
+			spectrumAndXi2.cpToHostWait();
 
 			op.power_img.at(img_id).resize(baseMLO->image_full_size[optics_group]/2 + 1);
 
@@ -1686,8 +1684,7 @@ void getAllSquaredDifferencesCoarse(
 	 #ifdef USE_ONEDPL
 		devAcc->waitAll();
 	 #else
-		allWeights.cpToHost();
-		allWeights.streamSync();
+		allWeights.cpToHostWait();
 
 		for (unsigned long iclass = sp.iclass_min, allWeights_pos = 0; iclass <= sp.iclass_max; iclass++)
 		{
@@ -2328,8 +2325,7 @@ void getAllSquaredDifferencesFine(
 		FinePassWeights.trans_idx.freeDeviceIfSet();
 		FinePassWeights.trans_idx.setAccType(accCPU);
 
-		FinePassWeights.weights.cpToHost();
-		FinePassWeights.weights.streamSync();
+		FinePassWeights.weights.cpToHostWait();
 		FinePassWeights.weights.freeDeviceIfSet();
 		FinePassWeights.weights.setAccType(accCPU);
 	 #endif
@@ -2513,8 +2509,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
         XFLOAT unity=1;
         DEBUG_HANDLE_ERROR(cudaMemcpyAsync( &(PassWeights.weights(min_pair.first) ), &unity, sizeof(XFLOAT), cudaMemcpyHostToDevice, 0));
 
-        PassWeights.weights.cpToHost();
-        PassWeights.weights.streamSync();
+        PassWeights.weights.cpToHostWait();
 #elif _HIP_ENABLED
         DEBUG_HANDLE_ERROR(hipMemsetAsync(~(PassWeights.weights), 0.f, PassWeights.weights.getSize()*sizeof(XFLOAT),0));
 
@@ -2526,8 +2521,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 #elif defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
 		deviceInitValue<XFLOAT>(PassWeights.weights, (XFLOAT)0.0);
 		PassWeights.weights.setAccValueAt((XFLOAT)1.0, min_pair.first);
-		PassWeights.weights.cpToHost();
-		PassWeights.weights.streamSync();
+		PassWeights.weights.cpToHostWait();
 #else
         deviceInitValue<XFLOAT>(PassWeights.weights, (XFLOAT)0.0);
         PassWeights.weights[min_pair.first] = (XFLOAT)1.0;
@@ -2686,8 +2680,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 fres.allAlloc();
                 CudaKernels::fusedWeightPass<XFLOAT>(ipartMweight, baseMLO->adaptive_fraction,
                         (long) baseMLO->maximum_significants, ~fres, true);
-                fres.cpToHost();
-                fres.streamSync();
+                fres.cpToHostWait();
                 SigRes r;
                 memcpy(&r, &fres[0], sizeof(SigRes));
                 memcpy(&op.Mcoarse_significant.data[foffset], &fres[sizeof(SigRes)], fused_n);
@@ -2832,8 +2825,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     CudaKernels::cuda_kernel_array_over_significant<XFLOAT><<<(int) ((ipart_length + OVER_THRESHOLD_BLOCK_SIZE - 1) / OVER_THRESHOLD_BLOCK_SIZE),
                             OVER_THRESHOLD_BLOCK_SIZE, 0, unsorted_ipart.getStream()>>>(~unsorted_ipart, ~Mcoarse_significant, ipart_length, d_r);
                     Mcoarse_significant.cpToHost();
-                    sigRes.cpToHost();
-                    sigRes.streamSync();
+                    sigRes.cpToHostWait();
                     SigRes r;
                     memcpy(&r, &sigRes[0], sizeof(SigRes));
 
@@ -2932,11 +2924,9 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 #elif _CUDA_ENABLED
                 DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
                 arrayOverThreshold<XFLOAT>(unsorted_ipart, Mcoarse_significant, significant_weight);
-                Mcoarse_significant.cpToHost();
-                Mcoarse_significant.streamSync();
+                Mcoarse_significant.cpToHostWait();
 #elif defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
-				unsorted_ipart.cpToHost();
-				unsorted_ipart.streamSync();
+				unsorted_ipart.cpToHostWait();
 				unsorted_ipart.setAccType(accCPU);
 				arrayOverThreshold<XFLOAT>(unsorted_ipart, Mcoarse_significant, significant_weight);
 #else	// ALTCPU
@@ -3121,8 +3111,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 fres.setStream(PassWeights.weights.getStream());
                 fres.allAlloc();
                 CudaKernels::fusedWeightPass<XFLOAT>(PassWeights.weights, baseMLO->adaptive_fraction, 0, ~fres, false);
-                fres.cpToHost();
-                fres.streamSync();
+                fres.cpToHostWait();
                 SigRes r;
                 memcpy(&r, &fres[0], sizeof(SigRes));
                 op.min_diff2 += 50 - r.wmax;
@@ -3224,8 +3213,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     else
                     CudaKernels::significanceOnDevice<XFLOAT>(sorted, cumulative_sum, PassWeights.weights,
                             baseMLO->adaptive_fraction, 0, (SigRes *) ~sigRes);
-                    sigRes.cpToHost();
-                    sigRes.streamSync();
+                    sigRes.cpToHostWait();
                     memcpy(&r, &sigRes[0], sizeof(SigRes));
                     op.sum_weight = r.sum_weight;
                 if (op.sum_weight==0)
@@ -4799,8 +4787,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					(accMLO->classStreams[exp_iclass])->waitAll();
 			devAcc->waitAll();
 
-			wdiff2s.cpToHost();
-			wdiff2s.streamSync();
+			wdiff2s.cpToHostWait();
 	#endif
 
 			AAXA_pos=0;

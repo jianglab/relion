@@ -50,8 +50,7 @@ if (ptr.getAllocator() == NULL)
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMax( alloc->getPtr(), temp_storage_size, ~ptr, ~max_pair, ptr.getSize(), ptr.getStream()));
 
-	max_pair.cpToHost();
-	max_pair.streamSync();
+	max_pair.cpToHostWait();
 
 	ptr.getAllocator()->free(alloc);
 
@@ -86,8 +85,7 @@ if (ptr.getAllocator() == NULL)
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMin( alloc->getPtr(), temp_storage_size, ~ptr, ~min_pair, ptr.getSize(), ptr.getStream()));
 
-	min_pair.cpToHost();
-	min_pair.streamSync();
+	min_pair.cpToHostWait();
 
 	ptr.getAllocator()->free(alloc);
 
@@ -122,8 +120,7 @@ if (ptr.getAllocator() == NULL)
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Max( alloc->getPtr(), temp_storage_size, ~ptr, ~max_val, ptr.getSize(), ptr.getStream()));
 
-	max_val.cpToHost();
-	max_val.streamSync();
+	max_val.cpToHostWait();
 
 	ptr.getAllocator()->free(alloc);
 
@@ -154,8 +151,7 @@ if (ptr.getAllocator() == NULL)
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Min( alloc->getPtr(), temp_storage_size, ~ptr, ~min_val, ptr.getSize(), ptr.getStream()));
 
-	min_val.cpToHost();
-	min_val.streamSync();
+	min_val.cpToHostWait();
 
 	ptr.getAllocator()->free(alloc);
 
@@ -186,8 +182,7 @@ if (ptr.getAllocator() == NULL)
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Sum( alloc->getPtr(), temp_storage_size, ~ptr, ~val, ptr.getSize(), ptr.getStream()));
 
-	val.cpToHost();
-	val.streamSync();
+	val.cpToHostWait();
 
 	ptr.getAllocator()->free(alloc);
 

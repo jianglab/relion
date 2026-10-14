@@ -133,7 +133,7 @@ void cudaCpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size)
 // for a driver mutex). Returns true when it has synchronised the stream (data is in h_ptr),
 // false when the copy was only queued.
 // RELION_GPU_PINNED_STAGING=off copies directly.
-static inline void stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t bytes, cudaStream_t stream)
+static inline bool stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t bytes, cudaStream_t stream)
 {
 	static const bool on = []() {
 		const char *e = getenv("RELION_GPU_PINNED_STAGING");
@@ -146,7 +146,7 @@ static inline void stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t byt
 	if (!on || bytes == 0 || bytes > max_bytes)
 	{
 		DEBUG_HANDLE_ERROR(cudaMemcpyAsync(h_ptr, d_ptr, bytes, cudaMemcpyDeviceToHost, stream));
-		return;
+		return false;
 	}
 	if (bytes > capacity)
 	{
@@ -158,13 +158,14 @@ static inline void stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t byt
 	DEBUG_HANDLE_ERROR(cudaMemcpyAsync(stage, d_ptr, bytes, cudaMemcpyDeviceToHost, stream));
 	DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
 	memcpy(h_ptr, stage, bytes);
+	return true;
 }
 
 template< typename T>
 static inline
-void cudaCpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size, cudaStream_t &stream)
+bool cudaCpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size, cudaStream_t &stream)
 {
-	stagedDeviceToHost(h_ptr, d_ptr, size * sizeof(T), stream);
+	return stagedDeviceToHost(h_ptr, d_ptr, size * sizeof(T), stream);
 };
 
 template< typename T>

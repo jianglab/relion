@@ -43,9 +43,9 @@ void cpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size)
 
 template< typename T>
 static inline
-void cpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size, cudaStream_t &stream)
+bool cpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size, cudaStream_t &stream)
 {
-	stagedDeviceToHost(h_ptr, d_ptr, size * sizeof(T), stream); // see cuda_mem_utils.h
+	return stagedDeviceToHost(h_ptr, d_ptr, size * sizeof(T), stream); // see cuda_mem_utils.h
 };
 
 template< typename T>

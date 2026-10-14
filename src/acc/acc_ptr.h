@@ -837,6 +837,24 @@ public:
 	}
 
 	/**
+	 * cpToHost() followed by streamSync(), skipping the sync when the copy has
+	 * already waited for the stream (CUDA staged copy).
+	 */
+	void cpToHostWait()
+	{
+#ifdef _CUDA_ENABLED
+		if (accType == accCUDA)
+		{
+			if (!cudaCpyDeviceToHost<T>(dPtr, hPtr, size, stream))
+				streamSync();
+			return;
+		}
+#endif
+		cpToHost();
+		streamSync();
+	}
+
+	/**
 	 * Copy a number (thisSize) of bytes from device to the host pointer
 	 */
 	void cpToHost(size_t thisSize)
@@ -1125,8 +1143,8 @@ public:
 		if (accType == accCUDA)
 		{
 			T value;
-			cudaCpyDeviceToHost<T>(&dPtr[idx], &value, 1, stream);
-			streamSync();
+			if (!cudaCpyDeviceToHost<T>(&dPtr[idx], &value, 1, stream))
+				streamSync();
 			return value;
 		}
 		else
@@ -1160,8 +1178,8 @@ public:
 		if (accType == accCUDA)
 		{
 			T value;
-			cudaCpyDeviceToHost<T>(&dPtr[idx], &value, 1, stream);
-			streamSync();
+			if (!cudaCpyDeviceToHost<T>(&dPtr[idx], &value, 1, stream))
+				streamSync();
 			return value;
 		}
 #elif _HIP_ENABLED
