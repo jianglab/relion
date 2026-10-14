@@ -3,6 +3,7 @@
 #include "src/acc/cuda/cuda_kernels/helper.cuh"
 #include "src/acc/cuda/cuda_settings.h"
 
+#include <cooperative_groups.h>
 #include <curand.h>
 #include <curand_kernel.h>
 
@@ -188,12 +189,21 @@ __global__ void cuda_kernel_helixMaskApply2D(
 {
 	const int n = xdim * ydim, x0 = -(xdim / 2), y0 = -(ydim / 2);
 	const double pi = 3.14159265358979323846;
-	double sum_bg = 0., sum = 0.;
-	for (int b = 0; b < nr_partials; b++)
+	// the partials are added up once per block (same order as before, so the same values) instead of by every thread
+	__shared__ double s_sums[2];
+	if (threadIdx.x == 0)
 	{
-		sum_bg += partials[2 * b];
-		sum += partials[2 * b + 1];
+		double sbg = 0., sm = 0.;
+		for (int b = 0; b < nr_partials; b++)
+		{
+			sbg += partials[2 * b];
+			sm += partials[2 * b + 1];
+		}
+		s_sums[0] = sbg;
+		s_sums[1] = sm;
 	}
+	__syncthreads();
+	const double sum_bg = s_sums[0], sum = s_sums[1];
 	if (sum < 0.00001)
 	{
 		if (blockIdx.x == 0 && threadIdx.x == 0)
@@ -220,6 +230,101 @@ __global__ void cuda_kernel_helixMaskApply2D(
 			w2 = 0.5 + 0.5 * cos(pi * (D2 - d) / cosine_width);
 		const double w = (w1 > w2) ? w1 : w2;
 		img[p] = (XFLOAT) ((1. - w) * (double) img[p] + w * noise_val);
+	}
+}
+
+// The two kernels above as one cooperative launch (RELION_GPU_MASK_FUSED=1): the first
+// HELIX_MASK_PARTIALS blocks make the partial sums exactly as cuda_kernel_helixMaskBackground2D
+// (same grid-stride split by HELIX_MASK_PARTIALS * HELIX_MASK_BLOCK), a grid-wide barrier, then
+// every block applies the mask as cuda_kernel_helixMaskApply2D (one pixel per thread, grid-stride).
+// Same values, one launch less. Launch it with cudaLaunchCooperativeKernel (grid <= resident blocks).
+__global__ void cuda_kernel_helixMaskFused2D(
+		XFLOAT *img, int xdim, int ydim,
+		double a10, double a11,
+		double R1, double R2, double D1, double D2, double cosine_width,
+		double *partials, int nr_partials, int *bad)
+{
+	__shared__ double sh[2 * HELIX_MASK_BLOCK];
+	__shared__ double s_sums[2];
+	const int n = xdim * ydim, x0 = -(xdim / 2), y0 = -(ydim / 2);
+	const double pi = 3.14159265358979323846;
+	if (blockIdx.x < HELIX_MASK_PARTIALS)
+	{
+		double sbg = 0., s = 0.;
+		for (int p = blockIdx.x * blockDim.x + threadIdx.x; p < n; p += HELIX_MASK_PARTIALS * blockDim.x)
+		{
+			const double d = helixAxisDistance(p, xdim, x0, y0, a10, a11);
+			const double v = (double) img[p];
+			if (d > D2)
+			{
+				sbg += v;
+				s += 1.;
+			}
+			else if (d > D1)
+			{
+				const double w = 0.5 + 0.5 * cos(pi * (D2 - d) / cosine_width);
+				sbg += w * v;
+				s += w;
+			}
+		}
+		sh[threadIdx.x] = sbg;
+		sh[HELIX_MASK_BLOCK + threadIdx.x] = s;
+		__syncthreads();
+		for (int k = HELIX_MASK_BLOCK / 2; k > 0; k /= 2)
+		{
+			if (threadIdx.x < k)
+			{
+				sh[threadIdx.x] += sh[threadIdx.x + k];
+				sh[HELIX_MASK_BLOCK + threadIdx.x] += sh[HELIX_MASK_BLOCK + threadIdx.x + k];
+			}
+			__syncthreads();
+		}
+		if (threadIdx.x == 0)
+		{
+			partials[2 * blockIdx.x] = sh[0];
+			partials[2 * blockIdx.x + 1] = sh[HELIX_MASK_BLOCK];
+		}
+	}
+	cooperative_groups::this_grid().sync();
+	if (threadIdx.x == 0)
+	{
+		double sbg = 0., sm = 0.;
+		for (int b = 0; b < nr_partials; b++)
+		{
+			sbg += partials[2 * b];
+			sm += partials[2 * b + 1];
+		}
+		s_sums[0] = sbg;
+		s_sums[1] = sm;
+	}
+	__syncthreads();
+	const double sum_bg = s_sums[0], sum = s_sums[1];
+	if (sum < 0.00001)
+	{
+		if (blockIdx.x == 0 && threadIdx.x == 0)
+			*bad = 1;
+		return;
+	}
+	const double noise_val = sum_bg / sum;
+	for (int p = blockIdx.x * blockDim.x + threadIdx.x; p < n; p += gridDim.x * blockDim.x)
+	{
+		const int i = p / xdim + y0, j = p % xdim + x0;
+		const double d = helixAxisDistance(p, xdim, x0, y0, a10, a11);
+		const double r = sqrt((double) (i * i + j * j));
+		if ((r < R1) && (d < D1))
+			continue;
+		if ((r > R2) || (d > D2))
+			img[p] = (XFLOAT) noise_val;
+		else
+		{
+			double w1 = 0., w2 = 0.;
+			if (r > R1)
+				w1 = 0.5 + 0.5 * cos(pi * (R2 - r) / cosine_width);
+			if (d > D1)
+				w2 = 0.5 + 0.5 * cos(pi * (D2 - d) / cosine_width);
+			const double w = (w1 > w2) ? w1 : w2;
+			img[p] = (XFLOAT) ((1. - w) * (double) img[p] + w * noise_val);
+		}
 	}
 }
 
@@ -584,7 +689,9 @@ __global__ void cuda_kernel_cosineFilter(	XFLOAT *vol,
 											XFLOAT radius,
 											XFLOAT radius_p,
 											XFLOAT cosine_width,
-											XFLOAT bg_value)
+											XFLOAT bg_value,
+											const XFLOAT *g_sum,
+											const XFLOAT *g_sum_bg)
 {
 
 	int tid = threadIdx.x;
@@ -599,6 +706,17 @@ __global__ void cuda_kernel_cosineFilter(	XFLOAT *vol,
 	int texel = bid*SOFTMASK_BLOCK_SIZE*texel_pass_num + tid;
 
 	defVal = bg_value;
+	if (g_sum != NULL)
+	{
+		// the background value of the particle from the partial sums, no round trip to the host
+		double sum = 0., sum_bg = 0.;
+		for (int i = 0; i < SOFTMASK_BLOCK_SIZE; i++)
+		{
+			sum    += (double) g_sum[i];
+			sum_bg += (double) g_sum_bg[i];
+		}
+		defVal = (XFLOAT) (sum_bg / sum);
+	}
 	for (int pass = 0; pass < texel_pass_num; pass++, texel+=SOFTMASK_BLOCK_SIZE) // loop the available warps enough to complete all translations for this orientation
 	{
 		if(texel<vol_size)
@@ -940,6 +1058,19 @@ __global__ void cuda_kernel_allweights_to_mweights(
         d_mweights[d_iorient[idx/translation_num] * translation_num + idx%translation_num] =
 				d_allweights[idx/translation_num * translation_num + idx%translation_num];
                 // TODO - isn't this just d_allweights[idx + idx%translation_num]?   Really?
+}
+
+__global__ void cuda_kernel_allweights_to_mweights_batched(
+		const WeightMapJob *jobs,
+		XFLOAT * d_allweights,
+		XFLOAT * d_mweights,
+		unsigned long translation_num)
+{
+	const WeightMapJob j = jobs[blockIdx.y];
+	const size_t idx = blockIdx.x * (size_t) blockDim.x + threadIdx.x;
+	if (idx < j.n_orient * translation_num)
+		d_mweights[j.iorient[idx / translation_num] * translation_num + idx % translation_num] =
+				d_allweights[j.pos + idx];
 }
 
 __global__ void cuda_kernel_initOrientations(RFLOAT *pdfs, XFLOAT *pdf_orientation, bool *pdf_orientation_zeros, size_t sz)

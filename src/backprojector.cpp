@@ -25,6 +25,9 @@
  */
 
 #include "src/backprojector.h"
+#include "src/gpu_reconstruct.h"
+
+#include <chrono>
 
 #ifdef TIMING
 	#define RCTIC(timer,label) (timer.tic(label))
@@ -1693,6 +1696,64 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 	const int max_r2 = ROUND(r_max * padding_factor) * ROUND(r_max * padding_factor);
 	RFLOAT oversampling_correction = (ref_dim == 3) ? (padding_factor * padding_factor * padding_factor) : (padding_factor * padding_factor);
 
+	// On the GPU (RELION_GPU_RECONSTRUCT=1, with --gpu): the same steps as below, see src/gpu_reconstruct.h
+	if (ref_dim == 3 && (skip_gridding || max_iter_preweight <= 0) && weight_out == 0 &&
+	    gpurec::requested() && gpurec::gpuRequested())
+	{
+		gpurec::SkipGriddingInput g;
+		g.data = (const RFLOAT*) MULTIDIM_ARRAY(data);
+		g.weight = MULTIDIM_ARRAY(weight);
+		g.zdim = ZSIZE(data); g.ydim = YSIZE(data); g.xdim = XSIZE(data);
+		g.start_z = STARTINGZ(data); g.start_y = STARTINGY(data); g.start_x = STARTINGX(data);
+		g.max_r2 = max_r2;
+		g.round_max_r2 = ROUND(r_max * padding_factor * r_max * padding_factor);
+		g.r_max = r_max;
+		g.padding_factor = padding_factor;
+		g.do_map = do_map;
+		g.minres_map = minres_map;
+		if (do_map)
+			for (long int ires = 0; ires < XSIZE(tau2); ires++)
+			{
+				const bool pos = DIRECT_A1D_ELEM(tau2, ires) > 0.;
+				g.shell_tau2_positive.push_back(pos ? 1 : 0);
+				g.shell_invtau2.push_back(pos ? 1. / (oversampling_correction * tau2_fudge * DIRECT_A1D_ELEM(tau2, ires)) : 0.);
+			}
+		g.ori_size = ori_size;
+		g.double_precision = gpurec::doublePrecision();
+		int padoridim = ROUND(padding_factor * ori_size);
+		padoridim += padoridim%2;
+		g.padoridim = padoridim;
+		g.normfft = (data_dim == 3) ? (RFLOAT)(padding_factor * padding_factor * padding_factor)
+		                            : (RFLOAT)(padding_factor * padding_factor * padding_factor * ori_size);
+		vol_out.resize(ori_size, ori_size, ori_size);
+		std::string reason;
+		bool zero_weight = false;
+		static bool reported_gpu = false, reported_cpu = false;
+		if (gpurec::reconstructSkipGridding(g, MULTIDIM_ARRAY(vol_out), reason, zero_weight))
+		{
+			if (!reported_gpu)
+			{
+				reported_gpu = true;
+				std::cout << " Reconstructing the maps on the GPU, in " << (g.double_precision ? "double" : "single")
+				          << " precision (RELION_GPU_RECONSTRUCT)." << std::endl;
+			}
+			if (zero_weight)
+				std::cerr << " WARNING: ignoring divide by zero in skip_gridding (GPU reconstruction)" << std::endl;
+			vol_out.setXmippOrigin();
+			// as at the end of windowToOridimRealSpace() and below
+			softMaskOutsideMap(vol_out);
+			griddingCorrect(vol_out);
+			vol_out.shrinkToFit();
+			return;
+		}
+		if (!reported_cpu)
+		{
+			reported_cpu = true;
+			std::cout << " Reconstructing the maps on the CPU: " << reason << "." << std::endl;
+		}
+		vol_out.clear();
+	}
+
 //#define DEBUG_RECONSTRUCT
 #ifdef DEBUG_RECONSTRUCT
 	Image<RFLOAT> ttt;
@@ -2416,7 +2477,7 @@ void BackProjector::symmetrise(int nr_helical_asu, RFLOAT helical_twist, RFLOAT 
 	enforceHermitianSymmetry();
 
 	// Then apply helical and point group symmetry (order irrelevant?)
-	applyHelicalSymmetry(nr_helical_asu, helical_twist, helical_rise);
+	applyHelicalSymmetry(nr_helical_asu, helical_twist, helical_rise, threads);
 
 	applyPointGroupSymmetry(threads);
 }
@@ -2440,7 +2501,7 @@ void BackProjector::enforceHermitianSymmetry()
 	}
 }
 
-void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twist, RFLOAT helical_rise)
+void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twist, RFLOAT helical_rise, int threads)
 {
 	if (rect)
 	{
@@ -2450,6 +2511,107 @@ void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twis
 	if ( (nr_helical_asu < 2) || (ref_dim != 3) )
 		return;
 
+	// On the GPU (RELION_GPU_SYMMETRISE=1, with --gpu): the same loop, see src/gpu_reconstruct.h
+	const int gpu_mode = gpurec::symmetriseMode();
+	if (gpu_mode != 0 && gpurec::gpuRequested())
+	{
+		const int rmax2g = ROUND(r_max * padding_factor) * ROUND(r_max * padding_factor);
+		gpurec::HelixFourierInput g;
+		g.zdim = ZSIZE(data); g.ydim = YSIZE(data); g.xdim = XSIZE(data);
+		g.start_z = STARTINGZ(data); g.start_y = STARTINGY(data); g.start_x = STARTINGX(data);
+		g.rmax2 = rmax2g;
+		g.has_rise = ABS(helical_rise) > 0.;
+		const int hmin = -nr_helical_asu/2;
+		const int hmax = -hmin + nr_helical_asu%2;
+		Matrix2D<RFLOAT> Rg(4, 4);
+		for (int hh = hmin; hh < hmax; hh++)
+		{
+			if (hh == 0) continue;
+			rotation3DMatrix(hh * (-helical_twist), 'Z', Rg);
+			Rg.setSmallValuesToZero();
+			for (int a = 0; a < 3; a++)
+				for (int b = 0; b < 3; b++)
+					g.R.push_back(Rg(a, b));
+			for (long int k = STARTINGZ(data); k <= FINISHINGZ(data); k++)
+			{
+				RFLOAT c = 1., sn = 0.;
+				if (g.has_rise)
+				{
+					RFLOAT zshift = hh * helical_rise;
+					zshift /= - ori_size * (RFLOAT)padding_factor;
+					RFLOAT dotp = 2 * PI * ((RFLOAT)k * zshift);
+					c = cos(dotp);
+					sn = sin(dotp);
+				}
+				g.shift_cos.push_back(c);
+				g.shift_sin.push_back(sn);
+			}
+		}
+		static_assert(sizeof(Complex) == 2 * sizeof(RFLOAT), "Complex must be two packed RFLOATs");
+		const bool check = gpu_mode == 2;
+		MultidimArray<Complex> data_in;
+		MultidimArray<RFLOAT> weight_in;
+		if (check)
+		{
+			data_in = data;
+			weight_in = weight;
+		}
+		std::string reason, choice;
+		bool partial = false;
+		const auto t_gpu0 = std::chrono::steady_clock::now();
+		const bool ok = gpurec::helicalSymmetryFourier(g, (RFLOAT*)MULTIDIM_ARRAY(data), MULTIDIM_ARRAY(weight), reason, choice, partial);
+		if (partial)
+			REPORT_ERROR("BackProjector::applyHelicalSymmetry(): the GPU failed half way (" + reason + ")");
+		const double gpu_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_gpu0).count();
+		static bool reported = false;
+		if (ok)
+		{
+			if (!reported || getenv("RELION_ITER_TIMING") != NULL)
+			{
+				reported = true;
+				std::cout << " Imposing helical symmetry in Fourier space on the GPU (RELION_GPU_SYMMETRISE): " << choice << ", " << gpu_s << " s." << std::endl;
+			}
+			if (!check)
+				return;
+			// Check mode: the CPU does it again from the same input and the two are compared
+			MultidimArray<Complex> data_gpu = data;
+			MultidimArray<RFLOAT> weight_gpu = weight;
+			data = data_in;
+			weight = weight_in;
+			const auto t_cpu0 = std::chrono::steady_clock::now();
+			applyHelicalSymmetryCpu(nr_helical_asu, helical_twist, helical_rise, threads);
+			const double cpu_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_cpu0).count();
+			double max_d = 0., max_w = 0., ref_d = 0., ref_w = 0.;
+			long int ndiff = 0;
+			for (long int n = 0; n < MULTIDIM_SIZE(data); n++)
+			{
+				const double dre = std::abs(data_gpu.data[n].real - data.data[n].real), dim = std::abs(data_gpu.data[n].imag - data.data[n].imag);
+				max_d = std::max(max_d, std::max(dre, dim));
+				ref_d = std::max(ref_d, (double)std::max(std::abs(data.data[n].real), std::abs(data.data[n].imag)));
+				const double dw = std::abs(weight_gpu.data[n] - weight.data[n]);
+				max_w = std::max(max_w, dw);
+				ref_w = std::max(ref_w, (double)std::abs(weight.data[n]));
+				if (dre != 0. || dim != 0. || dw != 0.) ndiff++;
+			}
+			std::cout << " RELION_GPU_SYMMETRISE=check: " << ndiff << " of " << MULTIDIM_SIZE(data) << " voxels differ, max |difference| "
+			          << max_d << " (largest value " << ref_d << ") in the data and " << max_w << " (largest " << ref_w
+			          << ") in the weights; the CPU result is kept. GPU " << gpu_s << " s, CPU " << cpu_s << " s with "
+			          << threads << " threads." << std::endl;
+			return;
+		}
+		static bool reported_cpu = false;
+		if (!reported_cpu)
+		{
+			reported_cpu = true;
+			std::cout << " Imposing helical symmetry in Fourier space on the CPU: " << reason << "." << std::endl;
+		}
+	}
+
+	applyHelicalSymmetryCpu(nr_helical_asu, helical_twist, helical_rise, threads);
+}
+
+void BackProjector::applyHelicalSymmetryCpu(int nr_helical_asu, RFLOAT helical_twist, RFLOAT helical_rise, int threads)
+{
 	int rmax2 = ROUND(r_max * padding_factor) * ROUND(r_max * padding_factor);
 
 	Matrix2D<RFLOAT> R(4, 4); // A matrix from the list
@@ -2476,8 +2638,26 @@ void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twis
 			rotation3DMatrix(rot_ang, 'Z', R);
 			R.setSmallValuesToZero(); // TODO: invert rotation matrix?
 
-			// Loop over all points in the output (i.e. rotated, or summed) array
-			FOR_ALL_ELEMENTS_IN_ARRAY3D(sum_weight)
+			// Loop over all points in the output (i.e. rotated, or summed) array. Each point is written by
+			// one thread only, so the result does not depend on the number of threads.
+			#pragma omp parallel for num_threads(threads) schedule(dynamic, 1) private(x, y, z, fx, fy, fz, xp, yp, zp, r2, is_neg_x, \
+				x0, x1, y0, y1, z0, z1, d000, d001, d010, d011, d100, d101, d110, d111, \
+				dx00, dx01, dx10, dx11, dxy0, dxy1, ddd, dd000, dd001, dd010, dd011, dd100, dd101, dd110, dd111, \
+				ddx00, ddx01, ddx10, ddx11, ddxy0, ddxy1)
+			for (long int k = STARTINGZ(sum_weight); k <= FINISHINGZ(sum_weight); k++)
+			{
+			// The phase shift depends on z only: evaluate cos and sin once per plane (same values as per voxel)
+			RFLOAT shift_cos = 1., shift_sin = 0.;
+			if (ABS(helical_rise) > 0.)
+			{
+				RFLOAT zshift = hh * helical_rise;
+				zshift /= - ori_size * (RFLOAT)padding_factor;
+				RFLOAT dotp = 2 * PI * ((RFLOAT)k * zshift);
+				shift_cos = cos(dotp);
+				shift_sin = sin(dotp);
+			}
+			for (long int i = STARTINGY(sum_weight); i <= FINISHINGY(sum_weight); i++)
+			for (long int j = STARTINGX(sum_weight); j <= FINISHINGX(sum_weight); j++)
 			{
 				x = (RFLOAT)j; // STARTINGX(sum_weight) is zero!
 				y = (RFLOAT)i;
@@ -2559,11 +2739,8 @@ void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twis
 					// Also apply a phase shift for helical translation along Z
 					if (ABS(helical_rise) > 0.)
 					{
-						RFLOAT zshift = hh * helical_rise;
-						zshift /= - ori_size * (RFLOAT)padding_factor;
-						RFLOAT dotp = 2 * PI * (z * zshift);
-						RFLOAT a = cos(dotp);
-						RFLOAT b = sin(dotp);
+						RFLOAT a = shift_cos;
+						RFLOAT b = shift_sin;
 						RFLOAT c = ddd.real;
 						RFLOAT d = ddd.imag;
 						RFLOAT ac = a * c;
@@ -2594,7 +2771,8 @@ void BackProjector::applyHelicalSymmetry(int nr_helical_asu, RFLOAT helical_twis
 					A3D_ELEM(sum_weight, k, i, j) +=  LIN_INTERP(fz, ddxy0, ddxy1);
 
 				} // end if r2 <= rmax2
-			 } // end loop over all elements of sum_weight
+			 } // end loop over i, j
+			} // end loop over k
 		} // end if hh!=0
 	} // end loop over hh
 
@@ -2936,7 +3114,15 @@ void BackProjector::windowToOridimRealSpace(FourierTransformer &transformer, Mul
 	// Normalisation factor of FFTW
 	// The Fourier Transforms are all "normalised" for 2D transforms of size = ori_size x ori_size
 	RCTIC(OriDimTimer,OriDim8);
-	Mout /= normfft;
+	{
+		// every element divided as before (Mout /= normfft), over threads for large maps
+		const long int nM = MULTIDIM_SIZE(Mout);
+		RFLOAT *pM = MULTIDIM_ARRAY(Mout);
+		const int nt = relionBulkThreads(nM);
+		#pragma omp parallel for num_threads(nt) if(nt > 1)
+		for (long int n = 0; n < nM; n++)
+			pM[n] = pM[n] / normfft;
+	}
 	RCTOC(OriDimTimer,OriDim8);
 #ifdef DEBUG_WINDOWORIDIMREALSPACE
 	tt()=Mout;

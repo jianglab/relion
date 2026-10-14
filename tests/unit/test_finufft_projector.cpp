@@ -26,13 +26,16 @@
 #include "src/projector.h"
 #include "src/finufft_central_slice.h"
 #include "src/euler.h"
+#include "src/fftw.h"
 #include "src/multidim_array.h"
 #include "src/complex.h"
 #include "src/macros.h"
 #include "src/matrix2d.h"
 #include "src/transformations.h"
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 namespace
@@ -509,5 +512,100 @@ TEST_CASE("get2DFourierTransformMany agrees with one call per orientation", "[fi
 		}
 		REQUIRE(max_ref > 0.0);
 		CHECK(max_diff / max_ref < 1e-9);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hidden benchmark ("[.finufft_bench]", run it by name): accuracy, time and
+// memory of trilinear (padding 1 and 2) against the NUFFT central slice
+// (padding 1 and 2), for a smooth object and for a noisy one.
+TEST_CASE("Central-slice interpolation benchmark", "[.finufft_bench]")
+{
+	if (!haveFinufftSupport())
+		return;
+
+	FinufftConfigGuard guard;
+	Projector::finufft_mode_crop = 1.0f;
+	Projector::finufft_tol = 1e-6;
+
+	// RELION_BENCH_SIZE / RELION_BENCH_ORIENTS override the box and the number of slices;
+	// the direct sums behind the accuracy figure are O(N^3) per pixel, so above 96 only
+	// time and memory are reported.
+	const char *e_size = getenv("RELION_BENCH_SIZE"), *e_or = getenv("RELION_BENCH_ORIENTS");
+	const int ori_size = e_size ? atoi(e_size) : 64;
+	const int n_orient = e_or ? atoi(e_or) : 24;
+	const int n_truth = ori_size <= 96 ? 4 : 0;
+
+	for (int noisy = 0; noisy < 2; noisy++)
+	{
+		MultidimArray<RFLOAT> vol = makeBlobVolume(ori_size, noisy ? 1.0 : 1.6);
+		if (noisy)
+		{
+			Lcg rng(12345);
+			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(vol)
+				DIRECT_MULTIDIM_ELEM(vol, n) += 0.05 * rng.next();
+		}
+
+		std::vector<Matrix2D<RFLOAT> > As(n_orient);
+		Lcg ang(777);
+		for (int n = 0; n < n_orient; n++)
+			Euler_angles2matrix(180.0 * (ang.next() + 1.0), 90.0 * (ang.next() + 1.0),
+			                    180.0 * (ang.next() + 1.0), As[n], false);
+
+		// RELION's model of the object has no power beyond the sphere of radius
+		// ori_size/2 (Projector::data is zero outside it), so that is what both
+		// interpolators are scored against: the object with the corners of
+		// Fourier space removed.
+		MultidimArray<RFLOAT> vol_gt = vol;
+		{
+			FourierTransformer ft;
+			MultidimArray<Complex> F;
+			ft.FourierTransform(vol_gt, F, false);
+			const int R = ori_size / 2;
+			FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(F)
+				if (kp*kp + ip*ip + jp*jp > R*R)
+					DIRECT_A3D_ELEM(F, k, i, j) = Complex(0., 0.);
+			ft.inverseFourierTransform();
+		}
+		vol_gt.setXmippOrigin();
+		std::vector<MultidimArray<Complex> > gt(n_truth);
+		for (int n = 0; n < n_truth; n++)
+			gt[n] = exactCentralSlice(vol_gt, As[n], ori_size);
+
+		for (int kind = 0; kind < 2; kind++)
+		for (int pad = 1; pad <= 2; pad++)
+		{
+			MultidimArray<RFLOAT> v = vol, dummy;
+			Projector proj(ori_size, kind ? FINUFFT : TRILINEAR, (float)pad);
+			proj.computeFourierTransformMap(v, dummy, -1, 1);
+
+			std::vector<MultidimArray<Complex> > f(n_orient);
+			for (int n = 0; n < n_orient; n++)
+			{
+				f[n].resize(ori_size, ori_size/2 + 1);
+				f[n].initZeros();
+			}
+
+			const auto t0 = std::chrono::steady_clock::now();
+			if (kind)
+				proj.get2DFourierTransformMany(f, As);
+			else
+				for (int n = 0; n < n_orient; n++)
+					proj.project(f[n], As[n]);
+			const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+			double err = 0.0;
+			for (int n = 0; n < n_truth; n++)
+				err = XMIPP_MAX(err, relativeError(f[n], gt[n]));
+
+			const double mem_mb = ((double)MULTIDIM_SIZE(proj.data) * sizeof(Complex)
+			                       + (double)proj.finufft_modes.memoryBytes()) / 1048576.0;
+			char errtxt[32];
+			if (n_truth > 0) snprintf(errtxt, sizeof errtxt, "%.3e", err);
+			else             snprintf(errtxt, sizeof errtxt, "n/a");
+			printf("BENCH N=%d x%d %s %s pad %d: rel.err %s  %.2f ms/slice  %.1f MB\n",
+			       ori_size, n_orient, noisy ? "noisy " : "smooth", kind ? "nufft   " : "trilinear", pad,
+			       errtxt, 1000.0 * secs / n_orient, mem_mb);
+		}
 	}
 }

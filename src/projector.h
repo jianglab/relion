@@ -308,7 +308,7 @@ public:
 	/*
 	 * Resize data array to the given size
 	 */
-	void initialiseData(int current_size = -1);
+	void initialiseData(int current_size = -1, bool zero_new = true);
 
 	/*
 	 * Initialise data array to all zeros
@@ -349,12 +349,29 @@ public:
 	{
 
 		// Mout should already have the right size
-		// Initialize to zero
-		Mout.initZeros();
-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Mout)
+		// Initialize to zero; every element is set independently, so over threads for large arrays
+		const int nt = relionBulkThreads(MULTIDIM_SIZE(Mout));
+		if (nt <= 1)
 		{
-			if (kp*kp + ip*ip + jp*jp <= my_rmax2)
-				DIRECT_A3D_ELEM(Mout, k, i, j) = A3D_ELEM(Min, kp, ip, jp);
+			Mout.initZeros();
+			FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Mout)
+			{
+				if (kp*kp + ip*ip + jp*jp <= my_rmax2)
+					DIRECT_A3D_ELEM(Mout, k, i, j) = A3D_ELEM(Min, kp, ip, jp);
+			}
+			return;
+		}
+		#pragma omp parallel for num_threads(nt)
+		for (long int k = 0; k < ZSIZE(Mout); k++)
+		{
+			const long int kp = (k < XSIZE(Mout)) ? k : k - ZSIZE(Mout);
+			for (long int i = 0; i < YSIZE(Mout); i++)
+			{
+				const long int ip = (i < XSIZE(Mout)) ? i : i - YSIZE(Mout);
+				for (long int j = 0, jp = 0; j < XSIZE(Mout); j++, jp = j)
+					DIRECT_A3D_ELEM(Mout, k, i, j) = (kp*kp + ip*ip + jp*jp <= my_rmax2) ?
+						A3D_ELEM(Min, kp, ip, jp) : T();
+			}
 		}
 	}
 

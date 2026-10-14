@@ -38,7 +38,17 @@ __device__ inline int findBatchClass(const int *class_start, int n, int block, i
 
 __device__ inline void cuda_atomic_add(float* address, float value)
 {
+#if defined(__CUDA_ARCH__) && !defined(RELION_GENERIC_ATOMICS)
+  // Every caller adds to global memory (cudaMalloc'd arrays). atomicAdd on a generic
+  // pointer, which is what the pointers of the class-batched kernels are (they are read
+  // from a table in memory, so the compiler cannot tell the address space), compiles to
+  // a returning ATOM plus a shared-memory compare-and-swap loop for the case that the
+  // address is in shared memory. One fire-and-forget red.global is the same addition
+  // (round to nearest, subnormals flushed as for atomicAdd on global memory).
+  asm volatile("red.global.add.f32 [%0], %1;" :: "l"(__cvta_generic_to_global(address)), "f"(value) : "memory");
+#else
   atomicAdd(address,value);
+#endif
 }
 #endif
 

@@ -828,6 +828,9 @@ public:
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;
 	AsyncImagePrefetcher *prefetcher_ = nullptr;
+	bool prefetch_speculative_ = false; // MPI follower: the next pool is a guess (the one after this), checked on arrival
+	int prefetch_hits_ = 0, prefetch_misses_ = 0;
+	double exp_time_serial_s = 0., exp_time_par_s = 0.; // RELION_ITER_TIMING: pool set-up/reading vs. threaded part of expectationSomeParticles
 	// Stacks kept open between pools when images are read without the prefetcher
 	// (e.g. by MPI workers, which get their particles a pool at a time)
 	OpenStacks open_stacks_;
@@ -1192,6 +1195,8 @@ public:
 
 	/* Expectation step: loop over all particles
 	 */
+	bool keepProjectorHostData();
+
 	void expectation();
 
 	/* Setup expectation step. We divide the heavy steps over mpi followers,
@@ -1220,6 +1225,9 @@ public:
 	 * Do rise and twist for all asymmetrical units in Fourier space
 	 * */
 	void symmetriseReconstructions();
+	int symmetriseThreads();
+	// ranks that symmetrise at the same time on one node (set by the MPI class)
+	int symmetrise_sharing_ranks = 1;
 
 	// Filament context: set up the chains, update them after the E-step, class prior factors
 	void initialiseHelicalContext();

@@ -18,6 +18,8 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/ml_optimiser_mpi.h"
+#include <chrono>
+#include "src/gpu_reconstruct.h"
 #include "src/mps_auto.h"
 #include "src/ml_optimiser.h"
 #ifdef _CUDA_ENABLED
@@ -797,16 +799,9 @@ will still yield good performance and possibly a more stable execution. \n" << s
 		fn_ref.getHalf(fn_ref, my_halfset);
 	}
 
-#ifdef MKLFFT
-	// Enable multi-threaded FFTW
-	int success = fftw_init_threads();
-	if (0 == success)
-		REPORT_ERROR("Multithreaded FFTW failed to initialize");
-
-	// And allow plans before expectation to run using allowed
-	// number of threads
-	fftw_plan_with_nthreads(nr_threads);
-#endif
+	// Enable multi-threaded FFTW, and let plans before the expectation use the threads
+	relionFftwInitThreads();
+	relionFftwPlanThreads(nr_threads);
 
 	MlOptimiser::initialiseGeneral(node->rank);
 
@@ -1243,10 +1238,17 @@ void MlOptimiserMpi::expectation()
 	n_trials_acc = XMIPP_MIN(n_trials_acc, mydata.numberOfParticles());
 	MPI_Status status;
 
-#ifdef MKLFFT
+	const bool exp_tm_on = getenv("RELION_ITER_TIMING") != NULL;
+	auto exp_tm_last = std::chrono::steady_clock::now();
+	auto exp_tm = [&](const char *what)
+	{
+		if (!exp_tm_on) return;
+		auto now = std::chrono::steady_clock::now();
+		fprintf(stderr, "MPI_TIMING it%d rank%d exp_%s ms %.0f\n", iter, node->rank, what, 1e3 * std::chrono::duration<double>(now - exp_tm_last).count());
+		exp_tm_last = now;
+	};
 	// Allow parallel FFTW execution
-	fftw_plan_with_nthreads(nr_threads);
-#endif
+	relionFftwPlanThreads(nr_threads);
 
 	// Initialise some stuff
 	// A. Update current size (may have been changed to ori_size in autoAdjustAngularSampling) and resolution pointers
@@ -1267,8 +1269,10 @@ void MlOptimiserMpi::expectation()
 		malloc_trim(0);
 #endif
 	}
+	exp_tm("setup");
 
 	MPI_Barrier(MPI_COMM_WORLD);
+	exp_tm("setup_barrier");
 #ifdef TIMING
 	timer.toc(TIMING_EXP_1a);
 #endif
@@ -1301,6 +1305,7 @@ void MlOptimiserMpi::expectation()
 		}
 		MPI_Barrier(MPI_COMM_WORLD);
 	}
+	exp_tm("ppref_bcast");
 #ifdef DEBUG
 	if(node->rank==2)
 	{
@@ -1328,6 +1333,7 @@ void MlOptimiserMpi::expectation()
 	if (!((iter==1 && do_firstiter_cc) || do_always_cc) && !(do_skip_align && do_skip_rotate || do_only_sample_tilt) &&
        (do_auto_refine || !do_grad || iter % 10 == 0 || iter == nr_iter || iter <= 1))
 		calculateExpectedAngularErrors(0, n_trials_acc - 1);
+	exp_tm("accuracy");
 
 #ifdef TIMING
 		timer.toc(TIMING_EXP_2);
@@ -1584,10 +1590,8 @@ void MlOptimiserMpi::expectation()
 #endif // ALTCPU
 	/************************************************************************/
 
-#ifdef MKLFFT
 	// Single-threaded FFTW execution for code inside parallel processing loop
-	fftw_plan_with_nthreads(1);
-#endif
+	relionFftwPlanThreads(1);
 
 #ifdef TIMING
 	timer.toc(TIMING_EXP_4);
@@ -1832,6 +1836,28 @@ void MlOptimiserMpi::expectation()
 			JOB_LEN_FN_RECIMG = 0;
 			node->relion_MPI_Send(MULTIDIM_ARRAY(first_last_nr_images), MULTIDIM_SIZE(first_last_nr_images), MPI_LONG, 0, MPITAG_JOB_REQUEST, MPI_COMM_WORLD);
 
+			const bool fw_timing = getenv("RELION_ITER_TIMING") != NULL;
+			double fw_wait_job = 0., fw_recv = 0., fw_work = 0., fw_report = 0.;
+			exp_time_serial_s = exp_time_par_s = 0.;
+			auto fw_now = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+			// Read the next pool's images in the background while this pool is processed. The leader hands a
+			// follower consecutive pools of its half set, so the pool after JOB_LAST is guessed; a wrong guess
+			// costs only the wasted read (expectationSomeParticles checks it and gives up on repeated misses)
+			// (RELION_MPI_PREFETCH=0 switches this off)
+			{
+				const char *pe = getenv("RELION_MPI_PREFETCH");
+				prefetch_speculative_ = do_prefetch && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3 && !(pe != NULL && atoi(pe) == 0);
+			}
+			if (prefetch_speculative_)
+			{
+				int max_readers = XMIPP_MIN(nr_threads, 8);
+				if (const char *e = getenv("RELION_PREFETCH_THREADS"))
+					max_readers = XMIPP_MAX(1, atoi(e));
+				prefetch_global_last_ = mydata.numberOfParticles() - 1;
+				prefetch_hits_ = prefetch_misses_ = 0;
+				prefetcher_ = new AsyncImagePrefetcher(&mydata, max_readers);
+			}
+			double fw_t = fw_now();
 			while (true)
 			{
 #ifdef TIMING
@@ -1839,6 +1865,7 @@ void MlOptimiserMpi::expectation()
 #endif
 				//Receive a new bunch of particles
 				node->relion_MPI_Recv(MULTIDIM_ARRAY(first_last_nr_images), MULTIDIM_SIZE(first_last_nr_images), MPI_LONG, 0, MPITAG_JOB_REPLY, MPI_COMM_WORLD, status);
+				if (fw_timing) { double t = fw_now(); fw_wait_job += t - fw_t; fw_t = t; }
 #ifdef TIMING
 				timer.toc(TIMING_MPISLAVEWAIT1);
 #endif
@@ -1851,6 +1878,18 @@ void MlOptimiserMpi::expectation()
 #endif
 					exp_imagedata.clear();
 					exp_metadata.clear();
+					if (prefetcher_ != NULL)
+					{
+						if (fw_timing)
+							fprintf(stderr, "MPI_TIMING it%d rank%d prefetch: hits %d misses %d wait %.2f s, pool read %.2f s\n", iter, node->rank,
+							        prefetch_hits_, prefetch_misses_, prefetcher_->waitTimeUs() / 1.e6, prefetcher_->poolReadTimeUs() / 1.e6);
+						delete prefetcher_;
+						prefetcher_ = NULL;
+					}
+					prefetch_speculative_ = false;
+					if (fw_timing)
+						fprintf(stderr, "MPI_TIMING it%d rank%d follower_loop s: wait_for_job %.2f recv_job_data %.2f expect_total %.2f (serial_setup_read %.2f threaded %.2f) report %.2f\n",
+						        iter, node->rank, fw_wait_job, fw_recv, fw_work, exp_time_serial_s, exp_time_par_s, fw_report);
 					break;
 				}
 				else
@@ -1933,7 +1972,9 @@ void MlOptimiserMpi::expectation()
 					timer.toc(TIMING_MPISLAVEWAIT2);
 					timer.tic(TIMING_MPISLAVEWORK);
 #endif
+					if (fw_timing) { double t = fw_now(); fw_recv += t - fw_t; fw_t = t; }
 					expectationSomeParticles(JOB_FIRST, JOB_LAST);
+					if (fw_timing) { double t = fw_now(); fw_work += t - fw_t; fw_t = t; }
 #ifdef TIMING
 					timer.toc(TIMING_MPISLAVEWORK);
 					timer.tic(TIMING_MPISLAVEWAIT3);
@@ -1947,6 +1988,7 @@ void MlOptimiserMpi::expectation()
 #ifdef TIMING
 					timer.toc(TIMING_MPISLAVEWAIT3);
 #endif
+					if (fw_timing) { double t = fw_now(); fw_report += t - fw_t; fw_t = t; }
 				}
 			}
 //		TODO: define MPI_COMM_SLAVES!!!!	MPI_Barrier(node->MPI_COMM_SLAVES);
@@ -2139,11 +2181,9 @@ void MlOptimiserMpi::expectation()
 #endif
 	}  // Follower node
 
-#ifdef  MKLFFT
 	// Allow parallel FFTW execution to continue now that we are outside the parallel
 	// portion of expectation
-	fftw_plan_with_nthreads(nr_threads);
-#endif
+	relionFftwPlanThreads(nr_threads);
 
 	// Just make sure the temporary arrays are empty...
 	exp_imagedata.clear();
@@ -2170,7 +2210,7 @@ void MlOptimiserMpi::expectation()
 	MPI_Barrier(MPI_COMM_WORLD);
 
 	// All followers reset the size of their projector to zero to save memory
-	if (!node->isLeader())
+	if (!node->isLeader() && !keepProjectorHostData())
 	{
 		for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
 			mymodel.PPref[iclass].initialiseData(0);
@@ -2540,6 +2580,17 @@ void MlOptimiserMpi::combineWeightedSumsTwoRandomHalves()
 		wsum_model.unpack(Mpack);
 	}
 #else
+	const bool jt_on = getenv("RELION_ITER_TIMING") != NULL;
+	double jt_last = MPI_Wtime();
+	double jt_pack = 0., jt_comm = 0., jt_sum = 0., jt_unpack = 0.;
+	auto jt_now = [&]() { return MPI_Wtime(); };
+	auto jt_lap = [&](const char *what)
+	{
+		if (!jt_on) return;
+		double t = MPI_Wtime();
+		fprintf(stderr, "MPI_TIMING it%d rank%d join_lap %s ms %.0f\n", iter, node->rank, what, 1e3 * (t - jt_last));
+		jt_last = t;
+	};
 	int piece = 0;
 	int nr_pieces = 1;
 	long int pack_size;
@@ -2550,26 +2601,49 @@ void MlOptimiserMpi::combineWeightedSumsTwoRandomHalves()
 
 		if (node->rank == 2)
 		{
+			double t0 = jt_now();
 			wsum_model.pack(Mpack, piece, nr_pieces, false); // do not clear the model!
+			double t1 = jt_now();
 			node->relion_MPI_Send(MULTIDIM_ARRAY(Mpack), MULTIDIM_SIZE(Mpack), MY_MPI_DOUBLE, 1, MPITAG_PACK, MPI_COMM_WORLD);
 			Mpack.clear();
+			jt_pack += t1 - t0; jt_comm += jt_now() - t1;
 		}
 		else if (node->rank == 1)
 		{
 			if (verb > 0) std::cout << " Combining two random halves ..."<< std::endl;
+			double t0 = jt_now();
 			wsum_model.pack(Mpack, piece, nr_pieces);
 			Msum.initZeros(Mpack);
+			double t1 = jt_now();
 			node->relion_MPI_Recv(MULTIDIM_ARRAY(Msum), MULTIDIM_SIZE(Msum), MY_MPI_DOUBLE, 2, MPITAG_PACK, MPI_COMM_WORLD, status);
+			double t2 = jt_now();
 			Msum += Mpack;
+			double t3 = jt_now();
 			// Unpack the sum (subtract 1 from piece because it was incremented already...)
 			wsum_model.unpack(Msum, piece - 1);
 			Msum.clear();
 			Mpack.clear();
+			jt_pack += t1 - t0; jt_comm += t2 - t1; jt_sum += t3 - t2; jt_unpack += jt_now() - t3;
 		}
 	}
 
+	jt_lap("gather_sum");
+	if (jt_on) fprintf(stderr, "MPI_TIMING it%d rank%d join_gather pack %.0f comm %.0f sum %.0f unpack %.0f ms\n", iter, node->rank, 1e3*jt_pack, 1e3*jt_comm, 1e3*jt_sum, 1e3*jt_unpack);
+	jt_pack = jt_comm = jt_sum = jt_unpack = 0.;
 	// Now follower 1 has the sum of the two halves
 	MPI_Barrier(MPI_COMM_WORLD);
+	jt_lap("gather_barrier");
+
+	// With two followers, rank 2 only reads back its own unregularised half when auto-refine has
+	// converged, which overwrites BPref, so the summed BPref need not be sent back to it (and
+	// rank 1 keeps its sum as it is). RELION_JOIN_SKIP_BPREF=1 turns this on.
+	const char *jsb = getenv("RELION_JOIN_SKIP_BPREF");
+	const bool skip_bpref = jsb && atoi(jsb) != 0 && node->size == 3 && do_auto_refine && has_converged &&
+			do_join_random_halves && !do_grad && !do_external_reconstruct && !do_blush && mymodel.nr_bodies == 1;
+	if (!node->isLeader())
+		wsum_model.pack_skip_bpref = skip_bpref;
+	if (skip_bpref && verb > 0 && jt_on)
+		std::cerr << " Join: the summed back-projection arrays are not sent back to rank 2 (RELION_JOIN_SKIP_BPREF)" << std::endl;
 
 	// Bcast to everyone
 	piece = 0;
@@ -2584,7 +2658,10 @@ void MlOptimiserMpi::combineWeightedSumsTwoRandomHalves()
 		if (!node->isLeader())
 		{
 			// Let's have everyone repack their Mpack, so we know the size etc
+			double t0 = jt_now();
 			wsum_model.pack(Mpack, piece, nr_pieces);
+			double t1 = jt_now();
+			jt_pack += t1 - t0;
 
 			// rank one sends Mpack to everyone else
 			if (node->rank == 1)
@@ -2597,11 +2674,17 @@ void MlOptimiserMpi::combineWeightedSumsTwoRandomHalves()
 				node->relion_MPI_Recv(MULTIDIM_ARRAY(Mpack), MULTIDIM_SIZE(Mpack), MY_MPI_DOUBLE, 1, MPITAG_PACK, MPI_COMM_WORLD, status);
 			}
 
+			double t2 = jt_now();
+			jt_comm += t2 - t1;
 			// Everyone unpacks the new Mpack
 			wsum_model.unpack(Mpack, piece - 1);
 			Mpack.clear();
+			jt_unpack += jt_now() - t2;
 		}
 	}
+	wsum_model.pack_skip_bpref = false;
+	if (jt_on) fprintf(stderr, "MPI_TIMING it%d rank%d join_scatter pack %.0f comm %.0f unpack %.0f ms\n", iter, node->rank, 1e3*jt_pack, 1e3*jt_comm, 1e3*jt_unpack);
+	jt_lap("scatter_sum");
 #endif
 }
 
@@ -2636,6 +2719,15 @@ void MlOptimiserMpi::maximization()
 		init_progress_bar(mymodel.nr_classes);
 	}
 
+	const bool mt_on = getenv("RELION_ITER_TIMING") != NULL;
+	double mt_last = MPI_Wtime();
+	auto mt_lap = [&](const char *what)
+	{
+		if (!mt_on) return;
+		double t = MPI_Wtime();
+		fprintf(stderr, "MPI_TIMING it%d rank%d max_lap %s ms %.0f\n", iter, node->rank, what, 1e3 * (t - mt_last));
+		mt_last = t;
+	};
 	RFLOAT helical_twist_half1, helical_rise_half1, helical_twist_half2, helical_rise_half2;
 	helical_twist_half1 = helical_twist_half2 = helical_twist_initial;
 	helical_rise_half1 = helical_rise_half2 = helical_rise_initial;
@@ -2747,6 +2839,7 @@ void MlOptimiserMpi::maximization()
 						}
 					}
 
+					mt_lap("h1_reconstruct");
 					// Apply the body mask
 					if (mymodel.nr_bodies > 1)
 					{
@@ -2800,14 +2893,16 @@ void MlOptimiserMpi::maximization()
 								helical_z_percentage,
 								mymodel.helical_rise[ith_recons],
 								mymodel.helical_twist[ith_recons],
-								width_mask_edge);
+								width_mask_edge, nr_threads);
 					}
 					helical_rise_half1 = mymodel.helical_rise[ith_recons];
 					helical_twist_half1 = mymodel.helical_twist[ith_recons];
 
 					// Also perform the unregularized reconstruction
+					mt_lap("h1_post");
 					if (do_auto_refine && has_converged)
 						readTemporaryDataAndWeightArraysAndReconstruct(ith_recons, 1);
+					mt_lap("h1_unreg");
 
 				}
 
@@ -2884,7 +2979,8 @@ void MlOptimiserMpi::maximization()
 								}
 							}
 
-							// Apply the body mask
+							mt_lap("h2_reconstruct");
+					// Apply the body mask
 							if (mymodel.nr_bodies > 1)
 							{
 								// 19may2015 translate the reconstruction back to its C.O.M.
@@ -2934,7 +3030,7 @@ void MlOptimiserMpi::maximization()
 										helical_z_percentage,
 										mymodel.helical_rise[ith_recons],
 										mymodel.helical_twist[ith_recons],
-										width_mask_edge);
+										width_mask_edge, nr_threads);
 							}
 						} // end if !do_join_random_halves
 
@@ -2943,8 +3039,10 @@ void MlOptimiserMpi::maximization()
                         helical_twist_half2 = mymodel.helical_twist[ith_recons];
 
 						// But rank 2 always does the unfiltered reconstruction
+						mt_lap("h2_post");
 						if (do_auto_refine && has_converged)
 							readTemporaryDataAndWeightArraysAndReconstruct(ith_recons, 2);
+						mt_lap("h2_unreg");
 
 					}
 				}
@@ -2967,7 +3065,9 @@ void MlOptimiserMpi::maximization()
 #ifdef DEBUG
 	std::cerr << "rank= "<<node->rank<<" has reached barrier of reconstruction" << std::endl;
 #endif
+	mt_lap("recon_end");
 	MPI_Barrier(MPI_COMM_WORLD);
+	mt_lap("recon_barrier");
 
 #ifdef DEBUG
 	std::cerr << "All classes have been reconstructed" << std::endl;
@@ -3134,6 +3234,7 @@ void MlOptimiserMpi::maximization()
 		}
 	}
 	RCTOC(timer,RCT_2);
+	mt_lap("model_bcast");
 #ifdef TIMING
 		timer.toc(TIMING_RECONS);
 #endif
@@ -3154,6 +3255,7 @@ void MlOptimiserMpi::maximization()
 		RCTOC(timer,RCT_3);
 	}
 
+	mt_lap("other_params");
 	// The leader broadcasts the changes in hidden variables to all other nodes
 	node->relion_MPI_Bcast(&current_changes_optimal_classes, 1, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
 	node->relion_MPI_Bcast(&current_changes_optimal_orientations, 1, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
@@ -3527,26 +3629,56 @@ void MlOptimiserMpi::alignHalves()
 		RFLOAT best_rot = 0., best_tilt = 0., best_psi = 0.;
 		RFLOAT best_dx = 0., best_dy = 0., best_dz = 0.;
 
-		// Rank 2 sends Iref to rank 1; rank 1 aligns and broadcasts params
+		// Rank 2 sends its map to rank 1; rank 1 aligns and broadcasts params.  For a cubic map
+		// the search works on a 64-cube, so each rank reduces its own map (in parallel) and only
+		// the small cubes travel; the parameters found are the same as for the full-size maps.
+		const bool reduce_first = XSIZE(mymodel.Iref[ibody]) == YSIZE(mymodel.Iref[ibody])
+				&& XSIZE(mymodel.Iref[ibody]) == ZSIZE(mymodel.Iref[ibody])
+				&& alignWorkSize(XSIZE(mymodel.Iref[ibody])) != XSIZE(mymodel.Iref[ibody]);
+		const RFLOAT align_angpix = reduce_first
+				? mymodel.pixel_size * XSIZE(mymodel.Iref[ibody]) / alignWorkSize(XSIZE(mymodel.Iref[ibody]))
+				: mymodel.pixel_size;
+		const bool align_timing = getenv("RELION_ALIGN_TIMING") != NULL;
+		const double t_align0 = align_timing ? MPI_Wtime() : 0.;
 		if (node->rank == reconstruct_rank2)
 		{
-			node->relion_MPI_Send(MULTIDIM_ARRAY(mymodel.Iref[ibody]),
-					MULTIDIM_SIZE(mymodel.Iref[ibody]),
+			MultidimArray<RFLOAT> half2_small;
+			if (reduce_first)
+			{
+				half2_small = mymodel.Iref[ibody];
+				reduceMapForAlignment(half2_small);
+			}
+			if (align_timing)
+				fprintf(stderr, "ALIGN_TIMING rank %d reduce %.3f s\n", node->rank, MPI_Wtime() - t_align0);
+			const MultidimArray<RFLOAT> &to_send = reduce_first ? half2_small : mymodel.Iref[ibody];
+			node->relion_MPI_Send(MULTIDIM_ARRAY(to_send), MULTIDIM_SIZE(to_send),
 					MY_MPI_DOUBLE, reconstruct_rank1, MPITAG_IMAGE, MPI_COMM_WORLD);
 		}
 		else if (node->rank == reconstruct_rank1)
 		{
+			MultidimArray<RFLOAT> half1_small;
+			if (reduce_first)
+			{
+				half1_small = mymodel.Iref[ibody];
+				reduceMapForAlignment(half1_small);
+			}
+			const MultidimArray<RFLOAT> &half1 = reduce_first ? half1_small : mymodel.Iref[ibody];
+			if (align_timing)
+				fprintf(stderr, "ALIGN_TIMING rank %d reduce %.3f s\n", node->rank, MPI_Wtime() - t_align0);
 			MultidimArray<RFLOAT> half2_Iref;
-			half2_Iref.resize(mymodel.Iref[ibody]);
+			half2_Iref.resize(half1);
 			node->relion_MPI_Recv(MULTIDIM_ARRAY(half2_Iref),
 					MULTIDIM_SIZE(half2_Iref),
 					MY_MPI_DOUBLE, reconstruct_rank2, MPITAG_IMAGE, MPI_COMM_WORLD, status);
+			if (align_timing)
+				fprintf(stderr, "ALIGN_TIMING rank %d received at %.3f s\n", node->rank, MPI_Wtime() - t_align0);
 
-			alignCuboidMapToMap(half2_Iref, mymodel.Iref[ibody], nr_freedom,
-					mymodel.pixel_size, maxres,
+			alignCuboidMapToMap(half2_Iref, half1, nr_freedom,
+					align_angpix, maxres,
 					3, 1., 1.,
 					best_rot, best_tilt, best_psi,
-					best_dx, best_dy, best_dz);
+					best_dx, best_dy, best_dz,
+					nr_threads, false);
 
 			if (verb > 0)
 				std::cout << " Aligning half2 to half1: rot=" << best_rot
@@ -3799,6 +3931,47 @@ void MlOptimiserMpi::writeTemporaryDataAndWeightArrays()
 	if ( (node->rank == 1 || (do_split_random_halves && node->rank == 2) ) )
 	{
 		Image<RFLOAT> It;
+
+		// Keep the arrays in memory instead of on the disc when the host has room for them
+		// (the copy is single precision, exactly what the files hold).  RELION_UNREG_VIA_DISC=1
+		// forces the disc path; the debug option that keeps the files needs them on disc.
+		bool keep_in_memory = false;
+		bool unreg_check = false;
+		{
+			double need_gb = 0.;
+			for (int ib = 0; ib < mymodel.nr_bodies; ib++)
+				for (int ic = 0; ic < mymodel.nr_classes; ic++)
+				{
+					int ir = (mymodel.nr_bodies > 1) ? ib : ic;
+					need_gb += 4. * (2. * MULTIDIM_SIZE(wsum_model.BPref[ir].data) + MULTIDIM_SIZE(wsum_model.BPref[ir].weight)) / 1e9;
+				}
+			double avail_gb = -1.;
+			if (FILE *fm = fopen("/proc/meminfo", "r"))
+			{
+				char line[256];
+				while (fgets(line, sizeof(line), fm))
+				{
+					long kb;
+					if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1)
+					{
+						avail_gb = kb / 1e6;
+						break;
+					}
+				}
+				fclose(fm);
+			}
+			const char *via_disc = getenv("RELION_UNREG_VIA_DISC");
+			// RELION_UNREG_VIA_DISC=check keeps the copies and also writes the files; the read then
+			// compares the two and reports any difference (a self-test)
+			unreg_check = (via_disc != NULL && strcmp(via_disc, "check") == 0);
+			const bool forced = (via_disc != NULL && !unreg_check && atoi(via_disc) != 0) || do_keep_debug_reconstruct_files;
+			// Two ranks may share the host and the regularised reconstruction needs room too
+			keep_in_memory = !forced && avail_gb > 0. && avail_gb > 4. * need_gb;
+			if (node->rank == 1 && verb > 0)
+				std::cout << " Unregularised reconstruction arrays (" << need_gb << " GB): "
+					<< (keep_in_memory ? "kept in memory" : "written to disc")
+					<< (forced ? " (forced)" : "") << " [available " << avail_gb << " GB]" << std::endl;
+		}
 //#define DEBUG_RECONSTRUCTION
 #ifdef DEBUG_RECONSTRUCTION
 		FileName fn_root = fn_out + "_it" + integerToString(iter, 3) + "_half" + integerToString(node->rank);
@@ -3820,6 +3993,30 @@ void MlOptimiserMpi::writeTemporaryDataAndWeightArrays()
 					fn_tmp.compose(fn_root+"_class", iclass+1, "", 3);
 				if (mymodel.pdf_class[iclass] > 0.)
 				{
+					if (keep_in_memory)
+					{
+						const MultidimArray<Complex> &bd = wsum_model.BPref[ith_recons].data;
+						const MultidimArray<RFLOAT> &bw = wsum_model.BPref[ith_recons].weight;
+						const long int nd = MULTIDIM_SIZE(bd), nw = MULTIDIM_SIZE(bw);
+						if ((int)unreg_keep_re.size() <= ith_recons)
+						{
+							unreg_keep_re.resize(ith_recons + 1);
+							unreg_keep_im.resize(ith_recons + 1);
+							unreg_keep_w.resize(ith_recons + 1);
+						}
+						unreg_keep_re[ith_recons].resize(nd);
+						unreg_keep_im[ith_recons].resize(nd);
+						unreg_keep_w[ith_recons].resize(nw);
+						for (long int n = 0; n < nd; n++)
+						{
+							unreg_keep_re[ith_recons][n] = (float)DIRECT_MULTIDIM_ELEM(bd, n).real;
+							unreg_keep_im[ith_recons][n] = (float)DIRECT_MULTIDIM_ELEM(bd, n).imag;
+						}
+						for (long int n = 0; n < nw; n++)
+							unreg_keep_w[ith_recons][n] = (float)DIRECT_MULTIDIM_ELEM(bw, n);
+						if (!unreg_check)
+							continue;
+					}
 					It().resize(wsum_model.BPref[ith_recons].data);
 					FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(It())
 					{
@@ -3856,6 +4053,29 @@ void MlOptimiserMpi::readTemporaryDataAndWeightArraysAndReconstruct(int iclass, 
 	else
 		fn_root.compose(fn_root+"_class", iclass+1, "", 3);
 
+	const bool has_copy = iclass < (int)unreg_keep_re.size() && !unreg_keep_re[iclass].empty();
+	const char *via_disc_env = getenv("RELION_UNREG_VIA_DISC");
+	const bool check_copy = has_copy && via_disc_env != NULL && strcmp(via_disc_env, "check") == 0;
+	const bool from_memory = has_copy && !check_copy;
+	if (from_memory)
+	{
+		MultidimArray<Complex> &bd = wsum_model.BPref[iclass].data;
+		MultidimArray<RFLOAT> &bw = wsum_model.BPref[iclass].weight;
+		if ((long int)unreg_keep_re[iclass].size() != MULTIDIM_SIZE(bd) || (long int)unreg_keep_w[iclass].size() != MULTIDIM_SIZE(bw))
+			REPORT_ERROR("Incompatible size of the in-memory data and weight arrays");
+		for (long int n = 0; n < MULTIDIM_SIZE(bd); n++)
+		{
+			DIRECT_MULTIDIM_ELEM(bd, n).real = unreg_keep_re[iclass][n];
+			DIRECT_MULTIDIM_ELEM(bd, n).imag = unreg_keep_im[iclass][n];
+		}
+		for (long int n = 0; n < MULTIDIM_SIZE(bw); n++)
+			DIRECT_MULTIDIM_ELEM(bw, n) = unreg_keep_w[iclass][n];
+		std::vector<float>().swap(unreg_keep_re[iclass]);
+		std::vector<float>().swap(unreg_keep_im[iclass]);
+		std::vector<float>().swap(unreg_keep_w[iclass]);
+	}
+	else
+	{
 	// Read temporary arrays back in
 	Itmp.read(fn_root+"_data_real.mrc");
 	Itmp().setXmippOrigin();
@@ -3898,6 +4118,24 @@ void MlOptimiserMpi::readTemporaryDataAndWeightArraysAndReconstruct(int iclass, 
 	{
 		A3D_ELEM(wsum_model.BPref[iclass].weight, k, i, j) = A3D_ELEM(Itmp(), k, i, j);
 	}
+	if (check_copy)
+	{
+		const MultidimArray<Complex> &bd = wsum_model.BPref[iclass].data;
+		const MultidimArray<RFLOAT> &bw = wsum_model.BPref[iclass].weight;
+		long int nbad = 0;
+		for (long int n = 0; n < MULTIDIM_SIZE(bd); n++)
+			if (DIRECT_MULTIDIM_ELEM(bd, n).real != unreg_keep_re[iclass][n] || DIRECT_MULTIDIM_ELEM(bd, n).imag != unreg_keep_im[iclass][n])
+				nbad++;
+		for (long int n = 0; n < MULTIDIM_SIZE(bw); n++)
+			if (DIRECT_MULTIDIM_ELEM(bw, n) != unreg_keep_w[iclass][n])
+				nbad++;
+		std::cerr << "UNREG_CHECK rank " << node->rank << " class " << iclass << ": " << nbad
+			<< " of " << (2 * MULTIDIM_SIZE(bd) + MULTIDIM_SIZE(bw)) << " values differ between memory copy and disc" << std::endl;
+		std::vector<float>().swap(unreg_keep_re[iclass]);
+		std::vector<float>().swap(unreg_keep_im[iclass]);
+		std::vector<float>().swap(unreg_keep_w[iclass]);
+	}
+	}
 
 	// Now perform the unregularized reconstruction
 	wsum_model.BPref[iclass].reconstruct(Iunreg(), gridding_nr_iter, false, dummy);
@@ -3917,7 +4155,7 @@ void MlOptimiserMpi::readTemporaryDataAndWeightArraysAndReconstruct(int iclass, 
 
 	// remove temporary arrays from the disc
 #ifndef DEBUG_RECONSTRUCTION
-	if (!do_keep_debug_reconstruct_files)
+	if (!from_memory && !do_keep_debug_reconstruct_files)
 	{
 		remove((fn_root+"_data_real.mrc").c_str());
 		remove((fn_root+"_data_imag.mrc").c_str());
@@ -4262,6 +4500,21 @@ void MlOptimiserMpi::gatherResourceReport(const resrep::ProcessStats &mine)
 	}
 }
 
+// RELION_ITER_TIMING=1: wall time of each stage of every iteration, one line per stage and rank, on stderr
+#include <chrono>
+struct MpiStageClock
+{
+	bool on = getenv("RELION_ITER_TIMING") != NULL;
+	std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+	void mark(const char *stage, int iter, int rank)
+	{
+		if (!on) return;
+		auto now = std::chrono::steady_clock::now();
+		fprintf(stderr, "MPI_TIMING it%d rank%d %s ms %.0f\n", iter, rank, stage, 1e3 * std::chrono::duration<double>(now - last).count());
+		last = now;
+	}
+};
+
 void MlOptimiserMpi::iterate()
 {
 #ifdef TIMING
@@ -4274,6 +4527,8 @@ void MlOptimiserMpi::iterate()
 	TIMING_MPISLAVEWAIT2= timer.setNew("mpiFollowerWaiting2");
 	TIMING_MPISLAVEWAIT3= timer.setNew("mpiFollowerWaiting3");
 #endif
+
+	MpiStageClock sclock;
 
 	// Launch threads etc.
 	MlOptimiser::iterateSetup();
@@ -4288,6 +4543,7 @@ void MlOptimiserMpi::iterate()
 
 	for (iter = iter + 1; iter <= nr_iter; iter++)
     {
+		sclock.mark("between", iter, node->rank);
 #ifdef TIMING
 		timer.tic(TIMING_EXP);
 #endif
@@ -4345,9 +4601,11 @@ void MlOptimiserMpi::iterate()
 
 		if (do_helical_context || do_helical_polarity)
 			helical_context.resetEvidence();
+		sclock.mark("pre_expectation", iter, node->rank);
 		startResourceMonitor();
 		expectation();
 		stopResourceMonitor();
+		sclock.mark("expectation", iter, node->rank);
 #ifdef DEBUG
 		std::cerr << " finished expectation..." << std::endl;
 #endif
@@ -4377,6 +4635,7 @@ void MlOptimiserMpi::iterate()
 			combineAllWeightedSumsViaFile();
 		else
 			combineAllWeightedSums();
+		sclock.mark("combine_sums", iter, node->rank);
 #ifdef DEBUG
 		std::cerr << " after combineAllWeightedSums..." << std::endl;
 #endif
@@ -4404,7 +4663,9 @@ void MlOptimiserMpi::iterate()
 					std::cout << " Applying helical symmetry from the last iteration in real space..." << std::endl;
 			}
 		}
+		symmetrise_sharing_ranks = XMIPP_MAX(1, node->size - 1);
 		symmetriseReconstructions();
+		sclock.mark("symmetrise", iter, node->rank);
 
 		if ( (verb > 0) && (node->isLeader()) && (fn_local_symmetry_masks.size() != 0) && (fn_local_symmetry_operators.size() != 0) )
 			std::cout << " Applying local symmetry in real space..." << std::endl;
@@ -4424,10 +4685,12 @@ void MlOptimiserMpi::iterate()
 			// to prevent divergence at all resolutions
 			if (do_align_halves)
 				alignHalves();
+		sclock.mark("align_halves", iter, node->rank);
 
 			// For asymmetric molecules, join 2 half-reconstructions at the lowest resolutions to prevent them from diverging orientations
 			if (low_resol_join_halves > 0.)
 				joinTwoHalvesAtLowResolution();
+		sclock.mark("join_lowres", iter, node->rank);
 
 			//If doing GD, do an exponenetial averaged FSC
 			std::vector<MultidimArray<RFLOAT> > old_fscs(mymodel.nr_bodies);
@@ -4456,6 +4719,7 @@ void MlOptimiserMpi::iterate()
 				reconstructUnregularisedMapAndCalculateSolventCorrectedFSC();
 			else
 				compareTwoHalves();
+		sclock.mark("compare_halves", iter, node->rank);
 #ifdef DEBUG
 			std::cerr << " after compareHalves..." << std::endl;
 #endif
@@ -4516,6 +4780,7 @@ void MlOptimiserMpi::iterate()
 #endif
 
 		maximization();
+		sclock.mark("maximization", iter, node->rank);
 
 		// Make sure all nodes have the same resolution, set the data_vs_prior array from half1 also for half2
 		// Because there is an if-statement on ave_Pmax to set the image size, also make sure this one is the same for both halves
@@ -4580,7 +4845,7 @@ void MlOptimiserMpi::iterate()
 
 		// Directly use fn_out, without "_it" specifier, so unmasked refs will be overwritten at every iteration
 		if (do_write_unmasked_refs && node->rank == 1)
-			mymodel.write(fn_out+"_unmasked", sampling, false, true);
+			mymodel.write(fn_out+"_unmasked", sampling, false, true, true);
 
 		// Mask the reconstructions to get rid of noisy solvent areas
 		// Skip masking upon convergence (for validation purposes)
@@ -4590,12 +4855,14 @@ void MlOptimiserMpi::iterate()
 #endif
         if (do_solvent && !has_converged)
         	solventFlatten();
+		sclock.mark("solvent_flatten", iter, node->rank);
 #ifdef TIMING
         timer.toc(TIMING_SOLVFLAT);
         timer.tic(TIMING_UPDATERES);
 #endif
         // Re-calculate the current resolution, do this before writing to get the correct values in the output files
         updateCurrentResolution();
+		sclock.mark("update_resolution", iter, node->rank);
 #ifdef TIMING
         timer.toc(TIMING_UPDATERES);
         timer.tic(TIMING_ITER_WRITE);
@@ -4638,6 +4905,7 @@ void MlOptimiserMpi::iterate()
 				pruneOldIterations(iter);
 		}
 
+		sclock.mark("write_prune", iter, node->rank);
 #ifdef TIMING
 		timer.toc(TIMING_ITER_WRITE);
 #endif

@@ -391,7 +391,9 @@ public:
 
 	/* Applies helical symmetry. Note that helical_rise is in PIXELS here, as BackProjector doesn't know angpix
 	 */
-	void applyHelicalSymmetry(int nr_helical_asu = 1, RFLOAT helical_twist = 0., RFLOAT helical_rise = 0.);
+	void applyHelicalSymmetry(int nr_helical_asu = 1, RFLOAT helical_twist = 0., RFLOAT helical_rise = 0., int threads = 1);
+	// the CPU loop of applyHelicalSymmetry (3D, not rect)
+	void applyHelicalSymmetryCpu(int nr_helical_asu, RFLOAT helical_twist, RFLOAT helical_rise, int threads);
 
 	/* Applies the symmetry from the SymList object to the weight and the data array
 	 */

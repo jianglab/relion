@@ -20,6 +20,9 @@
 
 #include "src/macros.h"
 #include "src/helix.h"
+#include "src/gpu_reconstruct.h"
+#include <omp.h>
+#include <vector>
 
 // Wider search ranges for helical twist and rise
 #define WIDE_HELICAL_TWIST_AND_RISE_SEARCHES
@@ -903,8 +906,11 @@ void imposeHelicalSymmetryInRealSpace(
 		RFLOAT z_percentage,
 		RFLOAT rise_A,
 		RFLOAT twist_deg,
-		RFLOAT cosine_width_pix)
+		RFLOAT cosine_width_pix,
+		int threads)
 {
+	if (threads <= 0)
+		threads = omp_get_max_threads();
 	bool ignore_helical_symmetry = false;
 	long int Xdim, Ydim, Zdim, Ndim, box_len;
 	RFLOAT rise_pix, sphere_radius_pix, cyl_inner_radius_pix, cyl_outer_radius_pix, r_min, r_max, d_min, d_max, D_min, D_max, z_min, z_max;
@@ -979,18 +985,76 @@ void imposeHelicalSymmetryInRealSpace(
 		SINCOS(DEG2RAD(((RFLOAT)(id)) * twist_deg), &sin_rec[id], &cos_rec[id]);
 #endif
 
-	FOR_ALL_ELEMENTS_IN_ARRAY3D(v)
+	// On the GPU (RELION_GPU_RECONSTRUCT, with --gpu): the same loop, one thread per voxel
+	if (gpurec::requested() && gpurec::gpuRequested())
 	{
+		gpurec::HelixRealSpaceInput g;
+		g.zdim = ZSIZE(v); g.ydim = YSIZE(v); g.xdim = XSIZE(v);
+		g.start_z = STARTINGZ(v); g.start_y = STARTINGY(v); g.start_x = STARTINGX(v);
+		g.r_min = r_min; g.r_max = r_max; g.d_min = d_min; g.d_max = d_max; g.D_min = D_min; g.D_max = D_max;
+		g.z_min = z_min; g.z_max = z_max; g.rise_pix = rise_pix; g.cosine_width_pix = cosine_width_pix;
+		g.sin_rec = sin_rec; g.cos_rec = cos_rec;
+		std::string reason;
+		bool gpu_bad = false;
+		static bool reported_gpu = false, reported_cpu = false;
+		if (gpurec::helicalSymmetryRealSpace(g, MULTIDIM_ARRAY(v), reason, gpu_bad))
+		{
+			if (gpu_bad)
+				REPORT_ERROR("helix.cpp::makeHelicalReferenceInRealSpace(): ERROR in imposing symmetry!");
+			if (!reported_gpu)
+			{
+				reported_gpu = true;
+				std::cout << " Imposing helical symmetry in real space on the GPU (RELION_GPU_RECONSTRUCT)." << std::endl;
+			}
+			return;
+		}
+		if (!reported_cpu)
+		{
+			reported_cpu = true;
+			std::cout << " Imposing helical symmetry in real space on the CPU: " << reason << "." << std::endl;
+		}
+	}
+
+	// The voxels are independent, so the volume is split over threads. The original loop set the
+	// voxels outside the mask to zero in v itself as it went, so a voxel near the edge saw zeros for
+	// neighbours outside the mask that came before it in the loop (lower index) and their values for
+	// those after it; the reads below reproduce that, so the result is the same at any thread count.
+	const long int vx = XSIZE(v), vxy = XSIZE(v) * YSIZE(v);
+	std::vector<char> outside(MULTIDIM_SIZE(v), 0);
+	#pragma omp parallel for num_threads(threads)
+	for (long int k = STARTINGZ(v); k <= FINISHINGZ(v); k++)
+		for (long int i = STARTINGY(v); i <= FINISHINGY(v); i++)
+			for (long int j = STARTINGX(v); j <= FINISHINGX(v); j++)
+			{
+				RFLOAT dd = (RFLOAT)(i * i + j * j);
+				RFLOAT rr = dd + (RFLOAT)(k * k);
+				RFLOAT d = sqrt(dd);
+				RFLOAT r = sqrt(rr);
+				if ( (r > r_max) || (d < d_min) || (d > D_max) )
+					outside[(k - STARTINGZ(v)) * vxy + (i - STARTINGY(v)) * vx + (j - STARTINGX(v))] = 1;
+			}
+
+	bool bad = false;
+	#pragma omp parallel for schedule(dynamic) reduction(||:bad) num_threads(threads)
+	for (long int k = STARTINGZ(v); k <= FINISHINGZ(v); k++)
+	for (long int i = STARTINGY(v); i <= FINISHINGY(v); i++)
+	for (long int j = STARTINGX(v); j <= FINISHINGX(v); j++)
+	{
+		const long int here = (k - STARTINGZ(v)) * vxy + (i - STARTINGY(v)) * vx + (j - STARTINGX(v));
+		// v as the original loop saw it when it reached this voxel
+		auto at = [&](long int z, long int y, long int x) -> RFLOAT
+		{
+			const long int n = z * vxy + y * vx + x;
+			return (outside[n] && n < here) ? (RFLOAT)0. : DIRECT_A3D_ELEM(v, z, y, x);
+		};
+
 		// Out of the mask
 		RFLOAT dd = (RFLOAT)(i * i + j * j);
 		RFLOAT rr = dd + (RFLOAT)(k * k);
 		RFLOAT d = sqrt(dd);
 		RFLOAT r = sqrt(rr);
-		if ( (r > r_max) || (d < d_min) || (d > D_max) )
-		{
-			A3D_ELEM(v, k, i, j) = 0.;
+		if (outside[here])
 			continue;
-		}
 
 		// How many voxels should be used to calculate the average?
 		RFLOAT zi = (RFLOAT)(k);
@@ -999,7 +1063,10 @@ void imposeHelicalSymmetryInRealSpace(
 		int rot_max = -(CEIL((zi - z_max) / rise_pix));
 		int rot_min = -(FLOOR((zi - z_min) / rise_pix));
 		if (rot_max < rot_min)
-			REPORT_ERROR("helix.cpp::makeHelicalReferenceInRealSpace(): ERROR in imposing symmetry!");
+		{
+			bad = true;
+			continue;
+		}
 
 		// Do the average
 		RFLOAT pix_sum, pix_weight;
@@ -1034,14 +1101,14 @@ void imposeHelicalSymmetryInRealSpace(
 			z0 = FLOOR(zp); fz = zp - z0; z0 -= STARTINGZ(v); z1 = z0 + 1;
 
 			RFLOAT d000, d001, d010, d011, d100, d101, d110, d111;
-			d000 = DIRECT_A3D_ELEM(v, z0, y0, x0);
-			d001 = DIRECT_A3D_ELEM(v, z0, y0, x1);
-			d010 = DIRECT_A3D_ELEM(v, z0, y1, x0);
-			d011 = DIRECT_A3D_ELEM(v, z0, y1, x1);
-			d100 = DIRECT_A3D_ELEM(v, z1, y0, x0);
-			d101 = DIRECT_A3D_ELEM(v, z1, y0, x1);
-			d110 = DIRECT_A3D_ELEM(v, z1, y1, x0);
-			d111 = DIRECT_A3D_ELEM(v, z1, y1, x1);
+			d000 = at(z0, y0, x0);
+			d001 = at(z0, y0, x1);
+			d010 = at(z0, y1, x0);
+			d011 = at(z0, y1, x1);
+			d100 = at(z1, y0, x0);
+			d101 = at(z1, y0, x1);
+			d110 = at(z1, y1, x0);
+			d111 = at(z1, y1, x1);
 
 			RFLOAT dx00, dx01, dx10, dx11;
 			dx00 = LIN_INTERP(fx, d000, d001);
@@ -1080,7 +1147,9 @@ void imposeHelicalSymmetryInRealSpace(
 		}
 		else
 			A3D_ELEM(vout, k, i, j) = 0.;
-    }
+	}
+	if (bad)
+		REPORT_ERROR("helix.cpp::makeHelicalReferenceInRealSpace(): ERROR in imposing symmetry!");
 
 	// Copy and exit
 	v = vout;
@@ -1565,6 +1634,39 @@ void transformCartesianAndHelicalCoords(
 	if (dim == 3)
 		zout = ZZ(out);
 	return;
+}
+
+HelicalCoordsRotation::HelicalCoordsRotation(RFLOAT rot_deg, RFLOAT tilt_deg, RFLOAT psi_deg, int dim, bool direction)
+	: dim_(dim)
+{
+	if ( (dim != 2) && (dim != 3) )
+		REPORT_ERROR("helix.cpp::HelicalCoordsRotation(): Vector of input coordinates should have 2 or 3 values!");
+	if (dim == 2)
+		rot_deg = tilt_deg = 0.;
+	Matrix2D<RFLOAT> A(3, 3);
+	Euler_angles2matrix(rot_deg, tilt_deg, psi_deg, A, false);
+	if (direction == CART_TO_HELICAL_COORDS)
+		A = A.transpose();
+	for (int i = 0; i < 3; i++)
+		for (int j = 0; j < 3; j++)
+			m_[i][j] = A(i, j);
+}
+
+void HelicalCoordsRotation::apply(RFLOAT xin, RFLOAT yin, RFLOAT zin, RFLOAT &xout, RFLOAT &yout, RFLOAT &zout) const
+{
+	const RFLOAT z = (dim_ == 3) ? zin : 0.;
+	RFLOAT o[3];
+	for (int i = 0; i < 3; i++)
+	{
+		o[i] = 0.;
+		o[i] += m_[i][0] * xin;
+		o[i] += m_[i][1] * yin;
+		o[i] += m_[i][2] * z;
+	}
+	xout = o[0];
+	yout = o[1];
+	if (dim_ == 3)
+		zout = o[2];
 }
 
 /*

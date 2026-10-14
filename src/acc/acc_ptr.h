@@ -1109,7 +1109,7 @@ public:
 	{
 #ifdef _CUDA_ENABLED
 		if (accType == accCUDA)
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+		{ DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream)); }
 #elif _HIP_ENABLED
 		if (accType == accHIP)
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(stream));

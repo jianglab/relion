@@ -43,6 +43,9 @@ public:
 
 	bool haveWarnedRefinementMem;
 
+	bool keep_allocator = false;
+	size_t retainedBytes() const { return 0; }
+
 	MlDeviceBundle(MlOptimiser *baseMLOptimiser):
 			baseMLO(baseMLOptimiser),
 			generateProjectionPlanOnTheFly(false),
@@ -64,6 +67,12 @@ public:
 	void syncAllBackprojects()
 	{
 		DEBUG_HANDLE_ERROR(hipDeviceSynchronize());
+	}
+
+	// Make this device current on the calling thread (worker threads start on device 0)
+	void bindThreadToDevice()
+	{
+		hipSetDevice(device_id);
 	}
 
 

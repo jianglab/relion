@@ -441,7 +441,7 @@ public:
 
 	// Write a model to disc
 	void write(FileName fn_out, HealpixSampling &sampling,
-			bool do_write_bild = true, bool do_only_write_images = false);
+			bool do_write_bild = true, bool do_only_write_images = false, bool allow_async = false);
 
 	//Read a tau-spectrum from a STAR file
 	void readTauSpectrum(FileName fn_tau, int verb);
@@ -575,6 +575,8 @@ public:
 	// To save memory, the model itself will be cleared after packing.
 	// If the whole thing becomes bigger than 1Gb (see MAX_PACK_SIZE in ml_model.cpp), then break it up into pieces because MPI cannot handle very large messages
 	// When broken up: nr_pieces > 1
+	// When set, the piecewise pack/unpack leave out BPref (data and weight) and do not touch it
+	bool pack_skip_bpref = false;
 	void pack(MultidimArray<RFLOAT> &packed, int &piece, int &nr_pieces, bool do_clear=true);
 
 	// Fill the model again using unpack (this is the inverse operation from pack)

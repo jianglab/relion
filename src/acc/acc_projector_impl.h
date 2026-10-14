@@ -55,19 +55,33 @@ bool AccProjector::setMdlDim(
 		if(mdlZ!=0)  // 3D model
 		{
 			texArrayReal = new cudaArray_t();
-			texArrayImag = new cudaArray_t();
+#ifndef ACC_DOUBLE_PRECISION
+			{
+				const char *e = getenv("RELION_GPU_FLOAT2_TEX");
+				cplx2 = e && strcmp(e, "0") && strcmp(e, "off");
+			}
+#endif
+			if (!cplx2) texArrayImag = new cudaArray_t();
 
 			// -- make extents for automatic pitch:ing (aligment) of allocated 3D arrays
 			cudaExtent volumeSize = make_cudaExtent(mdlX, mdlY, mdlZ);
 
 
 			// -- Allocate and copy data using very clever CUDA memcpy-functions
-			HANDLE_ERROR(cudaMalloc3DArray(texArrayReal, &desc, volumeSize));
-			HANDLE_ERROR(cudaMalloc3DArray(texArrayImag, &desc, volumeSize));
+			if (cplx2)
+			{
+				cudaChannelFormatDesc desc2 = cudaCreateChannelDesc(32, 32, 0, 0, cudaChannelFormatKindFloat);
+				HANDLE_ERROR(cudaMalloc3DArray(texArrayReal, &desc2, volumeSize));
+			}
+			else
+			{
+				HANDLE_ERROR(cudaMalloc3DArray(texArrayReal, &desc, volumeSize));
+				HANDLE_ERROR(cudaMalloc3DArray(texArrayImag, &desc, volumeSize));
+			}
 
 			// -- Descriptors of the channel(s) in the texture(s)
 			resDesc_real.res.array.array = *texArrayReal;
-			resDesc_imag.res.array.array = *texArrayImag;
+			if (!cplx2) resDesc_imag.res.array.array = *texArrayImag;
 			resDesc_real.resType = cudaResourceTypeArray;
 			resDesc_imag.resType = cudaResourceTypeArray;
 		}
@@ -102,7 +116,10 @@ bool AccProjector::setMdlDim(
 
 		// -- Create texture object(s)
 		HANDLE_ERROR(cudaCreateTextureObject(mdlReal, &resDesc_real, &texDesc, NULL));
-		HANDLE_ERROR(cudaCreateTextureObject(mdlImag, &resDesc_imag, &texDesc, NULL));
+		if (cplx2)
+			*mdlImag = *mdlReal;
+		else
+			HANDLE_ERROR(cudaCreateTextureObject(mdlImag, &resDesc_imag, &texDesc, NULL));
 	#elif _HIP_ENABLED
 		mdlReal = new hipTextureObject_t();
 		mdlImag = new hipTextureObject_t();
@@ -212,7 +229,21 @@ void AccProjector::initMdl(XFLOAT *real, XFLOAT *imag)
 
 #ifndef PROJECTOR_NO_TEXTURES
 	#ifdef _CUDA_ENABLED
-	if(mdlZ!=0)  // 3D model
+	if(mdlZ!=0 && cplx2)  // 3D model, one two-channel texture
+	{
+		float2 *tmp = (float2 *) malloc(mdlXYZ * sizeof(float2));
+		if (!tmp) CRITICAL(RAMERR);
+		for (size_t i = 0; i < mdlXYZ; i ++)
+			tmp[i] = make_float2(real[i], imag[i]);
+		cudaMemcpy3DParms copyParams = {0};
+		copyParams.extent = make_cudaExtent(mdlX, mdlY, mdlZ);
+		copyParams.kind   = cudaMemcpyHostToDevice;
+		copyParams.dstArray = *texArrayReal;
+		copyParams.srcPtr   = make_cudaPitchedPtr(tmp, mdlX * sizeof(float2), mdlX, mdlY);
+		DEBUG_HANDLE_ERROR(cudaMemcpy3D(&copyParams));
+		free(tmp);
+	}
+	else if(mdlZ!=0)  // 3D model
 	{
 		// -- make extents for automatic pitching (aligment) of allocated 3D arrays
 		cudaMemcpy3DParms copyParams = {0};
@@ -276,6 +307,42 @@ void AccProjector::initMdl(std::complex<XFLOAT> *data)
 void AccProjector::initMdl(Complex *data)
 {
 #if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED)
+#ifndef PROJECTOR_NO_TEXTURES
+	if (mdlZ == 0 && pitch2D > 0)
+	{
+		// 2D model: the driver copies a pitched destination from pageable memory one row at
+		// a time (about 1 ms per model, 200 of them per VDAM iteration). Laying the rows out
+		// at the device pitch on the host makes it one linear copy of the same bytes.
+		const size_t row = pitch2D / sizeof(XFLOAT);
+		const size_t bytes = pitch2D * mdlY;
+		XFLOAT *padReal, *padImag;
+		if (posix_memalign((void **)&padReal, MEM_ALIGN, bytes)) CRITICAL(RAMERR);
+		if (posix_memalign((void **)&padImag, MEM_ALIGN, bytes)) CRITICAL(RAMERR);
+		for (size_t y = 0; y < (size_t) mdlY; y ++)
+		{
+			const Complex *src = data + y * mdlX;
+			XFLOAT *dr = padReal + y * row;
+			XFLOAT *di = padImag + y * row;
+			for (size_t x = 0; x < (size_t) mdlX; x ++)
+			{
+				dr[x] = (XFLOAT) src[x].real;
+				di[x] = (XFLOAT) src[x].imag;
+			}
+			for (size_t x = mdlX; x < row; x ++)
+				dr[x] = di[x] = 0;
+		}
+#ifdef _CUDA_ENABLED
+		DEBUG_HANDLE_ERROR(cudaMemcpy(texArrayReal2D, padReal, bytes, cudaMemcpyHostToDevice));
+		DEBUG_HANDLE_ERROR(cudaMemcpy(texArrayImag2D, padImag, bytes, cudaMemcpyHostToDevice));
+#else
+		DEBUG_HANDLE_ERROR(hipMemcpy(texArrayReal2D, padReal, bytes, hipMemcpyHostToDevice));
+		DEBUG_HANDLE_ERROR(hipMemcpy(texArrayImag2D, padImag, bytes, hipMemcpyHostToDevice));
+#endif
+		free(padReal);
+		free(padImag);
+		return;
+	}
+#endif
 	XFLOAT *tmpReal;
 	XFLOAT *tmpImag;
 	if (posix_memalign((void **)&tmpReal, MEM_ALIGN, mdlXYZ * sizeof(XFLOAT))) CRITICAL(RAMERR);
@@ -320,7 +387,7 @@ void AccProjector::clear()
 #ifndef PROJECTOR_NO_TEXTURES
 		#ifdef _CUDA_ENABLED
 			cudaDestroyTextureObject(*mdlReal);
-			cudaDestroyTextureObject(*mdlImag);
+			if (!cplx2) cudaDestroyTextureObject(*mdlImag);
 		#elif _HIP_ENABLED
 			hipDestroyTextureObject(*mdlReal);
 			hipDestroyTextureObject(*mdlImag);
@@ -332,13 +399,13 @@ void AccProjector::clear()
 		{
 		#ifdef _CUDA_ENABLED
 			cudaFreeArray(*texArrayReal);
-			cudaFreeArray(*texArrayImag);
+			if (!cplx2) cudaFreeArray(*texArrayImag);
 		#elif _HIP_ENABLED
 			hipFreeArray(*texArrayReal);
 			hipFreeArray(*texArrayImag);
 		#endif
 			delete texArrayReal;
-			delete texArrayImag;
+			if (!cplx2) delete texArrayImag;
 		}
 		else //2D case
 		{

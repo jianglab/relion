@@ -19,6 +19,14 @@
  ***************************************************************************/
 
 #include "src/ml_model.h"
+#include "src/async_file_writer.h"
+#include <memory>
+#include <cstring>
+#ifdef _OPENMP
+#include <omp.h>
+#else
+static inline int omp_get_max_threads() { return 1; }
+#endif
 #include "src/fftw_rect.h"
 
 #define MOM2_INIT_CONSTANT 1
@@ -500,7 +508,7 @@ void MlModel::read(FileName fn_in, int nr_optics_groups_from_mydata, bool _do_gr
 
 }
 
-void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bild, bool only_write_images)
+void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bild, bool only_write_images, bool allow_async)
 {
 
 	MetaDataTable MDclass, MDgroup, MDopticsgroup, MDlog, MDsigma, MDbodies;
@@ -514,7 +522,8 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 	// A. Write images
 	if (ref_dim == 2)
 	{
-		Image<RFLOAT> img(XSIZE(Iref[0]), YSIZE(Iref[0]), 1, nr_classes_bodies);
+		std::shared_ptr<Image<RFLOAT> > pimg = std::make_shared<Image<RFLOAT> >(XSIZE(Iref[0]), YSIZE(Iref[0]), 1, nr_classes_bodies);
+		Image<RFLOAT> &img = *pimg;
 		for (int iclass = 0; iclass < nr_classes_bodies; iclass++)
 		{
 			FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(Iref[iclass])
@@ -523,15 +532,16 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 			}
 		}
 		img.setSamplingRateInHeader(pixel_size);
-		if (nr_bodies > 1)
-			img.write(fn_out + "_bodies.mrcs");
-		else
-			img.write(fn_out + "_classes.mrcs");
+		{
+			const FileName fn_img = (nr_bodies > 1) ? fn_out + "_bodies.mrcs" : fn_out + "_classes.mrcs";
+			if (allow_async) AsyncFileWriter::instance().submit([pimg, fn_img] { pimg->write(fn_img); }); else pimg->write(fn_img);
+		}
 
 		if (do_grad)
 		{
 			int nr_grads = pseudo_halfsets ? nr_classes_bodies * 2 : nr_classes_bodies;
-			Image<RFLOAT> img1(XSIZE(Igrad1[0])*2, YSIZE(Igrad1[0]), 1, nr_grads);
+			std::shared_ptr<Image<RFLOAT> > pimg1 = std::make_shared<Image<RFLOAT> >(XSIZE(Igrad1[0])*2, YSIZE(Igrad1[0]), 1, nr_grads);
+			Image<RFLOAT> &img1 = *pimg1;
 			for (int iclass = 0; iclass < nr_classes; iclass++)
 			{
 				FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(Igrad1[iclass])
@@ -549,9 +559,13 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 					}
 				}
 			}
-			img1.write(fn_out + "_1moment.mrcs");
+			{
+				const FileName fn_img = fn_out + "_1moment.mrcs";
+				if (allow_async) AsyncFileWriter::instance().submit([pimg1, fn_img] { pimg1->write(fn_img); }); else pimg1->write(fn_img);
+			}
 
-			Image<RFLOAT> img2(XSIZE(Igrad1[0])*2, YSIZE(Igrad1[0]), 1, nr_classes_bodies);
+			std::shared_ptr<Image<RFLOAT> > pimg2 = std::make_shared<Image<RFLOAT> >(XSIZE(Igrad1[0])*2, YSIZE(Igrad1[0]), 1, nr_classes_bodies);
+			Image<RFLOAT> &img2 = *pimg2;
 			for (int iclass = 0; iclass < nr_classes; iclass++)
 			{
 				FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY2D(Igrad2[iclass])
@@ -561,15 +575,19 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 					}
 
 			}
-			img2.write(fn_out + "_2moment.mrcs");
+			{
+				const FileName fn_img = fn_out + "_2moment.mrcs";
+				if (allow_async) AsyncFileWriter::instance().submit([pimg2, fn_img] { pimg2->write(fn_img); }); else pimg2->write(fn_img);
+			}
 		}
 	}
 	else
 	{
-		Image<RFLOAT> img;
 		// Set correct voxel size in the header
 		for (int iclass = 0; iclass < nr_classes_bodies; iclass++)
 		{
+			std::shared_ptr<Image<RFLOAT> > pimg = std::make_shared<Image<RFLOAT> >();
+			Image<RFLOAT> &img = *pimg;
 			img() = Iref[iclass];
 			img.setSamplingRateInHeader(pixel_size);
 			if (nr_bodies > 1)
@@ -582,7 +600,10 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 			else
 				fn_tmp.compose(fn_out+"_class", iclass+1, "mrc", 3);
 
-			img.write(fn_tmp);
+			{
+				const FileName fn_img = fn_tmp;
+				if (allow_async) AsyncFileWriter::instance().submit([pimg, fn_img] { pimg->write(fn_img); }); else pimg->write(fn_img);
+			}
 		}
 
 		if (do_grad)
@@ -1018,14 +1039,19 @@ void MlModel::initialiseFromImages(
 			}
 			else
 			{
-				MultidimArray<Complex> zeros(
+				// the gradient moments are padded Fourier volumes (several GB for a large box):
+				// only build them when they are used
+				MultidimArray<Complex> zeros, constv;
+				if (_do_grad)
+				{
+					zeros.resize(
 						img().zdim * padding_factor,
 						img().ydim * padding_factor,
-						img().xdim  * padding_factor / 2 + 1
-				);
-				zeros.initZeros();
-				MultidimArray<Complex> constv(zeros);
-				constv.initConstant(Complex(MOM2_INIT_CONSTANT, MOM2_INIT_CONSTANT));
+						img().xdim  * padding_factor / 2 + 1);
+					zeros.initZeros();
+					constv = zeros;
+					constv.initConstant(Complex(MOM2_INIT_CONSTANT, MOM2_INIT_CONSTANT));
+				}
 
 				for (int iclass = 0; iclass < nr_classes; iclass++)
 				{
@@ -1569,6 +1595,35 @@ void MlModel::setFourierTransformMaps(bool update_tau2_spectra, int nr_threads, 
 		min_ires = ROUND(pixel_size * ori_size / strict_lowres_exp);
 //		std::cout << "MlModel::setFourierTransformMaps: strict_lowres_exp = " << strict_lowres_exp
 //		          << " pixel_size = " << pixel_size << " ori_size = " << ori_size << " min_ires = " << min_ires << std::endl;;
+	}
+
+	// Many small 2D classes (box up to about 512 at padding 2): transform them one per
+	// thread, each with single-thread FFTW plans. FFTW's own threads cost as much as
+	// these transforms (the 100 classes of a 2D classification took 70 ms with them and
+	// 37 ms without, one class after the other). The classes are independent (own
+	// PPref, tau2_class), FFTW's planner is protected inside FourierTransformer, and
+	// the CPU path is used for such maps (see Projector::computeFourierTransformMap).
+	// RELION_FFTW_THREADS=1 / OMP_NUM_THREADS are respected through nr_threads.
+	const bool per_class_threads = nr_threads > 1 && !(do_gpu && getenv("RELION_GPU_SMALL_FT")) && nr_bodies == 1 && ref_dim == 2 && PPref.size() > 1 &&
+			PPrefRank.size() <= 1 && (size_t) ROUND(PPref[0].padding_factor * ori_size) * ROUND(PPref[0].padding_factor * ori_size) < ((size_t) 1 << 20);
+	if (per_class_threads)
+	{
+		relionFftwPlanThreads(1);
+		#pragma omp parallel for num_threads(nr_threads) schedule(dynamic)
+		for (int iclass = 0; iclass < (int) PPref.size(); iclass++)
+		{
+			MultidimArray<RFLOAT> Irefp = Iref[iclass];
+			PPref[iclass].interpolator = projector_interpolator;
+			if (update_tau2_spectra && iclass < nr_classes * nr_bodies)
+				PPref[iclass].computeFourierTransformMap(Irefp, tau2_class[iclass], current_size, 1, true, true, min_ires, fourier_mask, do_gpu);
+			else
+			{
+				MultidimArray<RFLOAT> dummy;
+				PPref[iclass].computeFourierTransformMap(Irefp, dummy, current_size, 1, true, true, min_ires, fourier_mask, do_gpu);
+			}
+		}
+		relionFftwPlanThreads(nr_threads);
+		return;
 	}
 
 	// Note that PPref.size() can be bigger than nr_bodies in multi-body refinement, due to extra PPrefs needed for overlapping bodies
@@ -2126,6 +2181,49 @@ void MlWsumModel::unpack(MultidimArray<RFLOAT> &packed)
 }
 
 
+// Copy the part of a flat array [ori, ori+n) that falls inside the piece [start, stop) to or from the
+// packed buffer. Same result as the element-by-element loops with range checks, but one block copy
+// per array, split over a few threads (memory-bandwidth bound, so more than 4 do not help).
+static int packThreads()
+{
+	static int nt = -1;
+	if (nt < 0)
+	{
+		const char *e = getenv("RELION_PACK_THREADS");
+		nt = e ? atoi(e) : XMIPP_MIN(4, omp_get_max_threads());
+		if (nt < 1) nt = 1;
+	}
+	return nt;
+}
+
+static void packCopy(RFLOAT *packed, const RFLOAT *arr, unsigned long long n, unsigned long long ori,
+                     unsigned long long start, unsigned long long stop, unsigned long long &idx, bool to_packed)
+{
+	const unsigned long long lo = XMIPP_MAX(start, ori);
+	const unsigned long long hi = XMIPP_MIN(stop, ori + n);
+	if (hi <= lo)
+		return;
+	RFLOAT *p = packed + idx;
+	RFLOAT *a = const_cast<RFLOAT*>(arr) + (lo - ori);
+	const long long len = (long long)(hi - lo);
+	const int nt = len > (1LL << 20) ? packThreads() : 1;
+	const long long chunk = (len + nt - 1) / nt;
+	#pragma omp parallel for num_threads(nt) schedule(static, 1)
+	for (int t = 0; t < nt; t++)
+	{
+		const long long b = (long long)t * chunk;
+		const long long e = XMIPP_MIN(len, b + chunk);
+		if (e > b)
+		{
+			if (to_packed)
+				memcpy(p + b, a + b, (e - b) * sizeof(RFLOAT));
+			else
+				memcpy(a + b, p + b, (e - b) * sizeof(RFLOAT));
+		}
+	}
+	idx += hi - lo;
+}
+
 void MlWsumModel::pack(MultidimArray<RFLOAT> &packed, int &piece, int &nr_pieces, bool do_clear)
 {
 
@@ -2146,8 +2244,11 @@ void MlWsumModel::pack(MultidimArray<RFLOAT> &packed, int &piece, int &nr_pieces
 	packed_size += 2 * nr_groups; // wsum_signal_product, wsum_reference_power
 	// for all class-related stuff
 	// data is complex: multiply by two!
-	packed_size += BPref.size() * 2 * (unsigned long long) BPref[0].getSize(); // BPref.data
-	packed_size += BPref.size() * (unsigned long long) BPref[0].getSize(); // BPref.weight
+	if (!pack_skip_bpref)
+	{
+		packed_size += BPref.size() * 2 * (unsigned long long) BPref[0].getSize(); // BPref.data
+		packed_size += BPref.size() * (unsigned long long) BPref[0].getSize(); // BPref.weight
+	}
 	packed_size += pdf_direction.size() * (unsigned long long) nr_directions; // pdf_directions
 	// for pdf_class
 	packed_size += nr_classes;
@@ -2248,24 +2349,23 @@ void MlWsumModel::pack(MultidimArray<RFLOAT> &packed, int &piece, int &nr_pieces
 
 	}
 
-	for (int iclass = 0; iclass < BPref.size(); iclass++)
+	for (int iclass = 0; iclass < (pack_skip_bpref ? 0 : (int)BPref.size()); iclass++)
 	{
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(BPref[iclass].data) {
-			if (ori_idx >= idx_start && ori_idx < idx_stop)
-				DIRECT_MULTIDIM_ELEM(packed, idx++) = (DIRECT_MULTIDIM_ELEM(BPref[iclass].data, n)).real;
-			ori_idx++;
-			if (ori_idx >= idx_start && ori_idx < idx_stop)
-				DIRECT_MULTIDIM_ELEM(packed, idx++) = (DIRECT_MULTIDIM_ELEM(BPref[iclass].data, n)).imag;
-			ori_idx++;
+		static_assert(sizeof(Complex) == 2 * sizeof(RFLOAT), "Complex must be two packed RFLOATs");
+		{
+			const unsigned long long nd = 2ULL * MULTIDIM_SIZE(BPref[iclass].data);
+			packCopy(MULTIDIM_ARRAY(packed), reinterpret_cast<const RFLOAT*>(MULTIDIM_ARRAY(BPref[iclass].data)),
+			         nd, ori_idx, idx_start, idx_stop, idx, true);
+			ori_idx += nd;
 		}
 		// Only clear after the whole array has been packed... i.e. not when we reached the pack_size halfway through
 		if (idx == ori_idx && do_clear)
 			BPref[iclass].data.clear();
 
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(BPref[iclass].weight) {
-			if (ori_idx >= idx_start && ori_idx < idx_stop)
-				DIRECT_MULTIDIM_ELEM(packed, idx++) = DIRECT_MULTIDIM_ELEM(BPref[iclass].weight, n);
-			ori_idx++;
+		{
+			const unsigned long long nw = MULTIDIM_SIZE(BPref[iclass].weight);
+			packCopy(MULTIDIM_ARRAY(packed), MULTIDIM_ARRAY(BPref[iclass].weight), nw, ori_idx, idx_start, idx_stop, idx, true);
+			ori_idx += nw;
 		}
 		if (idx == ori_idx && do_clear)
 			BPref[iclass].weight.clear();
@@ -2399,24 +2499,20 @@ void MlWsumModel::unpack(MultidimArray<RFLOAT> &packed, int piece, bool do_clear
 
 	}
 
-	for (int iclass = 0; iclass < BPref.size(); iclass++) {
+	for (int iclass = 0; iclass < (pack_skip_bpref ? 0 : (int)BPref.size()); iclass++) {
 		if (idx == ori_idx)
 			BPref[iclass].initialiseDataAndWeight(current_size);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(BPref[iclass].data) {
-			if (ori_idx >= idx_start && ori_idx < idx_stop)
-				(DIRECT_MULTIDIM_ELEM(BPref[iclass].data, n)).real = DIRECT_MULTIDIM_ELEM(packed, idx++);
-			ori_idx++;
-
-			if (ori_idx >= idx_start && ori_idx < idx_stop)
-				(DIRECT_MULTIDIM_ELEM(BPref[iclass].data, n)).imag = DIRECT_MULTIDIM_ELEM(packed, idx++);
-			ori_idx++;
-			//DIRECT_MULTIDIM_ELEM(BPref[iclass].data, n) = Complex(re, im);
+		{
+			const unsigned long long nd = 2ULL * MULTIDIM_SIZE(BPref[iclass].data);
+			packCopy(MULTIDIM_ARRAY(packed), reinterpret_cast<const RFLOAT*>(MULTIDIM_ARRAY(BPref[iclass].data)),
+			         nd, ori_idx, idx_start, idx_stop, idx, false);
+			ori_idx += nd;
 		}
 
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(BPref[iclass].weight) {
-			if (ori_idx >= idx_start && ori_idx < idx_stop)
-				DIRECT_MULTIDIM_ELEM(BPref[iclass].weight, n) = DIRECT_MULTIDIM_ELEM(packed, idx++);
-			ori_idx++;
+		{
+			const unsigned long long nw = MULTIDIM_SIZE(BPref[iclass].weight);
+			packCopy(MULTIDIM_ARRAY(packed), MULTIDIM_ARRAY(BPref[iclass].weight), nw, ori_idx, idx_start, idx_stop, idx, false);
+			ori_idx += nw;
 		}
 	}
 

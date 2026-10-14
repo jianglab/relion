@@ -1,3 +1,4 @@
+#include <atomic>
 /*
 #undef ALTCPU
 #ifdef _CUDA_ENABLED
@@ -197,72 +198,152 @@ void buildCorrImage(MlOptimiser *baseMLO,
 			corr_img[i] *= myscale * myscale;
 }
 
+// One Euler matrix from three angles in degrees, the same arithmetic wherever it is evaluated.
+static inline void eulerMatrixOne(
+		RFLOAT rot, RFLOAT tilt, RFLOAT psi,
+		bool inverse, bool doL, Matrix2D<RFLOAT> &L, bool doR, Matrix2D<RFLOAT> &R,
+		Matrix2D<RFLOAT> &A, XFLOAT *out)
+{
+	RFLOAT alpha, beta, gamma;
+	RFLOAT ca, sa, cb, sb, cg, sg;
+	RFLOAT cc, cs, sc, ss;
+
+	//TODO In a sense we're doing RAD2DEG just to do DEG2RAD here.
+	//The only place the degree value is actually used is in the metadata assignment.
+	alpha = DEG2RAD(rot);
+	beta  = DEG2RAD(tilt);
+	gamma = DEG2RAD(psi);
+
+#ifdef RELION_SINGLE_PRECISION
+	sincosf(alpha, &sa, &ca);
+	sincosf(beta,  &sb, &cb);
+	sincosf(gamma, &sg, &cg);
+#else
+	sincos(alpha, &sa, &ca);
+	sincos(beta,  &sb, &cb);
+	sincos(gamma, &sg, &cg);
+#endif
+
+	cc = cb * ca;
+	cs = cb * sa;
+	sc = sb * ca;
+	ss = sb * sa;
+
+	A(0, 0) =  cg * cc - sg * sa;
+	A(0, 1) =  cg * cs + sg * ca;
+	A(0, 2) = -cg * sb;
+	A(1, 0) = -sg * cc - cg * sa;
+	A(1, 1) = -sg * cs + cg * ca;
+	A(1, 2) = sg * sb;
+	A(2, 0) = sc;
+	A(2, 1) = ss;
+	A(2, 2) = cb;
+
+	if (doL)
+		A = L * A;
+
+	if (doR)
+		A = A * R;
+
+	if(inverse)
+		A = A.inv();
+
+	for (int m = 0; m < 3; m ++)
+		for (int n = 0; n < 3; n ++)
+			out[m*3 + n] = A(m, n);
+}
+
 void generateEulerMatrices(
 		ProjectionParams &ProjectionData,
 		XFLOAT *eulers,
 		bool inverse,
 		Matrix2D<RFLOAT> &L,
-		Matrix2D<RFLOAT> &R)
+		Matrix2D<RFLOAT> &R,
+		const OrientationCache *cache)
 {
-	RFLOAT alpha, beta, gamma;
-    RFLOAT ca, sa, cb, sb, cg, sg;
-    RFLOAT cc, cs, sc, ss;
+	Matrix2D<RFLOAT> A(3,3);
 
-    Matrix2D<RFLOAT> A(3,3);
-
-    bool doL = (L.mdimx == 3 && L.mdimy == 3);
-    bool doR = (R.mdimx == 3 && R.mdimy == 3);
+	bool doL = (L.mdimx == 3 && L.mdimy == 3);
+	bool doR = (R.mdimx == 3 && R.mdimy == 3);
+	const bool use_cache = cache && inverse && !doL && !doR;
 
 	for (long int i = 0; i < ProjectionData.rots.size(); i++)
 	{
-	    //TODO In a sense we're doing RAD2DEG just to do DEG2RAD here.
-	    //The only place the degree value is actually used is in the metadata assignment.
-
-	    alpha = DEG2RAD(ProjectionData.rots[i]);
-	    beta  = DEG2RAD(ProjectionData.tilts[i]);
-	    gamma = DEG2RAD(ProjectionData.psis[i]);
-
-#ifdef RELION_SINGLE_PRECISION
-	    sincosf(alpha, &sa, &ca);
-	    sincosf(beta,  &sb, &cb);
-	    sincosf(gamma, &sg, &cg);
-#else
-	    sincos(alpha, &sa, &ca);
-	    sincos(beta,  &sb, &cb);
-	    sincos(gamma, &sg, &cg);
-#endif
-
-	    cc = cb * ca;
-	    cs = cb * sa;
-	    sc = sb * ca;
-	    ss = sb * sa;
-
-	    A(0, 0) =  cg * cc - sg * sa;
-	    A(0, 1) =  cg * cs + sg * ca;
-	    A(0, 2) = -cg * sb;
-	    A(1, 0) = -sg * cc - cg * sa;
-	    A(1, 1) = -sg * cs + cg * ca;
-	    A(1, 2) = sg * sb;
-	    A(2, 0) = sc;
-	    A(2, 1) = ss;
-	    A(2, 2) = cb;
-
-		if (doL)
-			A = L * A;
-
-		if (doR)
-			A = A * R;
-
-		if(inverse)
-			A = A.inv();
-
-		for (int m = 0; m < 3; m ++)
-			for (int n = 0; n < 3; n ++)
-				eulers[9 * i + (m*3 + n)] = A(m, n);
+		if (use_cache)
+		{
+			const size_t e = ProjectionData.iorientclasses[i] % cache->entries;
+			if (cache->ready(e))
+			{
+				const XFLOAT *src = &cache->matrices[9 * (e * cache->nover + ProjectionData.iover_rots[i])];
+				for (int k = 0; k < 9; k++)
+					eulers[9 * i + k] = src[k];
+				continue;
+			}
+		}
+		eulerMatrixOne(ProjectionData.rots[i], ProjectionData.tilts[i], ProjectionData.psis[i],
+				inverse, doL, L, doR, R, A, &eulers[9 * i]);
 	}
-
 }
 
+// The orientation cache of this iteration for the fine pass, or null when the orientations
+// cannot be tabulated by (direction, psi) alone: priors, other than a full search range,
+// bodies, or a table that would be too large. RELION_GPU_ORIENT_CACHE=0 turns it off.
+static std::atomic<long> orientCacheHits(0), orientCacheMisses(0);
+
+std::shared_ptr<OrientationCache> getOrientationCache(
+		MlOptimiser *baseMLO, SamplingParameters &sp, OptimisationParamters &op)
+{
+	static const bool enabled = []() {
+		const char *e = getenv("RELION_GPU_ORIENT_CACHE");
+		return !(e && atoi(e) == 0);
+	}();
+	static const bool verbose = getenv("RELION_GPU_ORIENT_CACHE_VERBOSE") != nullptr;
+	const char *why = nullptr;
+	if (!enabled) why = "disabled";
+	else if (sp.current_oversampling == 0) why = "oversampling 0";
+	else if (baseMLO->mymodel.nr_bodies != 1) why = "bodies";
+	else if (!op.pointer_dir_nonzeroprior.empty() || !op.pointer_psi_nonzeroprior.empty()) why = "prior pointers";
+	else if (sp.idir_min != 0 || sp.ipsi_min != 0 || sp.idir_max != sp.nr_dir - 1 || sp.ipsi_max != sp.nr_psi - 1) why = "partial range";
+	else if (baseMLO->do_skip_align || baseMLO->do_skip_rotate || baseMLO->do_only_sample_tilt) why = "skip";
+	const size_t entries = (size_t) sp.nr_dir * sp.nr_psi;
+	const size_t nover = sp.nr_oversampled_rot;
+	const size_t bytes = entries * nover * (3 * sizeof(RFLOAT) + 9 * sizeof(XFLOAT));
+	if (!why && bytes > ((size_t) 1 << 29)) why = "too large";
+	if (why)
+	{
+		static std::atomic<int> reported(0);
+		if (verbose && enabled && reported.fetch_add(1) < 3)
+			fprintf(stderr, "ORIENT_CACHE off: %s\n", why);
+		return nullptr;
+	}
+
+	struct Signature
+	{
+		MlOptimiser *who; int iter; int over; size_t entries, nover;
+		RFLOAT perturb, psi_step; int order;
+		bool operator==(const Signature &o) const
+		{
+			return who == o.who && iter == o.iter && over == o.over && entries == o.entries
+				&& nover == o.nover && perturb == o.perturb && psi_step == o.psi_step && order == o.order;
+		}
+	};
+	const Signature sig = { baseMLO, baseMLO->iter, (int) sp.current_oversampling, entries, nover,
+			baseMLO->sampling.random_perturbation, baseMLO->sampling.psi_step, baseMLO->sampling.healpix_order };
+
+	static std::mutex mtx;
+	static Signature cur_sig = { nullptr, -1, -1, 0, 0, 0, 0, 0 };
+	static std::shared_ptr<OrientationCache> cur;
+	std::lock_guard<std::mutex> lock(mtx);
+	if (!cur || !(cur_sig == sig))
+	{
+		if (verbose)
+			fprintf(stderr, "ORIENT_CACHE new table iter %d: %zu entries x %zu, previous hits %ld misses %ld\n",
+					sig.iter, entries, nover, orientCacheHits.exchange(0), orientCacheMisses.exchange(0));
+		cur.reset(new OrientationCache(entries, nover));
+		cur_sig = sig;
+	}
+	return cur;
+}
 
 long unsigned generateProjectionSetupFine(
 		OptimisationParamters &op,
@@ -283,6 +364,8 @@ long unsigned generateProjectionSetupFine(
 	//Local variables
 	std::vector< RFLOAT > oversampled_rot, oversampled_tilt, oversampled_psi;
 	long int orientation_num = 0;
+	std::shared_ptr<OrientationCache> cache = getOrientationCache(baseMLO, sp, op);
+	Matrix2D<RFLOAT> A(3,3), noL, noR;
 
 	for (long int idir = sp.idir_min, iorient = 0; idir <= sp.idir_max; idir++)
 	{
@@ -292,10 +375,40 @@ long unsigned generateProjectionSetupFine(
 
 			if (baseMLO->isSignificantAnyImageAnyTranslation(iorientclass, sp.itrans_min, sp.itrans_max, op.Mcoarse_significant))
 			{
+				if (cache && cache->ready(iorient))
+				{
+					orientCacheHits.fetch_add(1, std::memory_order_relaxed);
+					const RFLOAT *ang = &cache->angles[3 * iorient * cache->nover];
+					for (long int iover_rot = 0; iover_rot < sp.nr_oversampled_rot; iover_rot++)
+					{
+						ProjectionData.pushBackAll(	(long unsigned)iclass,
+													ang[3 * iover_rot], ang[3 * iover_rot + 1], ang[3 * iover_rot + 2],
+													iorientclass,
+													iover_rot 					);
+						orientation_num ++;
+					}
+					continue;
+				}
+
 				// Now get the oversampled (rot, tilt, psi) triplets
 				// This will be only the original (rot,tilt,psi) triplet in the first pass (sp.current_oversampling==0)
 				baseMLO->sampling.getOrientations(idir, ipsi, sp.current_oversampling, oversampled_rot, oversampled_tilt, oversampled_psi,
 						op.pointer_dir_nonzeroprior, op.directions_prior, op.pointer_psi_nonzeroprior, op.psi_prior);
+
+				orientCacheMisses.fetch_add(1, std::memory_order_relaxed);
+				if (cache && cache->claim(iorient))
+				{
+					for (long int iover_rot = 0; iover_rot < sp.nr_oversampled_rot; iover_rot++)
+					{
+						RFLOAT *ang = &cache->angles[3 * (iorient * cache->nover + iover_rot)];
+						ang[0] = oversampled_rot[iover_rot];
+						ang[1] = oversampled_tilt[iover_rot];
+						ang[2] = oversampled_psi[iover_rot];
+						eulerMatrixOne(ang[0], ang[1], ang[2], true, false, noL, false, noR, A,
+								&cache->matrices[9 * (iorient * cache->nover + iover_rot)]);
+					}
+					cache->publish(iorient);
+				}
 
 				// Loop over all oversampled orientations (only a single one in the first pass)
 				for (long int iover_rot = 0; iover_rot < sp.nr_oversampled_rot; iover_rot++)
@@ -1093,6 +1206,32 @@ void runBackProjectKernel(
 
 #define WEIGHT_MAP_BLOCK_SIZE 512
 
+#ifdef _CUDA_ENABLED
+// All classes of a particle in one launch (per-class launches cost a driver call each: with 100
+// classes in 2D that was 100 tiny launches per particle)
+void mapAllWeightsToMweightsBatched(
+		const std::vector<WeightMapJob> &jobs,
+		XFLOAT * d_allweights,
+		XFLOAT * d_mweights,
+		unsigned long translation_num,
+		AccPtr<char> &table)
+{
+	if (jobs.empty())
+		return;
+	unsigned long max_orient = 0;
+	for (const WeightMapJob &j : jobs)
+		max_orient = std::max(max_orient, j.n_orient);
+	table.setSize(jobs.size() * sizeof(WeightMapJob));
+	table.allAlloc();
+	memcpy(&table[0], jobs.data(), jobs.size() * sizeof(WeightMapJob));
+	table.cpToDevice();
+	dim3 grid((unsigned) ceil((float)(max_orient * translation_num) / (float) WEIGHT_MAP_BLOCK_SIZE), (unsigned) jobs.size());
+	cuda_kernel_allweights_to_mweights_batched<<< grid, WEIGHT_MAP_BLOCK_SIZE, 0, table.getStream() >>>(
+			(const WeightMapJob *) ~table, d_allweights, d_mweights, translation_num);
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+#endif
+
 void mapAllWeightsToMweights(
 		unsigned long * d_iorient, //projectorPlan.iorientclasses
 		XFLOAT * d_allweights, //allWeights
@@ -1139,25 +1278,104 @@ void mapAllWeightsToMweights(
 }
 
 #ifdef _CUDA_ENABLED
+
+// Pixel chunks of the class-batched wavg and backprojection kernels: a particle has
+// one block per orientation (a few dozen for local searches), so its kernels leave
+// most SMs idle. Chunks of the pixel passes give n_chunks times as many blocks;
+// chosen for about 3 blocks per SM, at least 2 passes per chunk. An env value N > 0
+// sets the number (1: no chunks, as before).
+static int envChunkOverride(const char *name)
+{
+	const char *e = getenv(name);
+	return e ? atoi(e) : 0;
+}
+
+// Blocks per multiprocessor that pixel chunks aim for (RELION_GPU_BLOCKS_PER_SM, default 3)
+static size_t gpuBlocksPerSM()
+{
+	static const size_t b = []()
+	{
+		const char *e = getenv("RELION_GPU_BLOCKS_PER_SM");
+		const int v = (e != NULL) ? atoi(e) : 0;
+		return (size_t) ((v > 0) ? v : 3);
+	}();
+	return b;
+}
+
+// Says once per process and step how many pixel chunks a GPU step uses, and why
+static void reportPixelChunks(const char *step, const char *env, int n_chunks, size_t blocks, bool overridden)
+{
+	static std::mutex mutex;
+	static std::set<std::string> reported;
+	std::lock_guard<std::mutex> lock(mutex);
+	if (!reported.insert(step).second)
+		return;
+	if (overridden)
+		std::cout << " GPU " << step << ": " << n_chunks << " pixel chunks per particle (" << env << ")." << std::endl;
+	else
+		std::cout << " GPU " << step << ": " << n_chunks << " pixel chunks per particle, for about " << gpuBlocksPerSM() << " blocks per multiprocessor"
+		          << " instead of " << blocks << " blocks in all (" << env << "=N to choose, 1 for none)." << std::endl;
+}
+
+static int gpuPixelChunks(size_t n_blocks, size_t n_pass, int requested)
+{
+	if (n_blocks == 0 || n_pass == 0)
+		return 1;
+	if (requested > 0)
+		return (int) std::min<size_t>(requested, n_pass);
+	int dev = 0, sms = 0;
+	DEBUG_HANDLE_ERROR(cudaGetDevice(&dev));
+	DEBUG_HANDLE_ERROR(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
+	const size_t target = gpuBlocksPerSM() * (size_t) std::max(sms, 1);
+	const size_t chunks = std::min((target + n_blocks - 1) / n_blocks, n_pass / 2);
+	return (int) std::max<size_t>(chunks, 1);
+}
+
 // Upload the class table and the first block of each class (one block per
 // orientation), in one copy; returns the number of blocks. A few dozen bytes per
 // class, so batching never needs memory in proportion to the orientations.
 template <class Job>
 static size_t uploadClassTable(std::vector<Job> &jobs, std::vector<size_t> &nums,
-		AccPtr<char> &table, const Job *&d_jobs, const int *&d_start)
+		AccPtr<char> &table, const Job *&d_jobs, const int *&d_start,
+		const std::vector<unsigned> *extra = NULL, const unsigned **d_extra = NULL)
 {
 	std::vector<int> start(jobs.size() + 1, 0);
 	for (size_t c = 0; c < jobs.size(); c++)
 		start[c + 1] = start[c] + (int) nums[c];
 	const size_t class_bytes = ((jobs.size() * sizeof(Job) + 15) / 16) * 16;
-	table.setSize(class_bytes + start.size() * sizeof(int));
+	const size_t extra_pos = ((class_bytes + start.size() * sizeof(int) + 15) / 16) * 16;
+	const size_t extra_bytes = extra ? extra->size() * sizeof(unsigned) : 0;
+	table.setSize(extra_pos + extra_bytes);
 	table.allAlloc();
 	memcpy(&table[0], jobs.data(), jobs.size() * sizeof(Job));
 	memcpy(&table[class_bytes], start.data(), start.size() * sizeof(int));
+	if (extra_bytes)
+		memcpy(&table[extra_pos], extra->data(), extra_bytes);
 	table.cpToDevice();
 	d_jobs = (const Job *) ~table;
 	d_start = (const int *) &(~table)[class_bytes];
+	if (d_extra)
+		*d_extra = extra_bytes ? (const unsigned *) &(~table)[extra_pos] : NULL;
 	return start.back();
+}
+
+void mapAllWeightsToMweightsBatched(
+		std::vector<MapClassJob> &jobs,
+		XFLOAT * d_mweights,
+		unsigned long translation_num,
+		AccPtr<char> &table)
+{
+	if (jobs.empty())
+		return;
+	std::vector<size_t> blocks(jobs.size());
+	for (size_t c = 0; c < jobs.size(); c++)
+		blocks[c] = (jobs[c].n * translation_num + WEIGHT_MAP_BLOCK_SIZE - 1) / WEIGHT_MAP_BLOCK_SIZE;
+	const MapClassJob *d_jobs;
+	const int *d_start;
+	const size_t n = uploadClassTable(jobs, blocks, table, d_jobs, d_start);
+	cuda_kernel_allweights_to_mweights_batched<<< n, WEIGHT_MAP_BLOCK_SIZE, 0, table.getStream() >>>(
+			d_jobs, d_start, (int) jobs.size(), d_mweights, translation_num);
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 
 void runWavgKernelBatched(
@@ -1186,11 +1404,41 @@ void runWavgKernelBatched(
 	const int nc = jobs.size();
 	deviceStream_t stream = table.getStream();
 	AccProjectorKernel &projector = jobs[0].projector;
+	// Pixel chunks (see cuda_kernel_wavg)
+	const unsigned wavg_block = data_is_3D ? WAVG_BLOCK_SIZE_DATA3D : WAVG_BLOCK_SIZE;
+	const int wavg_requested = envChunkOverride("RELION_GPU_WAVG_SPLIT");
+	const int wavg_chunks = gpuPixelChunks(n, (image_size + wavg_block - 1) / wavg_block, wavg_requested);
+	reportPixelChunks("weighted averaging", "RELION_GPU_WAVG_SPLIT", wavg_chunks, n, wavg_requested > 0);
+#ifndef ACC_DOUBLE_PRECISION
+	// RELION_GPU_WAVG_SUM=1: 2D data, up to 1024 translations, table up to 64 MB
+	if (gpuWavgSum() && !data_is_3D && translation_num > 0 && translation_num <= 1024 &&
+		image_size * translation_num * sizeof(float2) <= ((size_t) 64 << 20))
+	{
+		AccPtr<float2> shifts = table.make<float2>();
+		shifts.setSize(translation_num * image_size);
+		shifts.deviceAlloc();
+		cuda_kernel_shift_table<<<dim3((image_size + 127) / 128, translation_num), 128, 0, stream>>>(
+				trans_x, trans_y, ~shifts, image_size, projector.imgX, projector.imgY, projector.maxR);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		const size_t smem = (16 + 2 * translation_num) * sizeof(XFLOAT);
+#define WAVG_SUM(RC, R3) cuda_kernel_wavg_sum<RC, R3, WAVG_BLOCK_SIZE><<<dim3(n, wavg_chunks), WAVG_BLOCK_SIZE, smem, stream>>>( \
+		image_size, Fimg_real, Fimg_imag, ctfs, wdiff2s_parts, translation_num, (XFLOAT) op.sum_weight, \
+		(XFLOAT) op.significant_weight, part_scale, ~shifts, d_jobs, d_start, nc, wavg_chunks)
+		if (refs_are_ctf_corrected) { if (projector.mdlZ != 0) WAVG_SUM(true, true);  else WAVG_SUM(true, false); }
+		else                        { if (projector.mdlZ != 0) WAVG_SUM(false, true); else WAVG_SUM(false, false); }
+#undef WAVG_SUM
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		return;
+	}
+#endif
 	// The same kernel variants as runWavgKernel
-#define WAVG_BATCH(RC, R3, D3, BS) cuda_kernel_wavg<RC, R3, D3, BS><<<n, BS, (3*BS+9)*sizeof(XFLOAT), stream>>>( \
+	// Room for the list of significant translations in shared memory (see cuda_kernel_wavg)
+	const bool sig_list = translation_num * sizeof(int) <= 16384;
+	const size_t sig_bytes = sig_list ? translation_num * sizeof(int) : 0;
+#define WAVG_BATCH(RC, R3, D3, BS) cuda_kernel_wavg<RC, R3, D3, BS><<<dim3(n, wavg_chunks), BS, (3*BS+9)*sizeof(XFLOAT) + sig_bytes, stream>>>( \
 		NULL, projector, image_size, 0, Fimg_real, Fimg_imag, trans_x, trans_y, trans_z, NULL, ctfs, \
 		wdiff2s_parts, NULL, NULL, translation_num, (XFLOAT) op.sum_weight, (XFLOAT) op.significant_weight, \
-		part_scale, d_jobs, d_start, nc)
+		part_scale, d_jobs, d_start, nc, wavg_chunks, sig_list)
 	if (refs_are_ctf_corrected)
 	{
 		if (data_is_3D)                WAVG_BATCH(true, true, true, WAVG_BLOCK_SIZE_DATA3D);
@@ -1233,13 +1481,29 @@ void runDiff2KernelFineBatched(
 	deviceStream_t stream = table.getStream();
 	AccProjectorKernel &projector = jobs[0].projector;
 	// The same kernel variants as runDiff2KernelFine (not do_CC)
-#define D2F_BATCH(R3, D3, BS, CH) cuda_kernel_diff2_fine<R3, D3, BS, CH><<<n, BS, 0, stream>>>( \
+	// 2D references: pixel chunks, like the coarse pass (RELION_GPU_FINE_SPLIT=auto chooses the number, =N sets it; off unless
+	// asked for). Each chunk's partial sums go to a buffer and a second kernel adds them in chunk order, so the result is the same
+	// from run to run (but not the order of the additions of the unchunked kernel: last-digit differences against it).
+	static const char *fine_env = getenv("RELION_GPU_FINE_SPLIT");
+	const int fine_requested = envChunkOverride("RELION_GPU_FINE_SPLIT");
+	const bool fine_on = fine_env != NULL && (fine_requested > 1 || !strcmp(fine_env, "auto"));
+	const int fine_chunks = (!fine_on || data_is_3D || projector.mdlZ != 0) ? 1 : gpuPixelChunks(n, (image_size + D2F_BLOCK_SIZE_2D - 1) / D2F_BLOCK_SIZE_2D, fine_requested);
+	AccPtr<XFLOAT> fine_partial = table.make<XFLOAT>();
+	if (fine_chunks > 1)
+	{
+		fine_partial.setSize((size_t) fine_chunks * n * D2F_CHUNK_2D);
+		fine_partial.deviceAlloc();
+	}
+#define D2F_BATCH(R3, D3, BS, CH) cuda_kernel_diff2_fine<R3, D3, BS, CH><<<dim3(n, (R3 || D3) ? 1 : fine_chunks), BS, 0, stream>>>( \
 		NULL, Fimgs_real, Fimgs_imag, trans_x, trans_y, trans_z, projector, corr_img, NULL, \
-		image_size, sum_init, 0, translation_num, 0, NULL, NULL, NULL, NULL, d_jobs, d_start, nc)
+		image_size, sum_init, 0, translation_num, 0, NULL, NULL, NULL, NULL, d_jobs, d_start, nc, (R3 || D3) ? 1 : fine_chunks, \
+		fine_chunks > 1 ? ~fine_partial : (XFLOAT *) NULL)
 	if (data_is_3D)               D2F_BATCH(true, true, D2F_BLOCK_SIZE_DATA3D, D2F_CHUNK_DATA3D);
 	else if (projector.mdlZ != 0) D2F_BATCH(true, false, D2F_BLOCK_SIZE_REF3D, D2F_CHUNK_REF3D);
 	else                          D2F_BATCH(false, false, D2F_BLOCK_SIZE_2D, D2F_CHUNK_2D);
 #undef D2F_BATCH
+	if (fine_chunks > 1)
+		cuda_kernel_diff2_fine_sum_chunks<D2F_CHUNK_2D><<<(unsigned) n, 32, 0, stream>>>(d_jobs, d_start, nc, ~fine_partial, fine_chunks, sum_init);
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 
@@ -1281,6 +1545,141 @@ void runCollect2jobsBatched(
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 
+// Orientations per block of cuda_kernel_shared_sums
+#define SHSUM_G 8
+
+bool runSharedSumsKernelBatched(
+		std::vector<SharedSumsClassJob> &jobs,
+		AccBackprojector &BP,
+		XFLOAT *d_img_real,
+		XFLOAT *d_img_imag,
+		XFLOAT *d_img_real_nomask,
+		XFLOAT *d_img_imag_nomask,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *d_ctfs,
+		XFLOAT *d_Minvsigma2s,
+		XFLOAT *wdiff2s_parts,
+		unsigned long translation_num,
+		XFLOAT weight_norm,
+		XFLOAT significant_weight,
+		XFLOAT part_scale,
+		unsigned long image_size,
+		int imgX,
+		int imgY,
+		bool refs_are_ctf_corrected,
+		bool ctf_premultiplied,
+		int parts,
+		AccPtr<char> &table)
+{
+#ifdef ACC_DOUBLE_PRECISION
+	return false;
+#else
+	if (jobs.empty())
+		return false;
+	const int max_r = imgX - 1; // the projector's maxR
+	// The kernels agree on the pixel coordinates (and one table serves both) when the
+	// image has an even size and maxR is half of it; the sums need shared memory
+	if ((imgY % 2) != 0 || max_r != imgY / 2 || translation_num == 0 || translation_num > 1024)
+		return false;
+	std::vector<size_t> groups(jobs.size());
+	for (size_t c = 0; c < jobs.size(); c++)
+		groups[c] = (jobs[c].n_orient + SHSUM_G - 1) / SHSUM_G;
+	const SharedSumsClassJob *d_jobs;
+	const int *d_start;
+	const size_t n = uploadClassTable(jobs, groups, table, d_jobs, d_start);
+	deviceStream_t stream = table.getStream();
+
+	// The shifts, once for all orientations
+	AccPtr<float2> shifts = table.make<float2>();
+	shifts.setSize(translation_num * image_size);
+	shifts.deviceAlloc();
+	cuda_kernel_shift_table<<<dim3((image_size + SHSUM_THREADS - 1) / SHSUM_THREADS, translation_num), SHSUM_THREADS, 0, stream>>>(
+			trans_x, trans_y, ~shifts, image_size, imgX, imgY, max_r);
+
+	const dim3 grid(n, (image_size + SHSUM_THREADS - 1) / SHSUM_THREADS);
+	const size_t smem = (size_t) SHSUM_G * translation_num * sizeof(XFLOAT);
+	const int bp_max_r2 = BP.maxR2;
+#define SHSUM_LAUNCH(RC, CP) cuda_kernel_shared_sums<SHSUM_G, RC, CP><<<grid, SHSUM_THREADS, smem, stream>>>( \
+		~shifts, d_img_real, d_img_imag, d_img_real_nomask, d_img_imag_nomask, d_ctfs, d_Minvsigma2s, wdiff2s_parts, \
+		translation_num, weight_norm, significant_weight, part_scale, image_size, imgX, imgY, max_r, bp_max_r2, \
+		BP.padding_factor, BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ, d_jobs, d_start, (int) jobs.size(), parts)
+	if (refs_are_ctf_corrected)
+	{
+		if (ctf_premultiplied) SHSUM_LAUNCH(true, true);
+		else                   SHSUM_LAUNCH(true, false);
+	}
+	else
+	{
+		if (ctf_premultiplied) SHSUM_LAUNCH(false, true);
+		else                   SHSUM_LAUNCH(false, false);
+	}
+#undef SHSUM_LAUNCH
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+	return true;
+#endif
+}
+
+// Gradient (VDAM) 2D backprojection of all classes in one launch: the kernel of
+// runBackProjectKernel with do_grad, one block per class and orientation. A block does
+// what it did in a per-class launch.
+void runBackProjectSgdKernelBatched(
+		AccBackprojector &BP,
+		std::vector<BPSgdClassJob> &jobs,
+		std::vector<size_t> &orientation_nums,
+		XFLOAT *d_img_real,
+		XFLOAT *d_img_imag,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT* d_Minvsigma2s,
+		XFLOAT* d_ctfs,
+		unsigned long translation_num,
+		XFLOAT significant_weight,
+		int imgX,
+		int imgY,
+		bool ctf_premultiplied,
+		AccPtr<char> &table)
+{
+	if (jobs.empty())
+		return;
+	const BPSgdClassJob *d_jobs;
+	const int *d_start;
+	const size_t n = uploadClassTable(jobs, orientation_nums, table, d_jobs, d_start);
+	const int nc = jobs.size();
+	deviceStream_t stream = table.getStream();
+#ifndef ACC_DOUBLE_PRECISION
+	// RELION_GPU_WAVG_SUM=1 also for the back-projection: see cuda_kernel_backproject2D_SGD_sum
+	if (gpuWavgSum() && (imgY % 2) == 0 && BP.maxR == imgY / 2 && translation_num > 0 && translation_num <= 1024 &&
+		(size_t) imgX * imgY * translation_num * sizeof(float2) <= ((size_t) 64 << 20))
+	{
+		AccPtr<float2> shifts = table.make<float2>();
+		shifts.setSize(translation_num * imgX * imgY);
+		shifts.deviceAlloc();
+		cuda_kernel_shift_table<<<dim3((imgX * imgY + 127) / 128, translation_num), 128, 0, stream>>>(
+				trans_x, trans_y, ~shifts, imgX * imgY, imgX, imgY, BP.maxR);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		const size_t smem = (16 + 2 * translation_num) * sizeof(XFLOAT);
+#define BP2DSGD_SUM(CP) cuda_kernel_backproject2D_SGD_sum<CP><<<n, BP_2D_BLOCK_SIZE, smem, stream>>>( \
+		jobs[0].projector, d_img_real, d_img_imag, d_Minvsigma2s, d_ctfs, translation_num, significant_weight, \
+		BP.maxR2, BP.padding_factor, imgX, imgY, imgX*imgY, BP.mdlX, BP.mdlInitY, ~shifts, d_jobs, d_start, nc)
+		if (ctf_premultiplied) BP2DSGD_SUM(true);
+		else                   BP2DSGD_SUM(false);
+#undef BP2DSGD_SUM
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		return;
+	}
+#endif
+#define BP2DSGD_BATCH(CP) cuda_kernel_backproject2D_SGD<CP><<<n, BP_2D_BLOCK_SIZE, 0, stream>>>( \
+		jobs[0].projector, d_img_real, d_img_imag, trans_x, trans_y, NULL, d_Minvsigma2s, d_ctfs, \
+		translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
+		BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgX*imgY, BP.mdlX, BP.mdlInitY, \
+		d_jobs, d_start, nc)
+	if (ctf_premultiplied) BP2DSGD_BATCH(true);
+	else                   BP2DSGD_BATCH(false);
+#undef BP2DSGD_BATCH
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+
 void runBackProjectKernelBatched(
 		AccBackprojector &BP,
 		std::vector<BPClassJob> &jobs,
@@ -1299,15 +1698,26 @@ void runBackProjectKernelBatched(
 		int imgZ,
 		bool data_is_3D,
 		bool ctf_premultiplied,
-		AccPtr<char> &table)
+		AccPtr<char> &table,
+		const std::vector<unsigned> *slots,
+		const BPAccumView *accum)
 {
 	if (jobs.empty())
 		return;
 	const BPClassJob *d_jobs;
 	const int *d_start;
-	const size_t n = uploadClassTable(jobs, orientation_nums, table, d_jobs, d_start);
+	const unsigned *d_slots = NULL;
+	const BPAccumView acc = (slots && accum && !data_is_3D && BP.mdlZ != 1) ? *accum : BPAccumView();
+	const size_t n = uploadClassTable(jobs, orientation_nums, table, d_jobs, d_start,
+			acc.cap > 0 ? slots : NULL, &d_slots);
 	const int nc = jobs.size();
 	deviceStream_t stream = table.getStream();
+	// Pixel chunks for the 3D kernels (see cuda_kernel_backproject3D)
+	const unsigned bp_block = data_is_3D ? BP_DATA3D_BLOCK_SIZE : BP_REF3D_BLOCK_SIZE;
+	const int bp_requested = envChunkOverride("RELION_GPU_BP_SPLIT");
+	const int bp_chunks = gpuPixelChunks(n, ((size_t) imgX * imgY * imgZ + bp_block - 1) / bp_block, bp_requested);
+	if (BP.mdlZ != 1)
+		reportPixelChunks("back-projection", "RELION_GPU_BP_SPLIT", bp_chunks, n, bp_requested > 0);
 	// The same kernel variants as runBackProjectKernel (without do_grad); BP gives the
 	// dimensions shared by all classes' models, jobs their arrays
 	if (BP.mdlZ == 1)
@@ -1315,22 +1725,39 @@ void runBackProjectKernelBatched(
 		// The significant translations listed once per block (see cuda_kernel_backproject2D)
 		const size_t smem = translation_num * (sizeof(XFLOAT) + sizeof(int));
 		const bool compact = smem <= 40960;
-#define BP2D_BATCH(CP) cuda_kernel_backproject2D<CP><<<n, BP_2D_BLOCK_SIZE, compact ? smem : 0, stream>>>( \
+		// Pixel chunks for the 2D kernel too (RELION_GPU_BP_SPLIT=N to choose, 1 for none): its blocks are one per
+		// significant orientation, a handful per particle, each looping over all the pixel passes
+		const int bp2d_chunks = gpuPixelChunks(n, ((size_t) imgX * imgY + BP_2D_BLOCK_SIZE - 1) / BP_2D_BLOCK_SIZE, bp_requested);
+#define BP2D_BATCH(CP) cuda_kernel_backproject2D<CP><<<dim3(n, bp2d_chunks), BP_2D_BLOCK_SIZE, compact ? smem : 0, stream>>>( \
 			d_img_real, d_img_imag, trans_x, trans_y, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgX*imgY, BP.mdlX, BP.mdlInitY, \
-			d_jobs, d_start, nc, compact)
+			d_jobs, d_start, nc, compact, bp2d_chunks)
 		if (ctf_premultiplied) BP2D_BATCH(true);
 		else                   BP2D_BATCH(false);
 #undef BP2D_BATCH
 	}
 	else
 	{
-#define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<n, BS, 0, stream>>>( \
+		const size_t smem3 = translation_num * (sizeof(XFLOAT) + sizeof(int));
+		const bool compact3 = smem3 <= 40960;
+		static const bool bp_scatter = [] { const char *e = getenv("RELION_GPU_BP_SCATTER"); return !(e && atoi(e) == 0); }();
+		// RELION_GPU_BP_TILE=1: a warp takes a tile of 16 x 2 pixels (2D data) so that its atomic additions
+		// are denser; =check also runs the default path on the first RELION_GPU_BP_TILE_CHECKS (2) launches
+		// and reports how far the two models differ (one class, no accumulation); off by default.
+		// The check saves and restores the whole model, so it is only valid with --j 1 (threads share the model)
+		static const int bp_tile_mode = [] {
+			const char *e = getenv("RELION_GPU_BP_TILE");
+			if (!e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
+			return strcmp(e, "check") ? 1 : 2;
+		}();
+		auto launch_bp = [&](int tl) {
+#define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<dim3(n, bp_chunks), BS, compact3 ? smem3 : 0, stream>>>( \
 			d_img_real, d_img_imag, trans_x, trans_y, trans_z, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgZ, imgX*imgY*imgZ, \
-			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ, d_jobs, d_start, nc)
+			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ, d_jobs, d_start, nc, bp_chunks, compact3, bp_scatter, acc, d_slots, \
+			data_is_3D ? 0 : tl)
 		if (data_is_3D)
 		{
 			if (ctf_premultiplied) BP3D_BATCH(true, true, BP_DATA3D_BLOCK_SIZE);
@@ -1342,12 +1769,97 @@ void runBackProjectKernelBatched(
 			else                   BP3D_BATCH(false, false, BP_REF3D_BLOCK_SIZE);
 		}
 #undef BP3D_BATCH
+		};
+		static int tile_checks_left = [] { const char *e = getenv("RELION_GPU_BP_TILE_CHECKS"); return e ? atoi(e) : 2; }();
+		if (bp_tile_mode == 2 && tile_checks_left > 0 && !data_is_3D && nc == 1 && acc.cap == 0 && BP.mdlXYZ > 0)
+		{
+			tile_checks_left--;
+			// the model of the class: one interleaved region of 3 floats per voxel, or three planar ones
+			XFLOAT *reg[3] = { jobs[0].model_real, jobs[0].model_imag, jobs[0].model_weight };
+			const int nreg = BP.interleaved ? 1 : 3;
+			const size_t reg_n = BP.interleaved ? 3 * BP.mdlXYZ : BP.mdlXYZ;
+			const size_t total = nreg * reg_n;
+			static float *d_save0 = NULL, *d_save1 = NULL;
+			static size_t save_cap = 0;
+			if (save_cap < total)
+			{
+				if (d_save0) { cudaFree(d_save0); cudaFree(d_save1); }
+				cudaMalloc(&d_save0, total * sizeof(float));
+				cudaMalloc(&d_save1, total * sizeof(float));
+				save_cap = total;
+			}
+			static unsigned *d_acc = NULL;
+			if (!d_acc) cudaMalloc(&d_acc, 4 * sizeof(double));
+			cudaMemsetAsync(d_acc, 0, 4 * sizeof(double), stream);
+			for (int r = 0; r < nreg; r++) cudaMemcpyAsync(d_save0 + r * reg_n, reg[r], reg_n * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+			launch_bp(0);   // the default path
+			for (int r = 0; r < nreg; r++) cudaMemcpyAsync(d_save1 + r * reg_n, reg[r], reg_n * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+			for (int r = 0; r < nreg; r++) cudaMemcpyAsync(reg[r], d_save0 + r * reg_n, reg_n * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+			launch_bp(1);   // the tiled path, from the same start (its result stays in the model)
+			unsigned *d_max = d_acc;            // [0] max |d|, [1] max |r|
+			double *d_sum = (double *) (d_acc + 2); // [0] sum d^2, [1] sum r^2
+			for (int r = 0; r < nreg; r++)
+				cuda_kernel_bp_check_diff<<<1024, 256, 0, stream>>>(d_save0 + r * reg_n, d_save1 + r * reg_n, reg[r], reg_n, d_max, d_max + 1, d_sum, d_sum + 1);
+			unsigned h_max[2]; double h_sum[2];
+			cudaMemcpyAsync(h_max, d_max, sizeof(h_max), cudaMemcpyDeviceToHost, stream);
+			cudaMemcpyAsync(h_sum, d_sum, sizeof(h_sum), cudaMemcpyDeviceToHost, stream);
+			cudaStreamSynchronize(stream);
+			float md, mr;
+			memcpy(&md, &h_max[0], 4); memcpy(&mr, &h_max[1], 4);
+			fprintf(stderr, "BP_TILE_CHECK: model update of this launch, max |tiled - default| %.3g, max |update| %.3g (ratio %.2e), rms ratio %.2e\n",
+					md, mr, mr > 0 ? md / mr : 0.f, h_sum[1] > 0 ? sqrt(h_sum[0] / h_sum[1]) : 0.0);
+		}
+		else
+			launch_bp(bp_tile_mode == 1 ? 1 : 0);
 	}
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+
+// Spreads the per-orientation accumulation into the class volumes (see BPAccumView)
+void runBackProjectAccumFlush(
+		AccBackprojector &BP,
+		const BPAccumView &acc,
+		const BPModelPtrs *d_models,
+		unsigned slots_per_class,
+		unsigned img_x,
+		unsigned img_y,
+		int used)
+{
+	cuda_kernel_backproject3D_flush<<<used, 128>>>(
+			acc, d_models, slots_per_class, img_x, img_y, BP.maxR2, BP.padding_factor,
+			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ);
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 #endif
 
 #ifdef _CUDA_ENABLED
+// Pixel chunks of the class-batched coarse pass (see runDiff2KernelCoarseBatched).
+// RELION_GPU_COARSE_SPLIT=N sets the number of chunks (1: no chunks, as before);
+// unset, it is chosen for about 3 blocks per SM of the current device.
+static int coarseChunkOverride()
+{
+	static const int n = [] { const char *e = getenv("RELION_GPU_COARSE_SPLIT"); return e ? atoi(e) : 0; }();
+	return n;
+}
+
+// RELION_GPU_COARSE_DETERMINISTIC=1: always sum the coarse differences through the chunk buffer
+// (one chunk when the pass is not split), never with atomics, so the order of the sums is fixed
+// and a particle comes out bit for bit the same alone or in a group (RELION_GPU_PARTICLE_GROUP)
+static bool coarseDeterministic()
+{
+	static const bool d = [] { const char *e = getenv("RELION_GPU_COARSE_DETERMINISTIC"); return e && atoi(e) != 0; }();
+	return d;
+}
+
+static size_t coarseChunkTargetBlocks()
+{
+	int dev = 0, sms = 0;
+	DEBUG_HANDLE_ERROR(cudaGetDevice(&dev));
+	DEBUG_HANDLE_ERROR(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
+	return gpuBlocksPerSM() * (size_t) std::max(sms, 1);
+}
+
+
 // Class batching of the coarse difference kernel: the two launches (whole blocks of
 // eulers_per_block orientations, then the rest one per block) for all classes at once
 template<bool REF3D, bool DATA3D, int block_sz, int eulers_per_block, int prefetch_fraction>
@@ -1358,12 +1870,30 @@ static void launchDiff2CoarseBatched(
 		XFLOAT *trans_x, XFLOAT *trans_y, XFLOAT *trans_z,
 		XFLOAT *corr_img, XFLOAT *Fimg_real, XFLOAT *Fimg_imag,
 		unsigned long translation_num, unsigned long image_size,
-		deviceStream_t stream)
+		deviceStream_t stream,
+		XFLOAT *d_partial = NULL, int n_chunks = 1, size_t chunk_stride = 0, size_t max_orient = 0,
+		const float2 *d_shift = NULL)
 {
+	if (d_partial != NULL && n_even && !n_rest)
+	{
+		// Pixel chunks (see cuda_kernel_diff2_coarse): n_even x n_chunks blocks, then
+		// the chunks added in order, one row of blocks per class
+		cuda_kernel_diff2_coarse<REF3D, DATA3D, block_sz, eulers_per_block, prefetch_fraction>
+			<<<dim3(n_even, n_chunks), block_sz, 0, stream>>>(
+				NULL, trans_x, trans_y, trans_z, Fimg_real, Fimg_imag, projector, corr_img, NULL,
+				translation_num, image_size, d_classes, d_even, n_classes, false,
+				d_partial, n_chunks, chunk_stride, d_shift);
+		const size_t n = max_orient * translation_num;
+		const unsigned sum_blocks = (unsigned) std::min<size_t>((n + 255) / 256, 1024);
+		cuda_kernel_diff2_coarse_sum_chunks<<<dim3(sum_blocks, n_classes), 256, 0, stream>>>(
+				d_classes, d_partial, n_chunks, chunk_stride, (int) translation_num);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		return;
+	}
 	if (n_even)
 		AccUtilities::diff2_coarse<REF3D, DATA3D, block_sz, eulers_per_block, prefetch_fraction>(
 			n_even, block_sz, NULL, trans_x, trans_y, trans_z, Fimg_real, Fimg_imag,
-			projector, corr_img, NULL, translation_num, image_size, stream, d_classes, d_even, n_classes, false);
+			projector, corr_img, NULL, translation_num, image_size, stream, d_classes, d_even, n_classes, false, d_shift);
 	if (n_rest)
 		AccUtilities::diff2_coarse<REF3D, DATA3D, block_sz, 1, prefetch_fraction>(
 			n_rest, block_sz, NULL, trans_x, trans_y, trans_z, Fimg_real, Fimg_imag,
@@ -1383,15 +1913,18 @@ bool runDiff2KernelCoarseBatched(
 		unsigned long translation_num,
 		unsigned long image_size,
 		bool data_is_3D,
-		AccPtr<char> &table)
+		AccPtr<char> &table,
+		CoarseDeferred *defer)
 {
 	if (classes.empty())
 		return true;
 	AccProjectorKernel &projector = classes[0].projector;
 	const bool ref3D = projector.mdlZ != 0;
 
-	// The same split as runDiff2KernelCoarse: per class, the orientations up to a
-	// multiple of `split` in blocks of `per_block`, the rest one per block
+	// Per class: the orientations up to a multiple of `split` in blocks of `per_block`,
+	// the rest one per block. runDiff2KernelCoarse splits 3D references at a multiple of
+	// the block size (128), which sends up to 127 orientations per class one per block;
+	// a block only needs whole blocks of per_block orientations, so split there instead.
 	int per_block, split, mult = 1;
 	if (ref3D)
 	{
@@ -1405,8 +1938,8 @@ bool runDiff2KernelCoarseBatched(
 			mult *= 2;
 		if (translation_num > blocks3D * mult)
 			CRITICAL(ERR_TRANSLIM);
-		split = blocks3D;
 		per_block = data_is_3D ? D2C_EULERS_PER_BLOCK_DATA3D : D2C_EULERS_PER_BLOCK_REF3D;
+		split = per_block;
 	}
 	else
 	{
@@ -1419,16 +1952,77 @@ bool runDiff2KernelCoarseBatched(
 		split = per_block = D2C_EULERS_PER_BLOCK_2D;
 	}
 
-	// Per class: the first block of its whole blocks and of its rest blocks
+	// Per class: its first block. The last block of a class takes the rest of its
+	// orientations (fewer than per_block), so one launch covers everything: a block's
+	// time hardly depends on its number of orientations (the loop over the image
+	// pixels sets it), and a second launch for the rest one per block cost about as
+	// much as half the first.
 	const size_t nc = classes.size();
 	std::vector<int> even(nc + 1, 0), rest(nc + 1, 0);
+	size_t n_orient_all = 0, max_orient = 0;
 	for (size_t c = 0; c < nc; c++)
 	{
 		const size_t n = orientation_nums[c];
-		const size_t n_even = n - n % split;
-		classes[c].n_even = (int) n_even;
-		even[c + 1] = even[c] + (int) (n_even / per_block);
-		rest[c + 1] = rest[c] + (int) (n - n_even);
+		classes[c].n_even = (int) n;
+		classes[c].n_orient = (int) n;
+		classes[c].orient_offset = (int) n_orient_all;
+		even[c + 1] = even[c] + (int) ((n + per_block - 1) / per_block);
+		n_orient_all += n;
+		max_orient = std::max(max_orient, n);
+	}
+	(void) split;
+
+	// Pixel chunks: a particle's coarse pass has only even[nc] blocks (a few dozen
+	// for local searches, against tens of SMs that each hold several blocks), so
+	// split the pixel passes in chunks for about coarseChunkTargetBlocks() blocks.
+	// Each chunk needs a pass of the block's orientations through the projector, so
+	// keep at least 4 passes per chunk (3D references; 1 for 2D), and the partial sums under 32 MB.
+	const int block_sz_used = !ref3D ? D2C_BLOCK_SIZE_2D :
+			(data_is_3D ? D2C_BLOCK_SIZE_DATA3D : D2C_BLOCK_SIZE_REF3D) * mult;
+	const size_t n_pass = (image_size + block_sz_used - 1) / block_sz_used;
+	const size_t chunk_stride = n_orient_all * translation_num;
+	int n_chunks = coarseChunkOverride();
+	const bool overridden = n_chunks > 0;
+	const size_t target = coarseChunkTargetBlocks();
+	if (n_chunks <= 0)
+	{
+		// 2D references are projected by a cheap interpolation, so a chunk may be a single pass there
+		n_chunks = (int) std::min<size_t>((target + even[nc] - 1) / std::max(even[nc], 1), ref3D ? n_pass / 4 : n_pass);
+		while (n_chunks > 1 && n_chunks * chunk_stride * sizeof(XFLOAT) > ((size_t) 32 << 20))
+			n_chunks--;
+	}
+	n_chunks = (int) std::max<size_t>(1, std::min<size_t>(n_chunks, n_pass));
+	reportPixelChunks("coarse pass", "RELION_GPU_COARSE_SPLIT", n_chunks, even[nc], overridden);
+	{
+		static const bool stats = getenv("RELION_GPU_COARSE_STATS") != NULL;
+		static long calls = 0;
+		if (stats && (calls++ % 500) == 0)
+			fprintf(stderr, "COARSE_STATS call %ld: classes %zu orientations %zu (blocks %d) translations %zu image_size %zu chunks %d block %d\n",
+					calls, nc, n_orient_all, even[nc], (size_t) translation_num, (size_t) image_size, n_chunks, block_sz_used);
+	}
+#ifndef ACC_DOUBLE_PRECISION
+	// RELION_GPU_COARSE_XT=1: cross-term form of the coarse differences (cuda_kernel_diff2_coarse_xt);
+	// =check runs both and reports how far they differ
+	static const int xt_mode = [] {
+		const char *e = getenv("RELION_GPU_COARSE_XT");
+		if (!e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
+		return strcmp(e, "check") ? 1 : 2;
+	}();
+	const size_t xt_tpad = ((translation_num + XT_TRANS - 1) / XT_TRANS) * XT_TRANS;
+	const bool use_xt = xt_mode && ref3D && !data_is_3D && image_size * xt_tpad * sizeof(float2) <= ((size_t) 128 << 20);
+#else
+	const bool use_xt = false;
+#endif
+	// A deferred (particle group) launch always sums through the chunk buffer
+	const bool use_partial = n_chunks > 1 || use_xt || defer != NULL || coarseDeterministic();
+	if (defer != NULL)
+		defer->partial.reset(new AccPtr<XFLOAT>(table.make<XFLOAT>()));
+	AccPtr<XFLOAT> partial_local = table.make<XFLOAT>();
+	AccPtr<XFLOAT> &partial = defer != NULL ? *defer->partial : partial_local;
+	if (use_partial)
+	{
+		partial.setSize(n_chunks * chunk_stride);
+		partial.deviceAlloc();
 	}
 
 	// One upload for the class table and both block tables
@@ -1446,9 +2040,86 @@ bool runDiff2KernelCoarseBatched(
 	const int *d_rest = d_even + nc + 1;
 	deviceStream_t stream = table.getStream();
 
+	// (cos, sin) of the shifts once per particle instead of a sincosf for every pixel,
+	// translation and block (2D data, single precision, up to 64 MB)
+	const float2 *d_shift = NULL;
+#ifndef ACC_DOUBLE_PRECISION
+	if (defer != NULL)
+		defer->shift.reset(new AccPtr<float2>(table.make<float2>()));
+	AccPtr<float2> shift_local = table.make<float2>();
+	AccPtr<float2> &shift = defer != NULL ? *defer->shift : shift_local;
+	if (gpuShiftTable() && !data_is_3D && image_size * translation_num * sizeof(float2) <= ((size_t) 64 << 20))
+	{
+		shift.setSize(image_size * translation_num);
+		shift.deviceAlloc();
+		cuda_kernel_shift_table_pt<<<(image_size + 127) / 128, 128, 0, stream>>>(
+				trans_x, trans_y, ~shift, (int) translation_num, (int) image_size,
+				projector.imgX, projector.imgY, projector.maxR);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		d_shift = ~shift;
+	}
+#endif
+
+	if (defer != NULL)
+	{
+		// The launch is made later for the whole group (runDiff2KernelCoarseGroup)
+		if (ref3D || data_is_3D || use_xt)
+			REPORT_ERROR("BUG: runDiff2KernelCoarseBatched: a deferred launch is for 2D references and 2D data only");
+		defer->projector.reset(new AccProjectorKernel(projector));
+		defer->trans_x = trans_x; defer->trans_y = trans_y; defer->trans_z = trans_z;
+		defer->corr_img = corr_img; defer->Fimg_real = Fimg_real; defer->Fimg_imag = Fimg_imag;
+		defer->translation_num = translation_num; defer->image_size = image_size;
+		defer->d_classes = d_classes; defer->d_even = d_even; defer->d_shift = d_shift;
+		defer->n_blocks = even[nc]; defer->n_classes = (int) nc; defer->n_chunks = n_chunks;
+		defer->chunk_stride = chunk_stride; defer->max_orient = max_orient;
+		defer->d_partial = ~partial;
+		defer->stream = stream;
+		return true;
+	}
+
+#ifndef ACC_DOUBLE_PRECISION
+	static const int xt_ablate = getenv("RELION_XT_ABLATE") ? atoi(getenv("RELION_XT_ABLATE")) : 0;
+	auto run_xt = [&]()
+	{
+		const int ntt = (int) (xt_tpad / XT_TRANS);
+		AccPtr<float2> xt_a = table.make<float2>();
+		xt_a.setSize(image_size * xt_tpad);
+		xt_a.deviceAlloc();
+		AccPtr<float> xt_x2 = table.make<float>();
+		xt_x2.setSize(image_size);
+		xt_x2.deviceAlloc();
+		cuda_kernel_coarse_xt_prepare<<<(image_size + 127) / 128, 128, 0, stream>>>(
+				trans_x, trans_y, Fimg_real, Fimg_imag, corr_img, ~xt_a, ~xt_x2,
+				(int) translation_num, (int) xt_tpad, (int) image_size, projector.imgX, projector.imgY, projector.maxR);
+		cuda_kernel_diff2_coarse_xt<<<dim3(even[nc], n_chunks, ntt), XT_BLOCK, 0, stream>>>(
+				d_classes, d_even, (int) nc, ~xt_a, ~xt_x2, corr_img, (int) translation_num, (int) xt_tpad,
+				(int) image_size, ~partial, n_chunks, chunk_stride, xt_ablate);
+		const size_t n = max_orient * translation_num;
+		const unsigned sum_blocks = (unsigned) std::min<size_t>((n + 255) / 256, 1024);
+		cuda_kernel_diff2_coarse_sum_chunks<<<dim3(sum_blocks, (unsigned) nc), 256, 0, stream>>>(
+				d_classes, ~partial, n_chunks, chunk_stride, (int) translation_num);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+	};
+	if (use_xt && xt_mode == 1)
+	{
+		run_xt();
+		return true;
+	}
+#endif
+
+	std::vector<std::vector<XFLOAT> > xt_init(nc);
+	if (use_xt && xt_mode == 2)
+	{
+		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+		for (size_t c = 0; c < nc; c++)
+		{
+			xt_init[c].resize(orientation_nums[c] * translation_num);
+			DEBUG_HANDLE_ERROR(cudaMemcpy(xt_init[c].data(), classes[c].diff2s, xt_init[c].size() * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+		}
+	}
 #define D2C_BATCH(R3, D3, BS, EPB, PF) launchDiff2CoarseBatched<R3, D3, BS, EPB, PF>(even[nc], rest[nc], (int) nc, \
 		d_classes, d_even, d_rest, projector, trans_x, trans_y, trans_z, corr_img, Fimg_real, Fimg_imag, \
-		translation_num, image_size, stream)
+		translation_num, image_size, stream, ~partial, n_chunks, chunk_stride, max_orient, d_shift)
 	if (!ref3D)
 	{
 		if (data_is_3D) D2C_BATCH(false, true, D2C_BLOCK_SIZE_2D, D2C_EULERS_PER_BLOCK_2D, 2);
@@ -1473,7 +2144,135 @@ bool runDiff2KernelCoarseBatched(
 #endif
 	}
 #undef D2C_BATCH
+#ifndef ACC_DOUBLE_PRECISION
+	if (use_xt && xt_mode == 2)
+	{
+		// Debug: keep the direct differences, run the cross-term form into zeroed arrays and compare
+		static long checks = 0;
+		std::vector<std::vector<XFLOAT> > direct(nc), cross(nc);
+		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+		for (size_t c = 0; c < nc; c++)
+		{
+			const size_t n = orientation_nums[c] * translation_num;
+			direct[c].resize(n);
+			cross[c].resize(n);
+			DEBUG_HANDLE_ERROR(cudaMemcpy(direct[c].data(), classes[c].diff2s, n * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+			DEBUG_HANDLE_ERROR(cudaMemcpy(classes[c].diff2s, xt_init[c].data(), n * sizeof(XFLOAT), cudaMemcpyHostToDevice));
+		}
+		run_xt();
+		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+		double max_abs = 0, max_rel = 0, sum_sq = 0, init_max = 0;
+		long n_all = 0;
+		for (size_t c = 0; c < nc; c++)
+		{
+			const size_t n = direct[c].size();
+			DEBUG_HANDLE_ERROR(cudaMemcpy(cross[c].data(), classes[c].diff2s, n * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+			for (size_t k = 0; k < n; k++)
+			{
+				init_max = std::max(init_max, (double) fabs(xt_init[c][k]));
+				const double d = fabs((double) direct[c][k] - cross[c][k]);
+				max_abs = std::max(max_abs, d);
+				max_rel = std::max(max_rel, d / std::max(1.0, fabs((double) direct[c][k])));
+				sum_sq += d * d;
+				n_all++;
+			}
+			DEBUG_HANDLE_ERROR(cudaMemcpy(classes[c].diff2s, direct[c].data(), n * sizeof(XFLOAT), cudaMemcpyHostToDevice));
+		}
+		if (checks++ % 200 == 0)
+			fprintf(stderr, "COARSE_XT_CHECK call %ld: %ld values, max |diff| %.4g, max relative %.3g, rms %.4g, max initial %.4g\n",
+					checks, n_all, max_abs, max_rel, sqrt(sum_sq / std::max(1L, n_all)), init_max);
+	}
+#endif
 	return true;
+}
+
+// The coarse differences of several particles (2D references, 2D data) in two launches: the blocks of
+// particle q are the z = q slice of the grid, its inputs come from a CoarseParticle record (the same
+// kernels as for one particle, so a particle gets exactly the sums it gets alone with
+// RELION_GPU_COARSE_DETERMINISTIC=1). Each item was prepared by runDiff2KernelCoarseBatched with `defer`.
+// Items with different translation numbers or image sizes go in separate launches.
+bool runDiff2KernelCoarseGroup(std::vector<CoarseDeferred *> &items, AccPtr<char> &recs)
+{
+	if (items.empty())
+		return true;
+	std::vector<size_t> order(items.size());
+	for (size_t i = 0; i < order.size(); i++)
+		order[i] = i;
+	std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+		return std::make_pair(items[a]->translation_num, items[a]->image_size) <
+				std::make_pair(items[b]->translation_num, items[b]->image_size); });
+
+	// One upload of all records
+	recs.setSize(items.size() * sizeof(CoarseParticle));
+	recs.allAlloc();
+	CoarseParticle *h = (CoarseParticle *) &recs[0];
+	for (size_t k = 0; k < order.size(); k++)
+	{
+		const CoarseDeferred &d = *items[order[k]];
+		h[k] = CoarseParticle{d.trans_x, d.trans_y, d.Fimg_real, d.Fimg_imag, d.corr_img, d.d_shift,
+				d.d_classes, d.d_even, d.d_partial, d.n_blocks, d.n_classes, d.n_chunks, d.chunk_stride};
+	}
+	recs.cpToDevice();
+	const CoarseParticle *d_recs = (const CoarseParticle *) ~recs;
+
+	for (size_t first = 0; first < order.size(); )
+	{
+		size_t last = first + 1;
+		const CoarseDeferred &d0 = *items[order[first]];
+		int max_blocks = d0.n_blocks, max_chunks = d0.n_chunks, max_classes = d0.n_classes;
+		size_t max_orient = d0.max_orient;
+		while (last < order.size() && items[order[last]]->translation_num == d0.translation_num &&
+				items[order[last]]->image_size == d0.image_size)
+		{
+			const CoarseDeferred &d = *items[order[last]];
+			max_blocks = std::max(max_blocks, d.n_blocks);
+			max_chunks = std::max(max_chunks, d.n_chunks);
+			max_classes = std::max(max_classes, d.n_classes);
+			max_orient = std::max(max_orient, d.max_orient);
+			last++;
+		}
+		const unsigned n = (unsigned) (last - first);
+		deviceStream_t stream = d0.stream;
+		AccProjectorKernel projector = *d0.projector;
+		for (size_t z0 = 0; z0 < n; z0 += 65535)
+		{
+			const unsigned nz = (unsigned) std::min<size_t>(65535, n - z0);
+			cuda_kernel_diff2_coarse<false, false, D2C_BLOCK_SIZE_2D, D2C_EULERS_PER_BLOCK_2D, 2>
+				<<<dim3(max_blocks, max_chunks, nz), D2C_BLOCK_SIZE_2D, 0, stream>>>(
+					NULL, d0.trans_x, d0.trans_y, d0.trans_z, d0.Fimg_real, d0.Fimg_imag, projector, d0.corr_img, NULL,
+					d0.translation_num, d0.image_size, NULL, NULL, 0, false,
+					NULL, 1, 0, NULL, d_recs + first + z0);
+			const size_t nel = max_orient * d0.translation_num;
+			const unsigned sum_blocks = (unsigned) std::min<size_t>((nel + 255) / 256, 1024);
+			cuda_kernel_diff2_coarse_sum_chunks_batched<<<dim3(sum_blocks, max_classes, nz), 256, 0, stream>>>(
+					d_recs + first + z0, (int) d0.translation_num, false);
+			LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		}
+		first = last;
+	}
+	return true;
+}
+
+void minOnDeviceBatched(const std::vector<std::pair<const XFLOAT *, size_t> > &arrays, std::vector<XFLOAT> &mins,
+		AccPtr<char> &scratch, deviceStream_t stream)
+{
+	const size_t n = arrays.size();
+	mins.assign(n, 0);
+	if (n == 0)
+		return;
+	const size_t job_bytes = ((n * sizeof(MinJob) + 15) / 16) * 16;
+	scratch.setSize(job_bytes + n * sizeof(XFLOAT));
+	scratch.setStream(stream);
+	scratch.allAlloc();
+	MinJob *h = (MinJob *) &scratch[0];
+	for (size_t i = 0; i < n; i++)
+		h[i] = MinJob{arrays[i].first, arrays[i].second};
+	scratch.cpToDevice();
+	cuda_kernel_min_batched<<<(unsigned) n, 256, 0, stream>>>((const MinJob *) ~scratch, (XFLOAT *) (&(~scratch)[job_bytes]));
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+	HANDLE_ERROR(cudaMemcpyAsync(&scratch[job_bytes], &(~scratch)[job_bytes], n * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+	DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+	memcpy(mins.data(), &scratch[job_bytes], n * sizeof(XFLOAT));
 }
 #endif
 

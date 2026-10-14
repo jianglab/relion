@@ -5,6 +5,8 @@
 #ifdef _CUDA_ENABLED
 #include "src/acc/cuda/cuda_settings.h"
 #include <cuda_runtime.h>
+#include <algorithm>
+#include <cstdio>
 #endif
 
 #include <signal.h>
@@ -572,7 +574,26 @@ private:
 
 		if (totalSize > 0)
 		{
-			HANDLE_ERROR(cudaMalloc( (void**) &(first->ptr), totalSize));
+			// Back off instead of failing when the memory measured free a moment ago is gone: another
+			// process on the same GPU (several MPI ranks per GPU, under MPS) may have allocated since.
+			// Retry with 90% of what is free now, down to a quarter of the size asked for.
+			const size_t asked = totalSize;
+			cudaError_t err = cudaMalloc( (void**) &(first->ptr), totalSize);
+			while (err == cudaErrorMemoryAllocation && totalSize > asked / 4)
+			{
+				cudaGetLastError();
+				size_t free_now = 0, total_now = 0;
+				cudaMemGetInfo(&free_now, &total_now);
+				const size_t next = std::min((size_t)(0.9 * (double)free_now), (size_t)(0.9 * (double)totalSize));
+				if (next < asked / 4) break;
+				totalSize = next;
+				first->size = totalSize;
+				err = cudaMalloc( (void**) &(first->ptr), totalSize);
+			}
+			if (err == cudaSuccess && totalSize < asked)
+				printf(" GPU memory for the expectation step reduced from %zu to %zu MB: the GPU had less free memory than measured (other processes on it).\n",
+				       asked / (1000*1000), totalSize / (1000*1000));
+			HANDLE_ERROR(err);
 			cache = true;
 		}
 		else
@@ -827,6 +848,13 @@ public:
 		Lock ml(&mutex);
 		size_t size = _getTotalUsedSpace();
 		return size;
+	}
+
+	// Bytes of the chunk on the device (0 while none is allocated)
+	size_t chunkSize()
+	{
+		Lock ml(&mutex);
+		return (first != NULL && first->ptr != NULL) ? totalSize : 0;
 	}
 
 	size_t getNumberOfAllocs()

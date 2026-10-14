@@ -232,6 +232,12 @@ __global__ void cuda_kernel_helixMaskApply2D(
 		double R1, double R2, double D1, double D2, double cosine_width,
 		const double *partials, int nr_partials, int *bad);
 
+__global__ void cuda_kernel_helixMaskFused2D(
+		XFLOAT *img, int xdim, int ydim,
+		double a10, double a11,
+		double R1, double R2, double D1, double D2, double cosine_width,
+		double *partials, int nr_partials, int *bad);
+
 __global__ void cuda_kernel_initRND(unsigned long seed,
                                     curandState *States);
 
@@ -286,7 +292,9 @@ __global__ void cuda_kernel_cosineFilter(	XFLOAT *vol,
 											XFLOAT radius,
 											XFLOAT radius_p,
 											XFLOAT cosine_width,
-											XFLOAT sum_bg_total);
+											XFLOAT sum_bg_total,
+											const XFLOAT *g_sum = NULL,       // if set, the background value is
+											const XFLOAT *g_sum_bg = NULL);   // sum(g_sum_bg) / sum(g_sum), on the GPU
 
 __global__ void cuda_kernel_initOrientations(RFLOAT *pdfs, XFLOAT *pdf_orientation, bool *pdf_orientation_zeros, size_t sz);
 
@@ -915,7 +923,34 @@ __global__ void cuda_kernel_init_value(
 		data[idx] = value;
 }
 
+// dense[pos[i]] = w[i]: the sparse significant weights into the dense (orientation, translation) map
+static __global__ void cuda_kernel_scatter_weights(
+		const size_t *pos,
+		const XFLOAT *w,
+		size_t n,
+		XFLOAT *dense)
+{
+	const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+	if (i < n)
+		dense[pos[i]] = w[i];
+}
+
 #define WEIGHT_MAP_BLOCK_SIZE 512
+// One launch for all classes of a particle (blockIdx.y = class): the same copy as
+// cuda_kernel_allweights_to_mweights for each class
+struct WeightMapJob
+{
+	const unsigned long *iorient;   // the class's projectorPlan.iorientclasses
+	unsigned long n_orient;
+	size_t pos;                     // where the class's weights start in allWeights
+};
+
+__global__ void cuda_kernel_allweights_to_mweights_batched(
+		const WeightMapJob *jobs,
+		XFLOAT * d_allweights,
+		XFLOAT * d_mweights,
+		unsigned long translation_num);
+
 __global__ void cuda_kernel_allweights_to_mweights(
 		unsigned long * d_iorient,
 		XFLOAT * d_allweights,
@@ -924,6 +959,25 @@ __global__ void cuda_kernel_allweights_to_mweights(
 		unsigned long translation_num,
         int block_size
 		);
+
+// All classes in one launch: blocks of WEIGHT_MAP_BLOCK_SIZE (orientation, translation)
+// pairs, the class table as for the other class-batched kernels
+static __global__ void cuda_kernel_allweights_to_mweights_batched(
+		const MapClassJob *g_classes,
+		const int *g_class_start,
+		int n_classes,
+		XFLOAT *d_mweights,
+		unsigned long translation_num)
+{
+	int local;
+	const MapClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
+	const size_t idx = (size_t) local * WEIGHT_MAP_BLOCK_SIZE + threadIdx.x;
+	if (idx < c.n * translation_num)
+	{
+		const size_t o = idx / translation_num, t = idx % translation_num;
+		d_mweights[c.iorient[o] * translation_num + t] = c.allweights[o * translation_num + t];
+	}
+}
 
 #define OVER_THRESHOLD_BLOCK_SIZE 512
 template< typename T>

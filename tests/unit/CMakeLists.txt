@@ -12,6 +12,7 @@
 
 set(RELION_UNIT_TEST_SOURCES
  main.cpp
+ test_group_size_tuner.cpp
  test_ctf.cpp
  test_spatial_frequency_grid.cpp
  test_fft_nufft_consistency.cpp
@@ -42,6 +43,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_ml_optimiser.cpp
     test_remove_intermediates.cpp
     test_virtual_particles.cpp
+    test_helix_coords.cpp
     test_helix_mask.cpp
     test_resource_report.cpp
     test_import_project.cpp
@@ -54,8 +56,10 @@ set(RELION_UNIT_TEST_SOURCES
     test_slurm_script.cpp
     test_particle_order.cpp
     test_async_file_writer.cpp
+    test_helix_symmetry_parallel.cpp
     test_fftw_plans.cpp
     test_bulk_threads.cpp
+    test_gpu_reconstruct.cpp
 )
 
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})
@@ -90,7 +94,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]

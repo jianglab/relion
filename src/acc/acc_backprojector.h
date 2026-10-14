@@ -40,6 +40,11 @@ public:
 
 	XFLOAT *d_mdlReal, *d_mdlImag, *d_mdlWeight;
 
+	// CUDA 3D models only: the three arrays are one allocation with real, imaginary and
+	// weight of a voxel next to each other (d_mdlImag = d_mdlReal + 1, d_mdlWeight = d_mdlReal + 2,
+	// element stride 3), see bpModelStride in BP.cuh. RELION_GPU_BP_LAYOUT=planar turns it off.
+	bool interleaved;
+
 	deviceStream_t stream;
 
 public:
@@ -50,7 +55,7 @@ public:
 				maxR(0), maxR2(0),
 				padding_factor(0),
 				allocaton_size(0), voxelCount(0),
-				d_mdlReal(NULL), d_mdlImag(NULL), d_mdlWeight(NULL),
+				d_mdlReal(NULL), d_mdlImag(NULL), d_mdlWeight(NULL), interleaved(false),
 				stream(0)
 #ifdef ALTCPU
 				, mutexes(0)

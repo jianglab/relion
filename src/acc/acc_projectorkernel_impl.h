@@ -1,6 +1,8 @@
 #ifndef ACC_PROJECTORKERNELIMPL_H_
 #define ACC_PROJECTORKERNELIMPL_H_
 
+#include "src/acc/acc_bp_accum.h"
+
 
 #ifndef PROJECTOR_NO_TEXTURES
 	#ifdef _CUDA_ENABLED
@@ -70,6 +72,23 @@ public:
 #endif
 
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
+	// RELION_GPU_FLOAT2_TEX: real and imaginary part in one two-channel texture (mdlImag == mdlReal), one fetch
+	__device__ __forceinline__ void tex3Dfetch(XFLOAT x, XFLOAT y, XFLOAT z, XFLOAT &re, XFLOAT &im) const
+	{
+#if defined _CUDA_ENABLED && !defined ACC_DOUBLE_PRECISION
+		if (mdlImag == mdlReal)
+		{
+			const float2 v = tex3D<float2>(mdlReal, x, y, z);
+			re = v.x; im = v.y;
+			return;
+		}
+#endif
+		re = tex3D<XFLOAT>(mdlReal, x, y, z);
+		im = tex3D<XFLOAT>(mdlImag, x, y, z);
+	}
+#endif
+
+#if defined _CUDA_ENABLED || defined _HIP_ENABLED
 	__device__ __forceinline__
 #else
 	inline
@@ -133,16 +152,15 @@ public:
 				yp -= mdlInitY;
 				zp -= mdlInitZ;
 
-				real =    tex3D<XFLOAT>(mdlReal, xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5);
-				imag =  - tex3D<XFLOAT>(mdlImag, xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5);
+				tex3Dfetch(xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5, real, imag);
+				imag = -imag;
 			}
 			else
 			{
 				yp -= mdlInitY;
 				zp -= mdlInitZ;
 
-				real =   tex3D<XFLOAT>(mdlReal, xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5);
-				imag =   tex3D<XFLOAT>(mdlImag, xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5);
+				tex3Dfetch(xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5, real, imag);
 			}
 #endif
 		}
@@ -210,16 +228,15 @@ public:
 				yp -= mdlInitY;
 				zp -= mdlInitZ;
 
-				real =    tex3D<XFLOAT>(mdlReal, xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5);
-				imag =  - tex3D<XFLOAT>(mdlImag, xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5);
+				tex3Dfetch(xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5, real, imag);
+				imag = -imag;
 			}
 			else
 			{
 				yp -= mdlInitY;
 				zp -= mdlInitZ;
 
-				real =   tex3D<XFLOAT>(mdlReal, xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5);
-				imag =   tex3D<XFLOAT>(mdlImag, xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5);
+				tex3Dfetch(xp + (XFLOAT)0.5, yp + (XFLOAT)0.5, zp + (XFLOAT)0.5, real, imag);
 			}
 #endif
 		}
@@ -326,7 +343,9 @@ struct CoarseClassJob
 	AccProjectorKernel projector;
 	XFLOAT *eulers;
 	XFLOAT *diff2s;
-	int n_even; // orientations in whole blocks; the rest follow one per block
+	int n_even;   // orientations in whole blocks; the rest follow one per block (rest launch)
+	int n_orient; // all orientations of the class: a block past n_orient - eulers_per_block covers fewer
+	int orient_offset; // orientations of the classes before it (pixel chunks: place in the partial sums)
 };
 
 // One class of a class-batched fine difference launch (see cuda_kernel_diff2_fine);
@@ -355,6 +374,14 @@ struct CollectClassJob
 	unsigned long *job_num;
 };
 
+// One class of a class-batched allweights_to_mweights launch
+struct MapClassJob
+{
+	unsigned long *iorient;
+	XFLOAT *allweights;
+	unsigned long n; // orientations
+};
+
 // One class of a class-batched weighted-average launch (see cuda_kernel_wavg)
 struct WavgClassJob
 {
@@ -369,6 +396,36 @@ struct WavgClassJob
 // all classes' models have the same dimensions
 struct BPClassJob
 {
+	XFLOAT *eulers;
+	XFLOAT *weights;
+	XFLOAT *model_real;
+	XFLOAT *model_imag;
+	XFLOAT *model_weight;
+	XFLOAT weight_norm;
+};
+
+
+// One class of a shared-sums launch (cuda_kernel_shared_sums): the weighted sums and the
+// back-projection of the class's orientations
+struct SharedSumsClassJob
+{
+	AccProjectorKernel projector;
+	XFLOAT *eulers;      // 9 per orientation
+	XFLOAT *weights;     // orientation x translation
+	XFLOAT *wdiff2s_AA;
+	XFLOAT *wdiff2s_XA;
+	XFLOAT *model_real;
+	XFLOAT *model_imag;
+	XFLOAT *model_weight;
+	int n_orient;
+};
+
+// One class of a class-batched gradient (VDAM) 2D backprojection: as BPClassJob, plus
+// the class's projector, whose reference projection the kernel subtracts
+// (see cuda_kernel_backproject2D_SGD)
+struct BPSgdClassJob
+{
+	AccProjectorKernel projector;
 	XFLOAT *eulers;
 	XFLOAT *weights;
 	XFLOAT *model_real;

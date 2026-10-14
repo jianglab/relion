@@ -10,6 +10,51 @@
 //#include "src/acc/acc_backprojector.h"
 #include "src/acc/acc_projector.h"
 
+#ifdef _CUDA_ENABLED
+// Interleaved model layout (see AccBackprojector::interleaved): the default for 3D models
+static bool bpInterleavedLayout()
+{
+	static const bool on = [] { const char *e = getenv("RELION_GPU_BP_LAYOUT"); return !(e && std::string(e) == "planar"); }();
+	return on;
+}
+
+__global__ void cuda_kernel_bp_deinterleave(const XFLOAT *g_in, XFLOAT *g_out, size_t n)
+{
+	const size_t v = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+	if (v < n)
+	{
+		g_out[v]         = g_in[3 * v];
+		g_out[n + v]     = g_in[3 * v + 1];
+		g_out[2 * n + v] = g_in[3 * v + 2];
+	}
+}
+
+// Copies an interleaved model to three host arrays through a device staging buffer in
+// chunks, which shrinks if memory is short
+static void bpDeinterleaveToHost(const XFLOAT *d_model, size_t n, XFLOAT *r, XFLOAT *i, XFLOAT *w, cudaStream_t stream)
+{
+	size_t chunk = std::min(n, (size_t) 1 << 22);
+	XFLOAT *d_tmp = NULL;
+	while (cudaMalloc((void **) &d_tmp, 3 * chunk * sizeof(XFLOAT)) != cudaSuccess)
+	{
+		cudaGetLastError();
+		chunk /= 2;
+		if (chunk < 4096)
+			CRITICAL(RAMERR);
+	}
+	for (size_t from = 0; from < n; from += chunk)
+	{
+		const size_t m = std::min(chunk, n - from);
+		cuda_kernel_bp_deinterleave<<<(m + 255) / 256, 256, 0, stream>>>(d_model + 3 * from, d_tmp, m);
+		DEBUG_HANDLE_ERROR(cudaMemcpyAsync(r + from, d_tmp,         m * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+		DEBUG_HANDLE_ERROR(cudaMemcpyAsync(i + from, d_tmp + m,     m * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+		DEBUG_HANDLE_ERROR(cudaMemcpyAsync(w + from, d_tmp + 2 * m, m * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+	}
+	DEBUG_HANDLE_ERROR(cudaFree(d_tmp));
+}
+#endif
+
 size_t AccBackprojector::setMdlDim(
 #ifdef _SYCL_ENABLED
 			deviceStream_t dev,
@@ -41,9 +86,19 @@ size_t AccBackprojector::setMdlDim(
 
 		//Allocate space for model
 #ifdef _CUDA_ENABLED
-		HANDLE_ERROR(cudaMalloc( (void**) &d_mdlReal,   mdlXYZ * sizeof(XFLOAT)));
-		HANDLE_ERROR(cudaMalloc( (void**) &d_mdlImag,   mdlXYZ * sizeof(XFLOAT)));
-		HANDLE_ERROR(cudaMalloc( (void**) &d_mdlWeight, mdlXYZ * sizeof(XFLOAT)));
+		interleaved = mdlZ != 1 && bpInterleavedLayout();
+		if (interleaved)
+		{
+			HANDLE_ERROR(cudaMalloc( (void**) &d_mdlReal, 3 * mdlXYZ * sizeof(XFLOAT)));
+			d_mdlImag = d_mdlReal + 1;
+			d_mdlWeight = d_mdlReal + 2;
+		}
+		else
+		{
+			HANDLE_ERROR(cudaMalloc( (void**) &d_mdlReal,   mdlXYZ * sizeof(XFLOAT)));
+			HANDLE_ERROR(cudaMalloc( (void**) &d_mdlImag,   mdlXYZ * sizeof(XFLOAT)));
+			HANDLE_ERROR(cudaMalloc( (void**) &d_mdlWeight, mdlXYZ * sizeof(XFLOAT)));
+		}
 #elif _HIP_ENABLED
 		HANDLE_ERROR(hipMalloc( (void**) &d_mdlReal,   mdlXYZ * sizeof(XFLOAT)));
 		HANDLE_ERROR(hipMalloc( (void**) &d_mdlImag,   mdlXYZ * sizeof(XFLOAT)));
@@ -84,9 +139,16 @@ void AccBackprojector::initMdl()
 
 	//Initiate model with zeros
 #ifdef _CUDA_ENABLED
-	DEBUG_HANDLE_ERROR(cudaMemset( d_mdlReal,   0, mdlXYZ * sizeof(XFLOAT)));
-	DEBUG_HANDLE_ERROR(cudaMemset( d_mdlImag,   0, mdlXYZ * sizeof(XFLOAT)));
-	DEBUG_HANDLE_ERROR(cudaMemset( d_mdlWeight, 0, mdlXYZ * sizeof(XFLOAT)));
+	if (interleaved)
+	{
+		DEBUG_HANDLE_ERROR(cudaMemset( d_mdlReal, 0, 3 * mdlXYZ * sizeof(XFLOAT)));
+	}
+	else
+	{
+		DEBUG_HANDLE_ERROR(cudaMemset( d_mdlReal,   0, mdlXYZ * sizeof(XFLOAT)));
+		DEBUG_HANDLE_ERROR(cudaMemset( d_mdlImag,   0, mdlXYZ * sizeof(XFLOAT)));
+		DEBUG_HANDLE_ERROR(cudaMemset( d_mdlWeight, 0, mdlXYZ * sizeof(XFLOAT)));
+	}
 #elif _HIP_ENABLED
 	DEBUG_HANDLE_ERROR(hipMemset( d_mdlReal,   0, mdlXYZ * sizeof(XFLOAT)));
 	DEBUG_HANDLE_ERROR(hipMemset( d_mdlImag,   0, mdlXYZ * sizeof(XFLOAT)));
@@ -111,6 +173,11 @@ void AccBackprojector::getMdlData(XFLOAT *r, XFLOAT *i, XFLOAT * w)
 #ifdef _CUDA_ENABLED
 	DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream)); //Make sure to wait for remaining kernel executions
 
+	if (interleaved)
+	{
+		bpDeinterleaveToHost(d_mdlReal, mdlXYZ, r, i, w, stream);
+		return;
+	}
 	DEBUG_HANDLE_ERROR(cudaMemcpyAsync( r, d_mdlReal,   mdlXYZ * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
 	DEBUG_HANDLE_ERROR(cudaMemcpyAsync( i, d_mdlImag,   mdlXYZ * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
 	DEBUG_HANDLE_ERROR(cudaMemcpyAsync( w, d_mdlWeight, mdlXYZ * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
@@ -163,8 +230,11 @@ void AccBackprojector::clear()
 	{
 #ifdef _CUDA_ENABLED
 		DEBUG_HANDLE_ERROR(cudaFree(d_mdlReal));
-		DEBUG_HANDLE_ERROR(cudaFree(d_mdlImag));
-		DEBUG_HANDLE_ERROR(cudaFree(d_mdlWeight));
+		if (!interleaved)
+		{
+			DEBUG_HANDLE_ERROR(cudaFree(d_mdlImag));
+			DEBUG_HANDLE_ERROR(cudaFree(d_mdlWeight));
+		}
 #elif _HIP_ENABLED
 		DEBUG_HANDLE_ERROR(hipFree(d_mdlReal));
 		DEBUG_HANDLE_ERROR(hipFree(d_mdlImag));
@@ -182,6 +252,7 @@ void AccBackprojector::clear()
 #endif
 
 		d_mdlReal = d_mdlImag = d_mdlWeight = NULL;
+		interleaved = false;
 	}
 }
 

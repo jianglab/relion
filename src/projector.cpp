@@ -18,6 +18,8 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/projector.h"
+#include <chrono>
+#include <vector>
 #include "src/finufft_central_slice.h"
 #include "src/strings.h"
 #include <cstdlib>
@@ -148,7 +150,7 @@ int Projector::resolveForwardInterpolator(bool accelerator_in_use, int verb)
 	return FINUFFT;
 }
 
-void Projector::initialiseData(int current_size)
+void Projector::initialiseData(int current_size, bool zero_new)
 {
 	if (rect)
 	{
@@ -174,7 +176,14 @@ void Projector::initialiseData(int current_size)
 		data.resize(pad_size, pad_size / 2 + 1);
 		break;
 	case 3:
-		data.resize(pad_size, pad_size, pad_size / 2 + 1);
+		if (!zero_new && (data.data == NULL || (long int) pad_size * pad_size * (pad_size / 2 + 1) != data.nzyxdimAlloc))
+		{
+			data.clear();
+			data.setDimensions(pad_size / 2 + 1, pad_size, pad_size, 1);
+			data.coreAllocate();
+		}
+		else
+			data.resize(pad_size, pad_size, pad_size / 2 + 1);
 		break;
 	default:
 		REPORT_ERROR("Projector::resizeData%%ERROR: Dimension of the data array should be 2 or 3");
@@ -225,6 +234,16 @@ void Projector::computeFourierTransformMap(
 		return;
 	}
 
+	static const bool cft_tm = getenv("RELION_ITER_TIMING") != NULL;
+	std::vector<std::pair<const char*, double> > cft_laps;
+	auto cft_t = std::chrono::steady_clock::now();
+	auto cft_lap = [&](const char *what)
+	{
+		if (!cft_tm) return;
+		auto now = std::chrono::steady_clock::now();
+		cft_laps.push_back(std::make_pair(what, 1e3 * std::chrono::duration<double>(now - cft_t).count()));
+		cft_t = now;
+	};
 	TIMING_TIC(TIMING_TOP);
 
 	TIMING_TIC(TIMING_INIT1);
@@ -252,20 +271,15 @@ void Projector::computeFourierTransformMap(
 	switch (ref_dim)
 	{
 	case 2:
-		if(do_heavy)
-			Mpad.initZeros(padoridim, padoridim);
-		else
-			Mpad.reshape(padoridim, padoridim);
+		// (zeroed below only when the CPU pads the map: the GPU never reads the host's Mpad)
+		Mpad.reshape(padoridim, padoridim);
 		if (data_dim == 2)
 			normfft = (RFLOAT)(padding_factor * padding_factor);
 		else
 			normfft = (RFLOAT)(padding_factor * padding_factor * ori_size);
 		break;
 	case 3:
-		if(do_heavy)
-			Mpad.initZeros(padoridim, padoridim, padoridim);
-		else
-			Mpad.reshape(padoridim, padoridim, padoridim);
+		Mpad.reshape(padoridim, padoridim, padoridim);
 		if (data_dim == 3)
 			normfft = (RFLOAT)(padding_factor * padding_factor * padding_factor);
 		else
@@ -273,6 +287,17 @@ void Projector::computeFourierTransformMap(
 		break;
 	default:
 		REPORT_ERROR("Projector::computeFourierTransformMap%%ERROR: Dimension of the data array should be 2 or 3");
+	}
+	// A small 2D map (a 2D class average at box sizes up to about 512) is transformed
+	// faster on the CPU than by the GPU path below, which for every map locks the
+	// device semaphore, allocates device memory, creates a cuFFT plan and waits for the
+	// copy back: for 100 classes per iteration this was over a tenth of a second.
+	// RELION_GPU_SMALL_FT=1 keeps the GPU path for these too.
+	if (do_gpu && ref_dim == 2 && (size_t) MULTIDIM_SIZE(Mpad) < ((size_t) 1 << 20))
+	{
+		static const bool keep_gpu = getenv("RELION_GPU_SMALL_FT") != NULL;
+		if (!keep_gpu)
+			do_gpu = false; // change local copy of do_gpu variable
 	}
 #ifdef _CUDA_ENABLED
 	static int semid = -1;
@@ -322,6 +347,15 @@ void Projector::computeFourierTransformMap(
 			allocator = new CudaCustomAllocator(mem_req, (size_t)16);
 		else
 		{
+			// Say so once: the transform then runs on the CPU, much slower for large boxes
+			static bool reported = false;
+			if (!reported)
+			{
+				reported = true;
+				std::cout << " Reference Fourier transforms run on the CPU: the GPU has "
+				          << mem_free / (1024 * 1024) << " MB free and they need "
+				          << mem_req / (1024 * 1024) << " MB." << std::endl;
+			}
 			do_gpu = false; // change local copy of do_gpu variable
 			if (semop(semid, &op_unlock[0], 1) < 0)
 				REPORT_ERROR("semop unlock error");
@@ -401,6 +435,7 @@ void Projector::computeFourierTransformMap(
 	}
 #endif
 	TIMING_TOC(TIMING_INIT1);
+	cft_lap("init_and_lock");
 
 	TIMING_TIC(TIMING_GRID);
 	// First do a gridding pre-correction on the real-space map:
@@ -433,6 +468,7 @@ void Projector::computeFourierTransformMap(
 	}
 
 	TIMING_TOC(TIMING_GRID);
+	cft_lap("grid");
 
 	TIMING_TIC(TIMING_PAD);
 
@@ -453,10 +489,25 @@ void Projector::computeFourierTransformMap(
 		}
 		else
 #endif
-		FOR_ALL_ELEMENTS_IN_ARRAY3D(vol_in) // This will also work for 2D
-			A3D_ELEM(Mpad, k, i, j) = A3D_ELEM(vol_in, k, i, j);
+		{
+			// This will also work for 2D; every element is copied independently
+			const int nt = relionBulkThreads(MULTIDIM_SIZE(Mpad));
+			{
+				// Mpad was only reshaped above: zero it here, over threads
+				const long int nyx = YXSIZE(Mpad);
+				#pragma omp parallel for num_threads(nt) if(nt > 1)
+				for (long int k = 0; k < ZSIZE(Mpad); k++)
+					memset(&DIRECT_A3D_ELEM(Mpad, k, 0, 0), 0, nyx * sizeof(RFLOAT));
+			}
+			#pragma omp parallel for num_threads(nt) if(nt > 1)
+			for (long int k = STARTINGZ(vol_in); k <= FINISHINGZ(vol_in); k++)
+			for (long int i = STARTINGY(vol_in); i <= FINISHINGY(vol_in); i++)
+			for (long int j = STARTINGX(vol_in); j <= FINISHINGX(vol_in); j++)
+				A3D_ELEM(Mpad, k, i, j) = A3D_ELEM(vol_in, k, i, j);
+		}
 	}
 	TIMING_TOC(TIMING_PAD);
+	cft_lap("pad");
 
 	TIMING_TIC(TIMING_TRANS);
 	// Calculate the oversampled Fourier transform
@@ -542,6 +593,7 @@ void Projector::computeFourierTransformMap(
 #endif
 		transformer.FourierTransform(Mpad, Faux, false);
 	TIMING_TOC(TIMING_TRANS);
+	cft_lap("fft");
 
 	TIMING_TIC(TIMING_CENTER);
 	// Translate padded map to put origin of FT in the center
@@ -555,6 +607,7 @@ void Projector::computeFourierTransformMap(
 #endif
 		CenterFFTbySign(Faux);
 	TIMING_TOC(TIMING_CENTER);
+	cft_lap("center");
 
 	TIMING_TIC(TIMING_INIT2);
 	// Free memory: Mpad no longer needed
@@ -563,8 +616,16 @@ void Projector::computeFourierTransformMap(
 #endif
 	Mpad.clear();
 
-	// Resize data array to the right size and initialise to zero
-	initZeros(current_size);
+	// Resize data array to the right size and initialise to zero. On the GPU path the device
+	// array is zeroed and copied back over every element of data, so zeroing the host array
+	// first (a fresh allocation page-faults about a third of a second per reference) is wasted.
+#if defined _CUDA_ENABLED || defined _HIP_ENABLED
+	if (do_heavy && do_gpu && !rect)
+		initialiseData(current_size, false);
+	else
+#endif
+		initZeros(current_size);
+	cft_lap("init2a_host_data");
 
 	// Fill data only for those points with distance to origin less than max_r
 	// (other points will be zero because of initZeros() call above
@@ -579,9 +640,11 @@ void Projector::computeFourierTransformMap(
 
 	if(do_heavy && do_gpu){
 		ddata.accAlloc();
+		cft_lap("init2b_dev_alloc");
 		dpower_spectrum.accAlloc();
 		dcounter.accAlloc();
 		ddata.deviceInit(0);
+		cft_lap("init2c_dev_memset");
 		dpower_spectrum.deviceInit(0);
 		dcounter.deviceInit(0);
 		dfourier_mask.accAlloc();
@@ -600,6 +663,7 @@ void Projector::computeFourierTransformMap(
 	MultidimArray<RFLOAT> counter(power_spectrum);
 	counter.initZeros();
 	TIMING_TOC(TIMING_INIT2);
+	cft_lap("init2_initZeros");
 
 	TIMING_TIC(TIMING_FAUX);
 	int max_r2 = ROUND(r_max * padding_factor) * ROUND(r_max * padding_factor);
@@ -624,30 +688,61 @@ void Projector::computeFourierTransformMap(
 		}
 		else
 #endif
+		{
+		// Three passes, with the same result as the original single loop: (1) set the data array, every
+		// element independently, over threads; (2) the power spectrum, a sum, in the original order on
+		// one thread; (3) the high-pass filter, applied only after the power spectrum.
+		const int nt = relionBulkThreads(MULTIDIM_SIZE(Faux));
+		#pragma omp parallel for num_threads(nt) if(nt > 1)
+		for (long int k = 0; k < ZSIZE(Faux); k++)
+		{
+			const long int kp = (k < XSIZE(Faux)) ? k : k - ZSIZE(Faux);
+			for (long int i = 0; i < YSIZE(Faux); i++)
+			{
+				const long int ip = (i < XSIZE(Faux)) ? i : i - YSIZE(Faux);
+				for (long int j = 0, jp = 0; j < XSIZE(Faux); j++, jp = j)
+				{
+					const int r2 = kp*kp + ip*ip + jp*jp;
+					// The Fourier Transforms are all "normalised" for 2D transforms of size = ori_size x ori_size
+					if (r2 <= max_r2)
+					{
+						const RFLOAT w = (do_fourier_mask) ? FFTW_ELEM(*fourier_mask, ROUND(kp/padding_factor), ROUND(ip/padding_factor), ROUND(jp/padding_factor)) : weight;
+						A3D_ELEM(data, kp, ip, jp) = w * DIRECT_A3D_ELEM(Faux, k, i, j) * normfft;
+					}
+				}
+			}
+		}
 		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Faux) // This will also work for 2D
 		{
 			int r2 = kp*kp + ip*ip + jp*jp;
-			// The Fourier Transforms are all "normalised" for 2D transforms of size = ori_size x ori_size
-			// Set data array
 			if (r2 <= max_r2)
 			{
 				if (do_fourier_mask) weight = FFTW_ELEM(*fourier_mask, ROUND(kp/padding_factor), ROUND(ip/padding_factor), ROUND(jp/padding_factor));
-				// Set data array
-				A3D_ELEM(data, kp, ip, jp) = weight * DIRECT_A3D_ELEM(Faux, k, i, j) * normfft;
-
 				// Calculate power spectrum
 				int ires = ROUND( sqrt((RFLOAT)r2) / padding_factor );
 				// Factor two because of two-dimensionality of the complex plane
 				DIRECT_A1D_ELEM(power_spectrum, ires) += norm(A3D_ELEM(data, kp, ip, jp)) / 2.;
 				DIRECT_A1D_ELEM(counter, ires) += weight;
-
-				// Apply high pass filter of the reference only after calculating the power spectrum
-				if (r2 <= min_r2)
+			}
+		}
+		// Apply high pass filter of the reference only after calculating the power spectrum
+		// (only the box around that small sphere needs to be visited)
+		if (min_r2 >= 0)
+		{
+			const long int rmin = (long int)sqrt((double)min_r2) + 1;
+			FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Faux) // This will also work for 2D
+			{
+				if (ABS(kp) > rmin || ABS(ip) > rmin || jp > rmin)
+					break;   // the rest of this row is outside as well
+				int r2 = kp*kp + ip*ip + jp*jp;
+				if (r2 <= max_r2 && r2 <= min_r2)
 					A3D_ELEM(data, kp, ip, jp) = 0;
 			}
 		}
+		}
 	}
 	TIMING_TOC(TIMING_FAUX);
+	cft_lap("fill_data_and_copy");
 
 	/*
 	FourierTransformer ft2;
@@ -686,6 +781,7 @@ void Projector::computeFourierTransformMap(
 		}
 	}
 	TIMING_TOC(TIMING_POW);
+	cft_lap("power");
 
 	TIMING_TOC(TIMING_TOP);
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
@@ -703,6 +799,13 @@ void Projector::computeFourierTransformMap(
 			REPORT_ERROR("semop unlock error");
 	}
 #endif
+	cft_lap("free_unlock");
+	if (cft_tm && do_heavy)
+	{
+		fprintf(stderr, "CFT_TIMING gpu=%d", (int) do_gpu);
+		for (auto &l : cft_laps) fprintf(stderr, " %s=%.0f", l.first, l.second);
+		fprintf(stderr, " ms\n");
+	}
 
 	// Build the conjugate-domain mode array that the FINUFFT interpolator evaluates
 	if (do_heavy && interpolator == FINUFFT)
@@ -723,7 +826,16 @@ void Projector::griddingCorrect(MultidimArray<RFLOAT> &vol_in)
 	if (interpolator == FINUFFT)
 		return;
 
-	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol_in)
+	const bool use_sinc = (interpolator==NEAREST_NEIGHBOUR && r_min_nn == 0);
+	if (!use_sinc && !(interpolator==TRILINEAR || (interpolator==NEAREST_NEIGHBOUR && r_min_nn > 0)))
+		REPORT_ERROR("BUG Projector::griddingCorrect: unrecognised interpolator scheme.");
+
+	// Every voxel is corrected independently, so the result does not depend on the threads
+	const int nt = relionBulkThreads(MULTIDIM_SIZE(vol_in));
+	#pragma omp parallel for num_threads(nt) if(nt > 1)
+	for (long int k = STARTINGZ(vol_in); k <= FINISHINGZ(vol_in); k++)
+	for (long int i = STARTINGY(vol_in); i <= FINISHINGY(vol_in); i++)
+	for (long int j = STARTINGX(vol_in); j <= FINISHINGX(vol_in); j++)
 	{
 		RFLOAT r = sqrt((RFLOAT)(k*k+i*i+j*j));
 		// if r==0: do nothing (i.e. divide by 1)
@@ -733,18 +845,16 @@ void Projector::griddingCorrect(MultidimArray<RFLOAT> &vol_in)
 			RFLOAT sinc = sin(PI * rval) / ( PI * rval);
 			//RFLOAT ftblob = blob_Fourier_val(rval, blob) / blob_Fourier_val(0., blob);
 			// Interpolation (goes with "interpolator") to go from arbitrary to fine grid
-			if (interpolator==NEAREST_NEIGHBOUR && r_min_nn == 0)
+			if (use_sinc)
 			{
 				// NN interpolation is convolution with a rectangular pulse, which FT is a sinc function
 				A3D_ELEM(vol_in, k, i, j) /= sinc;
 			}
-			else if (interpolator==TRILINEAR || (interpolator==NEAREST_NEIGHBOUR && r_min_nn > 0) )
+			else
 			{
 				// trilinear interpolation is convolution with a triangular pulse, which FT is a sinc^2 function
 				A3D_ELEM(vol_in, k, i, j) /= sinc * sinc;
 			}
-			else
-				REPORT_ERROR("BUG Projector::griddingCorrect: unrecognised interpolator scheme.");
 //#define DEBUG_GRIDDING_CORRECT
 #ifdef DEBUG_GRIDDING_CORRECT
 			if (k==0 && i==0 && j > 0)

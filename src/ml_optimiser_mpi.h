@@ -111,6 +111,9 @@ public:
      *  Write temporary data and weight arrays from the backprojector to disc to allow unregularized reconstructions
      */
     void writeTemporaryDataAndWeightArrays();
+    // Copies of the data and weight arrays (single precision, as the files would hold them),
+    // kept in memory when there is room, so the unregularised reconstruction avoids the disc
+    std::vector<std::vector<float> > unreg_keep_re, unreg_keep_im, unreg_keep_w;
 
     /**
      *  Read temporary data and weight arrays from disc and perform unregularized reconstructions

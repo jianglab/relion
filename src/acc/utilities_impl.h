@@ -568,7 +568,9 @@ static void cosineFilter(
 		XFLOAT radius,
 		XFLOAT radius_p,
 		XFLOAT cosine_width,
-		XFLOAT sum_bg_total)
+		XFLOAT sum_bg_total,
+		const XFLOAT *g_sum = NULL,     // CUDA only: if set, the background value is made on the GPU
+		const XFLOAT *g_sum_bg = NULL)  // from these partial sums (see cuda_kernel_cosineFilter)
 {
 	int block_dim = 128; //TODO: set balanced (hardware-dep?)
 #ifdef _CUDA_ENABLED
@@ -586,7 +588,9 @@ static void cosineFilter(
 			radius,
 			radius_p,
 			cosine_width,
-			sum_bg_total);
+			sum_bg_total,
+			g_sum,
+			g_sum_bg);
 #elif _HIP_ENABLED
 	hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_kernel_cosineFilter), dim3(block_dim), dim3(SOFTMASK_BLOCK_SIZE), 0, vol.getStream(),
 			~vol,

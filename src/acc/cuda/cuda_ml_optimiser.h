@@ -7,6 +7,7 @@
 #include "src/acc/acc_projector_plan.h"
 #include "src/acc/acc_projector.h"
 #include "src/acc/acc_backprojector.h"
+#include "src/acc/acc_bp_accum.h"
 #include "src/acc/cuda/cuda_fft.h"
 #include "src/acc/cuda/cuda_benchmark_utils.h"
 #include <stack>
@@ -40,6 +41,13 @@ public:
 
 	bool haveWarnedRefinementMem;
 
+	// Hand the allocator and its chunk of GPU memory on to the next bundle on this device instead of
+	// freeing and allocating them every iteration (a cudaMalloc of the chunk takes 0.1-0.3 s)
+	bool keep_allocator = false;
+
+	// Bytes of GPU memory held for the next iteration (0 when none)
+	size_t retainedBytes() const;
+
 	MlDeviceBundle(MlOptimiser *baseMLOptimiser):
 			baseMLO(baseMLOptimiser),
 			generateProjectionPlanOnTheFly(false),
@@ -63,6 +71,30 @@ public:
 		DEBUG_HANDLE_ERROR(cudaDeviceSynchronize());
 	}
 
+	// Per-orientation accumulation for the back-projection of 3D references (see BPAccumView):
+	// sized and put in the allocator's chunk by setupBackprojectAccumulator() when the
+	// iteration is a global search with images against 3D references, spread into the
+	// volumes and freed by flushBackprojectAccumulator()
+	struct BPAccumulator
+	{
+		CudaCustomAllocator::Alloc *block = NULL;
+		BPAccumView view = BPAccumView();
+		size_t slots = 0;           // slots (class, orientation) in all
+		unsigned slots_per_class = 0;
+		unsigned nr_over = 0;       // oversampled rotations per orientation the slots were made for
+		unsigned img_x = 0, img_y = 0;
+		BPModelPtrs *d_models = NULL; // in the block
+		size_t bytes = 0;
+	} bpacc;
+	void setupBackprojectAccumulator();
+	void flushBackprojectAccumulator();
+
+	// Make this device current on the calling thread (worker threads start on device 0)
+	void bindThreadToDevice()
+	{
+		cudaSetDevice(device_id);
+	}
+
 
 	~MlDeviceBundle()
 	{
@@ -70,10 +102,18 @@ public:
 		backprojectors.clear();
 		coarseProjectionPlans.clear();
 		//Delete this lastly
+		if (keep_allocator && allocator != NULL && retainAllocator(device_id, allocator))
+			allocator = NULL;
 		delete allocator;
 	}
 
+	static bool retainAllocator(int device, CudaCustomAllocator *a);
+
 };
+// Frees the allocators kept between iterations, for code that needs the GPU memory (the GPU
+// reconstruction): the next iteration then allocates a new one
+void relionReleaseRetainedGpuMemory();
+
 class MlOptimiserCuda
 {
 public:

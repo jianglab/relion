@@ -1100,7 +1100,8 @@ void diff2_coarse(
 		, const CoarseClassJob *g_classes = NULL, // class batching (CUDA only):
 		const int *g_class_start = NULL,          // see cuda_kernel_diff2_coarse
 		int n_classes = 0,
-		bool rest_blocks = false
+		bool rest_blocks = false,
+		const float2 *g_shift = NULL
 #endif
 		)
 {
@@ -1121,7 +1122,8 @@ void diff2_coarse(
 			g_classes,
 			g_class_start,
 			n_classes,
-			rest_blocks);
+			rest_blocks,
+			NULL, 1, 0, g_shift);
 #elif _HIP_ENABLED
 	hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_kernel_diff2_coarse<REF3D, DATA3D, block_sz, eulers_per_block, prefetch_fraction>), dim3(grid_size), dim3(block_size), 0, stream,
 			g_eulers,

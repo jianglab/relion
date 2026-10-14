@@ -40,6 +40,7 @@ class AccProjector
 		hipTextureObject_t *mdlReal, *mdlImag;	
 	#endif
 	size_t pitch2D;
+	bool cplx2; // one two-channel texture for real and imaginary part (3D CUDA model)
 #else
 #ifdef ALTCPU
 	std::complex<XFLOAT> *mdlComplex;
@@ -66,6 +67,7 @@ public:
 		texArrayImag2D = 0;
 		texArrayReal = 0;
 		texArrayImag = 0;
+		cplx2 = false;
 		mdlReal = 0;
 		mdlImag = 0;
 		pitch2D = 0;

@@ -2,6 +2,12 @@
 #define ACC_HELPER_FUNCTIONS_H_
 
 #include "src/acc/acc_ml_optimiser.h"
+#include "src/acc/orientation_cache.h"
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
 #ifdef _CUDA_ENABLED
 	using deviceStream_t = cudaStream_t;
 #elif _HIP_ENABLED
@@ -66,7 +72,11 @@ void generateEulerMatrices(
 		XFLOAT *eulers,
 		bool inverse,
 		Matrix2D<RFLOAT> &L,
-		Matrix2D<RFLOAT> &R);
+		Matrix2D<RFLOAT> &R,
+		const OrientationCache *cache = nullptr);
+
+std::shared_ptr<OrientationCache> getOrientationCache(
+		MlOptimiser *baseMLO, SamplingParameters &sp, OptimisationParamters &op);
 
 long unsigned generateProjectionSetupFine(
 		OptimisationParamters &op,
@@ -142,6 +152,16 @@ void deviceInitValue(AccPtr<T> &data, T value, size_t Size)
 {
 	AccUtilities::InitValue<T>(data, value, Size);
 }
+
+#ifdef _CUDA_ENABLED
+// All classes of a particle in one launch (see cuda_kernel_allweights_to_mweights_batched)
+void mapAllWeightsToMweightsBatched(
+		const std::vector<WeightMapJob> &jobs,
+		XFLOAT * d_allweights,
+		XFLOAT * d_mweights,
+		unsigned long translation_num,
+		AccPtr<char> &table);
+#endif
 
 void mapAllWeightsToMweights(
 		unsigned long * d_iorient, //projectorPlan.iorientclasses
@@ -269,8 +289,100 @@ inline bool gpuClassBatching()
 	return on;
 }
 
+// RELION_GPU_MAP_PER_CLASS=1: allweights_to_mweights with one launch per class again
+// (the default is one launch for all classes), e.g. to compare
+inline bool gpuMapPerClass()
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_MAP_PER_CLASS");
+		return e && std::string(e) != "0" && std::string(e) != "off";
+	}();
+	return on;
+}
+
+// RELION_GPU_SHIFT_TABLE=1: (cos, sin) of the translations' phases of a particle's pixels made
+// once per particle for the coarse differences instead of a sincosf in every block
+inline bool gpuShiftTable()
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_SHIFT_TABLE");
+		return e && std::string(e) != "0" && std::string(e) != "off";
+	}();
+	return on;
+}
+
+// RELION_GPU_WAVG_SUM=1: the class-batched weighted averages of 2D data from the weights' sum and
+// the weighted sum of the shifted images (see cuda_kernel_wavg_sum); float noise, off by default
+inline bool gpuWavgSum()
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_WAVG_SUM");
+		return e && std::string(e) != "0" && std::string(e) != "off";
+	}();
+	return on;
+}
+
+// RELION_GPU_FUSED_WEIGHTS=1: the significance pass of the weights (maximum, exponentiation, sort,
+// scan, threshold, significance mask) as a few launches and one copy instead of about fifty driver
+// calls per pass (see CudaKernels::fusedWeightPass); off by default while it is validated
+inline bool gpuFusedWeights()
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_FUSED_WEIGHTS");
+		return e && std::string(e) != "0" && std::string(e) != "off";
+	}();
+	return on;
+}
+
+// RELION_GPU_FUSED_PREP=1: the particle preparation with fewer round trips to the host: the
+// background value of the soft mask is made on the GPU from the partial sums, and the wait
+// after the mask is left to the copy that follows; off by default while it is validated
+inline bool gpuFusedPrep()
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_FUSED_PREP");
+		return e && std::string(e) != "0" && std::string(e) != "off";
+	}();
+	return on;
+}
+
+// RELION_GPU_SHARED_SUMS=1: the weighted sums and the 3D back-projection of 2D images in
+// one kernel (see cuda_kernel_shared_sums); off by default while it is validated
+// (2: only the weighted-sum outputs, 3: only the back-projection, from the shared-sums
+// kernel, the other half from its own kernel: for checking the two halves separately)
+inline int gpuSharedSums()
+{
+	static const int mode = []() {
+		const char *e = getenv("RELION_GPU_SHARED_SUMS");
+		if (!e || std::string(e) == "0" || std::string(e) == "off")
+			return 0;
+		const int m = atoi(e);
+		return (m == 2 || m == 3) ? m : 1;
+	}();
+	return mode;
+}
+
 // All classes of one coarse pass in one call (two launches); `table` is uploaded and
 // must outlive the launches (CUDA only, not for do_CC)
+//
+// With `defer` nothing is launched: the objects the launch needs stay in `defer` (they must live until the
+// group's launch has finished) and runDiff2KernelCoarseGroup launches for several particles together.
+struct CoarseDeferred
+{
+	std::unique_ptr<AccPtr<XFLOAT> > partial;
+	std::unique_ptr<AccPtr<float2> > shift;
+	std::unique_ptr<AccProjectorKernel> projector;
+	XFLOAT *trans_x, *trans_y, *trans_z, *corr_img, *Fimg_real, *Fimg_imag;
+	unsigned long translation_num, image_size;
+	const CoarseClassJob *d_classes;
+	const int *d_even;
+	const float2 *d_shift;
+	XFLOAT *d_partial;
+	int n_blocks = 0, n_classes = 0, n_chunks = 1;
+	size_t chunk_stride = 0, max_orient = 0;
+	deviceStream_t stream;
+};
+
 bool runDiff2KernelCoarseBatched(
 		std::vector<CoarseClassJob> &classes,
 		std::vector<size_t> &orientation_nums,
@@ -283,10 +395,27 @@ bool runDiff2KernelCoarseBatched(
 		unsigned long translation_num,
 		unsigned long image_size,
 		bool data_is_3D,
-		AccPtr<char> &table);
+		AccPtr<char> &table,
+		CoarseDeferred *defer = NULL);
+
+// The deferred coarse launches of several particles together; `recs` holds the uploaded records
+bool runDiff2KernelCoarseGroup(std::vector<CoarseDeferred *> &items, AccPtr<char> &recs);
+
+// The minimum of each of several device arrays (one launch, one read-back); the arrays are
+// (pointer, size) pairs, all on `stream`
+void minOnDeviceBatched(const std::vector<std::pair<const XFLOAT *, size_t> > &arrays, std::vector<XFLOAT> &mins,
+		AccPtr<char> &scratch, deviceStream_t stream);
 #endif
 
 #ifdef _CUDA_ENABLED
+// All classes' mappings in one launch (RELION_GPU_CLASS_BATCH, default; the per-class
+// launch is 2-3 us of GPU and a launch for each of up to 100 classes per particle)
+void mapAllWeightsToMweightsBatched(
+		std::vector<MapClassJob> &jobs,
+		XFLOAT * d_mweights,
+		unsigned long translation_num,
+		AccPtr<char> &table);
+
 // All classes' weighted averages / back-projections of one image in one launch
 // (one block per class and orientation); `table` is uploaded and must outlive
 // the launch. Back-projection without do_grad only.
@@ -341,6 +470,49 @@ void runCollect2jobsBatched(
 		bool data_is_3D,
 		AccPtr<char> &table);
 
+// Weighted sums and 3D back-projection of all classes in one launch (opt-in, see
+// cuda_kernel_shared_sums); false if the case is not covered (nothing launched)
+bool runSharedSumsKernelBatched(
+		std::vector<SharedSumsClassJob> &jobs,
+		AccBackprojector &BP,
+		XFLOAT *d_img_real,
+		XFLOAT *d_img_imag,
+		XFLOAT *d_img_real_nomask,
+		XFLOAT *d_img_imag_nomask,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT *d_ctfs,
+		XFLOAT *d_Minvsigma2s,
+		XFLOAT *wdiff2s_parts,
+		unsigned long translation_num,
+		XFLOAT weight_norm,
+		XFLOAT significant_weight,
+		XFLOAT part_scale,
+		unsigned long image_size,
+		int imgX,
+		int imgY,
+		bool refs_are_ctf_corrected,
+		bool ctf_premultiplied,
+		int parts,
+		AccPtr<char> &table);
+
+void runBackProjectSgdKernelBatched(
+		AccBackprojector &BP,
+		std::vector<BPSgdClassJob> &jobs,
+		std::vector<size_t> &orientation_nums,
+		XFLOAT *d_img_real,
+		XFLOAT *d_img_imag,
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		XFLOAT* d_Minvsigma2s,
+		XFLOAT* d_ctfs,
+		unsigned long translation_num,
+		XFLOAT significant_weight,
+		int imgX,
+		int imgY,
+		bool ctf_premultiplied,
+		AccPtr<char> &table);
+
 void runBackProjectKernelBatched(
 		AccBackprojector &BP,
 		std::vector<BPClassJob> &jobs,
@@ -359,7 +531,18 @@ void runBackProjectKernelBatched(
 		int imgZ,
 		bool data_is_3D,
 		bool ctf_premultiplied,
-		AccPtr<char> &table);
+		AccPtr<char> &table,
+		const std::vector<unsigned> *slots = NULL,
+		const BPAccumView *accum = NULL);
+
+void runBackProjectAccumFlush(
+		AccBackprojector &BP,
+		const BPAccumView &acc,
+		const BPModelPtrs *d_models,
+		unsigned slots_per_class,
+		unsigned img_x,
+		unsigned img_y,
+		int used);
 #endif
 
 void runDiff2KernelFine(

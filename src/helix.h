@@ -135,7 +135,8 @@ void imposeHelicalSymmetryInRealSpace(
 		RFLOAT z_percentage,
 		RFLOAT rise_A,
 		RFLOAT twist_deg,
-		RFLOAT cosine_width_pix);
+		RFLOAT cosine_width_pix,
+		int threads = 0); // 0: as many as OpenMP allows
 
 // Some functions only for specific testing
 void calcRadialAverage(
@@ -169,6 +170,18 @@ void transformCartesianAndHelicalCoords(
 		RFLOAT tilt_deg,
 		RFLOAT psi_deg,
 		bool direction);
+
+/// The rotation of transformCartesianAndHelicalCoords() for one particle, built once and applied to
+/// many shifts. Gives exactly the numbers of the function above (same matrix, same order of sums).
+class HelicalCoordsRotation
+{
+public:
+	HelicalCoordsRotation(RFLOAT rot_deg, RFLOAT tilt_deg, RFLOAT psi_deg, int dim, bool direction);
+	void apply(RFLOAT xin, RFLOAT yin, RFLOAT zin, RFLOAT &xout, RFLOAT &yout, RFLOAT &zout) const;
+private:
+	int dim_;
+	RFLOAT m_[3][3];
+};
 
 void transformCartesianAndHelicalCoords(
 		RFLOAT xin,

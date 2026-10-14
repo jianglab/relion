@@ -47,6 +47,11 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "src/ml_optimiser.h"
+#include <thread>
+#ifdef __linux__
+#include <sched.h>
+#endif
+#include "src/gpu_reconstruct.h"
 #include "src/fixed_class_initialisation.h"
 #include "src/class2d_consensus_metadata.h"
 #include "src/spatial_frequency_grid.h"
@@ -82,6 +87,18 @@
 #endif
 
 #define NR_CLASS_MUTEXES 5
+#include "src/async_file_writer.h"
+#include "src/acc/stage_timer.h"
+
+// RELION_ITER_TIMING=1 prints the wall time of each stage of every iteration to stderr
+#include <chrono>
+static double itNow() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static double itMarks[12];
+static bool itTimingOn() { static const bool on = getenv("RELION_ITER_TIMING") != NULL; return on; }
+#define IT_MARK(i) do { if (itTimingOn()) itMarks[i] = itNow(); } while (0)
+#define IT_REPORT() do { if (itTimingOn()) fprintf(stderr, "ITER_TIMING it%d ms: pre %.0f expsetup %.0f memchk %.0f gpusetup %.0f estep %.0f gpupost %.0f tail %.0f sym %.0f max %.0f post %.0f write %.0f\n", iter, \
+    1e3*(itMarks[1]-itMarks[0]), 1e3*(itMarks[2]-itMarks[1]), 1e3*(itMarks[3]-itMarks[2]), 1e3*(itMarks[4]-itMarks[3]), 1e3*(itMarks[5]-itMarks[4]), 1e3*(itMarks[6]-itMarks[5]), 1e3*(itMarks[7]-itMarks[6]), \
+    1e3*(itMarks[8]-itMarks[7]), 1e3*(itMarks[9]-itMarks[8]), 1e3*(itMarks[10]-itMarks[9]), 1e3*(itMarks[11]-itMarks[10])); } while (0)
 
 //Some global threads management variables
 static omp_lock_t global_mutex2[NR_CLASS_MUTEXES] = {};
@@ -1540,6 +1557,7 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
     if (do_grad && subset_size > 0 && (iter % write_every_grad_iter) != 0 && iter != nr_iter)
         return;
 
+    double wt0 = itNow(), wt1 = 0, wt2 = 0, wt3 = 0;
     FileName fn_root, fn_tmp, fn_model, fn_model2, fn_data, fn_sampling, fn_root2;
     std::ofstream  fh;
     if (iter > -1)
@@ -1700,17 +1718,20 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
     }
 
     // Then write the mymodel to file
+    if (itTimingOn()) wt1 = itNow();
     if (do_write_model)
     {
         if (do_split_random_halves && !do_join_random_halves)
-            mymodel.write(fn_root2 + "_half" + integerToString(random_subset), sampling, do_write_bild);
+            mymodel.write(fn_root2 + "_half" + integerToString(random_subset), sampling, do_write_bild, false, true);
         else
-            mymodel.write(fn_root2, sampling, do_write_bild, false);
+            mymodel.write(fn_root2, sampling, do_write_bild, false, true);
     }
+    if (itTimingOn()) wt2 = itNow();
 
     // And write the mydata to file
     if (do_write_data)
-        mydata.write(fn_root + "_data.star", remove_offset_priors_again);
+        mydata.write(fn_root + "_data.star", remove_offset_priors_again, true);
+    if (itTimingOn()) { wt3 = itNow(); fprintf(stderr, "ITER_TIMING write it%d ms: optimiser %.0f model %.0f data %.0f\n", iter, 1e3*(wt1-wt0), 1e3*(wt2-wt1), 1e3*(wt3-wt2)); }
 
     // And write the sampling object
     if (do_write_sampling)
@@ -1964,16 +1985,9 @@ void MlOptimiser::initialise()
 
     grad_pseudo_halfsets = gradient_refine && !do_split_random_halves;
 
-#ifdef MKLFFT
-    // Enable multi-threaded FFTW
-    int success = fftw_init_threads();
-    if (0 == success)
-        REPORT_ERROR("Multithreaded FFTW failed to initialize");
-
-    // And allow plans before expectation to run using allowed
-    // number of threads
-    fftw_plan_with_nthreads(nr_threads);
-#endif
+    // Enable multi-threaded FFTW, and let plans before the expectation use the threads
+    relionFftwInitThreads();
+    relionFftwPlanThreads(nr_threads);
 
     initialiseGeneral();
 
@@ -2258,6 +2272,8 @@ void MlOptimiser::initialiseGeneral(int rank)
 
     // RELION_GPU_SKIP_ALIGN=1 keeps the GPU for --skip_align / --skip_rotate (opt-in while it is
     // being validated: upstream switches the accelerators off here)
+    // (before --skip_align switches the GPU off: the M-step can still use it, RELION_GPU_RECONSTRUCT=1)
+    gpurec::setGpuRequested(do_gpu);
     const char *gpu_skip_align = getenv("RELION_GPU_SKIP_ALIGN");
     const bool keep_gpu_skip_align = gpu_skip_align != NULL && std::string(gpu_skip_align) == "1";
     if ((do_skip_align || do_skip_rotate) && !(keep_gpu_skip_align && do_gpu))
@@ -3068,6 +3084,24 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
     }
     wsum_model.initZeros();
 
+    auto report_norm_warning = [&](const FileName &fn, RFLOAT sum, RFLOAT sum2, bool is_helical_segment,
+                                   RFLOAT cyl_radius_pix, RFLOAT psi_prior, RFLOAT tilt_prior, RFLOAT sphere_radius_pix)
+    {
+        std::cerr << " fn_img= " << fn << " bg_avg= " << sum << " bg_stddev= " << sum2 << std::flush;
+        if (is_helical_segment)
+            std::cerr << " tube_bg_radius= " << cyl_radius_pix << " psi_deg= " << psi_prior << " tilt_deg= " << tilt_prior << " (this is a particle from a helix)" << std::flush;
+        else
+            std::cerr << " bg_radius= " << sphere_radius_pix << std::flush;
+        std::cerr << std::endl;
+        std::cerr << "WARNING: It appears that these images have not been normalised to an average background value of 0 and a stddev value of 1. \n \
+                            Note that the average and stddev values for the background are calculated: \n \
+                            (1) for single particles: outside a circle with the particle diameter \n \
+                            (2) for helical segments: outside a cylinder (tube) with the helical tube diameter \n \
+                            You can use the relion_preprocess program to normalise your images \n \
+                            If you are sure you have normalised the images correctly (also see the RELION Wiki), you can switch off this warning message using the --dont_check_norm command line option" <<std::endl;
+        dont_raise_norm_error = true;
+    };
+
     // Seed membership selection is independent of optics-group noise quotas.
     std::vector<char> seed_particle;
     if (fresh_fixed)
@@ -3084,7 +3118,249 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
         for (long int particle : selection.takeIndices()) seed_particle[particle] = true;
     }
     bool is_done_all_optics_groups = false;
-    for (long int part_id_sorted = 0; part_id_sorted < mydata.numberOfParticles(); part_id_sorted++)
+
+    // The particles that take part, in the order of the serial loop below. Reading each image, masking
+    // it and taking its power spectrum is independent from particle to particle, so it is done by
+    // all threads, a block of particles at a time; the sums are then added up in the serial order,
+    // so that the result does not depend on the number of threads.
+    bool parallel_done = false;
+    {
+        const char *env_st = getenv("RELION_STARTUP_THREADS");
+        const bool threads_allowed = !(env_st && std::string(env_st) == "0");
+        if (fn_ref != "None" && !mydata.is_tomo && !fresh_fixed && nr_threads > 1 && threads_allowed)
+        {
+            std::vector<long int> selected;
+            {
+                std::vector<long> count_per_group(mymodel.nr_optics_groups, 0);
+                for (long int part_id_sorted = 0; part_id_sorted < mydata.numberOfParticles(); part_id_sorted++)
+                {
+                    long int part_id = mydata.sorted_idx[part_id_sorted];
+                    long int og = mydata.getOpticsGroup(part_id);
+                    if (count_per_group[og] >= minimum_nr_particles_sigma2_noise) continue;
+                    selected.push_back(part_id);
+                    count_per_group[og]++;
+                    bool all_full = true;
+                    for (int i = 0; i < count_per_group.size(); i++)
+                        if (count_per_group[i] < minimum_nr_particles_sigma2_noise) all_full = false;
+                    if (all_full) break;
+                }
+            }
+
+            struct NoiseJob
+            {
+                Image<RFLOAT> img;
+                MultidimArray<RFLOAT> spectrum;
+                RFLOAT psi = 0., tilt = 0., bg_sum = 0., bg_sum2 = 0.;
+                bool check = false;
+                FileName fn_img;
+            };
+            const int nt = XMIPP_MIN((long int)nr_threads, (long int)selected.size());
+            const size_t block = XMIPP_MAX(nt * 4, 16);
+            std::vector<NoiseJob> jobs(XMIPP_MIN(block, selected.size()));
+            const int spectral_size = (mymodel.ori_size / 2) + 1;
+            const bool check_norm_possible = !(mymodel.data_dim == 3) && verb > 0;
+            struct timeval t_start; gettimeofday(&t_start, NULL);
+
+            // plans made by the worker threads are single-threaded; the main thread's setting comes back below
+            relionFftwPlanThreads(1);
+            std::vector<FourierTransformer> thread_transformers(nt);
+            std::vector<OpenStacks> thread_stacks(nt);
+
+            auto work = [&](int tid, size_t first, size_t count, std::atomic<size_t> &next)
+            {
+                MultidimArray<Complex> FauxT;
+                size_t j;
+                while ((j = next++) < count)
+                {
+                    NoiseJob &job = jobs[j];
+                    const long int part_id = selected[first + j];
+                    const long int optics_group = mydata.getOpticsGroup(part_id);
+                    MetaDataTable MDrow = mydata.getMetaDataParticle(part_id);
+                    Image<RFLOAT> &img = job.img;
+                    job.fn_img = mydata.particles[part_id].name;
+                    if (do_preread_images && do_parallel_disc_io)
+                    {
+                        img().reshape(mydata.particles[part_id].img);
+                        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(mydata.particles[part_id].img)
+                        {
+                            DIRECT_MULTIDIM_ELEM(img(), n) = (RFLOAT)DIRECT_MULTIDIM_ELEM(mydata.particles[part_id].img, n);
+                        }
+                    }
+                    else
+                    {
+                        FileName fn_i, fn_s;
+                        long int dump;
+                        if (!mydata.getImageNameOnScratch(part_id, fn_i))
+                            fn_i = mydata.particles[part_id].name;
+                        else if (!do_parallel_disc_io)
+                        {
+                            fn_i.decompose(dump, fn_s);
+                            if (!exists(fn_s)) MDrow.getValue(EMDL_IMAGE_NAME, fn_i);
+                        }
+                        fn_i.decompose(dump, fn_s);
+                        img.readFromOpenFile(fn_i, thread_stacks[tid].get(fn_s), -1, false);
+                        img().setXmippOrigin();
+                        job.fn_img = fn_i;
+                    }
+
+                    RFLOAT my_pixel_size = mydata.getOpticsPixelSize(optics_group);
+                    RFLOAT psi_prior = 0., tilt_prior = 0.;
+                    bool is_helical_segment = (do_helical_refine) || ((mymodel.ref_dim == 2) && (helical_tube_outer_diameter > 0.));
+                    if (is_helical_segment)
+                    {
+                        if (!MDrow.getValue(EMDL_ORIENT_PSI_PRIOR, psi_prior))
+                        {
+                            if (!MDrow.getValue(EMDL_ORIENT_PSI, psi_prior))
+                                REPORT_ERROR("ml_optimiser.cpp::calculateSumOfPowerSpectraAndAverageImage: Psi priors of helical segments are missing!");
+                        }
+                        if (!MDrow.getValue(EMDL_ORIENT_TILT_PRIOR, tilt_prior))
+                        {
+                            if (!MDrow.getValue(EMDL_ORIENT_TILT, tilt_prior))
+                                REPORT_ERROR("ml_optimiser.cpp::calculateSumOfPowerSpectraAndAverageImage: Tilt priors of helical segments are missing!");
+                        }
+                    }
+                    job.psi = psi_prior;
+                    job.tilt = tilt_prior;
+
+                    job.check = check_norm_possible;
+                    if (job.check)
+                    {
+                        RFLOAT cyl_radius_pix = helical_tube_outer_diameter / (2. * my_pixel_size);
+                        RFLOAT sphere_radius_pix = particle_diameter / (2. * my_pixel_size);
+                        calculateBackgroundAvgStddev(img, job.bg_sum, job.bg_sum2, (int)(ROUND(sphere_radius_pix)), is_helical_segment,
+                                                     cyl_radius_pix, tilt_prior, psi_prior, mymodel.isRect());
+                    }
+
+                    if (do_zero_mask)
+                    {
+                        if (is_helical_segment)
+                            softMaskOutsideMapForHelix(img(), psi_prior, tilt_prior, (particle_diameter / (2. * my_pixel_size)),
+                                    (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge);
+                        else
+                            softMaskOutsideMap(img(), particle_diameter / (2. * my_pixel_size), width_mask_edge, NULL, mymodel.isRect());
+                    }
+
+                    if (fabs(my_pixel_size - mymodel.pixel_size) > 0.0001)
+                    {
+                        int rescalesize = ROUND(XSIZE(img()) * (my_pixel_size/ mymodel.pixel_size));
+                        rescalesize += rescalesize%2;
+                        resizeMap(img(), rescalesize);
+                    }
+                    img().setXmippOrigin();
+                    if (mymodel.isRect())
+                    {
+                        if (XSIZE(img()) != mymodel.imgX() || YSIZE(img()) != mymodel.imgY())
+                            REPORT_ERROR("ERROR: particle image size differs from the rectangular box of the model.");
+                    }
+                    else if (fabs(XSIZE(img()) - mymodel.ori_size) > 0)
+                    {
+                        if (mymodel.data_dim == 2)
+                            img().window(FIRST_XMIPP_INDEX(mymodel.ori_size), FIRST_XMIPP_INDEX(mymodel.ori_size),
+                                         LAST_XMIPP_INDEX(mymodel.ori_size), LAST_XMIPP_INDEX(mymodel.ori_size));
+                        else if (mymodel.data_dim == 3)
+                            img().window(FIRST_XMIPP_INDEX(mymodel.ori_size), FIRST_XMIPP_INDEX(mymodel.ori_size), FIRST_XMIPP_INDEX(mymodel.ori_size),
+                                         LAST_XMIPP_INDEX(mymodel.ori_size), LAST_XMIPP_INDEX(mymodel.ori_size), LAST_XMIPP_INDEX(mymodel.ori_size));
+                    }
+
+                    MultidimArray<RFLOAT> &ind_spectrum = job.spectrum, count;
+                    ind_spectrum.initZeros(spectral_size);
+                    count.initZeros(spectral_size);
+                    thread_transformers[tid].FourierTransform(img(), FauxT, false);
+                    if (mymodel.isRect())
+                    {
+                        FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_RECT(FauxT)
+                        {
+                            long int idx = shellOf(kp, ip, jp);
+                            if (idx < spectral_size)
+                            {
+                                ind_spectrum(idx) += norm(dAkij(FauxT, k, i, j));
+                                count(idx) += 1.;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(FauxT)
+                        {
+                            long int idx = ROUND(sqrt(kp*kp + ip*ip + jp*jp));
+                            if (idx < spectral_size)
+                            {
+                                ind_spectrum(idx) += norm(dAkij(FauxT, k, i, j));
+                                count(idx) += 1.;
+                            }
+                        }
+                    }
+                    ind_spectrum /= count;
+                }
+            };
+
+            for (size_t first = 0; first < selected.size(); first += jobs.size())
+            {
+                const size_t count = XMIPP_MIN(jobs.size(), selected.size() - first);
+                std::atomic<size_t> next(0);
+                std::vector<std::thread> workers;
+                for (int t = 1; t < nt; t++)
+                    workers.emplace_back(work, t, first, count, std::ref(next));
+                work(0, first, count, next);
+                for (auto &w : workers) w.join();
+
+                // in the serial order
+                for (size_t j = 0; j < count; j++)
+                {
+                    NoiseJob &job = jobs[j];
+                    const long int part_id = selected[first + j];
+                    const long int optics_group = mydata.getOpticsGroup(part_id);
+                    if (job.check && !dont_raise_norm_error)
+                    {
+                        RFLOAT my_pixel_size = mydata.getOpticsPixelSize(optics_group);
+                        if (ABS(job.bg_sum/job.bg_sum2) > 0.5 || job.bg_sum2 < 0.5 || job.bg_sum2 > 2.0)
+                        {
+                            bool is_helical_segment = (do_helical_refine) || ((mymodel.ref_dim == 2) && (helical_tube_outer_diameter > 0.));
+                            report_norm_warning(job.fn_img, job.bg_sum, job.bg_sum2, is_helical_segment,
+                                                helical_tube_outer_diameter / (2. * my_pixel_size), job.psi, job.tilt,
+                                                particle_diameter / (2. * my_pixel_size));
+                        }
+                    }
+                    wsum_model.sigma2_noise[optics_group] += job.spectrum;
+                    wsum_model.sumw_group[optics_group] += 1.;
+                    nr_particles_done++;
+                    nr_particles_done_per_optics_group[optics_group]++;
+                }
+                // the average image: each pixel adds the particles in the serial order
+                {
+                    const long int npix = MULTIDIM_SIZE(Mavg);
+                    const long int chunk = (npix + nt - 1) / nt;
+                    auto add = [&](long int from, long int to)
+                    {
+                        for (size_t j = 0; j < count; j++)
+                        {
+                            const RFLOAT *src = MULTIDIM_ARRAY(jobs[j].img());
+                            RFLOAT *dst = MULTIDIM_ARRAY(Mavg);
+                            for (long int n = from; n < to; n++) dst[n] += src[n];
+                        }
+                    };
+                    std::vector<std::thread> adders;
+                    for (int t = 1; t < nt; t++)
+                        adders.emplace_back(add, XMIPP_MIN(npix, t * chunk), XMIPP_MIN(npix, (t + 1) * chunk));
+                    add(0, XMIPP_MIN(npix, chunk));
+                    for (auto &a : adders) a.join();
+                }
+                if (myverb > 0) progress_bar(nr_particles_done);
+                if (pipeline_control_check_abort_job()) break;
+            }
+            thread_transformers.clear();
+            relionFftwPlanThreads(nr_threads);
+            parallel_done = true;
+            if (myverb > 0)
+            {
+                struct timeval t_end; gettimeofday(&t_end, NULL);
+                std::cout << " The noise spectra of " << nr_particles_done << " particles were calculated with " << nt << " threads in "
+                          << (t_end.tv_sec - t_start.tv_sec) + 1e-6 * (t_end.tv_usec - t_start.tv_usec)
+                          << " s (RELION_STARTUP_THREADS=0 for one thread)." << std::endl;
+            }
+        }
+    }
+    for (long int part_id_sorted = 0; !parallel_done && part_id_sorted < mydata.numberOfParticles(); part_id_sorted++)
     {
 
         long int part_id = mydata.sorted_idx[part_id_sorted];
@@ -3179,21 +3455,7 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
                 // Average should be close to zero, i.e. max +/-50% of stddev...
                 // Stddev should be close to one, i.e. larger than 0.5 and smaller than 2)
                 if (ABS(sum/sum2) > 0.5 || sum2 < 0.5 || sum2 > 2.0)
-                {
-                    std::cerr << " fn_img= " << fn_img << " bg_avg= " << sum << " bg_stddev= " << sum2 << std::flush;
-                    if (is_helical_segment)
-                        std::cerr << " tube_bg_radius= " << cyl_radius_pix << " psi_deg= " << psi_prior << " tilt_deg= " << tilt_prior << " (this is a particle from a helix)" << std::flush;
-                    else
-                        std::cerr << " bg_radius= " << sphere_radius_pix << std::flush;
-                    std::cerr << std::endl;
-                    std::cerr << "WARNING: It appears that these images have not been normalised to an average background value of 0 and a stddev value of 1. \n \
-                            Note that the average and stddev values for the background are calculated: \n \
-                            (1) for single particles: outside a circle with the particle diameter \n \
-                            (2) for helical segments: outside a cylinder (tube) with the helical tube diameter \n \
-                            You can use the relion_preprocess program to normalise your images \n \
-                            If you are sure you have normalised the images correctly (also see the RELION Wiki), you can switch off this warning message using the --dont_check_norm command line option" <<std::endl;
-                    dont_raise_norm_error = true;
-                }
+                    report_norm_warning(fn_img, sum, sum2, is_helical_segment, cyl_radius_pix, psi_prior, tilt_prior, sphere_radius_pix);
             }
 
 
@@ -3551,16 +3813,28 @@ void MlOptimiser::initialLowPassFilterReferences()
                 }
             }
             else
-            FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Faux)
             {
-                RFLOAT r = sqrt((RFLOAT)(kp*kp + ip*ip + jp*jp));
-                if (r < radius)
-                    continue;
-                else if (r > radius_p)
-                    DIRECT_A3D_ELEM(Faux, k, i, j) = 0.;
-                else
+                // every element is independent of the others: over threads for large volumes
+                const int nt = relionBulkThreads(MULTIDIM_SIZE(Faux));
+                #pragma omp parallel for num_threads(nt) if(nt > 1)
+                for (long int k = 0; k < ZSIZE(Faux); k++)
                 {
-                    DIRECT_A3D_ELEM(Faux, k, i, j) *= 0.5 - 0.5 * cos(PI * (radius_p - r) / WIDTH_FMASK_EDGE);
+                    const long int kp = (k < XSIZE(Faux)) ? k : k - ZSIZE(Faux);
+                    for (long int i = 0; i < YSIZE(Faux); i++)
+                    {
+                        const long int ip = (i < XSIZE(Faux)) ? i : i - YSIZE(Faux);
+                        for (long int j = 0; j < XSIZE(Faux); j++)
+                        {
+                            const long int jp = j;
+                            RFLOAT r = sqrt((RFLOAT)(kp*kp + ip*ip + jp*jp));
+                            if (r < radius)
+                                continue;
+                            else if (r > radius_p)
+                                DIRECT_A3D_ELEM(Faux, k, i, j) = 0.;
+                            else
+                                DIRECT_A3D_ELEM(Faux, k, i, j) *= 0.5 - 0.5 * cos(PI * (radius_p - r) / WIDTH_FMASK_EDGE);
+                        }
+                    }
                 }
             }
             transformer.inverseFourierTransform(Faux, mymodel.Iref[iclass]);
@@ -3584,6 +3858,8 @@ void MlOptimiser::iterateSetup()
 void MlOptimiser::iterateWrapUp()
 {
 
+    AsyncFileWriter::instance().wait();
+
     // delete barrier, threads and task distributors
     delete exp_ipart_ThreadTaskDistributor;
 
@@ -3595,9 +3871,7 @@ void MlOptimiser::iterateWrapUp()
     if (!keep_scratch)
         mydata.deleteDataOnScratch();
 
-#ifdef MKLFFT
-    fftw_cleanup_threads();
-#endif
+    relionFftwCleanupThreads();
 }
 
 void MlOptimiser::initialiseHelicalContext()
@@ -3967,6 +4241,7 @@ void MlOptimiser::iterate()
         timer.tic(TIMING_EXP);
 #endif
 
+        IT_MARK(0);
         if (gradient_refine && iter < 10) {
             nr_iter_wo_resol_gain = 0;
             nr_iter_wo_large_hidden_variable_changes = 0;
@@ -4041,9 +4316,11 @@ void MlOptimiser::iterate()
         //if (grad_pseudo_halfsets)
         //	std::cerr << "DEBUG: doing pseudo gold standard" << std::endl;
 
+        IT_MARK(1);
         startResourceMonitor();
         expectation();
         stopResourceMonitor();
+        IT_MARK(7);
 
 
         // Sjors & Shaoda Apr 2015
@@ -4068,6 +4345,7 @@ void MlOptimiser::iterate()
             }
         }
         symmetriseReconstructions();
+        IT_MARK(8);
 
 #ifdef TIMING
         timer.toc(TIMING_EXP);
@@ -4084,6 +4362,7 @@ void MlOptimiser::iterate()
         }
 
         maximization();
+        IT_MARK(9);
 
 #ifdef TIMING
         timer.toc(TIMING_MAX);
@@ -4143,7 +4422,7 @@ void MlOptimiser::iterate()
 
         // Directly use fn_out, without "_it" specifier, so unmasked refs will be overwritten at every iteration
         if (do_write_unmasked_refs)
-            mymodel.write(fn_out+"_unmasked", sampling, false, true);
+            mymodel.write(fn_out+"_unmasked", sampling, false, true, true);
 
 #ifdef TIMING
         timer.toc(TIMING_ITER_HELICALREFINE);
@@ -4165,11 +4444,13 @@ void MlOptimiser::iterate()
         timer.toc(TIMING_UPDATERES);
         timer.tic(TIMING_ITER_WRITE);
 #endif
+        IT_MARK(10);
         // Write output files
         write(DO_WRITE_SAMPLING, DO_WRITE_DATA, DO_WRITE_OPTIMISER, DO_WRITE_MODEL, 0);
         if (do_helical_context)
             writeHelicalTypeFiles();
         pruneOldIterations(iter);
+        IT_MARK(11); IT_REPORT(); stagetimer::reportAndReset(iter);
 
 #ifdef TIMING
         timer.toc(TIMING_ITER_WRITE);
@@ -4199,6 +4480,33 @@ void MlOptimiser::iterate()
 
 }
 
+// With a GPU the next iteration fills the host arrays of the projectors again from the
+// device, and a fresh allocation costs about a third of a second of page faults per
+// reference, so keep them when memory is plentiful (RELION_KEEP_PPREF=0 frees them).
+bool MlOptimiser::keepProjectorHostData()
+{
+	if (!do_gpu)
+		return false;
+	if (const char *e = getenv("RELION_KEEP_PPREF"))
+		if (atoi(e) == 0)
+			return false;
+	double need_kb = 0.;
+	for (int iclass = 0; iclass < (int) mymodel.PPref.size(); iclass++)
+		need_kb += mymodel.PPref[iclass].data.nzyxdimAlloc * sizeof(Complex) / 1024.;
+	double avail_kb = 0.;
+	if (FILE *f = fopen("/proc/meminfo", "r"))
+	{
+		char line[256];
+		long kb;
+		while (fgets(line, sizeof(line), f))
+			if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1)
+				avail_kb = kb;
+		fclose(f);
+	}
+	return avail_kb > 16. * need_kb;
+}
+
+
 void MlOptimiser::expectation()
 {
 
@@ -4207,10 +4515,8 @@ void MlOptimiser::expectation()
     std::cerr << "Entering expectation" << std::endl;
 #endif
 
-#ifdef MKLFFT
     // Allow parallel FFTW execution
-    fftw_plan_with_nthreads(nr_threads);
-#endif
+    relionFftwPlanThreads(nr_threads);
 
     // Initialise some stuff
     // A. Update current size (may have been changed to ori_size in autoAdjustAngularSampling) and resolution pointers
@@ -4218,6 +4524,7 @@ void MlOptimiser::expectation()
 
     // B. Initialise Fouriertransform, set weights in wsum_model to zero, initialise AB-matrices for FFT-phase shifts, etc
     expectationSetup();
+        IT_MARK(2);
 
 #ifdef DEBUG_EXP
     std::cerr << "Expectation: done setup" << std::endl;
@@ -4251,6 +4558,7 @@ void MlOptimiser::expectation()
 
     // E. Check whether everything fits into memory
     expectationSetupCheckMemory(verb);
+        IT_MARK(3);
 
 
 #ifdef DEBUG_EXP
@@ -4267,6 +4575,7 @@ void MlOptimiser::expectation()
         {
             MlDeviceBundle *b = new MlDeviceBundle(this);
             b->setDevice(gpuDevices[i]);
+            b->keep_allocator = true; // not set for MPI jobs, where processes share GPUs
             b->setupFixedSizedObjects();
             accDataBundles.push_back((void*)b);
         }
@@ -4298,6 +4607,7 @@ void MlOptimiser::expectation()
             
             size_t free, total, allocationSize;
             HANDLE_ERROR(accGPUMemGetInfo( &free, &total ));
+            free += ((MlDeviceBundle*)accDataBundles[i])->retainedBytes(); // kept from the last iteration
 
             size_t required_free = requested_free_gpu_memory + GPU_THREAD_MEMORY_OVERHEAD_MB*1000*1000*threadcountOnDevice[i];
 
@@ -4321,6 +4631,7 @@ void MlOptimiser::expectation()
         }
     }
 #endif
+        IT_MARK(4);
 #ifdef _SYCL_ENABLED
 	if (do_sycl)
 	{
@@ -4393,10 +4704,8 @@ void MlOptimiser::expectation()
 #endif // ALTCPU
     /************************************************************************/
 
-#ifdef MKLFFT
     // Single-threaded FFTW execution for code inside parallel processing loop
-    fftw_plan_with_nthreads(1);
-#endif
+    relionFftwPlanThreads(1);
 
     // Now perform real expectation over all particles
     // Use local parameters here, as also done in the same overloaded function in MlOptimiserMpi
@@ -4449,7 +4758,10 @@ void MlOptimiser::expectation()
     if (use_prefetch)
     {
         prefetch_global_last_ = my_last_part_id;
-        prefetcher_ = new AsyncImagePrefetcher(&mydata);
+        int max_readers = XMIPP_MIN(nr_threads, 8);
+        if (const char *e = getenv("RELION_PREFETCH_THREADS")) // most reader threads per pool (1 = the old single reader)
+            max_readers = XMIPP_MAX(1, atoi(e));
+        prefetcher_ = new AsyncImagePrefetcher(&mydata, max_readers);
         long int first = my_first_part_id + nr_particles_done;
         long int last = XMIPP_MIN(my_last_part_id, first + nr_pool - 1);
         getMetaAndImageDataSubset(first, last, false);
@@ -4525,12 +4837,21 @@ void MlOptimiser::expectation()
 
     if (use_prefetch)
     {
+        if (verb > 0 && prefetcher_->nrPools() > 0)
+        {
+            long int np = prefetcher_->nrPools();
+            std::cout << " Image prefetch: " << np << " pools of " << nr_pool << " images, read in "
+                      << prefetcher_->poolReadTimeUs() / 1.e6 / np << " s each on average; the E-step waited "
+                      << prefetcher_->waitTimeUs() / 1.e6 << " s in total, " << prefetcher_->nrLatePools()
+                      << " pools were late; up to " << prefetcher_->readers() << " threads read a pool (--no_prefetch turns the prefetcher off)." << std::endl;
+        }
         delete prefetcher_;
         prefetcher_ = NULL;
     }
 
     if (verb > 0)
         progress_bar(my_nr_particles);
+    IT_MARK(5);
 
     // If requested, enforce that all segments from the same filament have the same class
     enforceFilamentConsistency();
@@ -4542,12 +4863,26 @@ void MlOptimiser::expectation()
         {
             MlDeviceBundle* b = ((MlDeviceBundle*)accDataBundles[i]);
             b->syncAllBackprojects();
+#ifdef _CUDA_ENABLED
+            b->flushBackprojectAccumulator();
+#endif
 
             for (int j = 0; j < b->projectors.size(); j++)
                 b->projectors[j].clear();
 
-            for (int j = 0; j < b->backprojectors.size(); j++)
+            // Classes are independent (own stream, own wsum_model.BPref[j]): download and add them
+            // in parallel, as many at a time as the host buffers (3 arrays per class) fit in 2 GB
+            const int nbp = b->backprojectors.size();
+            int nt_post = nbp;
+            if (nbp > 0)
             {
+                const size_t per_class = 3 * (size_t)wsum_model.BPref[0].data.nzyxdim * sizeof(XFLOAT);
+                nt_post = std::max(1, std::min(std::min(nr_threads, nbp), (int)((size_t(2) << 30) / std::max<size_t>(per_class, 1))));
+            }
+            #pragma omp parallel for schedule(dynamic, 1) num_threads(nt_post) if(nt_post > 1)
+            for (int j = 0; j < nbp; j++)
+            {
+                if (nt_post > 1) b->bindThreadToDevice();
                 unsigned long s = wsum_model.BPref[j].data.nzyxdim;
                 XFLOAT *reals = new XFLOAT[s];
                 XFLOAT *imags = new XFLOAT[s];
@@ -4603,6 +4938,7 @@ void MlOptimiser::expectation()
         accDataBundles.clear();
     }
 #endif
+        IT_MARK(6);
 #ifdef _SYCL_ENABLED
 	if (do_sycl)
 	{
@@ -4697,15 +5033,14 @@ void MlOptimiser::expectation()
         tbbCpuOptimiser.clear();
     }
 #endif  // ALTCPU
-#ifdef  MKLFFT
     // Allow parallel FFTW execution to continue now that we are outside the parallel
     // portion of expectation
-    fftw_plan_with_nthreads(nr_threads);
-#endif
+    relionFftwPlanThreads(nr_threads);
 
     // Clean up some memory
-    for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
-        mymodel.PPref[iclass].data.clear();
+    if (!keepProjectorHostData())
+        for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+            mymodel.PPref[iclass].data.clear();
 
 #ifdef DEBUG_EXP
     std::cerr << "Expectation: done " << std::endl;
@@ -4729,10 +5064,19 @@ void MlOptimiser::expectationSetup()
 
     // Initialise Projectors and fill vector with power_spectra for all classes
     MultidimArray<RFLOAT> *my_fourier_mask = (XSIZE(helical_fourier_mask) > 0) ? &helical_fourier_mask : NULL;
+    const bool setup_tm = getenv("RELION_ITER_TIMING") != NULL;
+    auto setup_t0 = std::chrono::steady_clock::now();
     mymodel.setFourierTransformMaps(!fix_tau, nr_threads, strict_lowres_exp, my_fourier_mask);
+    auto setup_t1 = std::chrono::steady_clock::now();
 
     // Initialise all weighted sums to zero
     wsum_model.initZeros();
+    if (setup_tm)
+    {
+        auto setup_t2 = std::chrono::steady_clock::now();
+        fprintf(stderr, "SETUP_TIMING it%d setFourierTransformMaps ms %.0f wsum_initZeros ms %.0f\n", iter,
+                1e3 * std::chrono::duration<double>(setup_t1 - setup_t0).count(), 1e3 * std::chrono::duration<double>(setup_t2 - setup_t1).count());
+    }
 
     // Initialise per-class orientation tracking for filament consistency
     if (do_keep_full_filaments && mymodel.nr_classes > 1)
@@ -4873,6 +5217,8 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
     std::cerr << "Entering expectationSomeParticles..." << std::endl;
 #endif
 
+    const double esp_t0 = itNow();
+
     // Use global variables for thread visibility (before there were local ones for similar call in MPI version!)
     exp_my_first_part_id = my_first_part_id;
     exp_my_last_part_id = my_last_part_id;
@@ -4905,7 +5251,28 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
     FileName fn_img, fn_stack, fn_open_stack="";
 
     // Store total number of particle images in this bunch of SomeParticles, and set translations and orientations for skip_align/rotate
-    if (prefetcher_ == NULL)
+    const bool prefetch_active = prefetcher_ != NULL && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3;
+    bool imgs_prefetched = false;
+    if (prefetch_active && prefetch_speculative_)
+    {
+        // the images of this pool were read while the previous one was being processed, if the guess was right
+        imgs_prefetched = prefetcher_->waitAndSwap(exp_imgs, my_first_part_id, my_last_part_id, true);
+        if (imgs_prefetched)
+            prefetch_hits_++;
+        else if (++prefetch_misses_ >= 3 && prefetch_hits_ == 0)
+        {
+            // pools do not arrive in order (several followers share a half set): stop guessing
+            delete prefetcher_;
+            prefetcher_ = NULL;
+        }
+        if (prefetcher_ != NULL)
+        {
+            long int next_first = my_last_part_id + 1;
+            if (next_first <= prefetch_global_last_)
+                prefetcher_->startPrefetch(next_first, XMIPP_MIN(prefetch_global_last_, next_first + nr_pool - 1));
+        }
+    }
+    if (!imgs_prefetched && (prefetcher_ == NULL || prefetch_speculative_))
         exp_imgs.clear();
     int metadata_offset = 0;
     for (long int part_id_sorted = my_first_part_id; part_id_sorted <= my_last_part_id; part_id_sorted++, metadata_offset++)
@@ -4974,7 +5341,7 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
         // Sjors 7 March 2016 to prevent too high disk access... Read in all pooled images simultaneously
         // Don't do this for sub-tomograms to save RAM!
         // With prefetch: images are loaded in background by AsyncImagePrefetcher
-        if (prefetcher_ == NULL && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3)
+        if (!imgs_prefetched && (prefetcher_ == NULL || prefetch_speculative_) && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3)
         {
             // Read in the actual image from disc, only open/close common stacks once
 
@@ -5019,7 +5386,7 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
 
     // If prefetching, swap the background-loaded images into exp_imgs
     // and start reading the next pool in the background
-    if (prefetcher_ != NULL && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3)
+    if (prefetcher_ != NULL && !prefetch_speculative_ && do_parallel_disc_io && !do_preread_images && mymodel.data_dim != 3)
     {
 #ifdef TIMING
         timer.tic(TIMING_ESP_PREFETCH_WAIT);
@@ -5040,6 +5407,8 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
 #ifdef DEBUG_EXPSOME
     std::cerr << " exp_my_first_part_id= " << exp_my_first_part_id << " exp_my_last_part_id= " << exp_my_last_part_id << std::endl;
 #endif
+    const double esp_t1 = itNow();
+    exp_time_serial_s += esp_t1 - esp_t0;
     if (!do_cpu)
     {
         // GPU and traditional CPU case - use RELION's built-in task manager to
@@ -5079,6 +5448,8 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
         //}
     }  // do_cpu
 #endif  // ifdef ALTCPU
+
+    exp_time_par_s += itNow() - esp_t1;
 
     if (threadException != NULL)
         throw *threadException;
@@ -5497,8 +5868,39 @@ void MlOptimiser::expectationOneParticle(long int part_id_sorted, int thread_id)
 
 }
 
+int MlOptimiser::symmetriseThreads()
+{
+    // The GPUs are idle while the reconstructions are symmetrised, so use the cores the
+    // ranks that symmetrise at the same time can share; never fewer than --j.
+    // The result does not depend on the number of threads.
+    static int cached = -1;
+    if (cached < 0)
+    {
+        int n = nr_threads;
+        const char *e = getenv("RELION_SYMMETRISE_THREADS");
+        if (e)
+            n = XMIPP_MAX(1, atoi(e));
+        else
+        {
+            int cpus = (int)std::thread::hardware_concurrency();
+#ifdef __linux__
+            cpu_set_t set;
+            if (sched_getaffinity(0, sizeof(set), &set) == 0)
+                cpus = CPU_COUNT(&set);
+#endif
+            n = XMIPP_MAX(nr_threads, cpus / XMIPP_MAX(1, symmetrise_sharing_ranks));
+        }
+        cached = n;
+        if (verb > 0 && getenv("RELION_ITER_TIMING"))
+            std::cerr << " Symmetrisation uses " << n << " threads (--j " << nr_threads << ", sharing ranks "
+                      << symmetrise_sharing_ranks << (e ? ", set by RELION_SYMMETRISE_THREADS" : "") << ")" << std::endl;
+    }
+    return cached;
+}
+
 void MlOptimiser::symmetriseReconstructions()
 {
+    const int sym_threads = symmetriseThreads();
     for (int ibody = 0; ibody < mymodel.nr_bodies; ibody++)
     {
         if (mymodel.nr_bodies > 1 && mymodel.keep_fixed_bodies[ibody] > 0)
@@ -5513,14 +5915,26 @@ void MlOptimiser::symmetriseReconstructions()
             {
                 // Immediately after expectation process. Do rise and twist for all asymmetrical units in Fourier space
                 // Also convert helical rise to pixels for BPref object
+                const bool sym_timing = getenv("RELION_ITER_TIMING") != NULL;
+                auto sym_t0 = std::chrono::steady_clock::now();
+                auto sym_lap = [&](const char *what)
+                {
+                    if (!sym_timing) return;
+                    auto t = std::chrono::steady_clock::now();
+                    fprintf(stderr, "SYM_TIMING it%d %s ms %.0f threads %d\n", iter, what,
+                            1e3 * std::chrono::duration<double>(t - sym_t0).count(), sym_threads);
+                    sym_t0 = t;
+                };
                 wsum_model.BPref[ith_recons].enforceHermitianSymmetry();
+                sym_lap("hermitian");
 
                 // Then apply helical and point group symmetry (order irrelevant?)
                 if (mymodel.nr_bodies == 1)
                     wsum_model.BPref[ith_recons].applyHelicalSymmetry(
                             mymodel.helical_nr_asu,
                             mymodel.helical_twist[ith_recons],
-                            mymodel.helical_rise[ith_recons] / mymodel.pixel_size);
+                            mymodel.helical_rise[ith_recons] / mymodel.pixel_size, sym_threads);
+                sym_lap("helical");
 
                 if (fn_multi_sym.size() > ith_recons) // Always false if size=0
                 {
@@ -5530,7 +5944,8 @@ void MlOptimiser::symmetriseReconstructions()
                 }
 
 
-                wsum_model.BPref[ith_recons].applyPointGroupSymmetry();
+                wsum_model.BPref[ith_recons].applyPointGroupSymmetry(sym_threads);
+                sym_lap("pointgroup");
 
 
                 if (grad_pseudo_halfsets)
@@ -5544,7 +5959,7 @@ void MlOptimiser::symmetriseReconstructions()
                         wsum_model.BPref[iclass_half].applyHelicalSymmetry(
                                 mymodel.helical_nr_asu,
                                 mymodel.helical_twist[ith_recons],
-                                mymodel.helical_rise[ith_recons] / mymodel.pixel_size);
+                                mymodel.helical_rise[ith_recons] / mymodel.pixel_size, sym_threads);
 
                     if (fn_multi_sym.size() > ith_recons) // Always false if size=0
                     {
@@ -5553,7 +5968,7 @@ void MlOptimiser::symmetriseReconstructions()
                     }
 
 
-                    wsum_model.BPref[iclass_half].applyPointGroupSymmetry();
+                    wsum_model.BPref[iclass_half].applyPointGroupSymmetry(sym_threads);
 
                 }
 
@@ -5629,7 +6044,7 @@ void MlOptimiser::makeGoodHelixForEachRef()
                         helical_z_percentage,
                         mymodel.helical_rise[iclass],
                         mymodel.helical_twist[iclass],
-                        width_mask_edge);
+                        width_mask_edge, nr_threads);
             }
         }
     }
@@ -5721,6 +6136,26 @@ void MlOptimiser::maximization()
 
     // First reconstruct the images for each class
     // multi-body refinement will never get here, as it is only 3D auto-refine and that requires MPI!
+    // With many small classes (VDAM 2D) each class goes to its own thread, with single-threaded FFTs:
+    // the classes are independent, so the results do not depend on the number of threads.
+    // RELION_CLASS_THREADS=1 turns it off, N sets the number of threads.
+    int nr_class_threads = 1;
+#ifndef TIMING
+    if (do_grad && !do_external_reconstruct && !do_blush && nr_threads > 1 && mymodel.nr_classes > 1)
+    {
+        const size_t padded_side = (size_t)(mymodel.ori_size * mymodel.padding_factor);
+        const size_t padded_elements = padded_side * padded_side * (mymodel.ref_dim == 3 ? padded_side : 1);
+        const char *ct = getenv("RELION_CLASS_THREADS");
+        if (ct != NULL && atoi(ct) >= 1)
+            nr_class_threads = XMIPP_MIN(atoi(ct), mymodel.nr_classes);
+        else if (padded_elements < ((size_t)1 << 20))
+            nr_class_threads = XMIPP_MIN(nr_threads, mymodel.nr_classes);
+    }
+#endif
+    long int nr_classes_done = 0;
+    if (nr_class_threads > 1)
+        relionFftwPlanThreads(1);
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(nr_class_threads) if(nr_class_threads > 1)
     for (int iclass = 0; iclass < mymodel.nr_classes * mymodel.nr_bodies; iclass++)
     {
         if (iclass == skip_class)
@@ -5796,8 +6231,13 @@ void MlOptimiser::maximization()
         }
         RCTOC(timer,RCT_1);
         if (verb > 0)
-            progress_bar(iclass);
+        {
+            #pragma omp critical(maximization_progress)
+            progress_bar(++nr_classes_done);
+        }
     }
+    if (nr_class_threads > 1)
+        relionFftwPlanThreads(nr_threads);
 
     RCTIC(timer,RCT_3);
     // Then perform the update of all other model parameters
@@ -5946,7 +6386,8 @@ void MlOptimiser::alignClasses()
             1.,                          // search_step_rot (degrees)
             1.,                          // search_step_trans (Angstrom)
             best_rot, best_tilt, best_psi,
-            best_dx, best_dy, best_dz);
+            best_dx, best_dy, best_dz,
+            nr_threads);
 
         std::cout << "   Best: rot=" << best_rot << " tilt=" << best_tilt
                   << " psi=" << best_psi << " dx=" << best_dx
@@ -10592,6 +11033,45 @@ void MlOptimiser::updateOverallChangesInHiddenVariables()
 }
 
 
+// calculateExpectedAngularErrors below tries each (class, particle) independently: the
+// random numbers of a trial come from a generator seeded with random_seed + part_id at
+// every step, so a trial's result depends only on its own particle. To run the trials in
+// threads each thread needs its own generator giving the same numbers as the global
+// srand()/rand() behind init_random_generator()/rnd_unif(): glibc's random_r() with a
+// 128-byte state is that generator (initstate_r selects the same TYPE_3 scheme as the
+// default state of rand()), and rnd_unif()'s float arithmetic is repeated below.
+#if defined(__GLIBC__)
+#define RELION_ACCERR_THREADS 1
+struct ExpAccRng
+{
+	char state[128];
+	struct random_data rd;
+	ExpAccRng() { memset(&rd, 0, sizeof(rd)); memset(state, 0, sizeof(state)); initstate_r(1, state, sizeof(state), &rd); }
+	void seed(int s) { srandom_r(static_cast<unsigned>(s), &rd); }
+	float unif()
+	{
+		int32_t r;
+		random_r(&rd, &r);
+		const float a = 0., b = 1.;
+		return a + static_cast<float>(r) / static_cast<float>(RAND_MAX / (b - a)); // as rnd_unif(0., 1.)
+	}
+};
+#endif
+// The global generator, for the trials run one after the other
+struct ExpAccGlobalRng
+{
+	void seed(int s) { init_random_generator(s); }
+	float unif() { return rnd_unif(); }
+};
+// What one trial (class, particle) leaves for the accumulation, which is then made in
+// the original particle order (the sums must not change)
+struct ExpAccUnit
+{
+	bool has_rot = false, has_trans = false;
+	RFLOAT ang_error = 0., trans_error = 0.;
+	std::vector<std::pair<int, RFLOAT> > contrib; // (resolution shell, increment) in the original order
+};
+
 void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long int my_last_part_id)
 {
 
@@ -10605,6 +11085,43 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
     std::cout << " Estimating accuracies in the orientational assignment ... " << std::endl;
     int nr_particles = (my_last_part_id - my_first_part_id + 1);
     init_progress_bar( nr_particles * mymodel.nr_classes * mymodel.nr_bodies);
+
+    // Threads (see ExpAccRng): not with a negative seed (time-based) or the NUFFT projector
+    long int acc_last_part_id = -1;
+#ifdef RELION_ACCERR_THREADS
+    // Only one MPI rank (or the single process) does this and the GPUs wait meanwhile, so it may use all the cores
+    // of the node; the results do not depend on the number of threads
+    int acc_threads = nr_threads;
+    {
+        const char *e = getenv("RELION_ACCURACY_THREADS");
+        if (e)
+            acc_threads = XMIPP_MAX(1, atoi(e));
+        else if (nr_threads > 1)
+        {
+            int cpus = (int)std::thread::hardware_concurrency();
+#ifdef __linux__
+            cpu_set_t set;
+            if (sched_getaffinity(0, sizeof(set), &set) == 0)
+                cpus = CPU_COUNT(&set);
+#endif
+            acc_threads = XMIPP_MAX(nr_threads, cpus);
+        }
+        acc_threads = XMIPP_MIN(acc_threads, XMIPP_MAX(1, nr_particles));
+        static bool reported = false;
+        if (!reported && verb > 0 && acc_threads != nr_threads)
+        {
+            reported = true;
+            std::cout << " Accuracy estimate uses " << acc_threads << " threads (--j " << nr_threads
+                      << "; the other ranks wait meanwhile; RELION_ACCURACY_THREADS overrides)" << std::endl;
+        }
+    }
+    const bool acc_parallel = acc_threads > 1 && random_seed >= 0 && mymodel.projector_interpolator != FINUFFT && nr_particles > 1;
+    std::vector<ExpAccRng> acc_rngs(acc_parallel ? acc_threads : 0);
+    if (acc_parallel)
+        relionFftwPlanThreads(1);
+#else
+    const bool acc_parallel = false;
+#endif
     for (int iclass = 0; iclass < mymodel.nr_classes * mymodel.nr_bodies; iclass++)
     {
 
@@ -10631,7 +11148,11 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
         RFLOAT acc_trans_class = 0.;
         // Particles are already in random order, so just move from 0 to n_trials
         long int sum_nr_images = 0;
-        for (long int part_id_sorted = my_first_part_id, metadata_offset = 0; part_id_sorted <= my_last_part_id; part_id_sorted++, metadata_offset++)
+        // The trials of the particles are independent (see ExpAccRng): run them in threads, in
+        // batches whose results are then accumulated in the original particle order, so
+        // that the sums, the orientability spectra, the progress bar and the final state of
+        // the global random generator are those of the particle-by-particle loop
+        auto run_unit = [&](auto &rng, long int part_id_sorted, long int metadata_offset, ExpAccUnit &res)
         {
 
             std::vector<MultidimArray<RFLOAT> > Fctfs;
@@ -10810,7 +11331,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                         break;
 
                     // part_id to keep exactly the same as in relion-3.0....
-                    init_random_generator(random_seed + part_id);
+                    rng.seed(random_seed + part_id);
 
                     MultidimArray<Complex > F1, F2;
                     Matrix2D<RFLOAT> A1, A2;
@@ -10859,7 +11380,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                             if (mymodel.ref_dim == 3)
                             {
                                 // Randomly change rot, tilt or psi
-                                RFLOAT ran = rnd_unif();
+                                RFLOAT ran = rng.unif();
                                 if (ran < 0.3333)
                                     rot2 = rot1 + ang_error;
                                 else if (ran < 0.6667)
@@ -10875,7 +11396,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                         else
                         {
                             // Randomly change xoff or yoff
-                            RFLOAT ran = rnd_unif();
+                            RFLOAT ran = rng.unif();
                             if (mymodel.data_dim == 3 || mydata.is_tomo)
                             {
                                 if (ran < 0.3333)
@@ -10951,20 +11472,60 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                             int ires = DIRECT_MULTIDIM_ELEM(*myMresol, n);
                             int ires_remapped = ROUND(remap_image_sizes * ires);
                             if (ires > 0 && ires_remapped < XSIZE(mymodel.sigma2_noise[optics_group]))
-                                mymodel.orientability_contrib[iclass](ires_remapped) +=
-                                        norm(DIRECT_MULTIDIM_ELEM(F1, n) - DIRECT_MULTIDIM_ELEM(F2, n)) / ( (2 * sigma2_fudge * mymodel.sigma2_noise[optics_group](ires_remapped) ) );
+                                res.contrib.emplace_back(ires_remapped,
+                                        norm(DIRECT_MULTIDIM_ELEM(F1, n) - DIRECT_MULTIDIM_ELEM(F2, n)) / ( (2 * sigma2_fudge * mymodel.sigma2_noise[optics_group](ires_remapped) ) ));
                         }
                     }
 
                 } // end while my_snr >= pvalue
                 if (imode == 0)
-                    acc_rot_class += ang_error;
+                {
+                    res.has_rot = true;
+                    res.ang_error = ang_error;
+                }
                 else if (imode == 1)
-                    acc_trans_class += my_pixel_size * sh_error; // now in Angstroms!
+                {
+                    res.has_trans = true;
+                    res.trans_error = my_pixel_size * sh_error; // now in Angstroms!
+                }
             } // end for imode
 
-            progress_bar(nr_particles*iclass + metadata_offset);
-        } // end for part_id
+        };
+
+        const long int nr_units = my_last_part_id - my_first_part_id + 1;
+        const long int batch = acc_parallel ? 2 * acc_threads : 1;
+        std::vector<ExpAccUnit> units;
+        for (long int first = 0; first < nr_units; first += batch)
+        {
+            const long int nb = XMIPP_MIN(batch, nr_units - first);
+            units.assign(nb, ExpAccUnit());
+#ifdef RELION_ACCERR_THREADS
+            if (acc_parallel)
+            {
+                #pragma omp parallel for num_threads(acc_threads) schedule(dynamic, 1)
+                for (long int k = 0; k < nb; k++)
+                    run_unit(acc_rngs[omp_get_thread_num()], my_first_part_id + first + k, first + k, units[k]);
+            }
+            else
+#endif
+            {
+                ExpAccGlobalRng global_rng;
+                for (long int k = 0; k < nb; k++)
+                    run_unit(global_rng, my_first_part_id + first + k, first + k, units[k]);
+            }
+            for (long int k = 0; k < nb; k++)
+            {
+                const ExpAccUnit &u = units[k];
+                if (u.has_rot)
+                    acc_rot_class += u.ang_error;
+                if (u.has_trans)
+                    acc_trans_class += u.trans_error;
+                for (size_t c = 0; c < u.contrib.size(); c++)
+                    (mymodel.orientability_contrib)[iclass](u.contrib[c].first) += u.contrib[c].second;
+                progress_bar(nr_particles*iclass + (first + k));
+            }
+            acc_last_part_id = mydata.sorted_idx[my_first_part_id + first + nb - 1];
+        }
 
         mymodel.acc_rot[iclass]   = acc_rot_class / (RFLOAT)nr_particles;
         mymodel.acc_trans[iclass] = acc_trans_class / (RFLOAT)nr_particles;
@@ -10989,6 +11550,22 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
     } // end loop iclass
     progress_bar(nr_particles * mymodel.nr_classes * mymodel.nr_bodies);
 
+#ifdef RELION_ACCERR_THREADS
+    if (acc_parallel)
+    {
+        relionFftwPlanThreads(nr_threads);
+        // The particle-by-particle loop leaves the global generator as the last trial's last
+        // step set it: seeded with random_seed + part_id, then one draw per image of that
+        // particle (the shift search, which always runs, draws once per image per step).
+        if (acc_last_part_id >= 0)
+        {
+            init_random_generator(random_seed + acc_last_part_id);
+            for (int img_id = 0; img_id < mydata.numberOfImagesInParticle(acc_last_part_id); img_id++)
+                rnd_unif();
+        }
+    }
+#endif
+
 
     std::cout << " Auto-refine: Estimated accuracy angles= " << acc_rot<< " degrees; offsets= " << acc_trans << " Angstroms" << std::endl;
     // Warn for inflated resolution estimates
@@ -10999,6 +11576,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
         std::cout << " Auto-refine: WARNING: However, if the problem persists it may lead to spurious FSC curves, so be wary of inflated resolution estimates..." << std::endl;
         std::cout << " Auto-refine: WARNING: Sometimes it is better to tune resolution yourself by adjusting T in a 3D-classification with a single class." << std::endl;
     }
+
 
 }
 
