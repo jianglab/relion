@@ -36,6 +36,8 @@
 #endif
 #include <stdio.h>
 #include <stdlib.h>
+#include <sched.h>
+#include <limits>
 #include "src/cache_manager.h"
 #include "src/cache_init.h"
 #include "src/align_map_to_map.h"
@@ -123,6 +125,39 @@ void MlOptimiserMpi::finalise()
 	delete node;
 }
 
+// --j not given: a thread per CPU core a worker may use, where the workers of a node that may
+// use the same cores share them. All processes get the same number, the smallest over the
+// workers, because the mapping of threads to GPUs assumes one number for all.
+void MlOptimiserMpi::resolveAutoThreads()
+{
+	cpu_set_t mine;
+	CPU_ZERO(&mine);
+	if (sched_getaffinity(0, sizeof(mine), &mine) != 0)
+		CPU_ZERO(&mine);
+	const int cores = std::max(1, CPU_COUNT(&mine));
+
+	MPI_Comm local;
+	MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, node->rank, MPI_INFO_NULL, &local);
+	int nlocal;
+	MPI_Comm_size(local, &nlocal);
+	std::vector<cpu_set_t> sets(nlocal);
+	std::vector<int> ranks(nlocal);
+	MPI_Allgather(&mine, sizeof(cpu_set_t), MPI_BYTE, sets.data(), sizeof(cpu_set_t), MPI_BYTE, local);
+	MPI_Allgather(&node->rank, 1, MPI_INT, ranks.data(), 1, MPI_INT, local);
+	MPI_Comm_free(&local);
+
+	int sharing = 0;
+	for (int i = 0; i < nlocal; i++)
+		if (ranks[i] != 0 && CPU_EQUAL(&sets[i], &mine))
+			sharing++;
+	int my_threads = node->isLeader() ? std::numeric_limits<int>::max() : std::max(1, cores / std::max(1, sharing));
+	MPI_Allreduce(MPI_IN_PLACE, &my_threads, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+	nr_threads = (my_threads == std::numeric_limits<int>::max()) ? cores : my_threads;
+
+	auto_threads_note = " Using " + integerToString(nr_threads) + " threads per process: --j was not given, and that is the number of CPU cores"
+	                    " each worker process may use (the fewest of any worker).";
+}
+
 void MlOptimiserMpi::initialise()
 {
 
@@ -130,6 +165,8 @@ void MlOptimiserMpi::initialise()
 	std::cerr<<"MlOptimiserMpi::initialise Entering"<<std::endl;
 #endif
 
+	if (nr_threads < 1)
+		resolveAutoThreads();
 
 	// Print information about MPI nodes:
 	printMpiNodesMachineNames(*node, nr_threads);

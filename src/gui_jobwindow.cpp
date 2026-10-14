@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/gui_jobwindow.h"
+#include "src/parallel_hint.h"
 #include "src/gui_entries.h"
 #include <cstdlib>
 JobWindow::JobWindow(int _x, int _y, int _w, int _h, const char* title ) : Fl_Box(_x,_y,_w,_h,title)
@@ -132,6 +133,21 @@ void JobWindow::setupRunTab()
 
 	bool has_parallel = false;
 
+	// Refinement jobs: the number of CPUs, split by RELION, or MPI processes and threads by hand
+	const bool has_auto = myjob.joboptions.find("auto_parallel") != myjob.joboptions.end();
+	Fl_Group *group_cpus = NULL, *group_manual = NULL;
+	if (has_auto)
+	{
+		group_cpus = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+		group_cpus->end();
+		place("auto_parallel", TOGGLE_LEAVE_ACTIVE, group_cpus);
+		group_cpus->begin();
+		place("nr_cpus", TOGGLE_LEAVE_ACTIVE);
+		group_cpus->end();
+		group_manual = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+		group_manual->begin();
+	}
+
 	if (myjob.joboptions.find("nr_mpi") != myjob.joboptions.end())
 	{
 		place("nr_mpi", TOGGLE_LEAVE_ACTIVE);
@@ -142,6 +158,49 @@ void JobWindow::setupRunTab()
 	{
 		place("nr_threads", TOGGLE_LEAVE_ACTIVE);
 		has_parallel = true;
+	}
+
+	if (has_auto)
+	{
+		group_manual->end();
+		guientries["auto_parallel"].my_inverse_group = group_manual; // chosen by RELION
+		guientries["auto_parallel"].cb_menu_i();
+	}
+
+	// Hover hints with suggested or chosen numbers of processes and threads (refinement jobs)
+	if (has_parallel)
+	{
+		auto view = [this]()
+		{
+			parhint::JobView view;
+			view.job_type = myjob.type;
+			view.value = [this](const std::string &key)
+			{
+				auto it = guientries.find(key);
+				return (it != guientries.end() && it->second.inp != NULL) ? std::string(it->second.inp->value()) : std::string();
+			};
+			view.label = [this](const std::string &key)
+			{
+				auto it = myjob.joboptions.find(key);
+				return (it != myjob.joboptions.end()) ? it->second.label : std::string();
+			};
+			return view;
+		};
+		// Show the numbers RELION will use in the greyed-out fields
+		auto refresh = [this, view]()
+		{
+			parhint::Suggestion s;
+			if (parhint::autoSplit(view(), s))
+			{
+				guientries["nr_mpi"].setValue(integerToString(s.mpi));
+				guientries["nr_threads"].setValue(integerToString(s.threads));
+			}
+		};
+		for (const char *key : {"nr_mpi", "nr_threads"})
+			if (guientries.find(key) != guientries.end())
+				guientries[key].setHint([view, refresh]() { refresh(); return parhint::tooltip(view(), parhint::Field::MpiOrThreads); });
+		if (has_auto)
+			guientries["nr_cpus"].setHint([view, refresh]() { refresh(); return parhint::tooltip(view(), parhint::Field::Cpus); });
 	}
 
 	// Add a little spacer
@@ -173,13 +232,54 @@ void JobWindow::setupRunTab()
 		}
 	}
 
-	place("qsubscript");
+	// RELION's own Slurm script (no site template)
+	for (const char *key : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_args"})
+		if (myjob.joboptions.find(key) != myjob.joboptions.end())
+			place(key);
+	// The job as the fields are now, for the hints below
+	auto currentJob = [this]()
+	{
+		RelionJob job = myjob;
+		for (auto &option : job.joboptions)
+		{
+			auto it = guientries.find(option.first);
+			if (it != guientries.end() && it->second.inp != NULL)
+				option.second.value = it->second.inp->value();
+		}
+		job.applyAutoParallel();
+		return job;
+	};
+	if (guientries.find("slurm_mem") != guientries.end())
+		guientries["slurm_mem"].setHint([currentJob]()
+		{
+			return slurmscript::memoryHint(currentJob().slurmRequest());
+		});
+	if (guientries.find("slurm_gpus") != guientries.end())
+		guientries["slurm_gpus"].setHint([currentJob]()
+		{
+			RelionJob job = currentJob();
+			if (!job.usesGpu())
+				return std::string("This job, as set up, does not run on GPUs: it asks Slurm for none.");
+			const int gpus = job.slurmRequest().gpus;
+			return "The job asks Slurm for " + integerToString(gpus) + " GPU" + (gpus == 1 ? "" : "s") + ".";
+		});
 
 	place("min_dedicated");
-	if (do_allow_change_minimum_dedicated)
-		guientries["min_dedicated"].deactivate(false);
-	else
-		guientries["min_dedicated"].deactivate(true);
+
+	place("qsubscript");
+
+	// Fields only a template uses, greyed out while RELION writes the Slurm script itself
+	auto templateFields = [this]()
+	{
+		const bool builtin = std::string(guientries["qsubscript"].inp->value()).empty();
+		guientries["qsub"].deactivate(builtin);
+		guientries["min_dedicated"].deactivate(builtin || !do_allow_change_minimum_dedicated);
+	};
+	GuiEntry &script = guientries["qsubscript"];
+	script.on_change = templateFields;
+	script.inp->callback(GuiEntry::cb_changed, &script);
+	script.inp->when(FL_WHEN_CHANGED);
+	templateFields();
 
 	queue_group->end();
 	guientries["do_queue"].cb_menu_i(); // This is to make the default effective

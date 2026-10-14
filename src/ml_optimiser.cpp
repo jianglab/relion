@@ -169,6 +169,15 @@ void MlOptimiser::read(int argc, char **argv, int rank)
 }
 
 // Default for --finufft_batch_mb, overridable with RELION_FINUFFT_BATCH_MB
+// --j: a number, or "auto" (the default) for a thread per CPU core, resolved in initialise()
+static int threadsOption(const std::string &value)
+{
+	if (value == "auto") return 0;
+	const int n = textToInteger(value);
+	if (n < 1) REPORT_ERROR("--j must be a positive number of threads, or auto");
+	return n;
+}
+
 static std::string getFinufftBatchBudgetDefault()
 {
     const char *env = getenv("RELION_FINUFFT_BATCH_MB");
@@ -556,7 +565,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     int computation_section = parser.addSection("Computation");
 
     x_pool = textToInteger(parser.getOption("--pool", "Number of images to pool for each thread task", "1"));
-    nr_threads = textToInteger(parser.getOption("--j", "Number of threads to run in parallel (only useful on multi-core machines)", "1"));
+    nr_threads = threadsOption(parser.getOption("--j", "Number of threads to run in parallel (default: one per CPU core the process may use)", "auto"));
     do_parallel_disc_io = !parser.checkOption("--no_parallel_disc_io", "Do NOT let parallel (MPI) processes access the disc simultaneously (use this option with NFS)");
     combine_weights_thru_disc = !parser.checkOption("--dont_combine_weights_via_disc", "Send the large arrays of summed weights through the MPI network, instead of writing large files to disc");
     do_shifts_onthefly = parser.checkOption("--onthefly_shifts", "Calculate shifted images on-the-fly, do not store precalculated ones in memory");
@@ -1046,7 +1055,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     // The number of threads is always read from the command line
     int computation_section = parser.addSection("Computation");
     x_pool = textToInteger(parser.getOption("--pool", "Number of images to pool for each thread task", "1"));
-    nr_threads = textToInteger(parser.getOption("--j", "Number of threads to run in parallel (only useful on multi-core machines)", "1"));
+    nr_threads = threadsOption(parser.getOption("--j", "Number of threads to run in parallel (default: one per CPU core the process may use)", "auto"));
     combine_weights_thru_disc = !parser.checkOption("--dont_combine_weights_via_disc", "Send the large arrays of summed weights through the MPI network, instead of writing large files to disc");
     do_shifts_onthefly = parser.checkOption("--onthefly_shifts", "Calculate shifted images on-the-fly, do not store precalculated ones in memory");
     do_parallel_disc_io = !parser.checkOption("--no_parallel_disc_io", "Do NOT let parallel (MPI) processes access the disc simultaneously (use this option with NFS)");
@@ -1736,6 +1745,13 @@ void MlOptimiser::initialise()
     std::cerr<<"MlOptimiser::initialise Entering"<<std::endl;
 #endif
 
+    if (nr_threads < 1)
+    {
+        nr_threads = std::max<int>(1, resrep::allowedCores().size());
+        auto_threads_note = " Using " + integerToString(nr_threads) + " threads: --j was not given, and this process may use "
+                          + integerToString(nr_threads) + " CPU cores.";
+    }
+
     if (do_gpu)
     {
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
@@ -2167,6 +2183,8 @@ void MlOptimiser::initialiseGeneral(int rank)
     // Check for errors in the command-line option
     if (parser.checkForErrors(verb))
         REPORT_ERROR("Errors encountered on the command line (see above), exiting...");
+    if (verb > 0 && !auto_threads_note.empty())
+        std::cout << auto_threads_note << std::endl;
 
 #ifdef RELION_SINGLE_PRECISION
         if (verb > 0)

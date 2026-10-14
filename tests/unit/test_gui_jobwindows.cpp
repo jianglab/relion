@@ -22,6 +22,7 @@
 #include "src/gui_jobwindow.h"
 #include "src/pipeline_jobs.h"
 
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -96,4 +97,74 @@ TEST_CASE("GUI: Reconstruct3D window has the fused-extraction controls", "[gui][
 	window.initialise(PROC_RECONSTRUCT3D, false);
 	for (const char *name : {"do_fused", "fused_angpix", "fused_box_x", "fused_box_y"})
 		REQUIRE(window.guientries.find(name) != window.guientries.end());
+}
+
+TEST_CASE("GUI: MPI and thread fields suggest numbers when the mouse enters them", "[gui][jobwindow]")
+{
+	setenv("RELION_CPUS_PER_GPU", "8", 1);
+	JobWindow window;
+	window.initialise(PROC_2DCLASS, false);
+	window.guientries["use_gpu"].inp->value("Yes");
+	window.guientries["do_grad"].inp->value("No");
+	window.guientries["do_queue"].inp->value("No");
+	window.guientries["gpu_ids"].inp->value("0:1");
+	window.guientries["auto_parallel"].inp->value("No");
+	for (const char *name : {"nr_mpi", "nr_threads"})
+	{
+		INFO(name);
+		Fl_Input *inp = window.guientries[name].inp;
+		inp->handle(FL_ENTER);
+		REQUIRE(inp->tooltip() != NULL);
+		CHECK(std::string(inp->tooltip()).find("MPI processes: 3    Threads: 8") != std::string::npos);
+	}
+	// chosen by RELION: the greyed-out fields show the numbers it will use
+	window.guientries["auto_parallel"].inp->value("Yes");
+	window.guientries["nr_cpus"].inp->value("16");
+	Fl_Input *cpus = window.guientries["nr_cpus"].inp;
+	cpus->handle(FL_ENTER);
+	REQUIRE(cpus->tooltip() != NULL);
+	CHECK(std::string(cpus->tooltip()).find("RELION splits the 16 CPUs") != std::string::npos);
+	CHECK(std::string(window.guientries["nr_mpi"].inp->value()) == "3");
+	CHECK(std::string(window.guientries["nr_threads"].inp->value()) == "8");
+	// other jobs keep fields without a tooltip
+	JobWindow extract;
+	extract.initialise(PROC_EXTRACT, false);
+	REQUIRE(extract.guientries.find("nr_mpi") != extract.guientries.end());
+	Fl_Input *inp = extract.guientries["nr_mpi"].inp;
+	inp->handle(FL_ENTER);
+	CHECK(inp->tooltip() == NULL);
+	unsetenv("RELION_CPUS_PER_GPU");
+}
+
+TEST_CASE("GUI: without a site template the Running tab has the built-in Slurm fields", "[gui][jobwindow]")
+{
+	const char *saved = getenv("RELION_QSUB_TEMPLATE");
+	const std::string saved_value = saved ? saved : "";
+	unsetenv("RELION_QSUB_TEMPLATE");
+	for (int type : {PROC_3DAUTO, PROC_EXTRACT, PROC_MOTIONCORR})
+	{
+		JobWindow window;
+		REQUIRE_NOTHROW(window.initialise(type, false));
+		REQUIRE_NOTHROW(window.updateMyJob());
+		for (const char *name : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_args"})
+			CHECK(window.guientries.find(name) != window.guientries.end());
+	}
+	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
+}
+
+TEST_CASE("GUI: template-only fields are greyed out while RELION writes the Slurm script", "[gui][jobwindow]")
+{
+	const char *saved = getenv("RELION_QSUB_TEMPLATE");
+	const std::string saved_value = saved ? saved : "";
+	unsetenv("RELION_QSUB_TEMPLATE");
+	JobWindow window;
+	window.initialise(PROC_3DAUTO, false);
+	CHECK(std::string(window.guientries["qsubscript"].inp->value()).empty());
+	CHECK_FALSE(window.guientries["qsub"].inp->active());
+	CHECK_FALSE(window.guientries["min_dedicated"].inp->active());
+	window.guientries["qsubscript"].setValue("my_template.sh");   // as when a saved job is loaded
+	CHECK(window.guientries["qsub"].inp->active());
+	window.guientries["qsubscript"].setValue("");
+	CHECK_FALSE(window.guientries["qsub"].inp->active());
+	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
 }

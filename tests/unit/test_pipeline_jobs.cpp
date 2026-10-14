@@ -941,3 +941,226 @@ TEST_CASE("Class2DConsensus: rejects unknown assignment methods", "[pipeline][co
     REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
     REQUIRE(error_message.find("unknown consensus assignment method") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// MPI processes and threads chosen from a number of CPUs
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Refinement jobs: MPI processes and threads chosen from the number of CPUs", "[pipeline]")
+{
+	setenv("RELION_CPUS_PER_GPU", "8", 1);
+	RelionJob job = makeClass2DJob();
+	REQUIRE(job.joboptions.find("auto_parallel") != job.joboptions.end());
+	REQUIRE(job.joboptions.find("nr_cpus") != job.joboptions.end());
+	job.joboptions["auto_parallel"].setString("Yes");
+	job.joboptions["use_gpu"].setString("Yes");
+	job.joboptions["gpu_ids"].setString("0:1");
+	job.joboptions["nr_cpus"].setString("16");
+
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+	REQUIRE(generateCommands(job, commands, final_command, error_message));
+	REQUIRE(commands.size() == 1);
+	CHECK(job.joboptions["nr_mpi"].getString() == "3");
+	CHECK(job.joboptions["nr_threads"].getString() == "8");
+	CHECK(commands[0].find("relion_refine_mpi") != std::string::npos);
+	CHECK(commands[0].find("--j 8") != std::string::npos);
+
+	// chosen by hand: the numbers given are used
+	job.joboptions["auto_parallel"].setString("No");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("2");
+	REQUIRE(generateCommands(job, commands, final_command, error_message));
+	CHECK(commands[0].find("relion_refine_mpi") == std::string::npos);
+	CHECK(commands[0].find("--j 2") != std::string::npos);
+	unsetenv("RELION_CPUS_PER_GPU");
+}
+
+TEST_CASE("Refinement jobs: jobs saved before the automatic choice keep their numbers", "[pipeline]")
+{
+	RelionJob job = makeClass2DJob();
+	job.joboptions["auto_parallel"].setString("Yes");
+	std::string fn = "auto_parallel_old_" + integerToString((int)std::time(NULL)) + ".star";
+	job.write(fn);
+	// remove the options from the file, as an older RELION would have written it
+	{
+		std::ifstream in(fn.c_str());
+		std::string line, text;
+		while (std::getline(in, line))
+			if (line.find("auto_parallel") == std::string::npos && line.find("nr_cpus") == std::string::npos)
+				text += line + "\n";
+		in.close();
+		std::ofstream(fn.c_str()) << text;
+	}
+	RelionJob loaded;
+	loaded.clear();
+	bool is_continue = false;
+	REQUIRE(loaded.read(fn, is_continue, true));
+	CHECK(loaded.joboptions["auto_parallel"].getString() == "No");
+	std::remove(fn.c_str());
+}
+
+TEST_CASE("Refinement jobs: only refinement jobs choose MPI processes and threads", "[pipeline]")
+{
+	for (int type : {PROC_2DCLASS, PROC_3DCLASS, PROC_INIMODEL, PROC_3DAUTO, PROC_MULTIBODY})
+	{
+		RelionJob job;
+		job.initialise(type);
+		CHECK(job.joboptions.find("auto_parallel") != job.joboptions.end());
+	}
+	for (int type : {PROC_EXTRACT, PROC_MOTIONCORR, PROC_AUTOPICK, PROC_RECONSTRUCT3D})
+	{
+		RelionJob job;
+		job.initialise(type);
+		CHECK(job.joboptions.find("auto_parallel") == job.joboptions.end());
+	}
+}
+
+TEST_CASE("Queued jobs: an empty submission-script field means RELION's own Slurm script", "[pipeline]")
+{
+	setenv("RELION_CPUS_PER_GPU", "8", 1);
+	const char *saved = getenv("RELION_QSUB_TEMPLATE");
+	const std::string saved_value = saved ? saved : "";
+	unsetenv("RELION_QSUB_TEMPLATE");
+
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_3DAUTO);
+	job.label = get_proc_label(job.type);
+	REQUIRE(job.joboptions["qsubscript"].getString() == "");
+	for (const char *key : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_args"})
+		REQUIRE(job.joboptions.find(key) != job.joboptions.end());
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["fn_ref"].setString("ref.mrc");
+	job.joboptions["do_queue"].setString("Yes");
+	job.joboptions["qsub"].setString("bash");          // ignored by the built-in script
+	job.joboptions["queuename"].setString("");
+	job.joboptions["use_gpu"].setString("Yes");
+	job.joboptions["slurm_gpus"].setString("1");
+	job.joboptions["slurm_mem"].setString("12");
+	job.joboptions["slurm_time"].setString("1-00:00:00");
+	job.joboptions["auto_parallel"].setString("Yes");
+	job.joboptions["nr_cpus"].setString("8");
+	job.joboptions["scratch_dir"].setString("");
+
+	std::string stem = "builtin_slurm_test_" + integerToString((int)std::clock());
+	std::string outputname = stem + "/";
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+	REQUIRE(generateCommands(job, commands, final_command, error_message, true, outputname));
+	CHECK(final_command.find("sbatch " + outputname + "run_submit.script") == 0);
+	std::ifstream fs((outputname + "run_submit.script").c_str());
+	std::string script((std::istreambuf_iterator<char>(fs)), std::istreambuf_iterator<char>());
+	INFO(script);
+	// auto-refine on 1 GPU with 8 CPUs: a leader and 2 workers with 4 threads each
+	CHECK(script.find("#SBATCH --ntasks=2\n") != std::string::npos);
+	CHECK(script.find("#SBATCH --cpus-per-task=4\n") != std::string::npos);
+	CHECK(script.find("#SBATCH --gpus=1\n") != std::string::npos);
+	CHECK(script.find("#SBATCH --mem=12G\n") != std::string::npos);
+	CHECK(script.find("#SBATCH --time=1-00:00:00\n") != std::string::npos);
+	CHECK(script.find("#SBATCH --output=" + outputname + "run.out") != std::string::npos);
+	CHECK(script.find("mpirun --oversubscribe --bind-to none -n 3 ") != std::string::npos);
+	CHECK(script.find("relion_refine_mpi") != std::string::npos);
+	CHECK(script.find("XXX") == std::string::npos);
+
+	// no GPUs asked for when the job does not use them; a bad memory value is refused
+	job.joboptions["use_gpu"].setString("No");
+	REQUIRE(generateCommands(job, commands, final_command, error_message, true, outputname));
+	std::ifstream fs2((outputname + "run_submit.script").c_str());
+	std::string script2((std::istreambuf_iterator<char>(fs2)), std::istreambuf_iterator<char>());
+	CHECK(script2.find("--gpus") == std::string::npos);
+	job.joboptions["slurm_mem"].setString("lots");
+	CHECK_FALSE(generateCommands(job, commands, final_command, error_message, true, outputname));
+	CHECK(error_message.find("Memory must be a number of GB") != std::string::npos);
+
+	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
+	unsetenv("RELION_CPUS_PER_GPU");
+	std::remove((outputname + "run_submit.script").c_str());
+	std::remove((outputname + "note.txt").c_str());
+	std::string cleanup = "rm -rf " + stem;
+	CHECK(system(cleanup.c_str()) == 0);
+}
+
+TEST_CASE("Queued jobs: in RELION's own Slurm script every process of other programs works", "[pipeline]")
+{
+	const char *saved = getenv("RELION_QSUB_TEMPLATE");
+	const std::string saved_value = saved ? saved : "";
+	unsetenv("RELION_QSUB_TEMPLATE");
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_CTFFIND);
+	job.label = get_proc_label(job.type);
+	job.joboptions["input_star_mics"].setString("mics.star");
+	job.joboptions["do_queue"].setString("Yes");
+	job.joboptions["queuename"].setString("");
+	job.joboptions["nr_mpi"].setString("4");
+	job.joboptions["slurm_mem"].setString("8");
+	std::string stem = "builtin_slurm_ctf_" + integerToString((int)std::clock());
+	std::string outputname = stem + "/";
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+	REQUIRE(generateCommands(job, commands, final_command, error_message, true, outputname));
+	std::ifstream fs((outputname + "run_submit.script").c_str());
+	std::string script((std::istreambuf_iterator<char>(fs)), std::istreambuf_iterator<char>());
+	INFO(script);
+	CHECK(script.find("#SBATCH --ntasks=4\n") != std::string::npos);
+	CHECK(script.find("--oversubscribe") == std::string::npos);
+	CHECK(script.find("--gpus") == std::string::npos);
+	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
+	std::string cleanup = "rm -rf " + stem;
+	CHECK(system(cleanup.c_str()) == 0);
+}
+
+TEST_CASE("Queued jobs: only jobs that run on GPUs ask Slurm for them", "[pipeline]")
+{
+	const char *saved = getenv("RELION_QSUB_TEMPLATE");
+	const std::string saved_value = saved ? saved : "";
+	unsetenv("RELION_QSUB_TEMPLATE");
+	RelionJob mc;
+	mc.initialise(PROC_MOTIONCORR);
+	mc.joboptions["slurm_gpus"].setString("1");
+	mc.joboptions["do_own_motioncor"].setString("Yes");
+	CHECK_FALSE(mc.usesGpu());
+	CHECK(mc.slurmRequest().gpus == 0);
+	mc.joboptions["do_own_motioncor"].setString("No");      // MotionCor2
+	CHECK(mc.usesGpu());
+	CHECK(mc.slurmRequest().gpus == 1);
+
+	RelionJob pick;
+	pick.initialise(PROC_AUTOPICK);
+	pick.joboptions["use_gpu"].setString("Yes");
+	pick.joboptions["do_log"].setString("Yes");
+	CHECK_FALSE(pick.usesGpu());
+	pick.joboptions["do_log"].setString("No");
+	CHECK(pick.usesGpu());
+
+	for (int type : {PROC_CTFFIND, PROC_EXTRACT, PROC_POST, PROC_MASKCREATE})
+	{
+		RelionJob job;
+		job.initialise(type);
+		job.joboptions["slurm_gpus"].setString("2");
+		CHECK_FALSE(job.usesGpu());
+		CHECK(job.slurmRequest().gpus == 0);
+	}
+	RelionJob refine;
+	refine.initialise(PROC_3DAUTO);
+	refine.joboptions["slurm_gpus"].setString("2");
+	refine.joboptions["use_gpu"].setString("No");
+	CHECK(refine.slurmRequest().gpus == 0);
+	refine.joboptions["use_gpu"].setString("Yes");
+	CHECK(refine.slurmRequest().gpus == 2);
+	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
+}
+
+TEST_CASE("Queued jobs: a site template keeps its extra fields and no built-in ones", "[pipeline]")
+{
+	const char *saved = getenv("RELION_QSUB_TEMPLATE");
+	const std::string saved_value = saved ? saved : "";
+	setenv("RELION_QSUB_TEMPLATE", "/some/site/template.sh", 1);
+	RelionJob job;
+	job.initialise(PROC_3DAUTO);
+	CHECK(job.joboptions["qsubscript"].getString() == "/some/site/template.sh");
+	CHECK(job.joboptions.find("slurm_mem") == job.joboptions.end());
+	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
+	else unsetenv("RELION_QSUB_TEMPLATE");
+}

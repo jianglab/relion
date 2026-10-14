@@ -62,6 +62,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <functional>
 #define GUI_MAX_RADIO_ELEMENTS 15
 
 // forward declaration current_browse_directory, which allows CURRENT_ODIR browse buttons
@@ -169,6 +170,30 @@ public:
     ~ShowHelpText();
 };
 
+/** A widget whose tooltip is worked out when the mouse enters it, so that it can
+ *  depend on the current values of other fields. Without a hint it is the plain widget.
+ */
+template <class W>
+class HintWidget : public W
+{
+public:
+	HintWidget(int x, int y, int w, int h, const char *l = 0) : W(x, y, w, h, l) {}
+
+	std::function<std::string()> hint;
+
+	int handle(int event)
+	{
+		if (event == FL_ENTER && hint)
+		{
+			const std::string text = hint();
+			this->copy_tooltip(text.empty() ? NULL : text.c_str());
+		}
+		const int r = W::handle(event);
+		// FLTK shows a widget's tooltip only if the widget takes FL_ENTER
+		return (hint && (event == FL_ENTER || event == FL_LEAVE)) ? 1 : r;
+	}
+};
+
 
 class GuiEntry{
 
@@ -252,6 +277,14 @@ public:
 
     // Deactivate this entry if the input boolean is true
     void deactivate(bool do_deactivate = true);
+
+    // Tooltip of the input field (and slider), worked out each time the mouse enters it
+    void setHint(std::function<std::string()> hint);
+
+    // Called whenever the value changes: typed (with cb_changed as the input's callback),
+    // browsed or set
+    std::function<void()> on_change;
+    static void cb_changed(Fl_Widget*, void*);
 
     /** Call-back functions for the help button
      *  The method of using two functions of static void and inline void was copied from:

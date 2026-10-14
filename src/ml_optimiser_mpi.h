@@ -63,6 +63,9 @@ public:
 
     void initialise();
 
+    // Threads per process when --j is not given (all processes get the same number)
+    void resolveAutoThreads();
+
     /** Initialise the work load: divide images equally over all nodes
      * Also initialise the same random seed for all nodes
      */

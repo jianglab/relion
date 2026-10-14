@@ -33,6 +33,8 @@
 #include "src/macros.h"
 #include "src/metadata_table.h"
 #include "src/filename.h"
+#include "src/parallel_hint.h"
+#include "src/slurm_script.h"
 #include <string>
 #include <vector>
 #include <stdio.h>
@@ -904,6 +906,18 @@ public:
 	// Generic getCommands
 	bool getCommands(std::string &outputname, std::vector<std::string> &commands,
 	 		std::string &final_command, bool do_makedir, int job_counter, std::string &error_message);
+
+	// The job's options as parallel_hint.h reads them
+	parhint::JobView parallelView();
+
+	// With "Choose MPI and threads automatically?", set nr_mpi and nr_threads from nr_cpus
+	void applyAutoParallel();
+
+	// Whether the job, as set up, runs on GPUs (for example MotionCor2, not RELION's own motion correction)
+	bool usesGpu();
+
+	// What the built-in Slurm script asks for (slurm_script.h)
+	slurmscript::Request slurmRequest();
 
 	// Now all the specific job types are defined
 	void initialiseImportJob();

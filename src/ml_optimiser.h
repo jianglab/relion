@@ -799,9 +799,12 @@ public:
 	// Thread Managers for the expectation step: one for all (pooled) particles
 	ThreadTaskDistributor *exp_ipart_ThreadTaskDistributor;
 
-	// Number of threads to run in parallel
+	// Number of threads to run in parallel; 0 until initialise() resolves it when --j is not
+	// given (a thread per CPU core the process may use)
 	int x_pool;
 	int nr_threads;
+	// Why nr_threads was chosen automatically, printed after the command-line check ("" if --j was given)
+	std::string auto_threads_note;
 
 	//for catching exceptions in threads
 	RelionError * threadException;

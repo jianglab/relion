@@ -20,6 +20,8 @@
  ***************************************************************************/
 #include "src/pipeline_jobs.h"
 #include "src/virtual_movie_averages.h"
+#include "src/parallel_hint.h"
+#include "src/slurm_script.h"
 #include <unistd.h>
 #include <cerrno>
 #include <algorithm>
@@ -583,6 +585,8 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 				if (!(it->second).readValue(fh))
 					read_all = false;
 			}
+			if (joboptions.find("auto_parallel") != joboptions.end())
+				joboptions["auto_parallel"].value = "No"; // run.job files predate it
 			have_read = true;
 		}
 
@@ -623,10 +627,12 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 
 		MDvals.read(fn_star, "joboptions_values");
 		std::string label, value;
+		bool read_auto_parallel = false;
 		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDvals)
 		{
 			MDvals.getValue(EMDL_JOBOPTION_VARIABLE, label);
 			MDvals.getValue(EMDL_JOBOPTION_VALUE, value);
+			if (label == "auto_parallel") read_auto_parallel = true;
 			if (joboptions.find(label) == joboptions.end())
 			{
 				std::cerr << "WARNING: cannot find " << label << " in the defined joboptions. Ignoring it ..." <<std::endl;
@@ -636,6 +642,9 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 				joboptions[label].value = value;
 			}
 		}
+		// Jobs saved before RELION could choose MPI processes and threads keep their numbers
+		if (!read_auto_parallel && joboptions.find("auto_parallel") != joboptions.end())
+			joboptions["auto_parallel"].value = "No";
 		have_read = true;
 	}
 
@@ -737,15 +746,30 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 		for (size_t command = 0; command + 1 < commands.size(); ++command)
 			commands[command] += " || exit $?";
 
-	// Open the standard job submission file
+	// Open the standard job submission file; empty: RELION's own Slurm script (slurm_script.h)
 	FileName fn_qsub = joboptions["qsubscript"].getString();
-
+	std::ifstream ftemplate;
+	std::istringstream fbuiltin;
+	std::istream *template_in = &ftemplate;
+	bool template_ok = true;
+	if (fn_qsub == "")
+	{
+		std::string text;
+		if (!slurmscript::build(slurmRequest(), text, error_message))
+			return false;
+		fbuiltin.str(text);
+		template_in = &fbuiltin;
+	}
+	else
+	{
+		ftemplate.open(fn_qsub.c_str(), std::ios_base::in);
+		template_ok = !ftemplate.fail();
+	}
+	std::istream &fh = *template_in;
 
 	std::ofstream fo;
-	std::ifstream fh;
-	fh.open(fn_qsub.c_str(), std::ios_base::in);
 	fo.open(newfilename.c_str(), std::ios::out);
-	if (fh.fail())
+	if (!template_ok)
 	{
 		error_message = "Error reading template submission script in: " + fn_qsub;
 		return false;
@@ -901,10 +925,62 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 		fo << std::endl;
 
 		fo.close();
-		fh.close();
 	}
 
 	return true;
+}
+
+bool RelionJob::usesGpu()
+{
+	auto yes = [this](const char *key)
+	{
+		auto it = joboptions.find(key);
+		return it != joboptions.end() && it->second.value == "Yes";
+	};
+	switch (type)
+	{
+	case PROC_MOTIONCORR:
+		// MotionCor2 runs on GPUs, RELION's own motion correction on CPUs
+		return joboptions.find("do_own_motioncor") != joboptions.end() && !yes("do_own_motioncor");
+	case PROC_AUTOPICK:
+		// the Laplacian-of-Gaussian picker has no GPU code
+		return yes("do_amyloid_tracing") || (yes("use_gpu") && !yes("do_log"));
+	case PROC_TOMO_ALIGN_TILTSERIES:
+		return yes("do_aretomo2");      // IMOD runs on CPUs
+	case PROC_TOMO_DENOISE_TOMOGRAM:  // cryoCARE
+	case PROC_DYNAMIGHT:
+	case PROC_MODELANGELO:
+		return true;
+	default:
+		return yes("use_gpu");
+	}
+}
+
+slurmscript::Request RelionJob::slurmRequest()
+{
+	slurmscript::Request r;
+	auto value = [this](const std::string &key, const std::string &otherwise)
+	{
+		auto it = joboptions.find(key);
+		return (it != joboptions.end()) ? it->second.value : otherwise;
+	};
+	r.partition = value("queuename", "");
+	r.mpi = std::max(1, (int)textToInteger(value("nr_mpi", "1")));
+	r.threads = std::max(1, (int)textToInteger(value("nr_threads", "1")));
+	// the leader of relion_refine_mpi only coordinates; in other programs every process works
+	r.leader_idle = parhint::kindOf(type, false) != parhint::Kind::Other;
+	// GPUs only for jobs that, as set up, run on them
+	if (usesGpu())
+	{
+		if (joboptions.find("slurm_gpus") != joboptions.end())
+			r.gpus = std::max(0, (int)textToInteger(value("slurm_gpus", "1")));
+		else
+			r.gpus = std::max(1, parhint::countGpuIds(value("gpu_ids", "")));
+	}
+	r.mem = value("slurm_mem", "auto");
+	r.time = value("slurm_time", "");
+	r.args = value("slurm_args", "");
+	return r;
 }
 
 void RelionJob::initialisePipeline(std::string &outputname, int job_counter)
@@ -972,7 +1048,8 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 
 		if (!saveJobSubmissionScript(output_script, outputname, commands, error_message, nr_parallel_runs, pipeline_control_last_only))
 			return false;
-		final_command = joboptions["qsub"].getString();
+		// RELION's own Slurm script goes to sbatch, whatever the submit command for templates
+		final_command = (joboptions["qsubscript"].getString() == "") ? std::string("sbatch") : joboptions["qsub"].getString();
 		if (nr_parallel_runs > 1)
 			final_command += " --array=1-" + integerToString(nr_parallel_runs);
 		final_command += " " + output_script + " &";
@@ -1278,6 +1355,21 @@ void RelionJob::initialise(int _job_type)
 When set to 1, no multi-threading will be used. The maximum can be set through the environment variable RELION_THREAD_MAX.");
 	}
 
+	// Refinement jobs can take a number of CPUs and choose MPI processes and threads themselves
+	// (parallel_hint.h)
+	if (has_mpi && has_thread && parhint::kindOf(type, false) != parhint::Kind::Other)
+	{
+		const char *auto_input = getenv("RELION_AUTO_PARALLEL");
+		const bool auto_default = (auto_input == NULL) ? true : textToBool(auto_input);
+		joboptions["auto_parallel"] = JobOption("Choose MPI and threads automatically?", auto_default, "If set to Yes, you only give the number of CPUs, \
+and RELION chooses the number of MPI processes and threads from it, the number of GPUs and the kind of job: one process for one GPU, \
+a leader plus one worker per GPU for several GPUs, one process for VDAM (which does not support MPI), and an odd number of at least 3 processes for auto-refine. \
+Rest the mouse on the fields to see the numbers it chooses and why. Set to No to give the numbers of MPI processes and threads yourself. \
+The default can be set through the environment variable RELION_AUTO_PARALLEL.");
+		joboptions["nr_cpus"] = JobOption("Number of CPUs:", parhint::THREADS_PER_GPU_CAP, 1, thread_max, 1, "The number of CPU cores for this job, \
+split into MPI processes and threads by RELION when it chooses them automatically. Rest the mouse on the field for a suggestion based on the number of GPUs.");
+	}
+
 	const char * use_queue_input = getenv("RELION_QUEUE_USE");
 	bool use_queue = (use_queue_input == NULL) ? DEFAULTQUEUEUSE : textToBool(use_queue_input);
 	joboptions["do_queue"] = JobOption("Submit to queue?", use_queue, "If set to Yes, the job will be submit to a queue, otherwise \
@@ -1304,9 +1396,25 @@ the job will be executed locally. Note that only MPI jobs may be sent to a queue
 Note that the person who installed RELION should have made a custom script for your cluster/queue setup. Check this is the case \
 (or create your own script following the RELION Wiki) if you have trouble submitting jobs. The default command can be set through the environment variable RELION_QSUB_COMMAND.");
 
+	// Without a site template (RELION_QSUB_TEMPLATE), RELION writes Slurm scripts itself
+	// (slurm_script.h) from these fields instead of the template's extra variables
+	const char *site_template = getenv("RELION_QSUB_TEMPLATE");
+	const bool builtin_slurm = (site_template == NULL || *site_template == '\0');
+	if (builtin_slurm)
+	{
+		joboptions["slurm_gpus"] = JobOption("Number of GPUs:", 1, 0, 8, 1, "GPUs to ask Slurm for, for jobs that use GPUs \
+(\"Use GPU acceleration?\" on the Compute tab); jobs that do not use GPUs ask for none.");
+		joboptions["slurm_mem"] = JobOption("Memory (GB):", std::string("auto"), "Memory to ask Slurm for. auto: the job's share of the memory \
+of the smallest node of the queue that fits the job, by its share of that node's CPU cores or of its GPUs, whichever is larger. \
+Rest the mouse on the field to see the amount.");
+		joboptions["slurm_time"] = JobOption("Walltime:", std::string(""), "Maximum run time, as Slurm takes it (for example 2-00:00:00 for two days). \
+Leave empty for the queue's default.");
+		joboptions["slurm_args"] = JobOption("Additional sbatch arguments:", std::string(""), "Any other options for sbatch, for example --account=myaccount.");
+	}
+
 	// additional options that may be set through environment variables RELION_QSUB_EXTRAi and RELION_QSUB_EXTRAi (for more flexibility)
 	char * extra_count_text = getenv("RELION_QSUB_EXTRA_COUNT");
-	const char extra_count_val = (extra_count_text ? atoi(extra_count_text) : 2);
+	const char extra_count_val = builtin_slurm ? 0 : (extra_count_text ? atoi(extra_count_text) : 2);
 	for (int i=1; i<=extra_count_val; i++)
 	{
 		std::stringstream out;
@@ -1337,15 +1445,11 @@ Note that the person who installed RELION should have made a custom script for y
 		}
 	}
 
-	// Check for environment variable RELION_QSUB_TEMPLATE
-	char * default_location = getenv("RELION_QSUB_TEMPLATE");
-	char default_qsub[] = DEFAULTQSUBLOCATION;
-	if (default_location == NULL)
-	{
-		default_location = default_qsub;
-	}
-	joboptions["qsubscript"] = JobOption("Standard submission script:", std::string(default_location), "Script Files (*.{csh,sh,bash,script})", ".",
+	// Check for environment variable RELION_QSUB_TEMPLATE; empty: RELION's own Slurm script
+	joboptions["qsubscript"] = JobOption("Submission script template (optional):", std::string(builtin_slurm ? "" : site_template), "Script Files (*.{csh,sh,bash,script})", ".",
 "The template for your standard queue job submission script. \
+Leave it empty to let RELION write a Slurm script itself (one node; MPI processes, threads, GPUs and memory from this tab); \
+this is the default when the environment variable RELION_QSUB_TEMPLATE is not set. \
 Its default location may be changed by setting the environment variable RELION_QSUB_TEMPLATE. \
 In the template script a number of variables will be replaced: \n \
 XXXcommandXXX = relion command + arguments; \n \
@@ -1382,10 +1486,38 @@ To print a list of possible options, run the corresponding program from the comm
 	}
 }
 
+parhint::JobView RelionJob::parallelView()
+{
+	parhint::JobView view;
+	view.job_type = type;
+	view.value = [this](const std::string &key)
+	{
+		auto it = joboptions.find(key);
+		return (it != joboptions.end()) ? it->second.value : std::string();
+	};
+	view.label = [this](const std::string &key)
+	{
+		auto it = joboptions.find(key);
+		return (it != joboptions.end()) ? it->second.label : std::string();
+	};
+	return view;
+}
+
+void RelionJob::applyAutoParallel()
+{
+	parhint::Suggestion s;
+	if (!parhint::autoSplit(parallelView(), s))
+		return;
+	joboptions["nr_mpi"].value = integerToString(s.mpi);
+	joboptions["nr_threads"].value = integerToString(s.threads);
+}
+
 bool RelionJob::getCommands(std::string &outputname, std::vector<std::string> &commands,
 		std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)
 {
 	bool result = false;
+
+	applyAutoParallel();
 
 	if (type == PROC_IMPORT)
 	{

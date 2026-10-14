@@ -23,11 +23,14 @@ correlate at 1.0000; two upstream runs with 4 and with 8 threads agree on
 changes the order of floating-point sums, and after 2 iterations two MPI runs
 already differ by about 4%.
 
-**What to run:** one process with a thread per core (`--j` = the number of
-cores of the job) now uses one GPU about as well as several processes under
-MPS. MPS still helps when one process cannot use the cores (see "Automatic
-MPS"). At the end of every run RELION reports how busy the GPU and the cores
-were and what to change (see "The resource report").
+**What to run:** one process with a thread per core now uses one GPU about as
+well as several processes under MPS. MPS still helps when one process cannot
+use the cores (see "Automatic MPS"). Without `--j`, `relion_refine` already
+runs a thread per core it may use (see "Number of threads"), and the GUI
+suggests numbers of processes and threads for the GPUs a job asks for (see
+"Suggested numbers in the GUI"). At the end of every run RELION reports how
+busy the GPU and the cores were and what to change (see "The resource
+report").
 
 ## Where the time went
 
@@ -99,6 +102,9 @@ All on by default; for comparisons or if a problem is suspected:
 | `RELION_GPU_HELICAL_MASK=off` | helical mask on the CPU, as upstream |
 | `RELION_AUTO_MPS=off` | `relion_refine_mpi` does not start MPS |
 | `RELION_RESOURCE_REPORT=off` | no resource report at the end |
+| `RELION_CPUS_PER_GPU=n` | CPU cores per GPU assumed by the GUI's suggestions |
+| `RELION_AUTO_PARALLEL=No` | GUI default: give MPI processes and threads by hand |
+| `RELION_SLURM_PREAMBLE` | site lines for RELION's own Slurm script |
 
 Opt-in (off by default):
 
@@ -113,6 +119,108 @@ from 0 instead of from its own stored offset (`itrans_min`, its place in the poo
 of the weights, the maximum, the best orientation and the count of significant samples were
 not those of the fine pass, and the best orientation was overwritten by that of the first
 particle of the pool. All are fixed, and the directions are not counted, as on the CPU.
+
+## Number of threads
+
+Without `--j`, `relion_refine` and `relion_refine_mpi` run a thread per CPU
+core the process may use (`sched_getaffinity`, so what Slurm or `taskset`
+allows), and say so:
+
+```
+ Using 8 threads: --j was not given, and this process may use 8 CPU cores.
+```
+
+MPI worker processes on one node that may use the same cores share them (with
+`srun --cpus-per-task` each has its own cores; with `mpirun --bind-to none` they
+share all of them). All processes get the same number - the smallest over the
+workers - because the mapping of threads to GPUs assumes one number for all.
+`--j n` sets the number as before; the GUI always passes it.
+
+## Number of CPUs in the GUI
+
+For Class2D, Class3D, InitialModel, Refine3D and MultiBody the Running tab
+asks "Choose MPI and threads automatically?" (default Yes;
+`RELION_AUTO_PARALLEL=No` changes the default). With Yes the user gives only
+"Number of CPUs", and RELION splits it into MPI processes and threads when the
+job is run, using the number of GPUs (below); the greyed-out MPI and thread
+fields show the split. With No the user sets both numbers, as before. Jobs
+saved before this option existed open with No and keep their numbers. Submit
+templates are unchanged: they still receive `XXXmpinodesXXX` and
+`XXXthreadsXXX`.
+
+Resting the mouse on any of the three fields explains the numbers. The split,
+for n GPUs (0 for a CPU-only job) and C CPUs:
+
+| Job | MPI processes | Threads per process |
+|---|---|---|
+| Class2D (EM), Class3D, 1 GPU | 1 | C |
+| Class2D (EM), Class3D, n GPUs | n + 1 (leader + a worker per GPU) | C / n |
+| InitialModel, Class2D with VDAM | 1 (VDAM does not support MPI) | C |
+| Refine3D, MultiBody | odd, at least 3: leader + workers in two equal halves | C / workers |
+| CPU-only Class2D (EM), Class3D, Refine3D, MultiBody | a worker per 8 CPUs (+ leader) | C / workers |
+
+The CPU-only split (8 threads per worker) has not been measured. For
+Class2D replicas, the GPUs are those of one replica.
+
+The suggested number of CPUs is n × the CPU cores per GPU, at most 8 per GPU:
+on an RTX 2080 Ti the E-step time is the same with 6 to 16 threads per GPU,
+because the threads of a process issue their GPU commands one at a time, and a
+job that takes fewer cores leaves the rest of a shared node to other jobs.
+With "No", the MPI and thread fields suggest numbers the same way.
+
+- **Number of GPUs:** the queue option whose label mentions GPUs (for
+  example a `RELION_QSUB_EXTRA3` labelled "Number of GPUs"), else the GPUs
+  listed in "Which GPUs to use", else, for jobs run on this computer, its
+  GPUs.
+- **CPU cores per GPU:** `RELION_CPUS_PER_GPU` if set; otherwise at most 8,
+  and no more than the nodes have: for queue jobs the nodes of the queue as
+  Slurm describes them (`sinfo`; the smallest ratio of cores to GPUs, since
+  the job may land on any of them); for jobs run on this computer, its cores
+  and GPUs.
+
+Suggestions are advice only: the fields keep what the user enters.
+
+## Slurm without a template
+
+When "Submission script template (optional)" on the Running tab is empty - the default
+when `RELION_QSUB_TEMPLATE` is not set - RELION writes the Slurm script
+itself (`src/slurm_script.{h,cpp}`) and submits it with `sbatch`. The site
+needs no template, and the Running tab then has "Number of GPUs", "Memory
+(GB)", "Walltime" and "Additional sbatch arguments" in place of the template's
+extra fields. A job given a template works as before.
+
+- **Each MPI process is a Slurm task** with a core per thread (`--ntasks`,
+  `--cpus-per-task`), its cores on one node.
+- **CPU-only programs whose processes work on their own** (MotionCorr,
+  CtfFind, Extract, AutoPick, Polish, ...): Slurm places the tasks on one node
+  or several, wherever it finds room, and memory is given per core.
+- **GPU jobs, and refinements** (Class2D, Class3D, InitialModel, Refine3D,
+  MultiBody) **that fit on one node: one node.** The leader of a refinement
+  only coordinates: it is started on top of the workers (`mpirun
+  --oversubscribe --bind-to none`), so no cores are reserved for it. A CPU
+  refinement too large for any node is spread like the programs above, its
+  leader with a task of its own.
+- **GPUs** (`--gpus`) only for jobs that, as set up, run on them, whatever
+  "Number of GPUs" says: refinements and AutoPick with "Use GPU acceleration?"
+  (not the Laplacian-of-Gaussian picker), MotionCorr with MotionCor2 (not
+  RELION's own), tilt-series alignment with AreTomo2, tomogram denoising,
+  DynaMight and ModelAngelo. Resting the mouse on the field says which.
+- **Memory** is always given, since without it some sites hand a job a whole
+  node's memory. `auto` (the default) is, on one node, the job's share of the
+  memory of the smallest node of the queue that fits it, by its share of that
+  node's cores or of its GPUs, whichever is larger; on several nodes, the
+  memory per core of the node type with the least (from `sinfo`; 4 GB per
+  core when Slurm's node list is not available). A number is the GB for the
+  whole job. Resting the mouse on the field shows the amount and the layout.
+- **A job the queue cannot hold is refused** with a message (a GPU job no
+  node has room for, or more cores than the queue has), instead of waiting in
+  the queue for ever.
+- `RELION_SLURM_PREAMBLE`: lines for the script before the command (module
+  loads, environment), or the name of a file that holds them.
+  `RELION_MPIRUN` names the MPI launcher (default `mpirun`).
+
+The script is saved as `run_submit.script` in the job directory, as with a
+template.
 
 ## Cache directory missing on a node
 

@@ -56,6 +56,22 @@ ShowHelpText::ShowHelpText(const char *help)
 
 ShowHelpText::~ShowHelpText(){};
 
+void GuiEntry::setHint(std::function<std::string()> hint)
+{
+	// inp and slider are always created as HintWidgets (initialise)
+	if (inp != NULL)
+		static_cast<HintWidget<Fl_Input> *>(inp)->hint = hint;
+	if (slider != NULL)
+		static_cast<HintWidget<Fl_Slider> *>(slider)->hint = hint;
+}
+
+void GuiEntry::cb_changed(Fl_Widget*, void* data)
+{
+	GuiEntry *entry = static_cast<GuiEntry *>(data);
+	if (entry->on_change)
+		entry->on_change();
+}
+
 void GuiEntry::clear()
 {
 	deactivate_option = -1;
@@ -106,7 +122,7 @@ void GuiEntry::initialise(int x, int y, Fl_Group * deactivate_this_group, bool _
 
 	// The input field
 	int mywidth = (joboption.joboption_type == JOBOPTION_SLIDER && !create_scheduler_gui) ? 50 : wcol2;
-	inp = new Fl_Input(x, y, mywidth, height, joboption.label_gui.c_str());
+	inp = new HintWidget<Fl_Input>(x, y, mywidth, height, joboption.label_gui.c_str());
 	inp->color(GUI_INPUT_COLOR);
 	inp->textsize(ENTRY_FONTSIZE);
 	inp->labelsize(ENTRY_FONTSIZE);
@@ -182,7 +198,7 @@ void GuiEntry::initialise(int x, int y, Fl_Group * deactivate_this_group, bool _
 		{
 			int floatwidth = 50;
 			// Slider is shorter than wcol2, so that underlying input field becomes visible
-			slider = new Fl_Slider(XCOL2 + floatwidth, y, wcol2 - floatwidth, height);
+			slider = new HintWidget<Fl_Slider>(XCOL2 + floatwidth, y, wcol2 - floatwidth, height);
 			slider->type(1);
 			slider->callback(cb_slider, this);
 			slider->minimum(joboption.min_value);
@@ -245,6 +261,8 @@ void GuiEntry::setValue(std::string _value)
 		if (_value.substr(0,2) != "$$")
 			slider->value(fltkTextToFloat(inp->value()));
 	}
+	if (on_change)
+		on_change();
 }
 
 
@@ -337,6 +355,8 @@ void GuiEntry::cb_browse_i()
 	inp->value(fn_out.c_str());
 	if (my_deactivate_group != NULL || my_additional_deactivate_group != NULL)
 		cb_input_i();
+	if (on_change)
+		on_change();
 }
 
 
@@ -387,6 +407,8 @@ void GuiEntry::cb_browse_node_i() {
 	inp->value(fn_out.c_str());
 	if (my_deactivate_group != NULL || my_additional_deactivate_group != NULL)
 		cb_input_i();
+	if (on_change)
+		on_change();
 }
 
 void GuiEntry::cb_menu(Fl_Widget* o, void* v) {
