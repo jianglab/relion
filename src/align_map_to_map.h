@@ -45,6 +45,9 @@
 /// @param best_dx output (Angstrom)
 /// @param best_dy output (Angstrom)
 /// @param best_dz output (Angstrom)
+/// @param nr_threads threads used to score candidates; the result does not depend on it
+/// @param apply_result if false, vol_align is left unchanged (callers that only need the
+///        parameters skip the full-size rotation and shift)
 void alignMapToMap(
     MultidimArray<RFLOAT> &vol_align,
     const MultidimArray<RFLOAT> &vol_ref,
@@ -59,7 +62,19 @@ void alignMapToMap(
     RFLOAT &best_psi,
     RFLOAT &best_dx,
     RFLOAT &best_dy,
-    RFLOAT &best_dz);
+    RFLOAT &best_dz,
+    int nr_threads = 1,
+    bool apply_result = true);
+
+/// Side of the cube alignMapToMap searches in for a map of side orig_size (64, or orig_size if
+/// smaller; always even).
+int alignWorkSize(int orig_size);
+
+/// The map as alignMapToMap reduces it before searching. alignMapToMap given maps of side
+/// alignWorkSize() (and the pixel size angpix * orig_size / alignWorkSize(orig_size)) finds
+/// exactly the parameters it finds for the full-size maps, so two processes can reduce their own
+/// map in parallel and exchange only the small cubes.
+void reduceMapForAlignment(MultidimArray<RFLOAT> &vol);
 
 /// Rotate (as Projector::rotate3D does) and then translate vol_align in place.
 void applyMapTransformation(
@@ -77,7 +92,9 @@ void alignCuboidMapToMap(
     int nr_freedom, RFLOAT angpix, RFLOAT maxres,
     int search_range, RFLOAT search_step_rot, RFLOAT search_step_trans,
     RFLOAT &best_rot, RFLOAT &best_tilt, RFLOAT &best_psi,
-    RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz);
+    RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz,
+    int nr_threads = 1,
+    bool apply_result = true);
 
 /// Apply the inverse of a found transformation to a per-particle orientation.
 /// For C1 (nr_freedom==6): composes the inverse rotation into the old one,

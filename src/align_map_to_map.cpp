@@ -22,6 +22,18 @@
 #include "src/fftw.h"
 #include "src/transformations.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#else
+static inline int omp_get_thread_num() { return 0; }
+#endif
+
 namespace
 {
 
@@ -72,6 +84,21 @@ bool isBetterCandidate(double diff2, double best_diff2,
  *    corners, and rotating it in Fourier space then rotates the accompanying
  *    phase ramp as well, which silently destroyed rotation recovery.
  */
+int alignWorkSize(int orig_size)
+{
+    int work_size = 64;
+    if (orig_size < work_size) work_size = orig_size;
+    if (work_size % 2 != 0) work_size++;
+    return work_size;
+}
+
+void reduceMapForAlignment(MultidimArray<RFLOAT> &vol)
+{
+    const int work_size = alignWorkSize(XSIZE(vol));
+    if (work_size != XSIZE(vol))
+        resizeMap(vol, work_size);
+}
+
 void alignMapToMap(
     MultidimArray<RFLOAT> &vol_align,
     const MultidimArray<RFLOAT> &vol_ref,
@@ -86,26 +113,42 @@ void alignMapToMap(
     RFLOAT &best_psi,
     RFLOAT &best_dx,
     RFLOAT &best_dy,
-    RFLOAT &best_dz)
+    RFLOAT &best_dz,
+    int nr_threads,
+    bool apply_result)
 {
     best_rot = best_tilt = best_psi = best_dx = best_dy = best_dz = 0.;
     if (nr_freedom == 0) return;
+
+    // RELION_ALIGN_TIMING=1: seconds spent in each stage, on stderr
+    const bool timing = getenv("RELION_ALIGN_TIMING") != NULL;
+    auto t_last = std::chrono::steady_clock::now();
+    auto lap = [&](const char *what)
+    {
+        if (!timing) return;
+        auto now = std::chrono::steady_clock::now();
+        fprintf(stderr, "ALIGN_TIMING %s %.3f s\n", what, std::chrono::duration<double>(now - t_last).count());
+        t_last = now;
+    };
 
     int orig_size = XSIZE(vol_ref);
     if (orig_size != XSIZE(vol_align))
         REPORT_ERROR("alignMapToMap: vol_align and vol_ref must have the same size!");
 
-    int work_size = 64;
-    if (orig_size < work_size) work_size = orig_size;
-    if (work_size % 2 != 0) work_size++;
+    const int work_size = alignWorkSize(orig_size);
     RFLOAT work_angpix = angpix * orig_size / work_size;
 
     MultidimArray<RFLOAT> vol_work, vol_ref_down;
     vol_work = vol_align;
     vol_ref_down = vol_ref;
 
-    resizeMap(vol_work, work_size);
-    resizeMap(vol_ref_down, work_size);
+    // Maps that are already work-sized (reduced by the caller) go in unchanged
+    if (orig_size != work_size)
+    {
+        resizeMap(vol_work, work_size);
+        resizeMap(vol_ref_down, work_size);
+    }
+    lap("resize_to_work_size");
 
     int r_max = (maxres > 0.) ? CEIL(work_size * work_angpix / maxres) : work_size;
     if (r_max > work_size) r_max = work_size;
@@ -120,40 +163,71 @@ void alignMapToMap(
     // the uncorrected reference.
     Projector projector(work_size, TRILINEAR, 2, 10, 3);
     projector.computeFourierTransformMap(vol_work, dummy, 2 * r_max, 1, false);
+    lap("projector_setup");
 
-    MultidimArray<RFLOAT> rotated;
-    MultidimArray<Complex> rot_ft;
-    FourierTransformer transformer;
-    rotated.reshape(vol_work);
-    transformer.setReal(rotated);
-    transformer.getFourierAlias(rot_ft);
+    // One worker per thread: every candidate is scored independently, in parallel, into a
+    // table; the winner is then picked serially in the original order, so the result does
+    // not depend on the number of threads.
+    struct Worker
+    {
+        MultidimArray<RFLOAT> rotated, shifted;
+        MultidimArray<Complex> rot_ft;
+        FourierTransformer transformer;
+    };
+    std::vector<std::unique_ptr<Worker>> workers;
+    {
+        if (const char *e = getenv("RELION_ALIGN_THREADS")) nr_threads = atoi(e);
+        if (nr_threads < 1) nr_threads = 1;
+        const int max_candidates = (nr_freedom == 2) ? (2 * search_range + 1)
+                                 : (2 * search_range + 1) * (2 * search_range + 1) * (2 * search_range + 1);
+        nr_threads = std::min(nr_threads, std::max(max_candidates, 1));
+        for (int t = 0; t < nr_threads; t++)
+        {
+            workers.emplace_back(new Worker);
+            Worker &w = *workers.back();
+            w.rotated.reshape(vol_work);
+            w.transformer.setReal(w.rotated);
+            w.transformer.getFourierAlias(w.rot_ft);
+        }
+    }
 
-    // Rotate the working map by (rot, tilt, psi) into `rotated`
-    auto rotateInto = [&](RFLOAT rot, RFLOAT tilt, RFLOAT psi)
+    auto forEach = [&](int n, const std::function<void(int, Worker &)> &fn)
+    {
+        const int nt = std::min(nr_threads, n);
+        #pragma omp parallel for schedule(dynamic, 1) num_threads(nt) if(nt > 1)
+        for (int i = 0; i < n; i++)
+            fn(i, *workers[omp_get_thread_num()]);
+    };
+
+    // Rotate the working map by (rot, tilt, psi) into the worker's `rotated`
+    auto rotateInto = [&](Worker &w, RFLOAT rot, RFLOAT tilt, RFLOAT psi)
     {
         Matrix2D<RFLOAT> A;
         Euler_rotation3DMatrix(rot, tilt, psi, A);
-        rot_ft.initZeros();
-        projector.rotate3D(rot_ft, A);
-        CenterFFTbySign(rot_ft);
-        transformer.inverseFourierTransform();
+        w.rot_ft.initZeros();
+        projector.rotate3D(w.rot_ft, A);
+        CenterFFTbySign(w.rot_ft);
+        w.transformer.inverseFourierTransform();
+    };
+    auto rotateAll = [&](RFLOAT rot, RFLOAT tilt, RFLOAT psi)
+    {
+        forEach((int) workers.size(), [&](int, Worker &w) { rotateInto(w, rot, tilt, psi); });
     };
 
-    // Squared difference to the reference of `rotated` shifted by (dx, dy, dz) A
-    auto diff2At = [&](RFLOAT dx, RFLOAT dy, RFLOAT dz) -> double
+    // Squared difference to the reference of the worker's `rotated` shifted by (dx, dy, dz) A
+    auto diff2At = [&](Worker &w, RFLOAT dx, RFLOAT dy, RFLOAT dz) -> double
     {
-        MultidimArray<RFLOAT> shifted;
         const bool do_shift = (fabs(dx) > 0. || fabs(dy) > 0. || fabs(dz) > 0.);
         if (do_shift)
         {
-            shifted = rotated;
+            w.shifted = w.rotated;
             Matrix1D<RFLOAT> shift(3);
             XX(shift) = dx / work_angpix;
             YY(shift) = dy / work_angpix;
             ZZ(shift) = dz / work_angpix;
-            selfTranslate(shifted, shift, WRAP);
+            selfTranslate(w.shifted, shift, WRAP);
         }
-        const MultidimArray<RFLOAT> &cmp = do_shift ? shifted : rotated;
+        const MultidimArray<RFLOAT> &cmp = do_shift ? w.shifted : w.rotated;
 
         double d2 = 0.;
         FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(cmp)
@@ -165,22 +239,43 @@ void alignMapToMap(
         return d2;
     };
 
+    // Shifts (dx, dy, dz) = best + (ix, iy, iz) * step for ix, iy in [-xy, xy] and iz in
+    // [-z, z], z fastest, scored with the rotation currently applied by rotateAll
+    auto scoreShifts = [&](RFLOAT cx, RFLOAT cy, RFLOAT cz, RFLOAT step, int xy, int z,
+                           std::vector<double> &out)
+    {
+        const int nxy = 2 * xy + 1, nz = 2 * z + 1;
+        out.assign((size_t) nxy * nxy * nz, 0.);
+        forEach((int) out.size(), [&](int i, Worker &w)
+        {
+            const int iz = i % nz - z, iy = (i / nz) % nxy - xy, ix = i / (nz * nxy) - xy;
+            out[i] = diff2At(w, cx + ix * step, cy + iy * step, cz + iz * step);
+        });
+    };
+
     double best_diff2 = 1E99;
 
     // ---------------- coarse search ----------------
     if (nr_freedom == 2)
     {
         // Cn / helical: rotation about Z and a shift along Z, searched jointly
+        const int n = 2 * search_range + 1;
+        std::vector<double> table((size_t) n * n);
+        forEach(n, [&](int i, Worker &w)
+        {
+            rotateInto(w, (i - search_range) * search_step_rot, 0., 0.);
+            for (int j = 0; j < n; j++)
+                table[(size_t) i * n + j] = diff2At(w, 0., 0., (j - search_range) * search_step_trans);
+        });
+
         double best_mag2 = 1E99;
         for (int irot = -search_range; irot <= search_range; irot++)
         {
             RFLOAT rot = irot * search_step_rot;
-            rotateInto(rot, 0., 0.);
-
             for (int idz = -search_range; idz <= search_range; idz++)
             {
                 RFLOAT dz = idz * search_step_trans;
-                double diff2 = diff2At(0., 0., dz);
+                double diff2 = table[(size_t) (irot + search_range) * n + (idz + search_range)];
 
                 if (isBetterCandidate(diff2, best_diff2, rot*rot, best_mag2))
                 {
@@ -195,6 +290,15 @@ void alignMapToMap(
     else if (nr_freedom == 6)
     {
         // Rotation first, with no shift applied ...
+        const int n = 2 * search_range + 1;
+        std::vector<double> table((size_t) n * n * n);
+        forEach((int) table.size(), [&](int i, Worker &w)
+        {
+            const int ipsi = i % n - search_range, itilt = (i / n) % n - search_range, irot = i / (n * n) - search_range;
+            rotateInto(w, irot * search_step_rot, itilt * search_step_rot, ipsi * search_step_rot);
+            table[i] = diff2At(w, 0., 0., 0.);
+        });
+
         double best_ang_mag2 = 1E99;
         for (int irot = -search_range; irot <= search_range; irot++)
         {
@@ -205,8 +309,7 @@ void alignMapToMap(
                 for (int ipsi = -search_range; ipsi <= search_range; ipsi++)
                 {
                     RFLOAT psi = ipsi * search_step_rot;
-                    rotateInto(rot, tilt, psi);
-                    double diff2 = diff2At(0., 0., 0.);
+                    double diff2 = table[((size_t) (irot + search_range) * n + (itilt + search_range)) * n + (ipsi + search_range)];
 
                     if (isBetterCandidate(diff2, best_diff2,
                                           rot*rot + tilt*tilt + psi*psi, best_ang_mag2))
@@ -222,28 +325,22 @@ void alignMapToMap(
         }
 
         // ... then the shift, with that rotation applied
-        rotateInto(best_rot, best_tilt, best_psi);
+        rotateAll(best_rot, best_tilt, best_psi);
+        std::vector<double> shifts;
+        scoreShifts(0., 0., 0., search_step_trans, search_range, search_range, shifts);
         for (int idx = -search_range; idx <= search_range; idx++)
-        {
-            RFLOAT dx = idx * search_step_trans;
             for (int idy = -search_range; idy <= search_range; idy++)
-            {
-                RFLOAT dy = idy * search_step_trans;
                 for (int idz = -search_range; idz <= search_range; idz++)
                 {
-                    RFLOAT dz = idz * search_step_trans;
-                    double diff2 = diff2At(dx, dy, dz);
-
+                    double diff2 = shifts[((size_t) (idx + search_range) * n + (idy + search_range)) * n + (idz + search_range)];
                     if (diff2 < best_diff2)
                     {
                         best_diff2 = diff2;
-                        best_dx = dx;
-                        best_dy = dy;
-                        best_dz = dz;
+                        best_dx = idx * search_step_trans;
+                        best_dy = idy * search_step_trans;
+                        best_dz = idz * search_step_trans;
                     }
                 }
-            }
-        }
     }
 
     // ---------------- refinement ----------------
@@ -269,6 +366,15 @@ void alignMapToMap(
                 double lv_mag2 = best_rot*best_rot + best_tilt*best_tilt + best_psi*best_psi;
 
                 const int tilt_range = (nr_freedom == 2) ? 0 : fine_range;
+                const int nr = 2 * fine_range + 1, nt = 2 * tilt_range + 1;
+                std::vector<double> table((size_t) nr * nt * nt);
+                forEach((int) table.size(), [&](int i, Worker &w)
+                {
+                    const int ipsi = i % nt - tilt_range, itilt = (i / nt) % nt - tilt_range, irot = i / (nt * nt) - fine_range;
+                    rotateInto(w, best_rot + irot * ang_step, best_tilt + itilt * ang_step, best_psi + ipsi * ang_step);
+                    table[i] = diff2At(w, best_dx, best_dy, best_dz);
+                });
+
                 for (int irot = -fine_range; irot <= fine_range; irot++)
                 for (int itilt = -tilt_range; itilt <= tilt_range; itilt++)
                 for (int ipsi = -tilt_range; ipsi <= tilt_range; ipsi++)
@@ -277,8 +383,7 @@ void alignMapToMap(
                     RFLOAT tilt = best_tilt + itilt * ang_step;
                     RFLOAT psi  = best_psi  + ipsi  * ang_step;
 
-                    rotateInto(rot, tilt, psi);
-                    double diff2 = diff2At(best_dx, best_dy, best_dz);
+                    double diff2 = table[((size_t) (irot + fine_range) * nt + (itilt + tilt_range)) * nt + (ipsi + tilt_range)];
 
                     if (isBetterCandidate(diff2, lv_best,
                                           rot*rot + tilt*tilt + psi*psi, lv_mag2))
@@ -295,25 +400,27 @@ void alignMapToMap(
 
             // --- translation, with the current rotation applied ---
             {
-                rotateInto(best_rot, best_tilt, best_psi);
+                rotateAll(best_rot, best_tilt, best_psi);
 
                 RFLOAT lv_dx = best_dx, lv_dy = best_dy, lv_dz = best_dz;
                 double lv_best = best_diff2;
 
                 const int xy_range = (nr_freedom == 2) ? 0 : fine_range;
+                const int nxy = 2 * xy_range + 1, nz = 2 * fine_range + 1;
+                std::vector<double> table;
+                scoreShifts(best_dx, best_dy, best_dz, trans_step, xy_range, fine_range, table);
+
                 for (int idx = -xy_range; idx <= xy_range; idx++)
                 for (int idy = -xy_range; idy <= xy_range; idy++)
                 for (int idz = -fine_range; idz <= fine_range; idz++)
                 {
-                    RFLOAT dx = best_dx + idx * trans_step;
-                    RFLOAT dy = best_dy + idy * trans_step;
-                    RFLOAT dz = best_dz + idz * trans_step;
-
-                    double diff2 = diff2At(dx, dy, dz);
+                    double diff2 = table[((size_t) (idx + xy_range) * nxy + (idy + xy_range)) * nz + (idz + fine_range)];
                     if (diff2 < lv_best)
                     {
                         lv_best = diff2;
-                        lv_dx = dx; lv_dy = dy; lv_dz = dz;
+                        lv_dx = best_dx + idx * trans_step;
+                        lv_dy = best_dy + idy * trans_step;
+                        lv_dz = best_dz + idz * trans_step;
                     }
                 }
 
@@ -327,7 +434,10 @@ void alignMapToMap(
         }
     }
 
-    applyMapTransformation(vol_align, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, angpix);
+    lap("search");
+    if (apply_result)
+        applyMapTransformation(vol_align, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, angpix);
+    lap("apply_to_full_map");
 }
 
 void applyMapTransformation(
@@ -364,7 +474,9 @@ void alignCuboidMapToMap(
     int nr_freedom, RFLOAT angpix, RFLOAT maxres,
     int search_range, RFLOAT search_step_rot, RFLOAT search_step_trans,
     RFLOAT &best_rot, RFLOAT &best_tilt, RFLOAT &best_psi,
-    RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz)
+    RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz,
+    int nr_threads,
+    bool apply_result)
 {
     if (XSIZE(vol_align) != XSIZE(vol_ref) || YSIZE(vol_align) != YSIZE(vol_ref) || ZSIZE(vol_align) != ZSIZE(vol_ref))
         REPORT_ERROR("alignCuboidMapToMap: the two maps must have the same size.");
@@ -373,7 +485,8 @@ void alignCuboidMapToMap(
     if (nx == ny && ny == nz)
     {
         alignMapToMap(vol_align, vol_ref, nr_freedom, angpix, maxres, search_range, search_step_rot,
-                      search_step_trans, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz);
+                      search_step_trans, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, nr_threads,
+                      apply_result);
         return;
     }
 
@@ -394,8 +507,10 @@ void alignCuboidMapToMap(
     };
     MultidimArray<RFLOAT> cube_align = centralCube(vol_align), cube_ref = centralCube(vol_ref);
     alignMapToMap(cube_align, cube_ref, nr_freedom, angpix, maxres, search_range, search_step_rot,
-                  search_step_trans, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz);
-    applyMapTransformation(vol_align, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, angpix);
+                  search_step_trans, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, nr_threads,
+                  false);
+    if (apply_result)
+        applyMapTransformation(vol_align, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, angpix);
 }
 
 void applyInverseOrientationAdjustment(

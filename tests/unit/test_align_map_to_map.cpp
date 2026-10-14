@@ -361,3 +361,88 @@ TEST_CASE("alignCuboidMapToMap: a cube gives the same result as alignMapToMap", 
 	REQUIRE(z1 == z2);
 	REQUIRE(r1 == r2);
 }
+
+TEST_CASE("alignMapToMap: the thread count does not change the result", "[alignmap]")
+{
+	for (int nr_freedom : {2, 6})
+	{
+		auto ref = makeVol(64);
+		auto base = ref;
+		rotateZ(base, 2.);
+		translate(base, 1., 0., 2.);
+
+		RFLOAT r[2], t[2], p[2], x[2], y[2], z[2];
+		MultidimArray<RFLOAT> out[2];
+		const int threads[2] = {1, 4};
+		for (int k = 0; k < 2; k++)
+		{
+			out[k] = base;
+			alignMapToMap(out[k], ref, nr_freedom, 1., 3., 3, 1., 1.,
+			              r[k], t[k], p[k], x[k], y[k], z[k], threads[k]);
+		}
+		REQUIRE(r[0] == r[1]);
+		REQUIRE(t[0] == t[1]);
+		REQUIRE(p[0] == p[1]);
+		REQUIRE(x[0] == x[1]);
+		REQUIRE(y[0] == y[1]);
+		REQUIRE(z[0] == z[1]);
+		REQUIRE(corr(out[0], out[1]) > 0.999999);
+	}
+}
+
+TEST_CASE("alignMapToMap: maps reduced by the caller give the same parameters", "[alignmap]")
+{
+	// A 96-cube is reduced to the 64-cube the search works on; handing alignMapToMap the
+	// reduced maps (with the pixel size of the reduced grid) must change nothing, and apply_result = false
+	// must leave the map alone.
+	for (int nr_freedom : {2, 6})
+	{
+		MultidimArray<RFLOAT> ref = makeVol(96), align = ref;
+		rotateZ(align, 3.);
+		translate(align, 0., 0., 2.);
+		const MultidimArray<RFLOAT> align_before = align;
+
+		RFLOAT r1, t1, p1, x1, y1, z1, r2, t2, p2, x2, y2, z2;
+		MultidimArray<RFLOAT> full = align;
+		alignMapToMap(full, ref, nr_freedom, 1.5, 6., 3, 1., 1., r1, t1, p1, x1, y1, z1, 2, false);
+		REQUIRE(full == align_before);
+
+		REQUIRE(alignWorkSize(96) == 64);
+		MultidimArray<RFLOAT> small_align = align, small_ref = ref;
+		reduceMapForAlignment(small_align);
+		reduceMapForAlignment(small_ref);
+		REQUIRE(XSIZE(small_align) == 64);
+		alignMapToMap(small_align, small_ref, nr_freedom, 1.5 * 96. / 64., 6., 3, 1., 1.,
+				r2, t2, p2, x2, y2, z2, 2, false);
+
+		REQUIRE(r1 == r2); REQUIRE(t1 == t2); REQUIRE(p1 == p2);
+		REQUIRE(x1 == x2); REQUIRE(y1 == y2); REQUIRE(z1 == z2);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hidden benchmark: RELION_ALIGN_BENCH_A / _B name two maps of the same size;
+// run with `relion_unit_tests "[.alignbench]"` and RELION_ALIGN_TIMING=1.
+// ---------------------------------------------------------------------------
+
+#include "src/image.h"
+#include "src/fftw.h"
+
+TEST_CASE("alignCuboidMapToMap: timing on two maps given by environment", "[.alignbench]")
+{
+	const char *fa = getenv("RELION_ALIGN_BENCH_A"), *fb = getenv("RELION_ALIGN_BENCH_B");
+	if (!fa || !fb)
+		return;
+	Image<RFLOAT> a, b;
+	a.read(fa);
+	b.read(fb);
+	RFLOAT rot, tilt, psi, dx, dy, dz;
+	const char *nf = getenv("RELION_ALIGN_BENCH_FREEDOM");
+	const char *th = getenv("RELION_ALIGN_BENCH_THREADS");
+	const int nt = th ? atoi(th) : 3;
+	relionFftwInitThreads();
+	relionFftwPlanThreads(nt);
+	alignCuboidMapToMap(a(), b(), nf ? atoi(nf) : 2, 1.0, 8., 3, 1., 1.,
+			rot, tilt, psi, dx, dy, dz, nt, getenv("RELION_ALIGN_BENCH_NOAPPLY") == NULL);
+	printf("rot=%g tilt=%g psi=%g dx=%g dy=%g dz=%g\n", rot, tilt, psi, dx, dy, dz);
+}
