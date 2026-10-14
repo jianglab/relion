@@ -657,6 +657,22 @@ foreach (SCRIPT_FILE ${RELION_PYTHON_WRAPPERS})
                      WORLD_READ WORLD_EXECUTE)
 endforeach()
 
+# Python scripts that the wrappers above execute. These are copied at configure time
+# (not by the `copy_scripts` target, which only runs during `make`), so that the wrappers,
+# and in particular `relion_python_fetch_weights` below, work before anything is compiled.
+# configure_file also makes cmake re-run (and re-copy) when the source script changes.
+list(APPEND RELION_PYTHON_SCRIPTS
+	trace_amyloids.py
+)
+
+foreach (SCRIPT_FILE ${RELION_PYTHON_SCRIPTS})
+    configure_file(
+            ${CMAKE_SOURCE_DIR}/scripts/${SCRIPT_FILE}
+            ${CMAKE_BINARY_DIR}/bin/relion_${SCRIPT_FILE}
+            COPYONLY
+    )
+endforeach()
+
 option(FETCH_WEIGHTS "Download model weights for dependent packages" ON)
 if (FETCH_WEIGHTS)
 	message(STATUS
