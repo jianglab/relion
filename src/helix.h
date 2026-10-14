@@ -99,7 +99,8 @@ bool localSearchHelicalSymmetry(
 		RFLOAT twist_max_deg,
 		RFLOAT twist_inistep_deg,
 		RFLOAT& twist_refined_deg,
-		std::ostream* o_ptr = NULL);
+		std::ostream* o_ptr = NULL,
+		bool ellipsoid_mask = false); // cuboid references: an ellipsoid along the box (BoxEllipse) in place of the sphere
 
 RFLOAT getHelicalSigma2Rot(
 		RFLOAT helical_rise_Angst,
@@ -124,7 +125,11 @@ bool checkParametersFor3DHelicalReconstruction(
 		RFLOAT particle_diameter_A,
 		RFLOAT tube_inner_diameter_A,
 		RFLOAT tube_outer_diameter_A,
-		bool verboseOutput = false);
+		bool verboseOutput = false,
+		// For a cuboid reference: its size across the helix (box_len is then the size along
+		// z), and the mask is an ellipsoid whose semi-axis along the longest side is the
+		// particle radius. -1 (or box_len) for a cube.
+		int box_len_xy = -1);
 
 void imposeHelicalSymmetryInRealSpace(
 		MultidimArray<RFLOAT>& v,
@@ -135,7 +140,10 @@ void imposeHelicalSymmetryInRealSpace(
 		RFLOAT z_percentage,
 		RFLOAT rise_A,
 		RFLOAT twist_deg,
-		RFLOAT cosine_width_pix);
+		RFLOAT cosine_width_pix,
+		// For a cuboid reference: mask with the ellipsoid along the box whose semi-axis along
+		// the longest side is the sphere radius (BoxEllipse in mask.h), instead of the sphere
+		bool ellipsoid_mask = false);
 
 // Some functions only for specific testing
 void calcRadialAverage(
@@ -152,7 +160,8 @@ void createCylindricalReference(
 		int box_size,
 		RFLOAT inner_diameter_pix,
 		RFLOAT outer_diameter_pix,
-		RFLOAT cosine_width = 5.);
+		RFLOAT cosine_width = 5.,
+		int box_z = -1); // depth along the helical axis for a cuboid; -1 for a cube of box_size
 
 void createCylindricalReferenceWithPolarity(
 		MultidimArray<RFLOAT>& v,

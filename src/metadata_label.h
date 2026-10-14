@@ -409,6 +409,7 @@ enum EMDLabel
 	EMDL_OPTIMISER_TAU2_FUDGE_ARG,
 	EMDL_MAX_SIGNIFICANTS,
 	EMDL_OPTIMISER_DO_CENTER_CLASSES,
+	EMDL_OPTIMISER_RECT_MASK_LENGTH,
 	EMDL_OPTIMISER_DO_SOLVENT_FLATTEN,
 	EMDL_OPTIMISER_DO_SOLVENT_FSC,
 	EMDL_OPTIMISER_DO_SKIP_ALIGN,
@@ -1206,6 +1207,7 @@ private:
 		EMDL::addLabel(EMDL_OPTIMISER_DO_AUTO_SAMPLING, EMDL_BOOL, "rlnDoAutoSampling", "Flag to indicate that auto-sampling is to be used (outside the auto-refine procedure)");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_ONLY_FLIP_CTF_PHASES, EMDL_BOOL, "rlnDoOnlyFlipCtfPhases", "Flag to indicate that CTF-correction should only comprise phase-flipping");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_CENTER_CLASSES, EMDL_BOOL, "rlnDoCenterClasses", "Flag to indicate that the class averages or reconstructions should be centered based on their center-of-mass during every iteration.");
+		EMDL::addLabel(EMDL_OPTIMISER_RECT_MASK_LENGTH, EMDL_BOOL, "rlnRectMaskAlongLength", "Flag to indicate that the masks of rectangular images are ellipses along the box whose long axis is the mask diameter (otherwise the mask diameter applies to the box width)");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_SOLVENT_FLATTEN, EMDL_BOOL, "rlnDoSolventFlattening", "Flag to indicate that the references should be masked to set their solvent areas to a constant density");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_SOLVENT_FSC, EMDL_BOOL, "rlnDoSolventFscCorrection", "Flag to indicate that the FSCs should be solvent-corrected during refinement");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_SKIP_ALIGN, EMDL_BOOL, "rlnDoSkipAlign", "Flag to indicate that orientational (i.e. rotational and translational) searches will be omitted from the refinement, only marginalisation over classes will take place");

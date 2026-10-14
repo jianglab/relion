@@ -710,6 +710,10 @@ public:
 	// the flip ratio of the bimodal psi prior (see src/helix_context.h)
 	bool do_helical_polarity;
 	int helical_polarity_start_iter;
+
+	// Rectangular images: masks are ellipses along the box whose long axis is the mask
+	// diameter (--rect_mask_length). Otherwise the diameter applies to the box width.
+	bool do_rect_mask_length;
 	std::vector<RFLOAT> helical_polarity_psi_prior; // per particle: the psi prior of its last E-step
 
 	// Flag whether to do local refinement of helical parameters
@@ -977,6 +981,7 @@ public:
             do_fix_gpu_bimodal_psi(0),
             do_helical_polarity(0),
             helical_polarity_start_iter(3),
+            do_rect_mask_length(0),
             do_helical_context(0),
             helical_context_types_max(-1),
             helical_context_types_tol(0.01),
@@ -1159,6 +1164,20 @@ public:
 	}
 	// Errors out for every option that cannot yet be combined with rectangular images
 	void checkRectangularSupport() const;
+	// With --rect_mask_length, masks of rectangular images (cuboid references) are ellipses
+	// (ellipsoids, BoxEllipse) whose long axis is the mask diameter; otherwise the diameter
+	// applies to the box width (an ellipse with the radius on the short side, or for helical
+	// segments a circle / sphere that fits the width).
+	bool rectMaskAlongLength() const { return mymodel.isRect() && do_rect_mask_length; }
+	// The longest side that the long axis may span: that of the images and, in 3D, also that
+	// of the reference
+	int rectMaskLength() const;
+	// With --rect_mask_length: errors out if the mask diameter does not fit the box, or the
+	// helical tube does not fit across the short axis of the ellipse (ellipsoid)
+	void checkRectangularMask() const;
+	// Warns if the angular searches let the reference stick out across the width of a
+	// rectangular box, where its projections wrap around (they are sampled on the image grid)
+	void warnRectangularWrapAround() const;
 
 	/* Calculates the sum of all individual power spectra and the average of all images for initial sigma_noise estimation
 	 * The rank is passed so that if one splits the data into random halves one can know which random half to treat

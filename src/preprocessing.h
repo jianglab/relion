@@ -162,6 +162,9 @@ public:
 	bool do_rescale;
 	int scale;
 
+	// Downscale the extracted box by this factor instead of to a size (--downscale_factor; sets scale)
+	RFLOAT downscale_factor;
+
 	// Perform re-windowing of extracted images
 	bool do_rewindow;
 	int window;

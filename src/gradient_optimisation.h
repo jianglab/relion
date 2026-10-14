@@ -435,7 +435,7 @@ public:
 				blobs_x[i] = random_normal<T>() * diameter / 7. + box.xdim / 2.;
 			blobs_y[i] = random_normal<T>() * diameter / 7. + box.ydim / 2.;
 
-			if (blobs_y[i] < amp_box.ydim && blobs_x[i] < amp_box.xdim)
+			if (blobs_y[i] >= 0 && blobs_x[i] >= 0 && blobs_y[i] < amp_box.ydim && blobs_x[i] < amp_box.xdim)
 				blobs_amp[i] = fabs(amp_box.data[(long) blobs_y[i] * amp_box.xdim + (long) blobs_x[i]]);
 			else
 				blobs_amp[i] = 0;
@@ -471,7 +471,8 @@ public:
 			else
 				blobs_z[i] = random_normal<T>() * diameter / 6. + box.zdim / 2.;
 
-			if (blobs_z[i] < amp_box.zdim && blobs_y[i] < amp_box.ydim && blobs_x[i] < amp_box.xdim)
+			if (blobs_z[i] >= 0 && blobs_y[i] >= 0 && blobs_x[i] >= 0 &&
+			    blobs_z[i] < amp_box.zdim && blobs_y[i] < amp_box.ydim && blobs_x[i] < amp_box.xdim)
 				blobs_amp[i] = fabs(amp_box.data[
 						(long) blobs_z[i] * amp_box.yxdim +
 						(long) blobs_y[i] * amp_box.xdim +

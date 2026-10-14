@@ -48,6 +48,8 @@ set(RELION_UNIT_TEST_SOURCES
     test_rectangular_box.cpp
     test_rectangular_projector.cpp
     test_rectangular_backprojector.cpp
+    test_rectangular_mask.cpp
+    test_rectangular_helix_mask.cpp
     test_fused_extract.cpp
 )
 

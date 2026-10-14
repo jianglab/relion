@@ -20,6 +20,7 @@
 
 #include "src/macros.h"
 #include "src/helix.h"
+#include "src/mask.h"
 
 // Wider search ranges for helical twist and rise
 #define WIDE_HELICAL_TWIST_AND_RISE_SEARCHES
@@ -299,7 +300,8 @@ bool localSearchHelicalSymmetry(
 		RFLOAT twist_max_deg,
 		RFLOAT twist_inistep_deg,
 		RFLOAT& twist_refined_deg,
-		std::ostream* o_ptr)
+		std::ostream* o_ptr,
+		bool ellipsoid_mask)
 {
 	// TODO: whether iterations can exit & this function works for negative twist
 	int iter, box_len, nr_asym_voxels, nr_rise_samplings, nr_twist_samplings, nr_min_samplings, nr_max_samplings, best_id, iter_not_converged;
@@ -315,7 +317,13 @@ bool localSearchHelicalSymmetry(
 
 	// Set the length of the box
 	box_len = (XSIZE(v) < YSIZE(v)) ? XSIZE(v) : YSIZE(v);
-	box_len = (box_len < ZSIZE(v)) ? box_len : ZSIZE(v);
+	// A cuboid reference with an ellipsoidal mask: box_len along z (see imposeHelicalSymmetryInRealSpace)
+	const bool cuboid = ellipsoid_mask && !(XSIZE(v) == YSIZE(v) && YSIZE(v) == ZSIZE(v));
+	const int box_len_xy = cuboid ? box_len : -1;
+	if (cuboid)
+		box_len = ZSIZE(v);
+	else
+		box_len = (box_len < ZSIZE(v)) ? box_len : ZSIZE(v);
 
 	// Initialise refined helical parameters
 	// Check helical parameters
@@ -336,7 +344,9 @@ bool localSearchHelicalSymmetry(
 			z_percentage,
 			sphere_radius_A * 2.,
 			cyl_inner_radius_A * 2.,
-			cyl_outer_radius_A * 2.);
+			cyl_outer_radius_A * 2.,
+			false,
+			box_len_xy);
 	rise_refined_pix = rise_refined_A / pixel_size_A;
 
 	// Initialise other parameters
@@ -648,7 +658,8 @@ bool checkParametersFor3DHelicalReconstruction(
 		RFLOAT particle_diameter_A,
 		RFLOAT tube_inner_diameter_A,
 		RFLOAT tube_outer_diameter_A,
-		bool verboseOutput)
+		bool verboseOutput,
+		int box_len_xy)
 {
 	RFLOAT nr_units_min = 2.; // Minimum nr_particles required along lenZ_max
 	RFLOAT rise_range_max_percentage = 0.3334;
@@ -691,13 +702,25 @@ bool checkParametersFor3DHelicalReconstruction(
 	RFLOAT tube_inner_radius_pix = tube_inner_diameter_A * 0.5 / pixel_size_A;
 	RFLOAT tube_outer_radius_pix = tube_outer_diameter_A * 0.5 / pixel_size_A;
 
+	// A cuboid reference (box_len along z, box_len_xy across): the mask is an ellipsoid whose
+	// semi-axis along the longest side is the particle radius (BoxEllipse in mask.h)
+	const bool cuboid = (box_len_xy > 0 && box_len_xy != box_len);
+	const int longest = cuboid ? XMIPP_MAX(box_len, box_len_xy) : box_len;
+	const int half_longest = longest / 2 - ((longest + 1) % 2);
+	const int half_box_xy = cuboid ? box_len_xy / 2 - ((box_len_xy + 1) % 2) : half_box_len;
+	const RFLOAT mask_semi_axis_z_pix = cuboid ? particle_radius_pix * box_len / longest : particle_radius_pix;
+	const RFLOAT mask_semi_axis_xy_pix = cuboid ? particle_radius_pix * box_len_xy / longest : particle_radius_pix;
+
 	// Check particle radius
 	if (verboseOutput)
 	{
 		std::cout << " Particle diameter = " << particle_radius_pix * 2. << " pixels = " << particle_diameter_A << " Angstroms" << std::endl;
 		std::cout << " Half box size = " << half_box_len << " pixels = " << (RFLOAT)(half_box_len) * pixel_size_A << " Angstroms" << std::endl;
+		if (cuboid)
+			std::cout << " Cuboid box: " << box_len_xy << " pixels across, ellipsoidal mask with semi-axes " << mask_semi_axis_xy_pix
+			          << " (across) and " << mask_semi_axis_z_pix << " (along z) pixels" << std::endl;
 	}
-	if ( (particle_radius_pix < 2.) || (particle_radius_pix > half_box_len) )
+	if ( (particle_radius_pix < 2.) || (particle_radius_pix > (cuboid ? half_longest : half_box_len)) )
 	{
 		if (verboseOutput)
 			std::cout << " ERROR! Particle radius should be > 2 pixels and < half the box size!" << std::endl;
@@ -713,9 +736,18 @@ bool checkParametersFor3DHelicalReconstruction(
 			std::cout << " Inner tube diameter = " << tube_inner_radius_pix * 2. << " pixels = " << tube_inner_diameter_A << " Angstroms" << std::endl;
 		std::cout << " Outer tube diameter = " << tube_outer_radius_pix * 2. << " pixels = " << tube_outer_diameter_A << " Angstroms" << std::endl;
 	}
-	if ( (tube_outer_radius_pix < 2.) || (tube_outer_radius_pix > half_box_len)
+	if (cuboid && ( (tube_outer_radius_pix < 2.) || (tube_outer_radius_pix > half_box_xy)
+			|| (mask_semi_axis_xy_pix < tube_outer_radius_pix) ) )
+	{
+		if (verboseOutput)
+			std::cout << " ERROR! Outer tube diameter should be > 4 pixels, < half the box size across the helix and < the short axis of the ellipsoidal mask!" << std::endl;
+		else
+			REPORT_ERROR("helix.cpp::chechParametersFor3DHelicalReconstruction(): Outer tube diameter should be > 4 pixels, < half the box size across the helix and < the axis of the ellipsoidal mask across the helix (particle diameter * box across / longest box side)");
+		return false;
+	}
+	if ( !cuboid && ( (tube_outer_radius_pix < 2.) || (tube_outer_radius_pix > half_box_len)
 			//|| ( (particle_radius_pix + 0.001) < tube_outer_radius_pix ) )
-			|| (particle_radius_pix < tube_outer_radius_pix) )
+			|| (particle_radius_pix < tube_outer_radius_pix) ) )
 	{
 		if (verboseOutput)
 			std::cout << " ERROR! Outer tube diameter should be > 4 pixels, < particle diameter and < half the box size!" << std::endl;
@@ -823,6 +855,12 @@ bool checkParametersFor3DHelicalReconstruction(
 	RFLOAT z_percentage_min = (nr_units_min * rise_max_A) / (pixel_size_A * (RFLOAT)(box_len));
 	z_percentage_min = (z_percentage_min < 0.001) ? (0.001) : (z_percentage_min);
 	RFLOAT z_percentage_max = ( (2.) * sqrt( (particle_diameter_A * particle_diameter_A / 4.) - (tube_outer_diameter_A * tube_outer_diameter_A / 4.) ) / pixel_size_A) / ((RFLOAT)(box_len));
+	if (cuboid)
+	{
+		// Height of the ellipsoid at the outer tube radius
+		const RFLOAT q = tube_outer_radius_pix / mask_semi_axis_xy_pix;
+		z_percentage_max = 2. * mask_semi_axis_z_pix * sqrt(1. - q * q) / ((RFLOAT)(box_len));
+	}
 	z_percentage_max = (z_percentage_max > 0.999) ? (0.999) : (z_percentage_max);
 	if (verboseOutput)
 		std::cout << " Z percentage should be > " << z_percentage_min << " and < " << z_percentage_max << " (under current settings)" << std::endl;
@@ -903,7 +941,8 @@ void imposeHelicalSymmetryInRealSpace(
 		RFLOAT z_percentage,
 		RFLOAT rise_A,
 		RFLOAT twist_deg,
-		RFLOAT cosine_width_pix)
+		RFLOAT cosine_width_pix,
+		bool ellipsoid_mask)
 {
 	bool ignore_helical_symmetry = false;
 	long int Xdim, Ydim, Zdim, Ndim, box_len;
@@ -917,7 +956,15 @@ void imposeHelicalSymmetryInRealSpace(
 		REPORT_ERROR("helix.cpp::imposeHelicalSymmetryInRealSpace(): Input helical reference is not 3D! (vol.getDim() = " + integerToString(v.getDim()) + ")");
 	v.getDimensions(Xdim, Ydim, Zdim, Ndim);
 	box_len = (Xdim < Ydim) ? Xdim : Ydim;
-	box_len = (box_len < Zdim) ? box_len : Zdim;
+	// A cuboid reference (rectangular images) with ellipsoid_mask: the mask is an ellipsoid
+	// whose semi-axis along the longest side is the sphere radius (BoxEllipse in mask.h).
+	// Otherwise the sphere, which must fit the shortest side.
+	const bool cuboid = ellipsoid_mask && !(Xdim == Ydim && Ydim == Zdim);
+	const long int box_len_xy = cuboid ? box_len : -1;
+	if (cuboid)
+		box_len = Zdim;
+	else
+		box_len = (box_len < Zdim) ? box_len : Zdim;
 
 	// Check helical parameters
 	checkParametersFor3DHelicalReconstruction(
@@ -935,7 +982,9 @@ void imposeHelicalSymmetryInRealSpace(
 			z_percentage,
 			sphere_radius_A * 2.,
 			cyl_inner_radius_A * 2.,
-			cyl_outer_radius_A * 2.);
+			cyl_outer_radius_A * 2.,
+			false,
+			box_len_xy);
 
 	// Parameters of mask
 	if (cosine_width_pix < 1.)
@@ -965,6 +1014,7 @@ void imposeHelicalSymmetryInRealSpace(
 	vout.clear();
 	vout.resize(v);
 	vout.setXmippOrigin();
+	const BoxEllipse ellipsoid(v, sphere_radius_pix, cosine_width_pix);
 
 	// Calculate tabulated sine and cosine values
 	rec_len = 2 + (CEIL((RFLOAT(Zdim) + 2.) / rise_pix));
@@ -986,7 +1036,11 @@ void imposeHelicalSymmetryInRealSpace(
 		RFLOAT rr = dd + (RFLOAT)(k * k);
 		RFLOAT d = sqrt(dd);
 		RFLOAT r = sqrt(rr);
-		if ( (r > r_max) || (d < d_min) || (d > D_max) )
+		// Where a voxel of a cuboid lies across the edge of the ellipsoid (0 inside, 1 outside)
+		const RFLOAT t = cuboid ? ellipsoid.edge(j, i, k) : 0.;
+		const bool outside_sphere = cuboid ? (t >= 1.) : (r > r_max);
+		const bool inside_sphere = cuboid ? (t <= 0.) : (r < r_min);
+		if ( outside_sphere || (d < d_min) || (d > D_max) )
 		{
 			A3D_ELEM(v, k, i, j) = 0.;
 			continue;
@@ -1061,7 +1115,7 @@ void imposeHelicalSymmetryInRealSpace(
 		{
 			A3D_ELEM(vout, k, i, j) = pix_sum / pix_weight;
 
-			if ( (d > d_max) && (d < D_min) && (r < r_min) )
+			if ( (d > d_max) && (d < D_min) && inside_sphere )
 			{}
 			else // The pixel is within cosine edge(s)
 			{
@@ -1070,9 +1124,9 @@ void imposeHelicalSymmetryInRealSpace(
 					pix_weight = 0.5 + (0.5 * cos(PI * ((d_max - d) / cosine_width_pix)));
 				else if (d > D_min) // D_min < d < D_max : w=(1~0)
 					pix_weight = 0.5 + (0.5 * cos(PI * ((d - D_min) / cosine_width_pix)));
-				if (r > r_min) // r_min < r < r_max
+				if (cuboid ? (t > 0.) : (r > r_min)) // r_min < r < r_max
 				{
-					pix_sum = 0.5 + (0.5 * cos(PI * ((r - r_min) / cosine_width_pix)));
+					pix_sum = cuboid ? 0.5 + (0.5 * cos(PI * t)) : 0.5 + (0.5 * cos(PI * ((r - r_min) / cosine_width_pix)));
 					pix_weight = (pix_sum < pix_weight) ? (pix_sum) : (pix_weight);
 				}
 				A3D_ELEM(vout, k, i, j) *= pix_weight;
@@ -1381,12 +1435,15 @@ void createCylindricalReference(
 		int box_size,
 		RFLOAT inner_diameter_pix,
 		RFLOAT outer_diameter_pix,
-		RFLOAT cosine_width)
+		RFLOAT cosine_width,
+		int box_z)
 {
 	RFLOAT r, dist, inner_radius_pix, outer_radius_pix;
 
 	// Check dimensions
-	if (box_size < 5)
+	if (box_z <= 0)
+		box_z = box_size;
+	if (box_size < 5 || box_z < 5)
 		REPORT_ERROR("helix.cpp::createCylindricalReference(): Invalid box size.");
 
 	if ( (inner_diameter_pix > outer_diameter_pix)
@@ -1398,7 +1455,7 @@ void createCylindricalReference(
 	outer_radius_pix = outer_diameter_pix * 0.5;
 
 	v.clear();
-	v.resize(box_size, box_size, box_size);
+	v.resize(box_z, box_size, box_size);
 	v.setXmippOrigin();
 	FOR_ALL_ELEMENTS_IN_ARRAY3D(v)
 	{

@@ -201,8 +201,10 @@ public:
 	Fl_Group * my_deactivate_group;
 	Fl_Group * my_additional_deactivate_group;
 
-	// Group that is deactivated while a Yes/No menu reads Yes (the reverse of my_deactivate_group)
-	Fl_Group * my_inverse_group;
+	// Groups that a Yes/No menu also controls, wherever they are in the window: those in
+	// my_yes_groups are active only while it reads Yes, those in my_no_groups only while it
+	// reads No (for example options of a square box while a rectangular box is chosen)
+	std::vector<Fl_Group *> my_yes_groups, my_no_groups;
 	bool actually_activate;
 
     ////////////// Slider entry
@@ -226,7 +228,6 @@ public:
 		menu = NULL;
 		my_deactivate_group = NULL;
 		my_additional_deactivate_group = NULL;
-		my_inverse_group = NULL;
 		actually_activate = false;
 		slider = NULL;
     };
