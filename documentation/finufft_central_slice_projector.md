@@ -490,3 +490,51 @@ in `Projector::resolveForwardInterpolator()`.
 - Relative error against a brute-force exact central slice: **1.1e-6** for NUFFT,
   **7.4e-3** for trilinear.
 - Reconstructions made with the two interpolators correlate at 0.999984.
+
+## NUFFT at padding 1 against trilinear at padding 2 (2026-10-11)
+
+The question was whether the NUFFT projector, which needs no padding, should replace
+RELION's usual trilinear interpolation at padding 2. Measured with the hidden unit
+test `Central-slice interpolation benchmark` (`relion_unit_tests "[.finufft_bench]"`),
+box 64, CPU, scored against the central slice of the object with the corners of
+Fourier space removed (what `Projector::data` holds for both methods):
+
+| | smooth object | noisy object | memory | time per slice (CPU) |
+|---|---|---|---|---|
+| trilinear, padding 1 | 7.9e-3 | 0.75 | 2.3 MB | 0.03 ms |
+| trilinear, padding 2 | 1.8e-3 | 0.155 | 17.3 MB | 0.03 ms |
+| NUFFT, padding 1 | 9e-8 | 1.1e-2 | 6.3 MB | 1.8 ms |
+| NUFFT, padding 2 | 1.1e-6 | 0.10 | 21.3 MB | 1.5 ms |
+
+NUFFT at padding 1 is 1000x (smooth) and 14x (noisy) more accurate than trilinear at
+padding 2, and uses 2.7x less memory. Padding 2 makes NUFFT worse (cropping the padded
+real-space volume to the box discards signal), so NUFFT never needs it. On the CPU
+NUFFT is about 60x slower per slice, so it stays opt-in.
+
+A standalone cuFINUFFT test (RTX A5000, single plan for all 4608 orientations of a
+class, float, tolerance 1e-5) takes 3.6-5.3 ms per class at box 64 and 15 ms at box 128:
+about 6.5x slower than the trilinear kernel at box 64 and 1.3x slower at box 128, with
+error 8e-6 against the CPU reference. Setting the points is only needed when the
+orientations change; a new volume per iteration is just an argument to `execute`.
+The obstacle is not the transform but that RELION's GPU diff2 kernels interpolate
+inline and never build projection arrays: a NUFFT path has to materialise the
+projections of every fine-pass orientation of every class once per iteration
+(about 480 MB per class at box 64, order-3 sampling), and share them across particles.
+That is the same restructuring as the batching redesign.
+
+### Scaling with box size (CPU, 8 threads, 2026-10-11)
+
+Per slice, `get2DFourierTransformMany` (NUFFT) against `Projector::project` (trilinear). Run:
+`RELION_BENCH_SIZE=<N> RELION_BENCH_ORIENTS=<n> relion_unit_tests '[.finufft_bench]'`.
+Accuracy is only measured at N=64 (the exact sums are O(N^3) per pixel).
+
+| N | slices | trilinear pad 2 | NUFFT pad 1 | slowdown | memory trilinear pad 2 / NUFFT pad 1 |
+|---|--------|-----------------|-------------|----------|--------------------------------------|
+| 64  | 24  | 0.03 ms | 1.74 ms  | 58x | 17 / 6 MB |
+| 128 | 24  | 0.46 ms | 10.5 ms  | 23x | 133 / 49 MB |
+| 128 | 200 | 0.40 ms | 4.7 ms   | 12x | same |
+| 256 | 24  | 1.95 ms | 77.8 ms  | 40x | 1044 / 389 MB |
+| 256 | 200 | 1.93 ms | 24.4 ms  | 12.7x | same |
+
+The slowdown does not keep growing with N, and it does not shrink below about 12x on CPU: many slices share one volume transform,
+which helps, but the per-point cost of NUFFT stays far above eight loads. Memory is 2.7-3x lower for NUFFT at every size.
