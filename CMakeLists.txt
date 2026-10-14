@@ -184,6 +184,10 @@ if(CUDA)
     # See https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/#gpu-architecture-arch.
     set(CUDA_ARCH "" CACHE STRING "Single CUDA sm architecture (e.g. 61)")
     set(CUDA_GENCODE "" CACHE STRING "Semicolon-separated list of sm archs for -gencode flags (e.g. '61;75;86;89'). Overrides CUDA_ARCH.")
+    # A list in CUDA_ARCH (e.g. "75;86;89") means one -gencode per architecture, as CUDA_GENCODE
+    if (CUDA_GENCODE STREQUAL "" AND CUDA_ARCH MATCHES ";")
+        set(CUDA_GENCODE "${CUDA_ARCH}")
+    endif()
     if (CUDA_GENCODE STREQUAL "")
         if (CUDA_ARCH STREQUAL "")
             if (${CUDA_VERSION} VERSION_LESS "13.0")
@@ -201,7 +205,10 @@ if(CUDA)
         message(STATUS "Using CUDA_GENCODE: ${CUDA_GENCODE}")
         foreach(sm ${CUDA_GENCODE})
             string(APPEND CUDARCH "-gencode arch=compute_${sm},code=sm_${sm} ")
+            set(_relion_newest_sm ${sm})
         endforeach()
+        # and the PTX of the last one, which the driver can compile for newer GPUs
+        string(APPEND CUDARCH "-gencode arch=compute_${_relion_newest_sm},code=compute_${_relion_newest_sm} ")
     endif()
 
     if(CUDA_FOUND)
@@ -403,6 +410,28 @@ else()
 	set(CMAKE_CXX_FLAGS "-fPIC -std=c++17 ${CMAKE_CXX_FLAGS}")
 endif()
 
+# ---------------------------------------------------------- NVCC flags (FindCUDA) --
+# The CUDA code is built with FindCUDA (cuda_add_library in src/apps), which takes its
+# flags only from CUDA_NVCC_FLAGS and CUDA_NVCC_FLAGS_<CONFIG>. The CMAKE_CUDA_FLAGS_<CONFIG>
+# set in BuildTypes.cmake are for enable_language(CUDA) and never reach nvcc here: without
+# this, the GPU code had no -arch (only sm_52 PTX, compiled when a kernel is first launched)
+# and no --default-stream per-thread. Flags already in CUDA_NVCC_FLAGS are kept.
+if(CUDA AND CUDA_FOUND)
+    if(NOT "${CUDA_NVCC_FLAGS}" MATCHES "-gencode|-arch")
+        separate_arguments(_relion_cudarch UNIX_COMMAND "${CUDARCH}")
+        list(APPEND CUDA_NVCC_FLAGS ${_relion_cudarch})
+    endif()
+    if(NOT "${CUDA_NVCC_FLAGS}" MATCHES "default-stream")
+        list(APPEND CUDA_NVCC_FLAGS --default-stream per-thread)
+    endif()
+    if(WARN_DBL)
+        list(APPEND CUDA_NVCC_FLAGS ${WARN_DBL})
+    endif()
+    list(APPEND CUDA_NVCC_FLAGS_RELEASE --disable-warnings)
+    list(APPEND CUDA_NVCC_FLAGS_PROFILING -lineinfo)
+    message(STATUS "NVCC flags: ${CUDA_NVCC_FLAGS}")
+endif()
+
 # ----------------------------------------------------------Intel Compiler support --
 # ----------------------------------  and build flags including MKL and IPP ---------
 
@@ -522,6 +551,13 @@ if(NOT MKLFFT)
 	if(NOT FFTW_FOUND)
 		include(${CMAKE_SOURCE_DIR}/cmake/BuildFFTW.cmake)
 	endif(NOT FFTW_FOUND)
+	# Multi-threaded transforms outside the parallel loops need FFTW's thread library
+	# (our own FFTW build always has it)
+	if(NOT FFTW_FOUND OR FORCE_OWN_FFTW OR (_FFTW_SINGLE_THREADS AND _FFTW_DOUBLE_THREADS))
+		add_definitions(-DRELION_HAVE_FFTW_THREADS)
+	else()
+		message(STATUS "FFTW thread libraries not found: FFTs outside the parallel loops stay single-threaded")
+	endif()
 endif(NOT MKLFFT)
 
 if(RELION_USE_FINUFFT)
