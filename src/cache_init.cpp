@@ -55,7 +55,8 @@ bool CacheInitializer::initializeCache(const FileName &fn_cache,
 	if (verb > 0)
 		std::cout << " Using cache directory: " << cache_label << std::endl;
 
-	// Validate cache directory
+	// Validate cache directory. A node without a usable one (node-local scratch that only
+	// some nodes have) reads the particles where they are.
 	{
 		if (!exists(fn_cache))
 		{
@@ -63,10 +64,29 @@ bool CacheInitializer::initializeCache(const FileName &fn_cache,
 				std::cout << " Creating cache directory: " << cache_label << std::endl;
 			mktree(fn_cache, 0777);
 		}
+		std::string problem;
 		if (!exists(fn_cache))
-			REPORT_ERROR("Cache directory does not exist and could not be created: " + cache_label);
-		if (access(fn_cache.c_str(), W_OK) != 0)
-			REPORT_ERROR("Cache directory is not writable: " + cache_label);
+			problem = "does not exist and could not be created";
+		else if (access(fn_cache.c_str(), W_OK) != 0)
+			problem = "is not writable";
+		if (!problem.empty())
+		{
+			// Particle names that already point into the cache (written by an earlier run that
+			// used it) cannot be read without it
+			for (long int p = 0; p < MDimg.numberOfObjects(); p++)
+			{
+				FileName fn_img_name, fn_stack;
+				long int imgno;
+				MDimg.getValue(EMDL_IMAGE_NAME, fn_img_name, p);
+				fn_img_name.decompose(imgno, fn_stack);
+				if (fn_stack.find(fn_cache) == 0)
+					REPORT_ERROR("Cache directory " + problem + ": " + cache_label +
+					             ", and the particle names point into it (written by an earlier run that used the cache).");
+			}
+			std::cerr << " WARNING: cache directory " << problem << ": " << cache_label
+			          << ". Reading the particles without the cache." << std::endl;
+			return true;
+		}
 	}
 
 	// If all particle names already point to the cache directory, skip re-caching

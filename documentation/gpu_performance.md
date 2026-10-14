@@ -114,6 +114,15 @@ of the weights, the maximum, the best orientation and the count of significant s
 not those of the fine pass, and the best orientation was overwritten by that of the first
 particle of the pool. All are fixed, and the directions are not counted, as on the CPU.
 
+## Cache directory missing on a node
+
+A cache directory (`--cache_dir`, `RELION_CACHE_DIRECTORY`) that does not
+exist on a node and cannot be made there, or cannot be written, no longer
+stops the job: that node's processes say so and read the particles where they
+are. Only a continued run whose particle names already point into the cache
+still stops, since those particles exist only there.
+
+
 ## Automatic MPS
 
 Without MPS, GPU work from different processes is time-sliced: several MPI
