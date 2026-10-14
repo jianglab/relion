@@ -13,6 +13,7 @@
 
 #include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iterator>
@@ -150,6 +151,38 @@ TEST_CASE("Class3D: align-classes checkbox emits a flag either way",
 	command.clear();
 	REQUIRE(generateCommand(job, command));
 	REQUIRE(command.find(" --dont_align_classes ") != std::string::npos);
+}
+
+TEST_CASE("Class3D: GPU with skipped alignment needs RELION_GPU_SKIP_ALIGN=1",
+          "[pipeline][class3d]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_3DCLASS);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["fn_ref"].setString("ref.mrc");
+	job.joboptions["do_em"].setString("Yes");
+	job.joboptions["do_grad"].setString("No");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+	job.joboptions["dont_skip_align"].setString("No");
+	job.joboptions["use_gpu"].setString("Yes");
+	job.joboptions["gpu_ids"].setString("0");
+
+	unsetenv("RELION_GPU_SKIP_ALIGN");
+	std::string command;
+	REQUIRE_FALSE(generateCommand(job, command));
+
+	setenv("RELION_GPU_SKIP_ALIGN", "1", 1);
+	command.clear();
+	const bool ok = generateCommand(job, command);
+	unsetenv("RELION_GPU_SKIP_ALIGN");
+	REQUIRE(ok);
+	REQUIRE(command.find(" --skip_align ") != std::string::npos);
+	REQUIRE(command.find(" --gpu \"0\"") != std::string::npos);
 }
 
 TEST_CASE("Refine3D: align-halves checkbox emits a flag either way",
@@ -1149,6 +1182,28 @@ TEST_CASE("Queued jobs: only jobs that run on GPUs ask Slurm for them", "[pipeli
 	CHECK(refine.slurmRequest().gpus == 0);
 	refine.joboptions["use_gpu"].setString("Yes");
 	CHECK(refine.slurmRequest().gpus == 2);
+
+	// Class3D without alignment: the GPU only with RELION_GPU_SKIP_ALIGN=1, and then the
+	// job carries the variable to the node
+	const char *saved_skip = getenv("RELION_GPU_SKIP_ALIGN");
+	const std::string saved_skip_value = saved_skip ? saved_skip : "";
+	RelionJob c3d;
+	c3d.initialise(PROC_3DCLASS);
+	c3d.joboptions["slurm_gpus"].setString("1");
+	c3d.joboptions["use_gpu"].setString("Yes");
+	unsetenv("RELION_GPU_SKIP_ALIGN");
+	CHECK(c3d.usesGpu());                       // with alignment
+	CHECK(c3d.slurmRequest().exports.empty());
+	c3d.joboptions["dont_skip_align"].setString("No");
+	CHECK_FALSE(c3d.usesGpu());
+	CHECK(c3d.slurmRequest().gpus == 0);
+	setenv("RELION_GPU_SKIP_ALIGN", "1", 1);
+	CHECK(c3d.usesGpu());
+	CHECK(c3d.slurmRequest().gpus == 1);
+	REQUIRE(c3d.slurmRequest().exports.size() == 1);
+	CHECK(c3d.slurmRequest().exports[0] == "RELION_GPU_SKIP_ALIGN=1");
+	if (saved_skip) setenv("RELION_GPU_SKIP_ALIGN", saved_skip_value.c_str(), 1);
+	else unsetenv("RELION_GPU_SKIP_ALIGN");
 	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
 }
 

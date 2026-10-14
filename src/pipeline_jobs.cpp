@@ -947,6 +947,14 @@ bool RelionJob::usesGpu()
 		return yes("do_amyloid_tracing") || (yes("use_gpu") && !yes("do_log"));
 	case PROC_TOMO_ALIGN_TILTSERIES:
 		return yes("do_aretomo2");      // IMOD runs on CPUs
+	case PROC_3DCLASS:
+	{
+		// without alignment the GPU is used only with RELION_GPU_SKIP_ALIGN=1 (the same rule as the
+		// command: the job window refuses the GPU otherwise)
+		const bool skips = joboptions.find("dont_skip_align") != joboptions.end() && !yes("dont_skip_align");
+		const char *on = getenv("RELION_GPU_SKIP_ALIGN");
+		return yes("use_gpu") && (!skips || (on && std::string(on) == "1"));
+	}
 	case PROC_TOMO_DENOISE_TOMOGRAM:  // cryoCARE
 	case PROC_DYNAMIGHT:
 	case PROC_MODELANGELO:
@@ -977,6 +985,10 @@ slurmscript::Request RelionJob::slurmRequest()
 		else
 			r.gpus = std::max(1, parhint::countGpuIds(value("gpu_ids", "")));
 	}
+	// the node must run the GPU path that the command asks for (a variable of the GUI's
+	// environment is not always passed on to the job)
+	if (type == PROC_3DCLASS && usesGpu() && value("dont_skip_align", "Yes") != "Yes")
+		r.exports.push_back("RELION_GPU_SKIP_ALIGN=1");
 	r.mem = value("slurm_mem", "auto");
 	r.time = value("slurm_time", "");
 	r.args = value("slurm_args", "");
@@ -5259,9 +5271,10 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	// GPU-stuff
 	if (joboptions["use_gpu"].getBoolean())
 	{
-		if (!joboptions["dont_skip_align"].getBoolean())
+		const char *gpu_skip_align = getenv("RELION_GPU_SKIP_ALIGN");
+		if (!joboptions["dont_skip_align"].getBoolean() && !(gpu_skip_align && std::string(gpu_skip_align) == "1"))
 		{
-			error_message = "ERROR: you cannot use GPUs when skipping image alignments.";
+			error_message = "ERROR: you cannot use GPUs when skipping image alignments (set RELION_GPU_SKIP_ALIGN=1 to allow it).";
 			return false;
 		}
 		command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";

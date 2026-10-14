@@ -230,6 +230,8 @@ std::string templateText(const Request &r, const Layout &l, const std::string &p
 		t << pre;
 		if (pre.back() != '\n') t << "\n";
 	}
+	for (const std::string &e : r.exports)
+		t << "export " << e << "\n";
 	if (r.mpi > 1)
 	{
 		const char *mpirun = getenv("RELION_MPIRUN");

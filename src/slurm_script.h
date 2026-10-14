@@ -57,6 +57,7 @@ struct Request
 	std::string mem = "auto";  // GB for the job, or "auto"
 	std::string time;          // empty: the queue's default
 	std::string args;          // more sbatch options, as typed
+	std::vector<std::string> exports;  // NAME=VALUE, exported before the command
 };
 
 /// A kind of node of the queue, from `sinfo -h -o "%D %c %m %G"`.
