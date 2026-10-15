@@ -163,7 +163,7 @@ void JobWindow::setupRunTab()
 	if (has_auto)
 	{
 		group_manual->end();
-		guientries["auto_parallel"].my_inverse_group = group_manual; // chosen by RELION
+		guientries["auto_parallel"].my_no_groups.push_back(group_manual); // chosen by RELION
 		guientries["auto_parallel"].cb_menu_i();
 	}
 
@@ -1196,7 +1196,7 @@ void JobWindow::initialiseExtractWindow()
 	place("extract_size_x", TOGGLE_DEACTIVATE);
 	place("extract_size_y", TOGGLE_DEACTIVATE);
 	group6->end();
-	guientries["do_rect_box"].my_inverse_group = group_square; // particle box size is unused for a rectangular box
+	guientries["do_rect_box"].my_no_groups.push_back(group_square); // particle box size is unused for a rectangular box
 	guientries["do_rect_box"].cb_menu_i();
 	place("do_invert", TOGGLE_DEACTIVATE); //(current_y, "Invert contrast?", true, "If set to Yes, the contrast in the particles will be inverted.");
 
@@ -1227,9 +1227,20 @@ Pixels values higher than this many times the image stddev will be replaced with
 	group4->end();
 	place("do_rescale", TOGGLE_DEACTIVATE, group4);
 	group4->begin();
+	// A square box is re-scaled to a size, a rectangular one by a factor
+	Fl_Group *group_rescale_square = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_rescale_square->begin();
 	place("rescale", TOGGLE_DEACTIVATE);
+	group_rescale_square->end();
+	Fl_Group *group_rescale_rect = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_rescale_rect->begin();
+	place("rescale_factor", TOGGLE_DEACTIVATE);
+	group_rescale_rect->end();
 	group4->end();
 	guientries["do_rescale"].cb_menu_i();
+	guientries["do_rect_box"].my_no_groups.push_back(group_rescale_square);
+	guientries["do_rect_box"].my_yes_groups.push_back(group_rescale_rect);
+	guientries["do_rect_box"].cb_menu_i();
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -1569,6 +1580,7 @@ void JobWindow::initialiseClass2DWindow()
 	current_y += STEPY/2;
 
 	place("particle_diameter");
+	place("do_rect_mask_length", TOGGLE_DEACTIVATE);
 	place("do_zero_mask", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
@@ -1845,6 +1857,7 @@ void JobWindow::initialiseClass3DWindow()
 
 
 	place("particle_diameter");
+	place("do_rect_mask_length", TOGGLE_DEACTIVATE);
 	place("do_zero_mask", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
@@ -2051,6 +2064,7 @@ void JobWindow::initialiseAutorefineWindow()
 	resetHeight();
 
 	place("particle_diameter");
+	place("do_rect_mask_length", TOGGLE_DEACTIVATE);
 	place("do_zero_mask", TOGGLE_DEACTIVATE);
 	place("tau_fudge");
 	place("do_align_halves");

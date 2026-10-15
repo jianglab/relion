@@ -19,6 +19,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/pipeline_jobs.h"
+#include "src/rect_downscale.h"
 #include "src/virtual_movie_averages.h"
 #include "src/parallel_hint.h"
 #include "src/slurm_script.h"
@@ -3058,7 +3059,7 @@ void RelionJob::initialiseExtractJob()
 	joboptions["recenter_y"] = JobOption("Re-center on Y-coordinate (in pix): ", std::string("0"), "Re-extract particles centered on this Y-coordinate (in pixels in the reference)");
 	joboptions["recenter_z"] = JobOption("Re-center on Z-coordinate (in pix): ", std::string("0"), "Re-extract particles centered on this Z-coordinate (in pixels in the reference)");
 	joboptions["extract_size"] = JobOption("Particle box size (pix):", 128, 64, 512, 8, "Size of the extracted particles (in pixels). This should be an even number! Ignored when 'Use a rectangular box?' is Yes: the rectangular length and width below are used instead.");
-	joboptions["do_rect_box"] = JobOption("Use a rectangular box?", false, "If set to Yes, particles are extracted into a rectangular box of the length (x) and width (y) below instead of the square box above. This is useful for long helical segments. Not available with 3D, CTF phase flipping/premultiplication, re-windowing or re-centering. When rescaling, the re-scaled size below is the new length and the width follows the aspect ratio. Rotating a box with beam tilt or higher-order aberrations is refused by relion_preprocess unless --allow_unrotated_aberrations is given in the additional arguments.");
+	joboptions["do_rect_box"] = JobOption("Use a rectangular box?", false, "If set to Yes, particles are extracted into a rectangular box of the length (x) and width (y) below instead of the square box above. This is useful for long helical segments. Not available with 3D, CTF phase flipping/premultiplication, re-windowing or re-centering. When rescaling, the box is downscaled by the downscale factor below (the re-scaled size is not used). Rotating a box with beam tilt or higher-order aberrations is refused by relion_preprocess unless --allow_unrotated_aberrations is given in the additional arguments.");
 	joboptions["extract_size_x"] = JobOption("Rectangular length (pix):", 768, 64, 2048, 8, "Length (image x-dimension, in pixels, even number) of the rectangular box. For helical segments this is the segment length: the helix axis lies along x. Only used if a rectangular box is selected.");
 	joboptions["extract_size_y"] = JobOption("Rectangular width (pix):", 256, 64, 2048, 8, "Width (image y-dimension, in pixels, even number) of the rectangular box, perpendicular to the helix axis for helical segments. This plays the role of the usual particle box size. Only used if a rectangular box is selected.");
 	joboptions["do_rotate_horizontal"] = JobOption("Rotate helical segments to horizontal?", false, "If set to Yes (helical segments only), each segment is rotated so the helix axis is horizontal in the box. The residual in-plane angle prior becomes 0 and the rotation is stored in rlnParticleExtractionAngle.");
@@ -3081,7 +3082,8 @@ Pixels values higher than this many times the image stddev will be replaced with
 	joboptions["black_dust"] = JobOption("Stddev for black dust removal: ", -1, -1, 10, 0.1, "Remove very black pixels from the extracted particles. \
 Pixels values higher than this many times the image stddev will be replaced with values from a Gaussian distribution. \n \n Use negative value to switch off dust removal.");
 	joboptions["do_rescale"] = JobOption("Rescale particles?", false, "If set to Yes, particles will be re-scaled. Note that the particle diameter below will be in the down-scaled images.");
-	joboptions["rescale"] = JobOption("Re-scaled size (pixels): ", 128, 64, 512, 8, "The re-scaled value needs to be an even number");
+	joboptions["rescale"] = JobOption("Re-scaled size (pixels): ", 128, 64, 512, 8, "The re-scaled value needs to be an even number. Only used for a square box; a rectangular box is downscaled by the factor below.");
+	joboptions["rescale_factor"] = JobOption("Downscale factor (rectangular box):", 2, 1, 8, 0.5, "Only used for a rectangular box: both its length and its width are divided by this factor (2 halves each side), so the pixel size grows by the same factor. Both downscaled sides must be even whole numbers; otherwise the job is not run and the nearest factors that work are listed. For example a 768 x 256 box can be downscaled by 2 (384 x 128) or 4 (192 x 64), but not by 3.");
 	joboptions["do_fom_threshold"] = JobOption("Use autopick FOM threshold?", false, "If set to Yes, only particles with rlnAutopickFigureOfMerit values below the threshold below will be extracted.");
 	joboptions["minimum_pick_fom"] = JobOption("Minimum autopick FOM: ", 0, -5, 10, 0.1, "The minimum value for the rlnAutopickFigureOfMerit for particles to be extracted.");
 
@@ -3231,23 +3233,32 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 	bg_radius /= 2.; // Go from diameter to radius
 	if (joboptions["do_rescale"].getBoolean())
 	{
-		command += " --scale " + joboptions["rescale"].getString();
-		bg_radius *= joboptions["rescale"].getNumber(error_message);
-		if (error_message != "") return false;
-
-		bg_radius /= rect_box ? joboptions["extract_size_x"].getNumber(error_message) : joboptions["extract_size"].getNumber(error_message);
-		if (error_message != "") return false;
-
 		if (rect_box)
 		{
-			const RFLOAT h = joboptions["extract_size_y"].getNumber(error_message) * joboptions["rescale"].getNumber(error_message)
-					/ joboptions["extract_size_x"].getNumber(error_message);
+			// A rectangular box is downscaled by a factor; both sides must stay even whole numbers
+			const int box_x = ROUND(joboptions["extract_size_x"].getNumber(error_message));
 			if (error_message != "") return false;
-			if (h < 2. || ABS(h - 2. * ROUND(h / 2.)) > 1e-6)
+			const int box_y = ROUND(joboptions["extract_size_y"].getNumber(error_message));
+			if (error_message != "") return false;
+			const RFLOAT factor = joboptions["rescale_factor"].getNumber(error_message);
+			if (error_message != "") return false;
+			const std::string problem = extractrect::downscaleFactorProblem(box_x, box_y, factor);
+			if (problem != "")
 			{
-				error_message = "ERROR: with a rectangular box the re-scaled length keeps the aspect ratio, so rectangular width * re-scaled size / rectangular length must be an even whole number (now " + floatToString(h) + ").";
+				error_message = "ERROR: " + problem;
 				return false;
 			}
+			command += " --downscale_factor " + joboptions["rescale_factor"].getString();
+			bg_radius /= factor;
+		}
+		else
+		{
+			command += " --scale " + joboptions["rescale"].getString();
+			bg_radius *= joboptions["rescale"].getNumber(error_message);
+			if (error_message != "") return false;
+
+			bg_radius /= joboptions["extract_size"].getNumber(error_message);
+			if (error_message != "") return false;
 		}
 	}
 	if (joboptions["do_norm"].getBoolean())
@@ -4068,7 +4079,9 @@ an additional 5 iterations (for example with a finer angular sampling), then the
 	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
 If set to a value larger than the image size no masking will be performed.\n\n\
-The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.");
+The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
+For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");
+	joboptions["do_rect_mask_length"] = JobOption("Mask rectangular boxes along their length?", false, "Only for rectangular particles. If set to Yes, the masks are ellipses (an ellipsoid for the reference) with the proportions of the box, whose long axis is the mask diameter above; for helical segments they are combined with the tube mask, so that the whole segment length is used for alignment. If set to No (the default), the mask diameter applies to the box width as before: helical segments are masked with a circle (sphere) that fits the width, and the length beyond it is used only in the reconstruction.\n\nWith Yes, keep the in-plane (psi) search narrow: relion_refine warns when it lets the reference reach across the box width, where its projections wrap around to the other side of the box.");
 	joboptions["do_zero_mask"] = JobOption("Mask individual particles with zeros?", true, "If set to Yes, then in the individual particles, \
 the area outside a circle with the radius of the particle will be set to zeros prior to taking the Fourier transform. \
 This will remove noise and therefore increase sensitivity in the alignment and classification. However, it will also introduce correlations \
@@ -4301,6 +4314,8 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 
 	command_after_scratch += " --tau2_fudge " + joboptions["tau_fudge"].getString();
 	command_after_scratch += " --particle_diameter " + joboptions["particle_diameter"].getString();
+	if (joboptions["do_rect_mask_length"].getBoolean())
+		command_after_scratch += " --rect_mask_length";
 	if (!is_continue)
 	{
 		if (joboptions["do_fast_subsets"].getBoolean())
@@ -4475,7 +4490,8 @@ These classes will be made in an unsupervised manner, starting from a single ref
 	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
 If set to a value larger than the image size no masking will be performed.\n\n\
-The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.");
+The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
+For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");
 	joboptions["do_solvent"] = JobOption("Flatten and enforce non-negative solvent?", true, "If set to Yes, the job will apply a spherical mask and enforce all values in the reference to be non-negative.");
 
     if (is_tomo)
@@ -4798,7 +4814,9 @@ an additional 5 iterations (for example with a finer angular sampling), then the
 	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
 If set to a value larger than the image size no masking will be performed.\n\n\
-The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.");
+The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
+For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");
+	joboptions["do_rect_mask_length"] = JobOption("Mask rectangular boxes along their length?", false, "Only for rectangular particles. If set to Yes, the masks are ellipses (an ellipsoid for the reference) with the proportions of the box, whose long axis is the mask diameter above; for helical segments they are combined with the tube mask, so that the whole segment length is used for alignment. If set to No (the default), the mask diameter applies to the box width as before: helical segments are masked with a circle (sphere) that fits the width, and the length beyond it is used only in the reconstruction.\n\nWith Yes, keep the in-plane (psi) search narrow: relion_refine warns when it lets the reference reach across the box width, where its projections wrap around to the other side of the box.");
 	joboptions["do_zero_mask"] = JobOption("Mask individual particles with zeros?", true, "If set to Yes, then in the individual particles, \
 the area outside a circle with the radius of the particle will be set to zeros prior to taking the Fourier transform. \
 This will remove noise and therefore increase sensitivity in the alignment and classification. However, it will also introduce correlations \
@@ -5078,6 +5096,8 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	command += " --iter " + joboptions["nr_iter"].getString();
 	command += " --tau2_fudge " + joboptions["tau_fudge"].getString();
 	command += " --particle_diameter " + joboptions["particle_diameter"].getString();
+	if (joboptions["do_rect_mask_length"].getBoolean())
+		command += " --rect_mask_length";
 	if (!is_continue)
 	{
 		if (joboptions["do_fast_subsets"].getBoolean())
@@ -5356,7 +5376,9 @@ Therefore, this option is not generally recommended: try increasing amplitude co
 	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
 If set to a value larger than the image size no masking will be performed.\n\n\
-The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.");
+The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
+For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");
+	joboptions["do_rect_mask_length"] = JobOption("Mask rectangular boxes along their length?", false, "Only for rectangular particles. If set to Yes, the masks are ellipses (an ellipsoid for the reference) with the proportions of the box, whose long axis is the mask diameter above; for helical segments they are combined with the tube mask, so that the whole segment length is used for alignment. If set to No (the default), the mask diameter applies to the box width as before: helical segments are masked with a circle (sphere) that fits the width, and the length beyond it is used only in the reconstruction.\n\nWith Yes, keep the in-plane (psi) search narrow: relion_refine warns when it lets the reference reach across the box width, where its projections wrap around to the other side of the box.");
 	joboptions["do_zero_mask"] = JobOption("Mask individual particles with zeros?", true, "If set to Yes, then in the individual particles, \
 the area outside a circle with the radius of the particle will be set to zeros prior to taking the Fourier transform. \
 This will remove noise and therefore increase sensitivity in the alignment and classification. However, it will also introduce correlations \
@@ -5662,6 +5684,8 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 	else
 		command += " --dont_align_halves ";
 	command += " --particle_diameter " + joboptions["particle_diameter"].getString();
+	if (joboptions["do_rect_mask_length"].getBoolean())
+		command += " --rect_mask_length";
 	if (!is_continue)
 	{
 		// Always flatten the solvent

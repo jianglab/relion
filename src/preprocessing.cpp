@@ -19,6 +19,7 @@
  ***************************************************************************/
 #include "src/preprocessing.h"
 #include "src/extract_rect.h"
+#include "src/rect_downscale.h"
 #include "src/fftw_rect.h"
 #include "src/virtual_particles.h"
 
@@ -126,6 +127,7 @@ void Preprocessing::read(int argc, char **argv, int rank)
 	int perpart_section = parser.addSection("Particle operations");
 	do_project_3d = parser.checkOption("--project3d", "Project sub-tomograms along Z to generate 2D particles");
 	scale  = textToInteger(parser.getOption("--scale", "Re-scale the particles to this size (in pixels)", "-1"));
+	downscale_factor = textToFloat(parser.getOption("--downscale_factor", "Downscale the extracted particles by this factor (2 halves each side) instead of giving --scale; both sides of the box divided by it must be even whole numbers. Meant for rectangular boxes", "-1"));
 	window  = textToInteger(parser.getOption("--window", "Re-window the particles to this size (in pixels)", "-1"));
 	do_normalise = parser.checkOption("--norm", "Normalise the background to average zero and stddev one");
 	do_ramp = !parser.checkOption("--no_ramp", "Just subtract the background mean in the normalisation, instead of subtracting a fitted ramping background. ");
@@ -355,6 +357,26 @@ void Preprocessing::initialise()
 
 	if (do_extract || fn_operate_in != "")
 	{
+		// A downscaling factor gives the re-scaled size: the length of a rectangular box
+		if (downscale_factor > 0.)
+		{
+			if (!do_extract)
+				REPORT_ERROR("Preprocessing::initialise ERROR: --downscale_factor needs --extract; use --scale with --operate_on.");
+			if (scale > 0)
+				REPORT_ERROR("Preprocessing::initialise ERROR: use either --scale or --downscale_factor, not both.");
+			const int box_x = do_rect ? extract_size_x : extract_size;
+			const int box_y = do_rect ? extract_size_y : extract_size;
+			const std::string problem = extractrect::downscaleFactorProblem(box_x, box_y, downscale_factor);
+			if (problem != "")
+				REPORT_ERROR("Preprocessing::initialise ERROR: " + problem);
+			int new_x, new_y;
+			extractrect::downscaledBox(box_x, box_y, downscale_factor, new_x, new_y);
+			scale = new_x;
+			if (verb > 0)
+				std::cout << " Downscaling the " << box_x << " x " << box_y << " box by " << downscale_factor
+				          << " to " << new_x << " x " << new_y << " pixels" << std::endl;
+		}
+
 		// Check whether to do re-scaling
 		do_rescale = (scale > 0);
 		if (do_rescale && scale%2 != 0)

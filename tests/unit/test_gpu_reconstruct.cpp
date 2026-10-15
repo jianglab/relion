@@ -129,10 +129,10 @@ TEST_CASE("GPU real-space helical symmetry equals the CPU's to rounding", "[gpu_
 		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(a) DIRECT_MULTIDIM_ELEM(a, n) = g(rng);
 		MultidimArray<RFLOAT> b = a;
 		gpurec::setGpuRequested(false);
-		imposeHelicalSymmetryInRealSpace(a, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., 4);
+		imposeHelicalSymmetryInRealSpace(a, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., false, 4);
 		setenv("RELION_GPU_RECONSTRUCT", "1", 1);
 		gpurec::setGpuRequested(true);
-		imposeHelicalSymmetryInRealSpace(b, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., 4);
+		imposeHelicalSymmetryInRealSpace(b, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., false, 4);
 		unsetenv("RELION_GPU_RECONSTRUCT");
 		gpurec::setGpuRequested(false);
 		REQUIRE(a.sameShape(b));

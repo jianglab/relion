@@ -441,12 +441,16 @@ void GuiEntry::cb_menu_i()
 			else
 				my_deactivate_group->activate();
 		}
-		if (my_inverse_group != NULL)
+		const bool yes = (strcmp(inp->value(), "Yes") == 0);
+		for (Fl_Group *group : my_yes_groups)
 		{
-			if (strcmp(inp->value(), "Yes") == 0)
-				my_inverse_group->deactivate();
-			else
-				my_inverse_group->activate();
+			if (yes) group->activate();
+			else group->deactivate();
+		}
+		for (Fl_Group *group : my_no_groups)
+		{
+			if (yes) group->deactivate();
+			else group->activate();
 		}
 	}
 }

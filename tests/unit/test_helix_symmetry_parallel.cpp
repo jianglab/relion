@@ -405,7 +405,7 @@ TEST_CASE("helical symmetry in real space: the same at any thread count as the o
 		{
 			INFO("twist " << c.twist << " rise " << c.rise_A << " threads " << threads);
 			MultidimArray<RFLOAT> a = randomVolume(n, 11), b = a;
-			imposeHelicalSymmetryInRealSpace(a, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., threads);
+			imposeHelicalSymmetryInRealSpace(a, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., false, threads);
 			referenceImposeHelicalSymmetry(b, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3.);
 			REQUIRE(a.sameShape(b));
 			bool same = true;

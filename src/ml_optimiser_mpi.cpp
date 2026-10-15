@@ -2879,7 +2879,9 @@ void MlOptimiserMpi::maximization()
 								mymodel.helical_twist_min,
 								mymodel.helical_twist_max,
 								mymodel.helical_twist_inistep,
-								mymodel.helical_twist[ith_recons]);
+								mymodel.helical_twist[ith_recons],
+								NULL,
+								rectMaskAlongLength());
 					}
 					// Sjors & Shaoda Apr 2015 - Apply real space helical symmetry and real space Z axis expansion.
 					if ( (do_helical_refine) && (!ignore_helical_symmetry) && (!has_converged) && mymodel.ref_dim != 2)
@@ -2893,7 +2895,9 @@ void MlOptimiserMpi::maximization()
 								helical_z_percentage,
 								mymodel.helical_rise[ith_recons],
 								mymodel.helical_twist[ith_recons],
-								width_mask_edge, nr_threads);
+								width_mask_edge,
+								rectMaskAlongLength(),
+								nr_threads);
 					}
 					helical_rise_half1 = mymodel.helical_rise[ith_recons];
 					helical_twist_half1 = mymodel.helical_twist[ith_recons];
@@ -3016,7 +3020,9 @@ void MlOptimiserMpi::maximization()
 										mymodel.helical_twist_min,
 										mymodel.helical_twist_max,
 										mymodel.helical_twist_inistep,
-										mymodel.helical_twist[ith_recons]);
+										mymodel.helical_twist[ith_recons],
+										NULL,
+										rectMaskAlongLength());
 							}
 							// Sjors & Shaoda Apr 2015 - Apply real space helical symmetry and real space Z axis expansion.
 							if( (do_helical_refine) && (!ignore_helical_symmetry) && (!has_converged) && mymodel.ref_dim != 2 )
@@ -3030,7 +3036,9 @@ void MlOptimiserMpi::maximization()
 										helical_z_percentage,
 										mymodel.helical_rise[ith_recons],
 										mymodel.helical_twist[ith_recons],
-										width_mask_edge, nr_threads);
+										width_mask_edge,
+										rectMaskAlongLength(),
+										nr_threads);
 							}
 						} // end if !do_join_random_halves
 

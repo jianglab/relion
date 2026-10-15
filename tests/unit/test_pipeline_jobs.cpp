@@ -277,15 +277,41 @@ TEST_CASE("Extract: rectangular box and rotation options are emitted only when u
 	REQUIRE(generateCommand(job, command));
 	REQUIRE(command.find(" --rotate_to_horizontal --interpolation cubic") != std::string::npos);
 
-	// Rescaling a rectangular box sets the new length; the width must stay an even whole number
+	// A rectangular box is downscaled by a factor (the re-scaled size is for square boxes);
+	// both sides must stay even whole numbers, which is checked before the job runs
 	job.joboptions["do_rescale"].setString("Yes");
 	job.joboptions["rescale"].setString("384");
+	job.joboptions["rescale_factor"].setString("2");
+	job.joboptions["do_norm"].setString("Yes");
+	job.joboptions["bg_diameter"].setString("200");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --downscale_factor 2") != std::string::npos);
+	REQUIRE(command.find(" --scale ") == std::string::npos);
+	REQUIRE(command.find(" --bg_radius 50") != std::string::npos); // 200 / 2 pixels before, halved
+
+	job.joboptions["rescale_factor"].setString("3");      // 256 / 3 rows
+	command.clear();
+	REQUIRE_FALSE(generateCommand(job, command));
+	{
+		std::string outputname, final_command, error_message;
+		std::vector<std::string> commands;
+		REQUIRE_FALSE(job.getCommands(outputname, commands, final_command, false, 1, error_message));
+		REQUIRE(error_message.find("2.97674 (258 x 86)") != std::string::npos);
+	}
+
+	job.joboptions["rescale_factor"].setString("2");
+	job.joboptions["extract_size_y"].setString("250");   // 125 rows
+	command.clear();
+	REQUIRE_FALSE(generateCommand(job, command));
+
+	// A square box is still re-scaled to a size
+	job.joboptions["do_rect_box"].setString("No");
+	job.joboptions["extract_size"].setString("256");
 	command.clear();
 	REQUIRE(generateCommand(job, command));
 	REQUIRE(command.find(" --scale 384") != std::string::npos);
-	job.joboptions["extract_size_y"].setString("250");   // 250 * 384 / 768 = 125 rows
-	command.clear();
-	REQUIRE_FALSE(generateCommand(job, command));
+	REQUIRE(command.find("--downscale_factor") == std::string::npos);
 }
 
 // relion_refine deletes old iteration files unless told to keep them; every
@@ -347,6 +373,27 @@ TEST_CASE("Refinement jobs: RELION_KEEP_ALL_ITERATIONS sets the GUI default",
 	REQUIRE(generateCommand(job, command));
 	REQUIRE(command.find(" --keep_all_iterations") != std::string::npos);
 	unsetenv("RELION_KEEP_ALL_ITERATIONS");
+}
+
+TEST_CASE("Refinement jobs: masks along the length of rectangular boxes only when asked",
+          "[pipeline][rectangular]")
+{
+	const int types[] = {PROC_2DCLASS, PROC_3DCLASS, PROC_3DAUTO};
+	for (int t : types)
+	{
+		INFO("job type " << t);
+		RelionJob job;
+		setUpRefineJob(job, t);
+		REQUIRE_FALSE(job.joboptions["do_rect_mask_length"].getBoolean());
+		std::string command;
+		REQUIRE(generateCommand(job, command));
+		REQUIRE(command.find("--rect_mask_length") == std::string::npos);
+
+		job.joboptions["do_rect_mask_length"].setString("Yes");
+		command.clear();
+		REQUIRE(generateCommand(job, command));
+		REQUIRE(command.find(" --rect_mask_length") != std::string::npos);
+	}
 }
 
 // MotionCorr: how micrographs are stored, always passed explicitly

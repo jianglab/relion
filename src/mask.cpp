@@ -40,10 +40,59 @@ template class std::basic_string<char>;
 #endif
 // Mask out corners outside sphere (replace by average value)
 // Apply a soft mask (raised cosine with cosine_width pixels width)
-void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine_width, MultidimArray<RFLOAT> *Mnoise, bool follow_box_shape)
+// The same with the BoxEllipse of a rectangular image (cuboid) in place of the sphere
+static void softMaskOutsideBoxEllipse(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine_width, MultidimArray<RFLOAT> *Mnoise)
+{
+	const BoxEllipse ellipse(vol, radius, cosine_width);
+	RFLOAT sum_bg = 0., sum = 0.;
+	if (Mnoise == NULL)
+	{
+		// Calculate average background value (raised cosine weights across the edge)
+		FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
+		{
+			const RFLOAT t = ellipse.edge(j, i, k);
+			if (t <= 0.)
+				continue;
+			const RFLOAT raisedcos = (t >= 1.) ? 1. : 0.5 - 0.5 * cos(PI * t);
+			sum += raisedcos;
+			sum_bg += raisedcos * A3D_ELEM(vol, k, i, j);
+		}
+		sum_bg /= sum;
+	}
+
+	// Apply noisy or average background value
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
+	{
+		const RFLOAT t = ellipse.edge(j, i, k);
+		if (t <= 0.)
+			continue;
+		const RFLOAT add = (Mnoise == NULL) ? sum_bg : A3D_ELEM(*Mnoise, k, i, j);
+		if (t >= 1.)
+			A3D_ELEM(vol, k, i, j) = add;
+		else
+		{
+			const RFLOAT raisedcos = 0.5 - 0.5 * cos(PI * t);
+			A3D_ELEM(vol, k, i, j) = (1 - raisedcos) * A3D_ELEM(vol, k, i, j) + raisedcos * add;
+		}
+	}
+}
+
+void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine_width, MultidimArray<RFLOAT> *Mnoise, bool follow_box_shape, bool radius_on_long_side)
 {
 
 	vol.setXmippOrigin();
+	if (follow_box_shape && radius_on_long_side)
+	{
+		if (radius < 0)
+		{
+			RFLOAT longest = (XSIZE(vol) > YSIZE(vol)) ? XSIZE(vol) : YSIZE(vol);
+			if (ZSIZE(vol) > longest) longest = ZSIZE(vol);
+			radius = longest / 2.;
+		}
+		softMaskOutsideBoxEllipse(vol, radius, cosine_width, Mnoise);
+		return;
+	}
+
 	RFLOAT r, radius_p, raisedcos, sum_bg = 0., sum = 0.;
 	if (radius < 0)
 		radius = (RFLOAT)XSIZE(vol)/2.;
@@ -140,12 +189,43 @@ void softMaskOutsideMapForHelix(
 		RFLOAT mask_sphere_radius_pix,
 		RFLOAT mask_cyl_radius_pix,
 		RFLOAT cosine_width,
-		MultidimArray<RFLOAT> *Mnoise)
+		MultidimArray<RFLOAT> *Mnoise,
+		bool follow_box_shape)
 {
 	Matrix2D<RFLOAT> A;
 	RFLOAT sum_bg, sum, R1, R2, D1, D2, r, d, noise_w, noise_w1, noise_w2, noise_val;
 	int dim = vol.getDim();
 	int boxsize = -1;
+
+	if (follow_box_shape)
+	{
+		vol.setXmippOrigin();
+		const bool is3D = (dim == 3);
+		long int longest = (XSIZE(vol) > YSIZE(vol)) ? XSIZE(vol) : YSIZE(vol);
+		long int shortest = (XSIZE(vol) < YSIZE(vol)) ? XSIZE(vol) : YSIZE(vol);
+		if (is3D && ZSIZE(vol) > longest) longest = ZSIZE(vol);
+		if (is3D && ZSIZE(vol) < shortest) shortest = ZSIZE(vol);
+		if (longest == shortest)
+			follow_box_shape = false; // a square box: the usual circle, bit for bit
+		else
+		{
+			// The ellipse reaches the longest side, the tube must fit across its shortest semi-axis
+			const long int half_long = longest / 2 - ((longest + 1) % 2);
+			const long int half_short = shortest / 2 - ((shortest + 1) % 2);
+			const RFLOAT across = BoxEllipse(vol, mask_sphere_radius_pix, cosine_width).shortestSemiAxis(is3D);
+			if ( (cosine_width < 0.)
+					|| (mask_sphere_radius_pix < 1.) || (mask_sphere_radius_pix > half_long)
+					|| (mask_cyl_radius_pix < 1.) || (mask_cyl_radius_pix > half_short)
+					|| (across < mask_cyl_radius_pix) )
+			{
+				std::cerr << " box= " << XSIZE(vol) << " x " << YSIZE(vol);
+				if (is3D) std::cerr << " x " << ZSIZE(vol);
+				std::cerr << " cosine_width= " << cosine_width << " mask_radius_pix (long semi-axis)= " << mask_sphere_radius_pix
+				          << " short semi-axis= " << across << " mask_cyl_radius_pix= " << mask_cyl_radius_pix << std::endl;
+				REPORT_ERROR("mask.cpp::softMaskOutsideMapForHelix(): for a rectangular image the mask is an ellipse whose long axis is the mask diameter and whose short axis shrinks in proportion to the box. The mask radius must not exceed half the long side, and the tube radius must not exceed half the short side nor the short semi-axis of the ellipse (mask radius * short side / long side): use a larger mask diameter or a smaller tube diameter.");
+			}
+		}
+	}
 
 	// Center the box
 	vol.setXmippOrigin();
@@ -171,10 +251,11 @@ void softMaskOutsideMapForHelix(
 	boxsize = boxsize / 2 - ((boxsize + 1) % 2);
 
 	// Diameter of the cylindrical mask around the helix should not exceed the box size, otherwise noise cannot be estimated
-	if ( (cosine_width < 0.)
+	// (checked above for the ellipse of a rectangular box)
+	if ( !follow_box_shape && ( (cosine_width < 0.)
 			|| (mask_sphere_radius_pix < 1.) || (mask_sphere_radius_pix > boxsize)
 			|| (mask_cyl_radius_pix < 1.) || (mask_cyl_radius_pix > boxsize)
-			|| (mask_sphere_radius_pix < mask_cyl_radius_pix) ) {
+			|| (mask_sphere_radius_pix < mask_cyl_radius_pix) ) ) {
         std::cerr << " cosine_width= " << cosine_width << std::endl;
         std::cerr << " boxsize= " << boxsize << std::endl;
         std::cerr << " mask_sphere_radius_pix= " << mask_sphere_radius_pix << std::endl;
@@ -242,29 +323,49 @@ void softMaskOutsideMapForHelix(
 
 	// Apply noisy or average background value
 	noise_val = sum_bg;
+	// Rectangular images: an ellipse instead of the sphere; t is where a pixel lies across its edge
+	const BoxEllipse ellipse(vol, R1, cosine_width);
+	RFLOAT t = 0.;
 	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
 	{
 		d = axisDistance(k, i, j);
 
-		// Distance from the origin
-		r = (RFLOAT)(i * i + j * j);
-		if (dim == 3)
-			r += (RFLOAT)(k * k);
-		r = sqrt(r);
+		bool in_sphere, out_sphere;
+		if (follow_box_shape)
+		{
+			t = ellipse.edge(j, i, (dim == 3) ? k : 0);
+			in_sphere = (t <= 0.);
+			out_sphere = (t >= 1.);
+		}
+		else
+		{
+			// Distance from the origin
+			r = (RFLOAT)(i * i + j * j);
+			if (dim == 3)
+				r += (RFLOAT)(k * k);
+			r = sqrt(r);
+			in_sphere = (r < R1);
+			out_sphere = (r > R2);
+		}
 
 		// Info areas
-		if ( (r < R1) && (d < D1) )
+		if ( in_sphere && (d < D1) )
 			continue;
 
 		if (Mnoise != NULL)
 			noise_val = A3D_ELEM(*Mnoise, k, i, j);
 
-		if ( (r > R2) || (d > D2) )  // Noise areas, fill in background values
+		if ( out_sphere || (d > D2) )  // Noise areas, fill in background values
 			A3D_ELEM(vol, k, i, j) = noise_val;
 		else // Edges of info areas
 		{
 			noise_w1 = noise_w2 = 0.;
-			if (r > R1)
+			if (follow_box_shape)
+			{
+				if (t > 0.)
+					noise_w1 = 0.5 - 0.5 * cos(PI * t);
+			}
+			else if (r > R1)
 				noise_w1 = 0.5 + 0.5 * cos(PI * (R2 - r) / cosine_width );
 			if (d > D1)
 				noise_w2 = 0.5 + 0.5 * cos(PI * (D2 - d) / cosine_width );
