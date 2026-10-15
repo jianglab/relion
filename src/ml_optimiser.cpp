@@ -2280,8 +2280,6 @@ void MlOptimiser::initialiseGeneral(int rank)
     else
         blush_args = blush_args + " --gpu -1 ";
 
-    // RELION_GPU_SKIP_ALIGN=1 keeps the GPU for --skip_align / --skip_rotate (opt-in while it is
-    // being validated: upstream switches the accelerators off here)
     // (before --skip_align switches the GPU off: the M-step can still use it, RELION_GPU_RECONSTRUCT=1)
     gpurec::setGpuRequested(do_gpu);
     if (do_gpu && verb > 0)
@@ -2294,8 +2292,15 @@ void MlOptimiser::initialiseGeneral(int rank)
         std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join) are on by default, each backing off to the older path when its conditions are not met; "
                   << (off.empty() ? "none is switched off" : "switched off: " + off) << " (VAR=0 turns one off)." << std::endl;
     }
-    const char *gpu_skip_align = getenv("RELION_GPU_SKIP_ALIGN");
-    const bool keep_gpu_skip_align = gpu_skip_align != NULL && std::string(gpu_skip_align) == "1";
+    // --skip_align / --skip_rotate keep the GPU (upstream switches the accelerators off here);
+    // RELION_GPU_SKIP_ALIGN=0 restores the upstream behaviour. Only the CUDA code was validated for
+    // this case: a HIP build keeps the upstream behaviour unless RELION_GPU_SKIP_ALIGN=1 asks for the GPU.
+#ifdef _CUDA_ENABLED
+    const bool keep_gpu_skip_align = gpuswitch::on("RELION_GPU_SKIP_ALIGN");
+#else
+    const char *gpu_skip_align_env = getenv("RELION_GPU_SKIP_ALIGN");
+    const bool keep_gpu_skip_align = gpu_skip_align_env != NULL && std::string(gpu_skip_align_env) == "1";
+#endif
     if ((do_skip_align || do_skip_rotate) && !(keep_gpu_skip_align && do_gpu))
     {
         do_gpu = false;
@@ -2305,8 +2310,8 @@ void MlOptimiser::initialiseGeneral(int rank)
         std::cerr << "WARNING: you cannot use accelerators (like the GPU) when skipping alignments." << std::endl
                   << "Will continue without accelerators and maintain setting for external tasks (like Blush regularization)." << std::endl;
     }
-    else if (do_skip_align || do_skip_rotate)
-        std::cout << " Using the GPU although alignments are skipped (RELION_GPU_SKIP_ALIGN=1)." << std::endl;
+    else if ((do_skip_align || do_skip_rotate) && verb > 0)
+        std::cout << " Using the GPU although alignments are skipped: the GPU code for this case is on by default (RELION_GPU_SKIP_ALIGN=0 switches the GPU off for such jobs, as upstream does)." << std::endl;
 
     if (do_always_cc)
         do_calculate_initial_sigma_noise = false;

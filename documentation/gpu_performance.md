@@ -118,11 +118,11 @@ All on by default; for comparisons or if a problem is suspected:
 | `RELION_AUTO_PARALLEL=No` | GUI default: give MPI processes and threads by hand |
 | `RELION_SLURM_PREAMBLE` | site lines for RELION's own Slurm script |
 
-Opt-in (off by default):
+On by default in CUDA builds (`=0` switches it off):
 
 | Variable | Effect |
 |---|---|
-| `RELION_GPU_SKIP_ALIGN=1` | keep the GPU for `--skip_align` / `--skip_rotate` (Class3D without alignment); upstream switches the GPU off for these jobs |
+| `RELION_GPU_SKIP_ALIGN=0` | switch the GPU off for `--skip_align` / `--skip_rotate` (Class3D without alignment), as upstream does; the job window then refuses the GPU for such jobs. By default the GPU is kept (a HIP build keeps upstream's behaviour unless `=1`) |
 
 The GPU code for `--skip_align` had several defects that never showed because upstream
 never runs it: the job arrays of the fine pass were one element too short with a single

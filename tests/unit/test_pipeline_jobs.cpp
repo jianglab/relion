@@ -153,7 +153,7 @@ TEST_CASE("Class3D: align-classes checkbox emits a flag either way",
 	REQUIRE(command.find(" --dont_align_classes ") != std::string::npos);
 }
 
-TEST_CASE("Class3D: GPU with skipped alignment needs RELION_GPU_SKIP_ALIGN=1",
+TEST_CASE("Class3D: GPU with skipped alignment is on by default, RELION_GPU_SKIP_ALIGN=0 refuses it",
           "[pipeline][class3d]")
 {
 	RelionJob job;
@@ -172,17 +172,22 @@ TEST_CASE("Class3D: GPU with skipped alignment needs RELION_GPU_SKIP_ALIGN=1",
 	job.joboptions["use_gpu"].setString("Yes");
 	job.joboptions["gpu_ids"].setString("0");
 
+	const char *saved = getenv("RELION_GPU_SKIP_ALIGN");
+	const std::string saved_value = saved ? saved : "";
+
 	unsetenv("RELION_GPU_SKIP_ALIGN");
 	std::string command;
-	REQUIRE_FALSE(generateCommand(job, command));
-
-	setenv("RELION_GPU_SKIP_ALIGN", "1", 1);
-	command.clear();
-	const bool ok = generateCommand(job, command);
-	unsetenv("RELION_GPU_SKIP_ALIGN");
+	bool ok = generateCommand(job, command);
 	REQUIRE(ok);
 	REQUIRE(command.find(" --skip_align ") != std::string::npos);
 	REQUIRE(command.find(" --gpu \"0\"") != std::string::npos);
+
+	setenv("RELION_GPU_SKIP_ALIGN", "0", 1);
+	command.clear();
+	ok = generateCommand(job, command);
+	if (saved) setenv("RELION_GPU_SKIP_ALIGN", saved_value.c_str(), 1);
+	else unsetenv("RELION_GPU_SKIP_ALIGN");
+	REQUIRE_FALSE(ok);
 }
 
 TEST_CASE("Refine3D: align-halves checkbox emits a flag either way",
@@ -1288,8 +1293,8 @@ TEST_CASE("Queued jobs: only jobs that run on GPUs ask Slurm for them", "[pipeli
 	refine.joboptions["use_gpu"].setString("Yes");
 	CHECK(refine.slurmRequest().gpus == 2);
 
-	// Class3D without alignment: the GPU only with RELION_GPU_SKIP_ALIGN=1, and then the
-	// job carries the variable to the node
+	// Class3D without alignment: the GPU unless RELION_GPU_SKIP_ALIGN=0; the default needs no
+	// variable on the node
 	const char *saved_skip = getenv("RELION_GPU_SKIP_ALIGN");
 	const std::string saved_skip_value = saved_skip ? saved_skip : "";
 	RelionJob c3d;
@@ -1300,13 +1305,12 @@ TEST_CASE("Queued jobs: only jobs that run on GPUs ask Slurm for them", "[pipeli
 	CHECK(c3d.usesGpu());                       // with alignment
 	CHECK(c3d.slurmRequest().exports.empty());
 	c3d.joboptions["dont_skip_align"].setString("No");
+	CHECK(c3d.usesGpu());                       // without alignment: still on the GPU
+	CHECK(c3d.slurmRequest().gpus == 1);
+	CHECK(c3d.slurmRequest().exports.empty());
+	setenv("RELION_GPU_SKIP_ALIGN", "0", 1);
 	CHECK_FALSE(c3d.usesGpu());
 	CHECK(c3d.slurmRequest().gpus == 0);
-	setenv("RELION_GPU_SKIP_ALIGN", "1", 1);
-	CHECK(c3d.usesGpu());
-	CHECK(c3d.slurmRequest().gpus == 1);
-	REQUIRE(c3d.slurmRequest().exports.size() == 1);
-	CHECK(c3d.slurmRequest().exports[0] == "RELION_GPU_SKIP_ALIGN=1");
 	if (saved_skip) setenv("RELION_GPU_SKIP_ALIGN", saved_skip_value.c_str(), 1);
 	else unsetenv("RELION_GPU_SKIP_ALIGN");
 	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);

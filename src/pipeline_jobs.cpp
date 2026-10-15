@@ -24,6 +24,7 @@
 #include "src/parallel_hint.h"
 #include "src/reference_list.h"
 #include "src/slurm_script.h"
+#include "src/gpu_switch.h"
 #include <unistd.h>
 #include <cerrno>
 #include <algorithm>
@@ -952,11 +953,10 @@ bool RelionJob::usesGpu()
 		return yes("do_aretomo2");      // IMOD runs on CPUs
 	case PROC_3DCLASS:
 	{
-		// without alignment the GPU is used only with RELION_GPU_SKIP_ALIGN=1 (the same rule as the
-		// command: the job window refuses the GPU otherwise)
+		// without alignment the GPU is used unless RELION_GPU_SKIP_ALIGN=0 (the same rule as the
+		// command: the job window refuses the GPU then)
 		const bool skips = joboptions.find("dont_skip_align") != joboptions.end() && !yes("dont_skip_align");
-		const char *on = getenv("RELION_GPU_SKIP_ALIGN");
-		return yes("use_gpu") && (!skips || (on && std::string(on) == "1"));
+		return yes("use_gpu") && (!skips || gpuswitch::on("RELION_GPU_SKIP_ALIGN"));
 	}
 	case PROC_TOMO_DENOISE_TOMOGRAM:  // cryoCARE
 	case PROC_DYNAMIGHT:
@@ -988,10 +988,6 @@ slurmscript::Request RelionJob::slurmRequest()
 		else
 			r.gpus = std::max(1, parhint::countGpuIds(value("gpu_ids", "")));
 	}
-	// the node must run the GPU path that the command asks for (a variable of the GUI's
-	// environment is not always passed on to the job)
-	if (type == PROC_3DCLASS && usesGpu() && value("dont_skip_align", "Yes") != "Yes")
-		r.exports.push_back("RELION_GPU_SKIP_ALIGN=1");
 	r.mem = value("slurm_mem", "auto");
 	r.time = value("slurm_time", "");
 	r.args = value("slurm_args", "");
@@ -5380,10 +5376,9 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	// GPU-stuff
 	if (joboptions["use_gpu"].getBoolean())
 	{
-		const char *gpu_skip_align = getenv("RELION_GPU_SKIP_ALIGN");
-		if (!joboptions["dont_skip_align"].getBoolean() && !(gpu_skip_align && std::string(gpu_skip_align) == "1"))
+		if (!joboptions["dont_skip_align"].getBoolean() && !gpuswitch::on("RELION_GPU_SKIP_ALIGN"))
 		{
-			error_message = "ERROR: you cannot use GPUs when skipping image alignments (set RELION_GPU_SKIP_ALIGN=1 to allow it).";
+			error_message = "ERROR: you cannot use GPUs when skipping image alignments (RELION_GPU_SKIP_ALIGN=0 is set; unset it to allow it).";
 			return false;
 		}
 		command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";

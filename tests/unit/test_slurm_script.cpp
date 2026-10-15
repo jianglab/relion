@@ -113,9 +113,9 @@ TEST_CASE("Slurm script: text", "[slurm]")
 	CHECK(t.find("mpirun") == std::string::npos);
 	CHECK(t.find("--time") == std::string::npos);
 
-	r.exports.push_back("RELION_GPU_SKIP_ALIGN=1");
+	r.exports.push_back("RELION_EXAMPLE_SWITCH=1");
 	t = slurmscript::templateText(r, slurmscript::plan(r, nodes), "");
-	CHECK(t.find("export RELION_GPU_SKIP_ALIGN=1\nXXXcommandXXX\n") != std::string::npos);
+	CHECK(t.find("export RELION_EXAMPLE_SWITCH=1\nXXXcommandXXX\n") != std::string::npos);
 
 	r = request(5, 4, 0, true);
 	r.time = "2:00:00";
