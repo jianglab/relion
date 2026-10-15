@@ -33,12 +33,26 @@ typedef finufft_plan FinufftPlanHandle;
 #define FINUFFT_DESTROY  finufft_destroy
 #endif
 
+// FFTW's planner is not thread-safe. FINUFFT creates FFTW plans inside makeplan (and, for type 3, inside
+// setpts) and destroys them in destroy, under a mutex of its own that does not cover the plans that
+// FourierTransformer creates in other threads. Every such call therefore runs in the named critical
+// section that all of RELION's own FFTW plan creation uses.
 struct FinufftPlanGuard
 {
         FinufftPlanHandle plan;
         FinufftPlanGuard() : plan(nullptr) {}
         ~FinufftPlanGuard() { /* defer to explicit clear() to avoid FFTW teardown race */ }
-        void clear() { if (plan) { FINUFFT_DESTROY(plan); plan = nullptr; } }
+        void clear()
+        {
+                if (plan)
+                {
+                        #pragma omp critical(FourierTransformer_fftw_plan)
+                        {
+                                FINUFFT_DESTROY(plan);
+                        }
+                        plan = nullptr;
+                }
+        }
         FinufftPlanGuard(const FinufftPlanGuard&) = delete;
         FinufftPlanGuard& operator=(const FinufftPlanGuard&) = delete;
         FinufftPlanGuard(FinufftPlanGuard&& other) : plan(other.plan) { other.plan = nullptr; }
