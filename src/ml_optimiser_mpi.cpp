@@ -1514,7 +1514,10 @@ void MlOptimiserMpi::expectation()
 	if (do_gpu && ! node->isLeader())
 	{
 		for (int i = 0; i < accDataBundles.size(); i ++)
+		{
+			((MlDeviceBundle*)accDataBundles[i])->rank_shared_count = gpuDeviceShares[i];
 			((MlDeviceBundle*)accDataBundles[i])->setupTunableSizedObjects(allocationSizes[i]);
+		}
 	}
 #endif // _CUDA_ENABLED or _HIP_ENABLED
 #ifdef _SYCL_ENABLED

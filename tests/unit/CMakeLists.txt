@@ -65,6 +65,8 @@ set(RELION_UNIT_TEST_SOURCES
     test_bulk_threads.cpp
     test_gpu_reconstruct.cpp
     test_gpu_switch.cpp
+    test_tuning_cache.cpp
+    test_gpu_pool_plan.cpp
 )
 
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})

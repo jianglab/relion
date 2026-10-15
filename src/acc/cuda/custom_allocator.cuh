@@ -23,6 +23,7 @@
 #include "src/macros.h"
 #include "src/error.h"
 #include "src/parallel.h"
+#include "src/acc/gpu_pool_plan.h"
 
 #ifdef CUSTOM_ALLOCATOR_MEMGUARD
 #include "src/acc/cuda/shortcuts.cuh"
@@ -69,6 +70,7 @@ public:
 		bool free;
 		cudaEvent_t readyEvent; //Event record used for auto free
 		bool freeWhenReady;
+		int chunk;                  // the chunk of device memory the block lies in (lean pool); blocks only merge within a chunk
 		CudaCustomAllocator *owner; // set by alloc(); its pool supplies the ready events
 		bool readyMarked;           // markReadyEvent() was called: free after the work
 		cudaStream_t readyStream;   // issued so far on this stream by this thread
@@ -88,6 +90,7 @@ public:
 			free(0),
 			readyEvent(0),
 			freeWhenReady(false),
+			chunk(0),
 			owner(NULL),
 			readyMarked(false),
 			readyStream(0)
@@ -150,6 +153,20 @@ private:
 	size_t alignmentSize;
 
 	bool cache;
+
+	// Lean pool (see configureLean()): instead of one chunk of all the memory there may be several,
+	// added when an allocation finds no room, up to capBytes held in all. Without it there is exactly
+	// one chunk (or none) and nothing below changes the old behaviour.
+	struct Chunk { BYTE *base; size_t size; int id; };
+	std::vector<Chunk> chunks;
+	int nextChunkId;
+	bool lean;
+	size_t capBytes;
+	size_t heldBytes;     // sum of the chunks
+	size_t usedBytes;     // sum of the blocks handed out and not yet freed (blocks waiting for their work count)
+	size_t peakUsed;      // high-water marks since resetPeaks()
+	size_t peakHeld;
+	size_t chunksAdded;   // chunks added by growth since resetPeaks()
 
 	omp_lock_t mutex;
 
@@ -487,6 +504,7 @@ private:
 		delete[] guards;
 #endif
 
+		usedBytes -= std::min(usedBytes, a->size);
 		a->free = true;
 
 		/* A free region must not carry a pending completion event.
@@ -508,7 +526,7 @@ private:
 		if (cache)
 		{
 			//Previous neighbor is free, concatenate
-			if ( a->prev != NULL && a->prev->free)
+			if ( a->prev != NULL && a->prev->free && a->prev->chunk == a->chunk)
 			{
 				//Resize and set pointer
 				a->size += a->prev->size;
@@ -530,7 +548,7 @@ private:
 			}
 
 			//Next neighbor is free, concatenate
-			if ( a->next != NULL && a->next->free)
+			if ( a->next != NULL && a->next->free && a->next->chunk == a->chunk)
 			{
 				//Resize and set pointer
 				a->size += a->next->size;
@@ -595,15 +613,89 @@ private:
 				       asked / (1000*1000), totalSize / (1000*1000));
 			HANDLE_ERROR(err);
 			cache = true;
+			first->chunk = nextChunkId++;
+			chunks.push_back(Chunk{first->ptr, totalSize, first->chunk});
+			heldBytes = totalSize;
+			peakHeld = std::max(peakHeld, heldBytes);
 		}
 		else
 			cache = false;
 	}
 
+	// An empty list: one free block of no size, as a pool without memory has
+	void _makeEmptyList()
+	{
+		first = new Alloc();
+		first->prev = NULL;
+		first->next = NULL;
+		first->size = 0;
+		first->free = true;
+	}
+
+	// Take a new chunk of `size` bytes and put it at the end of the list as one free block. False if
+	// the device has no such memory (the caller then waits for blocks to come free, as before).
+	bool _addChunk(size_t size)
+	{
+		BYTE *p = NULL;
+		cudaError_t err = cudaMalloc( (void**) &p, size);
+		if (err == cudaErrorMemoryAllocation)
+		{
+			cudaGetLastError();
+			return false;
+		}
+		HANDLE_ERROR(err);
+		Alloc *a = new Alloc();
+		a->ptr = p;
+		a->size = size;
+		a->free = true;
+		a->chunk = nextChunkId++;
+		chunks.push_back(Chunk{p, size, a->chunk});
+		heldBytes += size;
+		peakHeld = std::max(peakHeld, heldBytes);
+		if (first == NULL)
+			first = a;
+		else if (first->ptr == NULL && first->size == 0 && first->next == NULL) // the empty list
+		{
+			delete first;
+			first = a;
+		}
+		else
+		{
+			Alloc *t = first;
+			while (t->next != NULL)
+				t = t->next;
+			t->next = a;
+			a->prev = t;
+		}
+		return true;
+	}
+
+	// Lean pool: no room for `size` bytes, take a new chunk instead of waiting for the GPU
+	bool _growFor(size_t size)
+	{
+		if (!lean || heldBytes >= capBytes)
+			return false;
+		const size_t room = capBytes - heldBytes;
+		size_t want = gpupool::nextChunk(heldBytes, size, room);
+		if (want == 0)
+			return false;
+		bool ok = _addChunk(want);
+		if (!ok && want > size) // the device has less than hoped: the request alone
+			ok = _addChunk(size);
+		if (ok)
+			chunksAdded++;
+		return ok;
+	}
+
 	void _clear()
 	{
-		if (first->ptr != NULL)
+		if (chunks.empty() && first->ptr != NULL)
 			DEBUG_HANDLE_ERROR(cudaFree( first->ptr ));
+		for (const Chunk &c : chunks)
+			DEBUG_HANDLE_ERROR(cudaFree( c.base ));
+		chunks.clear();
+		heldBytes = 0;
+		usedBytes = 0;
 
 		first->ptr = NULL;
 
@@ -620,7 +712,8 @@ private:
 public:
 
 	CudaCustomAllocator(size_t size, size_t alignmentSize):
-		totalSize(size), alignmentSize(alignmentSize), first(0), cache(true)
+		totalSize(size), alignmentSize(alignmentSize), first(0), cache(true),
+		nextChunkId(0), lean(false), capBytes(size), heldBytes(0), usedBytes(0), peakUsed(0), peakHeld(0), chunksAdded(0)
 	{
 		_setup();
 
@@ -706,6 +799,11 @@ public:
 
 			Alloc *curAlloc = _getFirstSuitedFree(size);
 
+			// Lean pool: add a chunk rather than wait for the GPU (a wait stalls this thread, a
+			// chunk only costs a driver call, and the next iteration starts with the size found)
+			if (curAlloc == NULL && _growFor(size))
+				curAlloc = _getFirstSuitedFree(size);
+
 			//If out of memory
 			if (curAlloc == NULL)
 			{
@@ -755,6 +853,7 @@ public:
 				newAlloc->ptr = curAlloc->ptr;
 				newAlloc->size = size;
 				newAlloc->free = false;
+				newAlloc->chunk = curAlloc->chunk;
 
 				//Modify old pointer
 				curAlloc->ptr = &(curAlloc->ptr[size]);
@@ -791,6 +890,8 @@ public:
 		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
 #endif
 
+		usedBytes += newAlloc->size;
+		peakUsed = std::max(peakUsed, usedBytes);
 		newAlloc->owner = this;
 		return newAlloc;
 	};
@@ -850,11 +951,97 @@ public:
 		return size;
 	}
 
-	// Bytes of the chunk on the device (0 while none is allocated)
+	// Bytes held on the device (the one chunk, or all the chunks of a lean pool; 0 while none is allocated)
 	size_t chunkSize()
 	{
 		Lock ml(&mutex);
-		return (first != NULL && first->ptr != NULL) ? totalSize : 0;
+		return heldBytes;
+	}
+
+	// ---- lean pool (RELION_GPU_LEAN_MEMORY) ----------------------------------------------------
+
+	// Make this a lean pool for the next iteration: hold about `target` bytes now, add chunks when
+	// something does not fit, never hold more than `cap` bytes. Chunks of the last iteration are kept
+	// when one of them fits the target, else (nothing in use) given back and replaced by one of
+	// the right size, which also joins the pieces that growth left. The high-water marks restart.
+	void configureLean(size_t cap, size_t target)
+	{
+		Lock ml(&mutex);
+		_syncReadyEvents();
+		lean = true;
+		capBytes = cap;
+		cache = true;
+		target = std::min(target, cap);
+		if (_getNumberOfAllocs() == 0 && !gpupool::keepChunks(chunks.size(), heldBytes, target))
+		{
+			_clear();
+			_makeEmptyList();
+			size_t t = target;
+			while (t > 0 && !_addChunk(t))
+			{
+				// Another process took the memory that was free a moment ago: take what is there, 90%
+				size_t free_now = 0, total_now = 0;
+				cudaMemGetInfo(&free_now, &total_now);
+				const size_t next = std::min((size_t)(0.9 * (double) free_now), (size_t)(0.9 * (double) t));
+				if (next < gpupool::kMinChunk || next < target / 4)
+					break; // growth will try again when something is allocated
+				t = next;
+			}
+			if (heldBytes < target)
+				printf(" GPU memory: first chunk %zu MB instead of %zu MB, the GPU has less free memory than measured (other processes on it).\n",
+				       heldBytes / (1000*1000), target / (1000*1000));
+		}
+		totalSize = heldBytes;
+		peakUsed = usedBytes;
+		peakHeld = heldBytes;
+		chunksAdded = 0;
+	}
+
+	bool isLean()
+	{
+		Lock ml(&mutex);
+		return lean;
+	}
+
+	// The most this pool may hold: the cap of a lean pool, the one chunk of the old pool. Sizes that
+	// are chosen from the memory available to the job (not from what is held now) use this.
+	size_t capSize()
+	{
+		Lock ml(&mutex);
+		return lean ? capBytes : heldBytes;
+	}
+
+	// Free bytes in the chunks plus, for a lean pool, the memory it may still add
+	size_t getPotentialFreeSpace()
+	{
+		Lock ml(&mutex);
+		size_t size = _getTotalFreeSpace();
+		if (lean && capBytes > heldBytes)
+			size += capBytes - heldBytes;
+		return size;
+	}
+
+	// High-water marks since configureLean(): bytes in use (blocks waiting for their work count as in
+	// use, as they are), bytes held, chunks added by growth
+	size_t peakUsedBytes()
+	{
+		Lock ml(&mutex);
+		return peakUsed;
+	}
+	size_t peakHeldBytes()
+	{
+		Lock ml(&mutex);
+		return peakHeld;
+	}
+	size_t chunksGrown()
+	{
+		Lock ml(&mutex);
+		return chunksAdded;
+	}
+	size_t numberOfChunks()
+	{
+		Lock ml(&mutex);
+		return chunks.size();
 	}
 
 	size_t getNumberOfAllocs()

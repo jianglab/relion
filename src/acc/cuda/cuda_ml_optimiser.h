@@ -66,6 +66,11 @@ public:
 	void setupFixedSizedObjects();
 	void setupTunableSizedObjects(size_t allocationSize);
 
+	// Lean GPU memory pool (RELION_GPU_LEAN_MEMORY): see cuda_ml_optimiser.cu
+	std::string lean_key; // description of the problem of this iteration, for the tuning cache
+	void setupLeanPool(size_t cap);
+	void finishLeanIteration();
+
 	void syncAllBackprojects()
 	{
 		DEBUG_HANDLE_ERROR(cudaDeviceSynchronize());
@@ -98,6 +103,7 @@ public:
 
 	~MlDeviceBundle()
 	{
+		finishLeanIteration();
 		projectors.clear();
 		backprojectors.clear();
 		coarseProjectionPlans.clear();
