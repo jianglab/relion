@@ -1304,7 +1304,7 @@ static int envChunkOverride(const char *name)
 // (read later, never waiting), and the median of the last few launches per candidate decides.
 // A smaller value wins ties and anything under a 3% gain. One launch in 256 re-times the candidate
 // with the oldest sample, so a changed workload or a busy GPU is noticed.
-// RELION_GPU_XT_TILES=N fixes the value, =auto turns the choice on, unset keeps 1.
+// On by default (automatic choice). RELION_GPU_XT_TILES=N fixes the value, =off (or 0) keeps 1 tile.
 struct XtTileTuner
 {
 	static const int MAXC = 6, RING = 5;
@@ -2312,8 +2312,9 @@ bool runDiff2KernelCoarseBatched(
 				(int) translation_num, (int) xt_tpad, (int) image_size, projector.imgX, projector.imgY, projector.maxR);
 		LAUNCH_HANDLE_ERROR(cudaGetLastError());
 		static const char *xt_env = getenv("RELION_GPU_XT_TILES");
-		static const bool xt_auto = xt_env != NULL && std::string(xt_env) == "auto";
-		static const int xt_fixed = (xt_env != NULL && !xt_auto) ? atoi(xt_env) : 1;
+		static const bool xt_off = gpuswitch::isOffValue(xt_env);
+		static const bool xt_auto = !xt_off && (xt_env == NULL || std::string(xt_env) == "auto" || std::string(xt_env) == "check" || atoi(xt_env) <= 0);
+		static const int xt_fixed = (xt_env != NULL && !xt_auto && !xt_off) ? atoi(xt_env) : 1;
 		int device = 0;
 		int nt = std::max(1, std::min(xt_fixed, std::min(ntt, 8)));
 		int cand = 0;
