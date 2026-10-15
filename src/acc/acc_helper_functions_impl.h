@@ -1964,8 +1964,20 @@ void runBackProjectKernelBatched(
 			if (!e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
 			return strcmp(e, "check") ? 1 : 2;
 		}();
+		// RELION_GPU_BP_PACK=1: the atomic additions of a warp are packed into runs of neighbouring floats
+		// (see cuda_kernel_backproject3D); same terms, order of the additions only; off by default
+		static const bool bp_pack = [] { const char *e = getenv("RELION_GPU_BP_PACK"); return e && atoi(e) > 0; }();
+		const size_t pk_off = compact3 ? ((smem3 + 15) & ~(size_t) 15) : 0;
+		const size_t pk_bytes = (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (768 * sizeof(XFLOAT) + 128 * sizeof(size_t));
+		const bool pack_ok = bp_pack && !data_is_3D && BP.interleaved && bp_tile_mode == 0 && pk_off + pk_bytes <= 48 * 1024;
+		static bool pack_reported = false;
+		if (bp_pack && !pack_reported)
+		{
+			pack_reported = true;
+			fprintf(stderr, "RELION_GPU_BP_PACK: %s\n", pack_ok ? "on" : "requested but not possible for this launch (needs images, interleaved model, translations list that fits)");
+		}
 		auto launch_bp = [&](int tl) {
-#define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<dim3(n, bp_chunks), BS, compact3 ? smem3 : 0, stream>>>( \
+#define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<dim3(n, bp_chunks), BS, (!D3 && tl == 2) ? pk_off + pk_bytes : (compact3 ? smem3 : 0), stream>>>( \
 			d_img_real, d_img_imag, trans_x, trans_y, trans_z, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgZ, imgX*imgY*imgZ, \
@@ -2023,7 +2035,7 @@ void runBackProjectKernelBatched(
 					md, mr, mr > 0 ? md / mr : 0.f, h_sum[1] > 0 ? sqrt(h_sum[0] / h_sum[1]) : 0.0);
 		}
 		else
-			launch_bp(bp_tile_mode == 1 ? 1 : 0);
+			launch_bp(pack_ok ? 2 : (bp_tile_mode == 1 ? 1 : 0));
 	}
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
