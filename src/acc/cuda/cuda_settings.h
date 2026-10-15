@@ -138,6 +138,10 @@ static void LaunchHandleError( cudaError_t err, const char *file, int line )
 #define BACKPROJECTION4_PREFETCH_COUNT 3
 #define BP_2D_BLOCK_SIZE 128
 #define BP_REF3D_BLOCK_SIZE 128
+// runs of the packed backprojection (RELION_GPU_BP_PACK) staged per round: 4, 2 or 1; fewer shrink its shared memory
+#ifndef BP_PACK_RUNS
+#define BP_PACK_RUNS 4
+#endif
 #define BP_DATA3D_BLOCK_SIZE 640
 
 

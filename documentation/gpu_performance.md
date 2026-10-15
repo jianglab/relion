@@ -104,6 +104,7 @@ All on by default; for comparisons or if a problem is suspected:
 | `RELION_RESOURCE_REPORT=off` | no resource report at the end |
 | `RELION_PARTICLE_ORDER=micrograph` | shuffle whole micrographs instead of particles (see below); off by default |
 | `RELION_GPU_BP_LAYOUT=planar` | keep the real, imaginary and weight arrays of the 3D back-projection model apart, as upstream (default: interleaved, see "Interleaved back-projection model") |
+| `RELION_GPU_BP_PACK=0` | back-projection atomics one voxel component per lane, as before (default: on for 2D images with the interleaved 3D model; the packed path is used per launch when it fits, otherwise the launch falls back and the reason is printed once; see "Packed back-projection atomics") |
 | `RELION_GPU_COARSE_XT=0` | coarse pass by the direct kernel instead of the cross-term kernel (default: on where it applies, i.e. 3D references and 2D images with a table up to 128 MB, otherwise the direct kernel is used automatically; `check` runs both and reports the largest relative difference) |
 | `RELION_GPU_BLOCKS_PER_SM=N` | thread blocks per multiprocessor that the pixel chunks of the coarse, weighted-average and back-projection kernels aim for (default: chosen from the device, one full wave of 128-thread blocks per multiprocessor, e.g. 12 on sm_86, 16 on sm_80/90, 8 on sm_75; 3 when the GPU has under 2 GiB free; the choice and its reason are printed once per device) |
 | `RELION_GPU_RECONSTRUCT=1` | the M-step reconstructions (3D, skip_gridding) on the GPU whenever `--gpu` was given, also with `--skip_align`; `=0` turns it off. Default: on. Falls back to the CPU with a message when the GPU lacks memory or no GPU is visible |
@@ -447,6 +448,29 @@ spread (about 1e-5 relative). At iteration 3 the accumulator differs from the
 upstream value by 1.6e-5 (relative). The sums over particles are made in
 separate buffers before they reach the volume, which loses less to float
 rounding than adding straight into a voxel that already holds a large sum.
+
+## Packed back-projection atomics (`RELION_GPU_BP_PACK`, on by default)
+
+The back-projection adds 24 floats per pixel into the 3D model (two neighbouring voxels in x, four
+(y, z) neighbours, real, imaginary and weight). With one voxel component per lane the atomic
+requests of a warp touch many sectors, and in local search (where the accumulator path of
+`RELION_GPU_BP_ACCUM` does not apply, about 1.1 visits per orientation) the kernel was bound by
+atomic request issue. The packed path lets a lane take one float of a run of one pixel: the warp
+compacts its active pixels with a ballot, stages values and addresses in shared memory (two of the
+four runs at a time, about 8 KB per block) and issues dense atomic additions. The terms are the
+same, only the order of the additions changes, so results differ from the default only by the
+noise of atomic float additions (the GPU back-projection is never bit-reproducible).
+
+Measured (helical auto-refine B5, 3 MPI ranks, one GPU): the back-projection kernel is 3.3x shorter
+(ncu, same launches) with 3.4x fewer L2 reduction sectors; local-search iterations are about 15%
+faster on an RTX 3090, and the full run on an RTX A5000 takes 862 s against 1005 s with the same
+final resolution (4.16337 A). Helical Class2D E-step -23%, Class3D B3 -19%.
+
+Automatic fallbacks, decided per launch and printed once per reason as
+`RELION_GPU_BP_PACK: ...`: 3D data, planar model layout (`RELION_GPU_BP_LAYOUT=planar`),
+`RELION_GPU_BP_TILE` set, and per-orientation accumulator buffers in use (silent, that launch only).
+`RELION_GPU_BP_PACK=0` turns the path off.
+Integration test: `tests/integration/test_bp_pack.py`.
 
 ## Interleaved back-projection model (`RELION_GPU_BP_LAYOUT`, on by default for 3D)
 

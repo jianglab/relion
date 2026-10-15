@@ -1964,17 +1964,29 @@ void runBackProjectKernelBatched(
 			if (!e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
 			return strcmp(e, "check") ? 1 : 2;
 		}();
-		// RELION_GPU_BP_PACK=1: the atomic additions of a warp are packed into runs of neighbouring floats
-		// (see cuda_kernel_backproject3D); same terms, order of the additions only; off by default
-		static const bool bp_pack = [] { const char *e = getenv("RELION_GPU_BP_PACK"); return e && atoi(e) > 0; }();
+		// RELION_GPU_BP_PACK: the atomic additions of a warp are packed into runs of neighbouring floats
+		// (see cuda_kernel_backproject3D); same terms, order of the additions only; on unless =0
+		static const bool bp_pack = [] { const char *e = getenv("RELION_GPU_BP_PACK"); return !(e && atoi(e) == 0); }();
+		// The staging buffer of the packed path follows the compacted translations list in shared memory (at most
+		// 1024 translations are supported in single precision, so both fit in 48 KB; the check below is a safety net)
+		const size_t pk_bytes = (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (32 * 6 * BP_PACK_RUNS * sizeof(XFLOAT) + 32 * BP_PACK_RUNS * sizeof(size_t));
+		int pack_state = 1;
 		const size_t pk_off = compact3 ? ((smem3 + 15) & ~(size_t) 15) : 0;
-		const size_t pk_bytes = (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (768 * sizeof(XFLOAT) + 128 * sizeof(size_t));
 		const bool pack_ok = bp_pack && !data_is_3D && BP.interleaved && bp_tile_mode == 0 && pk_off + pk_bytes <= 48 * 1024;
-		static bool pack_reported = false;
-		if (bp_pack && !pack_reported)
+		if (bp_pack)
 		{
-			pack_reported = true;
-			fprintf(stderr, "RELION_GPU_BP_PACK: %s\n", pack_ok ? "on" : "requested but not possible for this launch (needs images, interleaved model, translations list that fits)");
+			if (!pack_ok)
+				pack_state = data_is_3D ? 2 : !BP.interleaved ? 3 : bp_tile_mode != 0 ? 4 : 5;
+			static const char *const notes[] = {"",
+				"on (default; RELION_GPU_BP_PACK=0 turns it off)",
+				"not used: 3D data",
+				"not used: planar model layout",
+				"not used: RELION_GPU_BP_TILE is set",
+				"not used: shared memory"};
+			static std::atomic<unsigned> reported(0);
+			const unsigned bit = 1u << pack_state;
+			if (!(reported.fetch_or(bit) & bit))
+				fprintf(stderr, "RELION_GPU_BP_PACK: %s\n", notes[pack_state]);
 		}
 		auto launch_bp = [&](int tl) {
 #define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<dim3(n, bp_chunks), BS, (!D3 && tl == 2) ? pk_off + pk_bytes : (compact3 ? smem3 : 0), stream>>>( \
