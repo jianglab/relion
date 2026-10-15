@@ -430,6 +430,7 @@ def test_cryosparc_import_picks_are_particles(relion_bin, test_data_dir):
         ("location/micrograph_shape", ("<u4", (2,)), [[4096, 4096]] * 3),
         ("location/micrograph_psize_A", "<f4", [1.06] * 3),
         ("filament/filament_uid", "<u4", [7, 7, 7]),
+        ("filament/filament_pose", "<f8", [np.pi / 4] * 3),
     ])
 
     cmd = [
@@ -450,6 +451,7 @@ def test_cryosparc_import_picks_are_particles(relion_bin, test_data_dir):
     assert "1024" in star_text and "2048" in star_text
     # Tracer picks are filament segments, so they carry the helical columns
     assert "rlnHelicalTubeID" in star_text
+    # The psi prior is the filament direction, so it needs a pose in the data
     assert "rlnAnglePsiPrior" in star_text
 
     # Picks have no images: their image pixel size is the micrograph's (from
