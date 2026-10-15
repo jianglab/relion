@@ -959,6 +959,10 @@ static __global__ void cuda_kernel_coarse_xt_prepare(
 	}
 }
 
+// NT translation tiles per block (blockIdx.z covers tiles NT * z .. NT * z + NT - 1): the projections of a block are
+// made once for all of them. Every output keeps its own accumulator and the same order of additions, so the values are
+// the same for every NT; only the number of reference fetches (the texture and L2 traffic) falls with NT.
+template <int NT>
 static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 		const CoarseClassJob *g_classes,
 		const int *g_class_start,
@@ -981,7 +985,7 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 	const float inv_imgX = 1.f / (float) projector.imgX;
 	const int orient0 = local * XT_ORIENT;
 	const int n_valid = min(XT_ORIENT, c.n_orient - orient0);
-	const int ttile = blockIdx.z;
+	const int ttile0 = blockIdx.z * NT;
 
 	// Projection role: orientation o of the block, pixels plane, plane + 8, ...
 	const int o = tid & (XT_ORIENT - 1);
@@ -999,7 +1003,7 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 
 	// s_ref and s_A are only used in the pass loop and s_red (same size) after it, so they share
 	// one buffer: 8 KB less shared memory per block, same values
-	__shared__ __align__(16) float2 s_buf[XT_PIXELS * XT_ORIENT + XT_PIXELS * XT_TRANS];
+	__shared__ __align__(16) float2 s_buf[XT_PIXELS * XT_ORIENT + NT * XT_PIXELS * XT_TRANS];
 	float2 *const s_ref = s_buf;
 	float2 *const s_A = s_buf + XT_PIXELS * XT_ORIENT;
 	__shared__ float2 s_refp[XT_ORIENT * (XT_PIXELS + 1)];
@@ -1023,12 +1027,14 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 		}
 	}
 
-	float acc[4][4];
+	float acc[NT][4][4];
 	#pragma unroll
-	for (int i = 0; i < 4; i++)
+	for (int tt = 0; tt < NT; tt++)
 		#pragma unroll
-		for (int j = 0; j < 4; j++)
-			acc[i][j] = 0.f;
+		for (int i = 0; i < 4; i++)
+			#pragma unroll
+			for (int j = 0; j < 4; j++)
+				acc[tt][i][j] = 0.f;
 	float rn = 0.f; // sum_p c_p |ref|^2 of this thread's orientation over its pixels
 
 	const int n_pass = (image_size + XT_PIXELS - 1) / XT_PIXELS;
@@ -1087,11 +1093,13 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 			s_ref[row * XT_ORIENT + o] = make_float2(re, im);
 		}
 		}
-		for (int idx = tid; idx < XT_PIXELS * XT_TRANS; idx += XT_BLOCK)
+		for (int idx = tid; idx < NT * XT_PIXELS * XT_TRANS; idx += XT_BLOCK)
 		{
-			const int row = idx / XT_TRANS, t = idx % XT_TRANS;
+			const int tt = idx / (XT_PIXELS * XT_TRANS);
+			const int row = (idx / XT_TRANS) % XT_PIXELS, t = idx % XT_TRANS;
 			const int p = base + row;
-			s_A[idx] = (ablate & 4) ? make_float2(p, t) : (p < image_size && ttile * XT_TRANS + t < tpad) ? g_A[(size_t) p * tpad + ttile * XT_TRANS + t] : make_float2(0.f, 0.f);
+			const int tg = (ttile0 + tt) * XT_TRANS + t;
+			s_A[idx] = (ablate & 4) ? make_float2(p, t) : (p < image_size && tg < tpad) ? g_A[(size_t) p * tpad + tg] : make_float2(0.f, 0.f);
 		}
 		__syncthreads();
 		#pragma unroll
@@ -1115,16 +1123,20 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 				rr[0] = r01.x; rr[1] = r01.z; rr[2] = r23.x; rr[3] = r23.z;
 				ri[0] = r01.y; ri[1] = r01.w; ri[2] = r23.y; ri[3] = r23.w;
 			}
-			const float4 a01 = *(const float4 *) &s_A[row * XT_TRANS + pt * 4];
-			const float4 a23 = *(const float4 *) &s_A[row * XT_TRANS + pt * 4 + 2];
-			const float ar[4] = {a01.x, a01.z, a23.x, a23.z}, ai[4] = {a01.y, a01.w, a23.y, a23.w};
-			if (!(ablate & 2))
 			#pragma unroll
-			for (int i = 0; i < 4; i++)
+			for (int tt = 0; tt < NT; tt++)
+			{
+				const float4 a01 = *(const float4 *) &s_A[(tt * XT_PIXELS + row) * XT_TRANS + pt * 4];
+				const float4 a23 = *(const float4 *) &s_A[(tt * XT_PIXELS + row) * XT_TRANS + pt * 4 + 2];
+				const float ar[4] = {a01.x, a01.z, a23.x, a23.z}, ai[4] = {a01.y, a01.w, a23.y, a23.w};
+				if (!(ablate & 2))
 				#pragma unroll
-				for (int j = 0; j < 4; j++)
-					acc[i][j] += rr[i] * ar[j] + ri[i] * ai[j];
-			else acc[0][0] += rr[0] + ri[1] + ar[2] + ai[3];
+				for (int i = 0; i < 4; i++)
+					#pragma unroll
+					for (int j = 0; j < 4; j++)
+						acc[tt][i][j] += rr[i] * ar[j] + ri[i] * ai[j];
+				else acc[tt][0][0] += rr[0] + ri[1] + ar[2] + ai[3];
+			}
 		}
 	}
 
@@ -1133,11 +1145,6 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 	float (*const s_red)[XT_ORIENT * XT_TRANS] = (float (*)[XT_ORIENT * XT_TRANS]) s_buf;
 	__shared__ float s_rn[8][XT_ORIENT];
 	__shared__ float s_x2[XT_BLOCK];
-	#pragma unroll
-	for (int i = 0; i < 4; i++)
-		#pragma unroll
-		for (int j = 0; j < 4; j++)
-			s_red[plane][(po * 4 + i) * XT_TRANS + pt * 4 + j] = acc[i][j];
 	s_rn[plane][o] = rn;
 	if (pixfast)
 	{
@@ -1160,21 +1167,35 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 	for (int i = 0; i < XT_BLOCK; i++)
 		x2_sum += s_x2[i];
 	float *out = &g_partial[(size_t) blockIdx.y * chunk_stride + (size_t) (c.orient_offset + orient0) * translation_num];
-	for (int idx = tid; idx < XT_ORIENT * XT_TRANS; idx += XT_BLOCK)
+	#pragma unroll
+	for (int tt = 0; tt < NT; tt++)
 	{
-		const int oo = idx / XT_TRANS, t = idx % XT_TRANS;
-		const int tg = ttile * XT_TRANS + t;
-		if (oo < n_valid && tg < translation_num)
+		const int ttile = ttile0 + tt;
+		if (ttile * XT_TRANS >= translation_num)
+			break;
+		#pragma unroll
+		for (int i = 0; i < 4; i++)
+			#pragma unroll
+			for (int j = 0; j < 4; j++)
+				s_red[plane][(po * 4 + i) * XT_TRANS + pt * 4 + j] = acc[tt][i][j];
+		__syncthreads();
+		for (int idx = tid; idx < XT_ORIENT * XT_TRANS; idx += XT_BLOCK)
 		{
-			float cross = 0.f, norm = 0.f;
-			for (int pl = 0; pl < 8; pl++)
+			const int oo = idx / XT_TRANS, t = idx % XT_TRANS;
+			const int tg = ttile * XT_TRANS + t;
+			if (oo < n_valid && tg < translation_num)
 			{
-				cross += s_red[pl][idx];
-				norm += s_rn[pl][oo];
+				float cross = 0.f, norm = 0.f;
+				for (int pl = 0; pl < 8; pl++)
+				{
+					cross += s_red[pl][idx];
+					norm += s_rn[pl][oo];
+				}
+				if (pixfast) norm = s_rn2[oo];
+				out[(size_t) oo * translation_num + tg] = norm + x2_sum - 2.f * cross;
 			}
-			if (pixfast) norm = s_rn2[oo];
-			out[(size_t) oo * translation_num + tg] = norm + x2_sum - 2.f * cross;
 		}
+		__syncthreads();
 	}
 }
 #endif
