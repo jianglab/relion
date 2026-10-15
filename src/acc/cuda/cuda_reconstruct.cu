@@ -57,6 +57,23 @@ __device__ __forceinline__ void decompose(size_t n, const Dims &d, long int &k, 
 __device__ __forceinline__ long int wrapK(long int k, const Dims &d) { return (k < d.x) ? k : k - d.z; }
 __device__ __forceinline__ long int wrapI(long int i, const Dims &d) { return (i < d.x) ? i : i - d.y; }
 
+// atomicAdd(double *, double) is native only from sm_60; below that, the atomicCAS loop of helper.cuh
+__device__ __forceinline__ double atomicAddDouble(double *address, double val)
+{
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 600
+	return atomicAdd(address, val);
+#else
+	unsigned long long int *address_as_ull = (unsigned long long int *)address;
+	unsigned long long int old = *address_as_ull, assumed;
+	do {
+		assumed = old;
+		old = atomicCAS(address_as_ull, assumed,
+		                __double_as_longlong(val + __longlong_as_double(assumed)));
+	} while (assumed != old);
+	return __longlong_as_double(old);
+#endif
+}
+
 #define GRID_STRIDE(n, total) for (size_t n = blockIdx.x * (size_t)blockDim.x + threadIdx.x; n < (total); n += (size_t)blockDim.x * gridDim.x)
 
 // Projector::decenter(Min, Mout, max_r2): Mout has the same shape as Min
@@ -125,7 +142,7 @@ __global__ void kShellSums(const R *Fw, Dims d, int round_max_r2, float pad, int
 		{
 			const int ires = dFLOOR(sqrt((RFLOAT)r2) / pad);
 			if (ires >= r_max) { *bad = 1; continue; }
-			atomicAdd(&sums[ires], (double)Fw[n]);
+			atomicAddDouble(&sums[ires], (double)Fw[n]);
 			atomicAdd(&counts[ires], 1ull);
 		}
 	}

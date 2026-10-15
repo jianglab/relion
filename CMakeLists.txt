@@ -191,9 +191,9 @@ if(CUDA)
     if (CUDA_GENCODE STREQUAL "")
         if (CUDA_ARCH STREQUAL "")
             if (${CUDA_VERSION} VERSION_LESS "13.0")
-                message(STATUS "Setting fallback sm=50 (Pascal, e.g. GTX 1080)")
+                message(STATUS "Setting fallback sm=50 (Maxwell, e.g. GTX 980)")
                 set(CUDARCH "-arch=sm_50")
-            else() # CUDA >= 13.0 no longer supports Pascal
+            else() # CUDA >= 13.0 no longer supports Maxwell, Pascal or Volta
                 message(STATUS "Setting fallback sm=75 (Turing, e.g. RTX 2080)")
                 set(CUDARCH "-arch=sm_75")
             endif()
