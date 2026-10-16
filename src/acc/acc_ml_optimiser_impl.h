@@ -4604,10 +4604,11 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					    over == A.nr_over && sp.idir_min == 0 && sp.ipsi_min == 0 &&
 					    (size_t) sp.nr_dir * sp.nr_psi * over * baseMLO->mymodel.nr_classes == A.slots &&
 					    (unsigned) op.local_Minvsigma2.xdim == A.img_x && (unsigned) op.local_Minvsigma2.ydim == A.img_y &&
-					    op.local_Minvsigma2.zdim == 1 && sp.iclass_min == 0 &&
-					    sp.iclass_max + 1 == (unsigned long) baseMLO->mymodel.nr_classes &&
+					    op.local_Minvsigma2.zdim == 1 && sp.iclass_max < (unsigned long) baseMLO->mymodel.nr_classes &&
 					    baseMLO->mymodel.orientational_prior_mode == NOPRIOR)
 					{
+						// A sub-range of the classes is fine (a single random class per particle in the first
+						// iteration of a run that generates its own seeds): iorientclasses are absolute
 						for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
 						{
 							if((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))
