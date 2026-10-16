@@ -2303,7 +2303,7 @@ void MlOptimiser::initialiseGeneral(int rank)
         for (size_t i = 0; i < n_names; i++)
             if (!gpuswitch::on(names[i]))
                 off += std::string(off.empty() ? "" : ", ") + names[i];
-        std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join, pooled pinned copy buffers, one-pass significance selection of the weights) are on by default, each backing off to the older path when its conditions are not met; "
+        std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join, pooled pinned copy buffers, block-wise sort of the weights, one-pass significance selection of the weights) are on by default, each backing off to the older path when its conditions are not met; "
                   << (off.empty() ? "none is switched off" : "switched off: " + off) << " (VAR=0 turns one off)." << std::endl;
     }
     // --skip_align / --skip_rotate keep the GPU (upstream switches the accelerators off here);

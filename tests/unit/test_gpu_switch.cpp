@@ -56,7 +56,7 @@ TEST_CASE("Every default-on GPU switch in the list is on when unset and off with
 {
 	size_t n = 0;
 	const char *const *names = gpuswitch::defaultOnNames(n);
-	REQUIRE(n >= 7);
+	REQUIRE(n >= 9);
 	for (size_t i = 0; i < n; i++)
 	{
 		INFO("switch " << names[i]);

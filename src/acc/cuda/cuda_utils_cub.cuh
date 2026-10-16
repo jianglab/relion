@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include "src/acc/cuda/cuda_settings.h"
 #include "src/acc/cuda/cuda_mem_utils.h"
+#include "src/gpu_switch.h"
 #include <stdio.h>
 #include <signal.h>
 #include <vector>
@@ -553,12 +554,10 @@ __global__ void cuda_kernel_block_sort_significance(const T *weights, int n, T *
 			mask_out[i] = (weights[i] >= sig_w);
 }
 
+// RELION_GPU_BLOCK_SORT=0 always uses the radix sort of the weights (the block-wise sort is on by default)
 inline bool gpuBlockSort()
 {
-	static const bool on = []() {
-		const char *e = getenv("RELION_GPU_BLOCK_SORT");
-		return e && std::string(e) != "0" && std::string(e) != "off";
-	}();
+	static const bool on = gpuswitch::on("RELION_GPU_BLOCK_SORT");
 	return on;
 }
 
