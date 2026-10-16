@@ -36,9 +36,10 @@ def _log_likelihood(model_star):
 
 
 def test_keep_pool_for_reconstruct(test_data_dir, relion_bin, relion_runner):
-    """RELION_GPU_KEEP_POOL=1 keeps the E-step's GPU memory chunk during the GPU reconstruction
-    (it is given back only when the reconstruction does not fit next to it): the maps are
-    still made on the GPU and the likelihood agrees with the run that frees the chunk."""
+    """By default the E-step's GPU memory chunk stays in the card during the GPU reconstruction
+    (it is given back only when the reconstruction does not fit next to it; RELION_GPU_KEEP_POOL=0
+    gives it back first): the maps are still made on the GPU and the likelihood agrees with the
+    run that frees the chunk."""
     if not _have_cuda_gpu(relion_bin, "GPU_KEEP_POOL"):
         pytest.skip("needs a CUDA GPU and a build with RELION_GPU_KEEP_POOL")
     from fixtures import generate_test_dataset
@@ -63,11 +64,13 @@ def test_keep_pool_for_reconstruct(test_data_dir, relion_bin, relion_runner):
         assert r.returncode == 0, f"{tag} failed:\n{r.stderr[-3000:]}"
         return r, out
 
-    r_plain, d_plain = run("kp_plain", {})
-    r_kp, d_kp = run("kp_on", {"RELION_GPU_KEEP_POOL": "1"})
-    assert "Reconstructing the maps on the GPU" in r_plain.stdout
+    r_free, d_free = run("kp_off", {"RELION_GPU_KEEP_POOL": "0"})
+    r_kp, d_kp = run("kp_default", {})
+    assert "Reconstructing the maps on the GPU" in r_free.stdout
     assert "Reconstructing the maps on the GPU" in r_kp.stdout
     assert "on the CPU" not in r_kp.stdout
-    ll_plain = _log_likelihood(d_plain / "run_it003_model.star")
+    assert "stays in the GPU meanwhile" in r_kp.stdout          # the default, reported once
+    assert "given back to the GPU before each reconstruction" in r_free.stdout
+    ll_free = _log_likelihood(d_free / "run_it003_model.star")
     ll_kp = _log_likelihood(d_kp / "run_it003_model.star")
-    assert abs(ll_kp - ll_plain) <= 1e-5 * abs(ll_plain), (ll_kp, ll_plain)
+    assert abs(ll_kp - ll_free) <= 1e-5 * abs(ll_free), (ll_kp, ll_free)

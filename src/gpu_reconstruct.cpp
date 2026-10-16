@@ -51,6 +51,8 @@ bool reconstructSkipGridding(const SkipGriddingInput &, RFLOAT *, std::string &r
 	return false;
 }
 
+bool keepPoolActive() { return false; }
+
 bool deviceAvailable() { return false; }
 
 bool helicalSymmetryFourier(const HelixFourierInput &, RFLOAT *, RFLOAT *, std::string &reason, std::string &, bool &partial)

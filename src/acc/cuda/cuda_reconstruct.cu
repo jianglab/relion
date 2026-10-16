@@ -422,13 +422,21 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 
 }
 
+bool keepPoolActive()
+{
+	// RELION_GPU_KEEP_POOL: on unless 0
+	static const bool on = [] { const char *e = getenv("RELION_GPU_KEEP_POOL"); return !(e && *e && atoi(e) <= 0); }();
+	return on;
+}
+
 bool reconstructSkipGridding(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool &warned_zero_weight)
 {
-	// RELION_GPU_KEEP_POOL=1: leave the chunk kept for the next expectation step on the device and give it
-	// back only when the reconstruction does not fit next to it. Freeing and allocating again the
-	// ~20 GB chunk takes 0.1 to 0.2 s per iteration; the reconstruction of the usual box sizes fits next to
-	// it (the chunk is sized to leave room for the threads' own needs). The results do not change.
-	static const bool keep_pool = [] { const char *e = getenv("RELION_GPU_KEEP_POOL"); return e && atoi(e) > 0; }();
+	// The chunk kept for the next expectation step stays on the device and is given back only when the
+	// reconstruction does not fit next to it (RELION_GPU_KEEP_POOL=0 gives it back first, as before).
+	// Freeing and allocating again the ~20 GB chunk of the old pool takes 0.1 to 0.2 s per iteration, and
+	// the reconstruction of the usual box sizes fits next to it (the chunk is sized to leave room for the
+	// threads' own needs). The results do not change.
+	const bool keep_pool = keepPoolActive();
 	if (!keep_pool)
 		relionReleaseRetainedGpuMemory(); // the chunk kept for the next expectation step
 	int ndev = 0;
