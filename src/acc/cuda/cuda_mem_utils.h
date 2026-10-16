@@ -53,11 +53,12 @@ void cudaCpyHostToDevice( T *h_ptr, T *d_ptr, size_t size)
 // RELION_GPU_PINNED_POOL=0 makes every thread allocate and free its own, as before.
 static inline pinnedpool::Pool &pinnedHostPool()
 {
-	static pinnedpool::Pool pool(
+	// never destroyed: threads still ending while the process exits give their buffers back to it
+	static pinnedpool::Pool *pool = new pinnedpool::Pool(
 		[](size_t n) -> void * { void *p = NULL; HANDLE_ERROR(cudaMallocHost(&p, n)); return p; },
 		[](void *p) { cudaFreeHost(p); },
 		gpuswitch::on("RELION_GPU_PINNED_POOL"));
-	return pool;
+	return *pool;
 }
 
 // Copy pageable host memory to the device through this thread's pinned, double-buffered
