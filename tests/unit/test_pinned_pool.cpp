@@ -8,6 +8,9 @@
 #include <catch2/catch.hpp>
 
 #include "src/acc/pinned_pool.h"
+#ifdef _CUDA_ENABLED
+#include "src/acc/cuda/cuda_mem_utils.h"
+#endif
 
 #include <cstdlib>
 #include <thread>
@@ -107,3 +110,32 @@ TEST_CASE("pinned pool is safe for threads taking and returning buffers", "[pinn
 	CHECK(pool.reuses() >= 1600 - 64);
 }
 
+#ifdef _CUDA_ENABLED
+TEST_CASE("pinned big copies move the same bytes as cudaMemcpy", "[pinned_pool]")
+{
+	int ndev = 0;
+	if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0)
+	{
+		cudaGetLastError();
+		WARN("no GPU - skipping");
+		return;
+	}
+	// sizes: below the 1 MB limit, not a multiple of the 8 MB chunk, exactly two chunks, and a bit over
+	for (size_t bytes : {(size_t) 100 << 10, ((size_t) 1 << 20) + 12, ((size_t) 20 << 20) + 4, (size_t) 16 << 20, ((size_t) 17 << 20) + 8})
+	{
+		INFO("bytes " << bytes);
+		std::vector<unsigned char> in(bytes), out(bytes, 0);
+		for (size_t i = 0; i < bytes; i++) in[i] = (unsigned char)(i * 2654435761u >> 13);
+		void *d = NULL;
+		REQUIRE(cudaMalloc(&d, bytes) == cudaSuccess);
+		REQUIRE(pinnedBigUpload(d, in.data(), bytes) == cudaSuccess);
+		REQUIRE(pinnedBigDownload(out.data(), d, bytes) == cudaSuccess);
+		CHECK(out == in);
+		// the upload, read back by the plain copy
+		std::fill(out.begin(), out.end(), 0);
+		REQUIRE(cudaMemcpy(out.data(), d, bytes, cudaMemcpyDeviceToHost) == cudaSuccess);
+		CHECK(out == in);
+		cudaFree(d);
+	}
+}
+#endif

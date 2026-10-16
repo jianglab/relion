@@ -194,6 +194,100 @@ static inline bool stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t byt
 	return true;
 }
 
+// Big one-off copies between a pageable host array and the device (legacy default stream), through
+// two pinned buffers from the pool: the copy of one chunk overlaps the memcpy of the next, so the
+// transfer runs at close to the speed of the bus instead of the driver's pageable path (which stages
+// small pieces and waits for each). Both return when the data is in place. Under 1 MB, or with
+// RELION_GPU_PINNED_BIG_COPY=0, they are a plain cudaMemcpy. Same bytes either way.
+static inline bool pinnedBigCopyOn()
+{
+	static const bool on = gpuswitch::on("RELION_GPU_PINNED_BIG_COPY");
+	return on;
+}
+
+static inline cudaError_t pinnedBigUpload(void *d_ptr, const void *h_ptr, size_t bytes)
+{
+	const size_t chunk = (size_t) 8 << 20;
+	if (!pinnedBigCopyOn() || bytes < ((size_t) 1 << 20))
+		return cudaMemcpy(d_ptr, h_ptr, bytes, cudaMemcpyHostToDevice);
+	void *buf[2] = {NULL, NULL};
+	size_t cap[2] = {0, 0};
+	cudaEvent_t ev[2] = {NULL, NULL};
+	cudaError_t e = cudaSuccess;
+	for (int i = 0; i < 2 && e == cudaSuccess; i++)
+	{
+		buf[i] = pinnedHostPool().acquire(chunk, cap[i]);
+		e = cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming);
+	}
+	const char *src = (const char *) h_ptr;
+	char *dst = (char *) d_ptr;
+	bool used[2] = {false, false};
+	int b = 0;
+	for (size_t done = 0; done < bytes && e == cudaSuccess; b ^= 1)
+	{
+		const size_t n = std::min(chunk, bytes - done);
+		if (used[b])
+			e = cudaEventSynchronize(ev[b]);
+		if (e != cudaSuccess) break;
+		memcpy(buf[b], src + done, n);
+		e = cudaMemcpyAsync(dst + done, buf[b], n, cudaMemcpyHostToDevice, 0);
+		if (e == cudaSuccess) e = cudaEventRecord(ev[b], 0);
+		used[b] = true;
+		done += n;
+	}
+	cudaError_t e2 = cudaStreamSynchronize(0);
+	if (e == cudaSuccess) e = e2;
+	for (int i = 0; i < 2; i++)
+	{
+		if (ev[i] != NULL) cudaEventDestroy(ev[i]);
+		pinnedHostPool().release(buf[i], cap[i]);
+	}
+	return e;
+}
+
+static inline cudaError_t pinnedBigDownload(void *h_ptr, const void *d_ptr, size_t bytes)
+{
+	const size_t chunk = (size_t) 8 << 20;
+	if (!pinnedBigCopyOn() || bytes < ((size_t) 1 << 20))
+		return cudaMemcpy(h_ptr, d_ptr, bytes, cudaMemcpyDeviceToHost);
+	void *buf[2] = {NULL, NULL};
+	size_t cap[2] = {0, 0};
+	cudaEvent_t ev[2] = {NULL, NULL};
+	cudaError_t e = cudaSuccess;
+	for (int i = 0; i < 2 && e == cudaSuccess; i++)
+	{
+		buf[i] = pinnedHostPool().acquire(chunk, cap[i]);
+		e = cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming);
+	}
+	const size_t nchunks = (bytes + chunk - 1) / chunk;
+	auto issue = [&](size_t i)
+	{
+		const size_t off = i * chunk, n = std::min(chunk, bytes - off);
+		cudaError_t r = cudaMemcpyAsync(buf[i & 1], (const char *) d_ptr + off, n, cudaMemcpyDeviceToHost, 0);
+		if (r == cudaSuccess) r = cudaEventRecord(ev[i & 1], 0);
+		return r;
+	};
+	if (e == cudaSuccess) e = issue(0);
+	for (size_t i = 0; i < nchunks && e == cudaSuccess; i++)
+	{
+		// the other buffer was emptied into the host array at the end of the last round
+		if (i + 1 < nchunks) e = issue(i + 1);
+		if (e != cudaSuccess) break;
+		e = cudaEventSynchronize(ev[i & 1]);
+		if (e != cudaSuccess) break;
+		const size_t off = i * chunk, n = std::min(chunk, bytes - off);
+		memcpy((char *) h_ptr + off, buf[i & 1], n);
+	}
+	cudaError_t e2 = cudaStreamSynchronize(0);
+	if (e == cudaSuccess) e = e2;
+	for (int i = 0; i < 2; i++)
+	{
+		if (ev[i] != NULL) cudaEventDestroy(ev[i]);
+		pinnedHostPool().release(buf[i], cap[i]);
+	}
+	return e;
+}
+
 template< typename T>
 static inline
 bool cudaCpyDeviceToHost( T *d_ptr, T *h_ptr, size_t size, cudaStream_t &stream)
