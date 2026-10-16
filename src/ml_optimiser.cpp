@@ -1582,14 +1582,21 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
     if (do_write_optimiser && random_subset < 2)
     {
         fn_tmp = fn_root2+"_optimiser.star";
-        fh.open((fn_tmp).c_str(), std::ios::out);
-        if (!fh)
-            REPORT_ERROR( (std::string)"MlOptimiser::write: Cannot write file: " + fn_tmp);
+        // RELION_ASYNC_STAR_WRITE: the text is formatted here, and the background thread opens and writes the file
+        const bool async_star = AsyncFileWriter::enabled() && AsyncFileWriter::starMode() > 0;
+        std::ostringstream fstr;
+        if (!async_star)
+        {
+            fh.open((fn_tmp).c_str(), std::ios::out);
+            if (!fh)
+                REPORT_ERROR( (std::string)"MlOptimiser::write: Cannot write file: " + fn_tmp);
+        }
+        std::ostream &fo = async_star ? static_cast<std::ostream &>(fstr) : static_cast<std::ostream &>(fh);
 
         // Write the command line as a comment in the header
-        fh << "# RELION optimiser; version " << g_RELION_VERSION <<std::endl;
-        fh << "# ";
-        parser.writeCommandLine(fh);
+        fo << "# RELION optimiser; version " << g_RELION_VERSION <<std::endl;
+        fo << "# ";
+        parser.writeCommandLine(fo);
 
         if (do_split_random_halves && !do_join_random_halves)
         {
@@ -1723,8 +1730,14 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
         MD.setValue(EMDL_OPTIMISER_OFFSET_RANGE_Z, offset_range_z);
 
 
-        MD.write(fh);
-        fh.close();
+        MD.write(fo);
+        if (async_star)
+        {
+            std::shared_ptr<std::string> text = std::make_shared<std::string>(fstr.str());
+            AsyncFileWriter::putText(fn_tmp, [text] { return text; }, true);
+        }
+        else
+            fh.close();
     }
 
     // Then write the mymodel to file
@@ -13049,10 +13062,26 @@ void MlOptimiser::parseKeepAllIterations()
         keep_all_iterations = false;
 }
 
+static void pruneOldIterationsNow(const FileName fn_out, int iter, bool keep_first_iteration);
+
 void MlOptimiser::pruneOldIterations(int iter)
 {
     if (keep_all_iterations || iter <= 0) return;
 
+    // With RELION_ASYNC_STAR_WRITE the files of this iteration are still queued for the background writer,
+    // so the clean-up joins the queue too and runs after them.
+    if (AsyncFileWriter::enabled() && AsyncFileWriter::starMode() > 0)
+    {
+        const FileName fo = fn_out;
+        const bool keep_first = keep_first_iteration;
+        AsyncFileWriter::instance().submit([fo, iter, keep_first] { pruneOldIterationsNow(fo, iter, keep_first); });
+        return;
+    }
+    pruneOldIterationsNow(fn_out, iter, keep_first_iteration);
+}
+
+static void pruneOldIterationsNow(const FileName fn_out, int iter, bool keep_first_iteration)
+{
     // Only once this iteration really is on disk (gradient runs write only
     // every few iterations, and write() returns early in between)
     FileName fn_now;
