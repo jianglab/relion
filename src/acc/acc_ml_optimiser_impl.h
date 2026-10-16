@@ -2716,6 +2716,14 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             // The rest of the pass on the GPU in a few launches and one copy
             // (RELION_GPU_FUSED_WEIGHTS, see CudaKernels::fusedWeightPass)
             const size_t fused_n = (sp.iclass_max-sp.iclass_min+1) * sp.nr_dir * sp.nr_psi * sp.nr_trans;
+            static const bool said_weights = [&]() {
+                if (baseMLO->verb > 0)
+                    std::cout << " GPU significance pass: fused weight pass " << (gpuFusedWeights() ? "on" : "off")
+                              << " (RELION_GPU_FUSED_WEIGHTS), radix selection " << (CudaKernels::gpuSignifSelect() ? "on" : "off")
+                              << " (RELION_GPU_SIGNIF_SELECT); =0 turns either off." << std::endl;
+                return true;
+            }();
+            (void) said_weights;
             if (gpuFusedWeights() && gpuClassBatching() && fused_n > 1 && fused_n <= ((size_t) 1 << 22))
             {
                 typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;

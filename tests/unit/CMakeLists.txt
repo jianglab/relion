@@ -70,6 +70,10 @@ set(RELION_UNIT_TEST_SOURCES
     test_gpu_pool_plan.cpp
 )
 
+if (CUDA_FOUND)
+    list(APPEND RELION_UNIT_TEST_SOURCES test_gpu_signif_select.cpp)
+endif()
+
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})
 
 # Inherit the same compile definitions and include paths as relion_lib
@@ -102,7 +106,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch pinned_pool)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch pinned_pool gpu_signif_select)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]
