@@ -825,7 +825,7 @@ void ObservationModel::getBoxSizes(std::vector<int>& sDest, std::vector<int>& sh
 	}
 }
 
-Matrix2D<RFLOAT> ObservationModel::getMagMatrix(int opticsGroup) const
+const Matrix2D<RFLOAT>& ObservationModel::getMagMatrix(int opticsGroup) const
 {
 	return magMatrices[opticsGroup];
 }

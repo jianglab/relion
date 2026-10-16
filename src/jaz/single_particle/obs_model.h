@@ -202,7 +202,7 @@ class ObservationModel
 		void setBoxSize(int opticsGroup, int newBoxSize);
 		void setPixelSize(int opticsGroup, RFLOAT newPixelSize);
 
-		Matrix2D<RFLOAT> getMagMatrix(int opticsGroup) const;
+		const Matrix2D<RFLOAT>& getMagMatrix(int opticsGroup) const;
 		std::vector<Matrix2D<RFLOAT> > getMagMatrices() const;
 		void setMagMatrix(int opticsGroup, const Matrix2D<RFLOAT>& M);
 
