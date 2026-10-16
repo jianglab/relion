@@ -18,6 +18,7 @@ import pytest
 SWITCHES = [
     "RELION_GPU_PINNED_POOL",
     "RELION_GPU_PINNED_BIG_COPY",
+    "RELION_GPU_FUSED_WEIGHTS",
 ]
 
 

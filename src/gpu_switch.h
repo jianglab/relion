@@ -36,6 +36,7 @@ inline const char *const *defaultOnNames(size_t &count)
 	static const char *const names[] = {
 		"RELION_GPU_FLOAT2_TEX", "RELION_GPU_COARSE_XT", "RELION_GPU_RECONSTRUCT", "RELION_GPU_SYMMETRISE",
 		"RELION_JOIN_SKIP_BPREF", "RELION_GPU_PINNED_POOL", "RELION_GPU_PINNED_BIG_COPY",
+		"RELION_GPU_FUSED_WEIGHTS",
 	};
 	count = sizeof(names) / sizeof(names[0]);
 	return names;

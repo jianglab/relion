@@ -3,6 +3,7 @@
 
 #include "src/acc/acc_ml_optimiser.h"
 #include "src/acc/orientation_cache.h"
+#include "src/gpu_switch.h"
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -322,15 +323,12 @@ inline bool gpuWavgSum()
 	return on;
 }
 
-// RELION_GPU_FUSED_WEIGHTS=1: the significance pass of the weights (maximum, exponentiation, sort,
+// RELION_GPU_FUSED_WEIGHTS: the significance pass of the weights (maximum, exponentiation, sort,
 // scan, threshold, significance mask) as a few launches and one copy instead of about fifty driver
-// calls per pass (see CudaKernels::fusedWeightPass); off by default while it is validated
+// calls per pass (see CudaKernels::fusedWeightPass); on by default, RELION_GPU_FUSED_WEIGHTS=0 turns it off
 inline bool gpuFusedWeights()
 {
-	static const bool on = []() {
-		const char *e = getenv("RELION_GPU_FUSED_WEIGHTS");
-		return e && std::string(e) != "0" && std::string(e) != "off";
-	}();
+	static const bool on = gpuswitch::on("RELION_GPU_FUSED_WEIGHTS");
 	return on;
 }
 
