@@ -1544,6 +1544,19 @@ void getAllSquaredDifferencesCoarse(
 				hold->table.reset(new AccPtr<char>(ptrFactory.make<char>()));
 			AccPtr<char> table_local = ptrFactory.make<char>();
 			AccPtr<char> &table = hold != NULL ? *hold->table : table_local;
+			CoarseCacheCtx cacheCtx;
+			CoarseCacheCtx *cacheCtxPtr = NULL;
+			if (hold == NULL && !accMLO->generateProjectionPlanOnTheFly && sp.nr_images == 1 && baseMLO->mymodel.nr_bodies == 1 &&
+			    baseMLO->mymodel.ref_dim == 3 && !accMLO->dataIs3D && !jobs.empty())
+			{
+				cacheCtx.cache = &accMLO->bundle->coarse_cache;
+				cacheCtx.allocator = accMLO->bundle->allocator;
+				cacheCtx.class_ids.assign(job_iclass.begin(), job_iclass.end());
+				cacheCtx.host_minvsigma2 = op.local_Minvsigma2.data;
+				cacheCtx.verb = baseMLO->verb;
+				cacheCtx.device = accMLO->bundle->device_id;
+				cacheCtxPtr = &cacheCtx;
+			}
 			runDiff2KernelCoarseBatched(
 					jobs, nums,
 					&(~trans_xyz)[trans_x_offset],
@@ -1556,7 +1569,8 @@ void getAllSquaredDifferencesCoarse(
 					image_size,
 					accMLO->dataIs3D,
 					table,
-					hold != NULL ? &hold->def : NULL);
+					hold != NULL ? &hold->def : NULL,
+					cacheCtxPtr);
 			if (hold != NULL)
 			{
 				// launched later for the whole group; keep what it reads

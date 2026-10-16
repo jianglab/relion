@@ -2138,6 +2138,168 @@ static void launchDiff2CoarseBatched(
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 
+#ifndef ACC_DOUBLE_PRECISION
+#include "src/acc/cuda/cuda_kernels/coarse_cache.cuh"
+
+static CoarseShapeTuner &coarseShapeTuner() { static CoarseShapeTuner t; return t; }
+
+// The cache for the classes of this pass: built on the first call of the iteration, then reused. Returns whether it can
+// serve this pass (same classes, orientations and pixel mask as it was built for).
+static bool coarseCacheReady(
+		CoarseCacheCtx &ctx,
+		std::vector<CoarseClassJob> &classes,
+		const std::vector<size_t> &nums,
+		int image_size,
+		unsigned long translation_num,
+		deviceStream_t stream)
+{
+	CoarseProjectionCache &cc = *ctx.cache;
+	{
+		std::lock_guard<std::mutex> lock(cc.mtx);
+		if (!cc.tried)
+		{
+			cc.tried = true;
+			cc.allocator = ctx.allocator;
+			std::vector<int> pix;
+			cc.mask.assign(image_size, 0);
+			for (int p = 0; p < image_size; p++)
+				if (ctx.host_minvsigma2[p] != 0)
+				{
+					cc.mask[p] = 1;
+					pix.push_back(p);
+				}
+			size_t O_total = 0;
+			for (size_t n : nums)
+				O_total += n;
+			const size_t K = pix.size();
+			size_t bytes = K * O_total * sizeof(float2) + K * sizeof(int) + 1024;
+			size_t budget = std::min<size_t>((size_t) 4 << 30, ctx.allocator->getPotentialFreeSpace() / 4);
+			const char *mb = getenv("RELION_GPU_COARSE_CACHE_MB");
+			if (mb != NULL && atoi(mb) > 0)
+				budget = (size_t) atoi(mb) << 20;
+			if (K == 0 || O_total == 0 || O_total >= ((size_t) 1 << 31) || K >= ((size_t) 1 << 24) || bytes > budget)
+			{
+				if (ctx.verb > 0)
+					std::cout << " GPU coarse pass: the projection cache would need " << (bytes >> 20) << " MB and may use " << (budget >> 20)
+					          << " MB (RELION_GPU_COARSE_CACHE_MB), using the cross-term kernel." << std::endl;
+				return false;
+			}
+			cc.image_size = image_size;
+			cc.K = (int) K;
+			cc.O_total = O_total;
+			cc.bytes = bytes;
+			cc.block = ctx.allocator->alloc(bytes);
+			char *base = (char *) cc.block->getPtr();
+			cc.d_pix = (int *) base;
+			cc.d_R = (float2 *) (base + ((K * sizeof(int) + 255) / 256) * 256);
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(cc.d_pix, pix.data(), K * sizeof(int), cudaMemcpyHostToDevice, stream));
+			size_t off = 0;
+			for (size_t c = 0; c < classes.size(); c++)
+			{
+				cc.class_ids.push_back(ctx.class_ids[c]);
+				cc.eulers.push_back(classes[c].eulers);
+				cc.n_orient.push_back(nums[c]);
+				cc.offset.push_back(off);
+				cuda_kernel_cc_build<<<(unsigned) ((nums[c] + 127) / 128), 128, 0, stream>>>(
+						classes[c].projector, classes[c].eulers, cc.d_pix, (int) K, (int) nums[c], O_total, off, cc.d_R);
+				LAUNCH_HANDLE_ERROR(cudaGetLastError());
+				off += nums[c];
+			}
+			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+			cc.ok = true;
+			if (ctx.verb > 0)
+				std::cout << " GPU coarse pass: projection cache of " << K << " pixels x " << O_total << " orientations ("
+				          << (bytes >> 20) << " MB), one pass over it per particle (RELION_GPU_COARSE_CACHE=0 for the cross-term kernel)." << std::endl;
+		}
+		if (!cc.ok)
+			return false;
+	}
+	if (cc.image_size != image_size || cc.class_ids != ctx.class_ids || classes.size() != cc.eulers.size())
+		return false;
+	for (size_t c = 0; c < classes.size(); c++)
+	{
+		if (cc.eulers[c] != classes[c].eulers || cc.n_orient[c] != nums[c])
+			return false;
+		if (classes[c].diff2s != classes[0].diff2s + cc.offset[c] * translation_num)
+			return false;
+	}
+	for (int p = 0; p < image_size; p++)
+		if (ctx.host_minvsigma2[p] != 0 && !cc.mask[p])
+			return false;
+	return true;
+}
+
+// One particle against the cache (see cuda_kernel_cc_score). `diff2s` of the classes are consecutive in memory.
+static void coarseCacheScore(
+		CoarseCacheCtx &ctx,
+		std::vector<CoarseClassJob> &classes,
+		XFLOAT *trans_x, XFLOAT *trans_y,
+		XFLOAT *corr_img, XFLOAT *Fimg_real, XFLOAT *Fimg_imag,
+		unsigned long translation_num, unsigned long image_size,
+		AccPtr<char> &table)
+{
+	CoarseProjectionCache &cc = *ctx.cache;
+	deviceStream_t stream = table.getStream();
+	const int T = (int) translation_num;
+	const int tiles = (T + 31) / 32;
+	const int TT = (((T + tiles - 1) / tiles + 3) / 4) * 4;
+	const int tpad = tiles * TT;
+	AccPtr<float2> A = table.make<float2>();
+	A.setSize((size_t) cc.K * tpad);
+	A.deviceAlloc();
+	AccPtr<float> W = table.make<float>();
+	W.setSize(cc.K);
+	W.deviceAlloc();
+	const size_t n_prep = (size_t) cc.K * tpad;
+	cuda_kernel_cc_prepare<<<(unsigned) ((n_prep + 127) / 128), 128, 0, stream>>>(
+			trans_x, trans_y, Fimg_real, Fimg_imag, corr_img, cc.d_pix, ~A, ~W,
+			cc.K, T, tpad, TT, classes[0].projector.imgX, classes[0].projector.imgY, classes[0].projector.maxR);
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+
+	static const int forced_tm = [] { const char *e = getenv("RELION_GPU_COARSE_CACHE_TM"); return e ? atoi(e) : 0; }();
+	const int cands[2] = {2, 1};
+	CoarseShapeTuner &tuner = coarseShapeTuner();
+	std::pair<cudaEvent_t, cudaEvent_t> ev((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+	int cand = 0;
+	int tm = forced_tm > 0 ? (forced_tm >= 2 ? 2 : 1) : 0;
+	if (tm == 0)
+	{
+		cand = tuner.begin(ctx.device, TT, 2, cands, ev);
+		tm = cands[cand];
+	}
+	if (ev.first != NULL)
+		cudaEventRecord(ev.first, stream);
+	const float2 *R = cc.d_R;
+	float *out = classes[0].diff2s;
+	const size_t O = cc.O_total;
+#define CC_SCORE(TTV, TMV) cuda_kernel_cc_score<TTV, TMV><<<dim3((unsigned) ((O + (size_t) CC_SB * TMV - 1) / ((size_t) CC_SB * TMV)), (unsigned) tiles), CC_SB, 0, stream>>>( \
+		R, cc.K, O, ~A, ~W, cc.d_pix, Fimg_real, Fimg_imag, T, out)
+#define CC_TT_CASE(TTV) case TTV: if (tm == 2) CC_SCORE(TTV, 2); else CC_SCORE(TTV, 1); break
+	switch (TT)
+	{
+		CC_TT_CASE(4);
+		CC_TT_CASE(8);
+		CC_TT_CASE(12);
+		CC_TT_CASE(16);
+		CC_TT_CASE(20);
+		CC_TT_CASE(24);
+		CC_TT_CASE(28);
+		CC_TT_CASE(32);
+		default: REPORT_ERROR("BUG: coarseCacheScore: unexpected translation tile");
+	}
+#undef CC_TT_CASE
+#undef CC_SCORE
+	cudaError_t err = cudaGetLastError();
+	if (err != cudaSuccess)
+		LAUNCH_HANDLE_ERROR(err);
+	if (ev.first != NULL)
+	{
+		cudaEventRecord(ev.second, stream);
+		tuner.finish(ctx.device, TT, ev, cand, 1e-3 * (double) O * (double) cc.K * (double) tiles);
+	}
+}
+#endif
+
 bool runDiff2KernelCoarseBatched(
 		std::vector<CoarseClassJob> &classes,
 		std::vector<size_t> &orientation_nums,
@@ -2151,7 +2313,8 @@ bool runDiff2KernelCoarseBatched(
 		unsigned long image_size,
 		bool data_is_3D,
 		AccPtr<char> &table,
-		CoarseDeferred *defer)
+		CoarseDeferred *defer,
+		CoarseCacheCtx *cc)
 {
 	if (classes.empty())
 		return true;
@@ -2255,6 +2418,62 @@ bool runDiff2KernelCoarseBatched(
 	}
 #else
 	const bool use_xt = false;
+#endif
+#ifndef ACC_DOUBLE_PRECISION
+	// RELION_GPU_COARSE_CACHE: cached reference projections (see cuda_kernels/coarse_cache.cuh); =check also runs the
+	// cross-term kernel and reports how far the two differ
+	if (cc != NULL && cc->cache != NULL && use_xt && defer == NULL && xt_mode == 1 && !data_is_3D && ref3D && translation_num > 0)
+	{
+		static const int cache_mode = gpuswitch::mode("RELION_GPU_COARSE_CACHE");
+		if (cache_mode != 0 && coarseCacheReady(*cc, classes, orientation_nums, (int) image_size, translation_num, table.getStream()))
+		{
+			static std::atomic<int> reported(0);
+			std::vector<std::vector<XFLOAT> > before(nc);
+			if (cache_mode == 2)
+			{
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(table.getStream()));
+				for (size_t c = 0; c < nc; c++)
+				{
+					before[c].resize(orientation_nums[c] * translation_num);
+					DEBUG_HANDLE_ERROR(cudaMemcpy(before[c].data(), classes[c].diff2s, before[c].size() * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+				}
+			}
+			coarseCacheScore(*cc, classes, trans_x, trans_y, corr_img, Fimg_real, Fimg_imag, translation_num, image_size, table);
+			if (cache_mode == 2)
+			{
+				std::vector<std::vector<XFLOAT> > cached(nc);
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(table.getStream()));
+				for (size_t c = 0; c < nc; c++)
+				{
+					cached[c].resize(before[c].size());
+					DEBUG_HANDLE_ERROR(cudaMemcpy(cached[c].data(), classes[c].diff2s, cached[c].size() * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+					DEBUG_HANDLE_ERROR(cudaMemcpy(classes[c].diff2s, before[c].data(), before[c].size() * sizeof(XFLOAT), cudaMemcpyHostToDevice));
+				}
+				runDiff2KernelCoarseBatched(classes, orientation_nums, trans_x, trans_y, trans_z, corr_img, Fimg_real, Fimg_imag,
+						translation_num, image_size, data_is_3D, table, NULL, NULL);
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(table.getStream()));
+				double max_abs = 0, max_rel = 0, sum_sq = 0;
+				long n_all = 0;
+				for (size_t c = 0; c < nc; c++)
+				{
+					std::vector<XFLOAT> xt(cached[c].size());
+					DEBUG_HANDLE_ERROR(cudaMemcpy(xt.data(), classes[c].diff2s, xt.size() * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+					for (size_t k = 0; k < xt.size(); k++)
+					{
+						const double d = fabs((double) xt[k] - cached[c][k]);
+						max_abs = std::max(max_abs, d);
+						max_rel = std::max(max_rel, d / std::max(1.0, fabs((double) xt[k])));
+						sum_sq += d * d;
+						n_all++;
+					}
+				}
+				if (reported++ % 200 == 0)
+					fprintf(stderr, "COARSE_CACHE_CHECK call %d: %ld values, max |diff| %.4g, max relative %.3g, rms %.4g\n",
+							(int) reported, n_all, max_abs, max_rel, sqrt(sum_sq / std::max(1L, n_all)));
+			}
+			return true;
+		}
+	}
 #endif
 	// A deferred (particle group) launch always sums through the chunk buffer
 	const bool use_partial = n_chunks > 1 || use_xt || defer != NULL || coarseDeterministic();

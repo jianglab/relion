@@ -362,6 +362,8 @@ inline int gpuSharedSums()
 //
 // With `defer` nothing is launched: the objects the launch needs stay in `defer` (they must live until the
 // group's launch has finished) and runDiff2KernelCoarseGroup launches for several particles together.
+struct CoarseCacheCtx;
+
 struct CoarseDeferred
 {
 	std::unique_ptr<AccPtr<XFLOAT> > partial;
@@ -391,7 +393,8 @@ bool runDiff2KernelCoarseBatched(
 		unsigned long image_size,
 		bool data_is_3D,
 		AccPtr<char> &table,
-		CoarseDeferred *defer = NULL);
+		CoarseDeferred *defer = NULL,
+		CoarseCacheCtx *cc = NULL);
 
 // The deferred coarse launches of several particles together; `recs` holds the uploaded records
 bool runDiff2KernelCoarseGroup(std::vector<CoarseDeferred *> &items, AccPtr<char> &recs);
