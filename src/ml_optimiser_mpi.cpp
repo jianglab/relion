@@ -4602,15 +4602,7 @@ void MlOptimiserMpi::iterate()
 			                    !grad_has_converged;
 		}
 
-		if (maximum_significants_arg != -1)
-			maximum_significants = maximum_significants_arg;
-		else if (do_grad)
-		{
-			if (mymodel.ref_dim == 2)
-				maximum_significants = 5 * mymodel.nr_classes;
-			else
-				maximum_significants = 100 * mymodel.nr_classes;
-		}
+		selectMaximumSignificants(node->isLeader());
 
 		// Update subset_size
 		updateSubsetSize(node->isLeader());

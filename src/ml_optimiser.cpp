@@ -4247,6 +4247,34 @@ void MlOptimiser::updateHelicalContext()
     }
 }
 
+// Cap on the significant coarse samples per particle. The VDAM gradient mode always caps it (as upstream
+// does). RELION_AUTO_MAXSIG=1 applies the same cap, 100 per class, to 3D EM runs, where it only binds in the
+// early iterations in which the posterior is nearly flat and tens of thousands of orientations "survive".
+void MlOptimiser::selectMaximumSignificants(bool announce)
+{
+    static const bool auto_cap = [] { const char *e = getenv("RELION_AUTO_MAXSIG"); return e && *e && atoi(e) > 0; }();
+    const char *reason = nullptr;
+    if (maximum_significants_arg != -1)
+        maximum_significants = maximum_significants_arg;
+    else if (do_grad)
+        maximum_significants = (mymodel.ref_dim == 2 ? 5 : 100) * mymodel.nr_classes;
+    else if (auto_cap && mymodel.ref_dim == 3)
+    {
+        maximum_significants = 100 * mymodel.nr_classes;
+        reason = "RELION_AUTO_MAXSIG=1: 100 per class, as in VDAM";
+    }
+    else
+        maximum_significants = -1;
+
+    static bool announced = false;
+    if (announce && !announced && reason != nullptr && verb > 0)
+    {
+        announced = true;
+        std::cout << " Maximum number of significant coarse samples per particle: " << maximum_significants
+                  << " (" << reason << ")" << std::endl;
+    }
+}
+
 void MlOptimiser::iterate()
 {
 
@@ -4323,15 +4351,7 @@ void MlOptimiser::iterate()
             grad_pseudo_halfsets = do_grad;
         }
 
-        if (maximum_significants_arg != -1)
-            maximum_significants = maximum_significants_arg;
-        else if (do_grad)
-        {
-            if (mymodel.ref_dim == 2)
-                maximum_significants = 5 * mymodel.nr_classes;
-            else
-                maximum_significants = 100 * mymodel.nr_classes;
-        }
+        selectMaximumSignificants(true);
 
         if(do_som)
         {

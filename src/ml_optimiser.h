@@ -865,6 +865,9 @@ public:
 	// This can be set by user or automatically
 	int maximum_significants;
 
+	// Chooses maximum_significants for the current iteration (see ml_optimiser.cpp)
+	void selectMaximumSignificants(bool announce);
+
 	// Tabulated sine and cosine values (for 3D helical sub-tomogram averaging with on-the-fly shifts)
 	TabSine tab_sin;
 	TabCosine tab_cos;
