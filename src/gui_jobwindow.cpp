@@ -20,7 +20,9 @@
 #include "src/gui_jobwindow.h"
 #include "src/parallel_hint.h"
 #include "src/gui_entries.h"
+#include "src/reference_list.h"
 #include <cstdlib>
+#include <memory>
 JobWindow::JobWindow(int _x, int _y, int _w, int _h, const char* title ) : Fl_Box(_x,_y,_w,_h,title)
 {
 	clear();
@@ -2005,6 +2007,37 @@ void JobWindow::initialiseClass3DWindow()
 	guientries["use_gpu"].cb_menu_i(); // This is to make the default effective
 
 	tab7->end();
+
+	// Several reference maps: one class per map, so 'Number of classes' follows the list and is greyed
+	GuiEntry *ref = &guientries["fn_ref"];
+	GuiEntry *classes = &guientries["nr_classes"];
+	auto several = std::make_shared<bool>(false);
+	ref->on_change = [ref, classes, several]()
+	{
+		reflist::Resolved r;
+		std::string error;
+		if (!reflist::resolve(ref->inp->value(), r, error))
+			return; // reported when the job is run
+		const bool now = r.is_list || (r.is_star && r.star_readable);
+		if (now)
+			classes->setValue(integerToString((int)r.maps.size()));
+		if (now != *several)
+			classes->deactivate(now);
+		*several = now;
+	};
+	ref->inp->callback(GuiEntry::cb_changed, ref);
+	ref->inp->when(FL_WHEN_CHANGED);
+	ref->setHint([ref]()
+	{
+		reflist::Resolved r;
+		std::string error;
+		if (!reflist::resolve(ref->inp->value(), r, error) || r.maps.size() < 2)
+			return std::string();
+		std::string text = integerToString((int)r.maps.size()) + " classes, one from each map:";
+		for (const std::string &m : r.maps)
+			text += "\n" + m;
+		return text;
+	});
 }
 
 void JobWindow::initialiseAutorefineWindow()

@@ -104,6 +104,8 @@ extern bool create_scheduler_gui;
 #define WCOL2 ( (XCOL3) - (XCOL2) - (COLUMN_SEPARATION) )
 #define WCOL3 ( (XCOL4) - (XCOL3) - (COLUMN_SEPARATION) )
 #define WCOL4 ( (XCOL5) - (XCOL4) - (COLUMN_SEPARATION) )
+// the small "+" button after Browse (the job window ends at GUIWIDTH - 10)
+#define WCOL5 30
 //version-1.0 #define GUI_BUTTON_COLOR (fl_rgb_color(200,255,100))
 //version-1.0 #define GUI_RUNBUTTON_COLOR (fl_rgb_color(255,155,0))
 //version-1.1 #define GUI_BUTTON_COLOR (fl_rgb_color(50,150,250))
@@ -216,6 +218,9 @@ public:
 	// Browse button
     Fl_Button* browse;
 
+    // The "+" button after Browse (only for an entry that takes several files)
+    Fl_Button* add_button;
+
     ////////////// Radio entry
 
     // The choices
@@ -249,6 +254,7 @@ public:
     	inp = NULL;
 		help = NULL;
 		browse = NULL;
+		add_button = NULL;
 		choice = NULL;
 		menu = NULL;
 		my_deactivate_group = NULL;
@@ -294,13 +300,23 @@ public:
     static void cb_help(Fl_Widget*, void*);
     void cb_help_i();
 
-    // Call-back functions for the browse button
+    // Call-back functions for the browse button (for an entry that takes several files, the
+    // chooser selects several; append keeps the files already listed)
     static void cb_browse(Fl_Widget*, void*);
-    void cb_browse_i();
+    void cb_browse_i(bool append = false);
 
     // Call-back functions for the browse button
     static void cb_browse_node(Fl_Widget*, void*);
-    void cb_browse_node_i();
+    void cb_browse_node_i(bool append = false);
+
+    // The "+" button, for an entry that takes several files
+    void addPlusButton(int y, int height);
+
+    // Call-back function for the "+" button
+    static void cb_add(Fl_Widget*, void*);
+
+    // Put what the file chooser returned into the entry
+    void setBrowsed(const std::vector<std::string> &names, bool append);
 
     // Call-back functions for the menu
     static void cb_menu(Fl_Widget*, void*);

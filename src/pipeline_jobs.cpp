@@ -22,6 +22,7 @@
 #include "src/rect_downscale.h"
 #include "src/virtual_movie_averages.h"
 #include "src/parallel_hint.h"
+#include "src/reference_list.h"
 #include "src/slurm_script.h"
 #include <unistd.h>
 #include <cerrno>
@@ -386,6 +387,7 @@ void JobOption::clear()
 	radio_options = job_undefined_options;
 	node_type = "";
     min_value = max_value = step_value = 0.;
+	multiple_files = false;
 }
 
 void JobOption::initialise(std::string _label, std::string _default_value, std::string _helptext)
@@ -4746,8 +4748,14 @@ from which you want to continue a previous run. \
 Note that the Output rootname of the continued run and the rootname of the previous run cannot be the same. \
 If they are the same, the program will automatically add a '_ctX' to the output rootname, \
 with X being the iteration from which one continues the previous run.");
-	joboptions["fn_ref"] = JobOption("Reference map:", LABEL_MAP_CPIPE, 1, "", "Image Files (*.{spi,vol,mrc})", "A 3D map in MRC/Spider format. \
-	Make sure this map has the same dimensions and the same pixel size as your input images, or specify that one can resize the reference if needed.");
+	joboptions["fn_ref"] = JobOption("Reference map(s):", LABEL_MAP_CPIPE, 1, "", "Image Files (*.{spi,vol,mrc})", "A 3D map in MRC/Spider format. \
+	Make sure this map has the same dimensions and the same pixel size as your input images, or specify that one can resize the reference if needed.\n\
+\n\
+To start the classes from different maps, select several maps in the Browse window (Ctrl- or Shift-click), or press the + button to add maps to the ones already listed. \
+Each map becomes one class, so the number of classes is the number of maps and 'Number of classes' on the Optimisation tab is not used. \
+All maps need the same box size and pixel size. RELION writes the list as a STAR file in the References directory when the job is run. \
+A STAR file with a column _rlnReferenceImage, such as run_it025_model.star of an earlier job, can also be given here instead of a map.");
+	joboptions["fn_ref"].multiple_files = true;
 	joboptions["fn_mask"] = JobOption("Reference mask (optional):", LABEL_MASK_CPIPE, 1, "", "Image Files (*.{spi,vol,msk,mrc})", "\
 If no mask is provided, a soft spherical mask based on the particle diameter will be used.\n\
 \n\
@@ -4796,7 +4804,9 @@ Still, in general using higher amplitude contrast on the CTFs (e.g. 10-20%) ofte
 Therefore, this option is not generally recommended: try increasing amplitude contrast (in your input STAR file) first!");
 
 	joboptions["nr_classes"] = JobOption("Number of classes:", 1, 1, 50, 1, "The number of classes (K) for a multi-reference refinement. \
-These classes will be made in an unsupervised manner from a single reference by division of the data into random subsets during the first iteration.");
+These classes will be made in an unsupervised manner from a single reference by division of the data into random subsets during the first iteration.\n\
+\n\
+If the Reference map field lists several maps (or a STAR file of maps), each map is one class and this number is not used.");
 	float default_T = (is_tomo) ? 1 : 4;
     joboptions["tau_fudge"] = JobOption("Regularisation parameter T:", default_T , 0.1, 10, 0.1, "Bayes law strictly determines the relative weight between \
 the contribution of the experimental data and the prior. However, in practice one may need to adjust this weight to put slightly more weight on \
@@ -5000,6 +5010,16 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	int my_classes = (int)joboptions["nr_classes"].getNumber(error_message);
 	if (error_message != "") return false;
 
+	// Several reference maps (a list, or a STAR file): one class per map, whatever K says
+	reflist::Resolved refs;
+	if (!reflist::resolve(joboptions["fn_ref"].getString(), refs, error_message))
+	{
+		error_message = "ERROR: " + error_message;
+		return false;
+	}
+	if (refs.is_list || (refs.is_star && refs.star_readable))
+		my_classes = (int)refs.maps.size();
+
 	outputNodes = getOutputNodesRefine(outputname + fn_run, "Class3D", my_iter, my_classes, 3, 1, is_tomo);
 
 	if (!is_continue)
@@ -5042,11 +5062,29 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
         }
         else
 		{
-			command += " --ref " + joboptions["fn_ref"].getString();
-			if (joboptions["fn_ref"].getString() != "None")
+			if (refs.is_list && do_makedir)
+			{
+				if (!reflist::checkMaps(refs.maps, error_message) ||
+				    !reflist::writeStar(refs.ref_argument, refs.maps, error_message))
+				{
+					error_message = "ERROR: " + error_message;
+					return false;
+				}
+			}
+			command += " --ref " + refs.ref_argument;
+			if (refs.ref_argument != "None")
             {
-                Node node(joboptions["fn_ref"].getString(), joboptions["fn_ref"].node_type);
-                inputNodes.push_back(node);
+				// One input node per map; a STAR file that cannot be read yet only registers itself
+				for (const std::string &map : refs.maps)
+				{
+					Node node(map, joboptions["fn_ref"].node_type);
+					inputNodes.push_back(node);
+				}
+				if (refs.maps.empty())
+				{
+					Node node(refs.ref_argument, joboptions["fn_ref"].node_type);
+					inputNodes.push_back(node);
+				}
             }
 			if (!joboptions["ref_correct_greyscale"].getBoolean())
 				command += " --firstiter_cc";
@@ -5103,7 +5141,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 		if (joboptions["do_fast_subsets"].getBoolean())
 			command += " --fast_subsets ";
 
-		command += " --K " + joboptions["nr_classes"].getString();
+		command += " --K " + ((refs.is_list || (refs.is_star && refs.star_readable)) ? integerToString(my_classes) : joboptions["nr_classes"].getString());
 		// Always flatten the solvent
 		command += " --flatten_solvent";
 		if (joboptions["do_zero_mask"].getBoolean())

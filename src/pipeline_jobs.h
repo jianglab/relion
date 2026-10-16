@@ -755,6 +755,8 @@ public:
     int node_type_depth;
 	std::string pattern;
 	std::string directory;
+	// A file entry that takes several files, kept as a comma-separated list (Browse selects several, + adds)
+	bool multiple_files = false;
 	std::vector<std::string> radio_options;
 
 public:

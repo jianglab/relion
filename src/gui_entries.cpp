@@ -20,6 +20,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/gui_entries.h"
+#include "src/reference_list.h"
 
 float fltkTextToFloat(const char* str)
 {
@@ -145,6 +146,7 @@ void GuiEntry::initialise(int x, int y, Fl_Group * deactivate_this_group, bool _
 		browse->callback( cb_browse, this );
 		browse->color(GUI_BUTTON_COLOR);
 		browse->labelsize(ENTRY_FONTSIZE);
+		addPlusButton(y, height);
 	}
 	else if (joboption.joboption_type == JOBOPTION_INPUTNODE)
 	{
@@ -153,6 +155,7 @@ void GuiEntry::initialise(int x, int y, Fl_Group * deactivate_this_group, bool _
 		browse->callback( cb_browse_node, this );
 		browse->color(GUI_BUTTON_COLOR);
 		browse->labelsize(ENTRY_FONTSIZE);
+		addPlusButton(y, height);
 	}
 	else if (joboption.joboption_type == JOBOPTION_RADIO || joboption.joboption_type == JOBOPTION_BOOLEAN)
 	{
@@ -276,6 +279,8 @@ void GuiEntry::deactivate(bool do_deactivate)
 			help->deactivate();
 		if (browse)
 			browse->deactivate();
+		if (add_button)
+			add_button->deactivate();
 		if (menu)
 			menu->deactivate();
 		if (slider)
@@ -289,6 +294,8 @@ void GuiEntry::deactivate(bool do_deactivate)
 			help->activate();
 		if (browse)
 			browse->activate();
+		if (add_button)
+			add_button->activate();
 		if (menu)
 			menu->activate();
 		if (slider)
@@ -320,11 +327,46 @@ void GuiEntry::cb_browse(Fl_Widget* o, void* v)
 }
 
 
-void GuiEntry::cb_browse_i()
+void GuiEntry::cb_add(Fl_Widget* o, void* v)
+{
+	GuiEntry* T=(GuiEntry*)v;
+	if (T->joboption.joboption_type == JOBOPTION_INPUTNODE)
+		T->cb_browse_node_i(true);
+	else
+		T->cb_browse_i(true);
+}
+
+void GuiEntry::addPlusButton(int y, int height)
+{
+	if (!joboption.multiple_files)
+		return;
+	add_button = new Fl_Button(XCOL5, y, WCOL5, height, "+");
+	add_button->callback(cb_add, this);
+	add_button->color(GUI_BUTTON_COLOR);
+	add_button->labelsize(ENTRY_FONTSIZE);
+	add_button->tooltip("Add maps to the ones already listed");
+}
+
+void GuiEntry::setBrowsed(const std::vector<std::string> &names, bool append)
+{
+	if (names.empty())
+		return;
+	if (joboption.multiple_files)
+		inp->value(append ? reflist::appendToList(inp->value(), names).c_str() : reflist::joinList(names).c_str());
+	else
+		inp->value(names[0].c_str());
+	if (my_deactivate_group != NULL || my_additional_deactivate_group != NULL)
+		cb_input_i();
+	if (on_change)
+		on_change();
+}
+
+void GuiEntry::cb_browse_i(bool append)
 {
 
 	Fl::scheme("gtk+");
-	Fl_File_Chooser * G_chooser = new Fl_File_Chooser("", joboption.pattern.c_str(), Fl_File_Chooser::SINGLE, "");
+	Fl_File_Chooser * G_chooser = new Fl_File_Chooser("", joboption.pattern.c_str(),
+			joboption.multiple_files ? Fl_File_Chooser::MULTI : Fl_File_Chooser::SINGLE, "");
 
 	FileName mydir = joboption.directory;
     mydir.replaceAllSubstrings("CURRENT_ODIR", current_browse_directory);
@@ -345,18 +387,19 @@ void GuiEntry::cb_browse_i()
 		return;
 	}
 
-	char relname[FL_PATH_MAX];
-	fl_filename_relative(relname,sizeof(relname),G_chooser->value());
+	std::vector<std::string> names;
+	const int nr_chosen = joboption.multiple_files ? G_chooser->count() : 1;
+	for (int i = 1; i <= nr_chosen; i++)
+	{
+		char relname[FL_PATH_MAX];
+		fl_filename_relative(relname,sizeof(relname),G_chooser->value(i));
 
-	FileName fn_pre, fn_jobnr, fn_post, fn_out;
-	decomposePipelineSymlinkName(relname, fn_pre, fn_jobnr, fn_post);
-	fn_out = fn_pre + fn_jobnr + fn_post;
-
-	inp->value(fn_out.c_str());
-	if (my_deactivate_group != NULL || my_additional_deactivate_group != NULL)
-		cb_input_i();
-	if (on_change)
-		on_change();
+		FileName fn_pre, fn_jobnr, fn_post, fn_out;
+		decomposePipelineSymlinkName(relname, fn_pre, fn_jobnr, fn_post);
+		fn_out = fn_pre + fn_jobnr + fn_post;
+		names.push_back(fn_out);
+	}
+	setBrowsed(names, append);
 }
 
 
@@ -366,9 +409,10 @@ void GuiEntry::cb_browse_node(Fl_Widget* o, void* v) {
 }
 
 
-void GuiEntry::cb_browse_node_i() {
+void GuiEntry::cb_browse_node_i(bool append) {
 	Fl::scheme("gtk+");
-	Fl_File_Chooser * G_chooser = new Fl_File_Chooser("", joboption.pattern.c_str(), Fl_File_Chooser::SINGLE, "");
+	Fl_File_Chooser * G_chooser = new Fl_File_Chooser("", joboption.pattern.c_str(),
+			joboption.multiple_files ? Fl_File_Chooser::MULTI : Fl_File_Chooser::SINGLE, "");
 
 	FileName mylabel = joboption.node_type;
     std::string fn_dir = (joboption.node_type_depth == 1) ?
@@ -391,24 +435,23 @@ void GuiEntry::cb_browse_node_i() {
 		return;
 	}
 
-	char relname[FL_PATH_MAX];
-	fl_filename_relative(relname,sizeof(relname),G_chooser->value());
+	std::vector<std::string> names;
+	const int nr_chosen = joboption.multiple_files ? G_chooser->count() : 1;
+	for (int i = 1; i <= nr_chosen; i++)
+	{
+		char relname[FL_PATH_MAX];
+		fl_filename_relative(relname,sizeof(relname),G_chooser->value(i));
 
-	// Get rid of the .Nodes/type/ directory-name again
-	std::string replace = std::string(relname);
-	std::string replace2 = (std::string::npos == replace.find(fn_dir.c_str())) ? replace : replace.substr(fn_dir.length()+1, replace.length());
-	char relname2[FL_PATH_MAX];
-	strcpy(relname2, replace2.c_str());
+		// Get rid of the .Nodes/type/ directory-name again
+		std::string replace = std::string(relname);
+		std::string replace2 = (std::string::npos == replace.find(fn_dir.c_str())) ? replace : replace.substr(fn_dir.length()+1, replace.length());
 
-	FileName fn_pre, fn_jobnr, fn_post, fn_out;
-	decomposePipelineSymlinkName(replace2, fn_pre, fn_jobnr, fn_post);
-	fn_out = fn_pre + fn_jobnr + fn_post;
-
-	inp->value(fn_out.c_str());
-	if (my_deactivate_group != NULL || my_additional_deactivate_group != NULL)
-		cb_input_i();
-	if (on_change)
-		on_change();
+		FileName fn_pre, fn_jobnr, fn_post, fn_out;
+		decomposePipelineSymlinkName(replace2, fn_pre, fn_jobnr, fn_post);
+		fn_out = fn_pre + fn_jobnr + fn_post;
+		names.push_back(fn_out);
+	}
+	setBrowsed(names, append);
 }
 
 void GuiEntry::cb_menu(Fl_Widget* o, void* v) {
