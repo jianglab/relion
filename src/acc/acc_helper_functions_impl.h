@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 #include "src/gpu_switch.h"
+#include "src/acc/pair_list.h"
 /*
 #undef ALTCPU
 #ifdef _CUDA_ENABLED
@@ -52,6 +53,38 @@ long int makeJobsForDiff2Fine(
 	dataMask.jobExtent.freeHostIfSet();
 	dataMask.jobOrigin.hostAlloc();
 	dataMask.jobExtent.hostAlloc();
+
+	// RELION_GPU_PAIR_LIST=0 (or "reference") uses the plain loop below
+	const bool plainLoop = !pairlist::fastEnabled();
+	bool regular = !plainLoop && nr_over_trans > 0 && translation_num > 0 && (long unsigned) translation_num == iover_transes.size() &&
+			iover_transes.size() == ihiddens.size() && translation_num % nr_over_trans == 0 && chunk >= 1;
+	for (long unsigned j = 0; regular && j < (long unsigned) translation_num; j++)
+		regular = ihiddens[j] == j / nr_over_trans && iover_transes[j] == j % nr_over_trans;
+	if (regular)
+	{
+		pairlist::Input in;
+		in.orientation_num = orientation_num;
+		in.nt = translation_num / nr_over_trans;
+		in.nov = nr_over_trans;
+		in.nor = nr_over_orient;
+		in.nr_trans = sp.nr_trans;
+		in.rot_mod = sp.nr_dir * sp.nr_psi;
+		in.chunk = chunk;
+		in.iorientclasses = &FineProjectionData.iorientclasses[0];
+		in.iover_rots = &FineProjectionData.iover_rots[0];
+		in.sig = op.Mcoarse_significant.data;
+		pairlist::Output out;
+		out.rot_id = &FPW.rot_id[w_base];
+		out.rot_idx = &FPW.rot_idx[w_base];
+		out.trans_idx = &FPW.trans_idx[w_base];
+		out.ihidden_overs = &FPW.ihidden_overs[w_base];
+		out.job_origin = &dataMask.jobOrigin[0];
+		out.job_extent = &dataMask.jobExtent[0];
+		pairlist::build(in, out);
+		dataMask.setNumberOfJobs(out.jobs);
+		dataMask.setNumberOfWeights(out.pairs);
+		return (long int) out.pairs;
+	}
 
 	dataMask.jobOrigin[k]=0;
 	for (long unsigned i = 0; i < orientation_num; i++)

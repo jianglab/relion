@@ -1,5 +1,6 @@
 #include <memory>
 #include "src/acc/stage_timer.h"
+#include "src/acc/pair_list.h"
 static omp_lock_t global_mutex;
 
 #include <limits>
@@ -2078,6 +2079,13 @@ void getAllSquaredDifferencesFine(
                     chunkSize = D2F_CHUNK_2D;
 
                 // Do more significance checks on translations and create jobDivision
+                static const bool said_pairs = [&]() {
+                    if (baseMLO->verb > 0)
+                        std::cout << " GPU fine-pass pair list: " << (pairlist::fastEnabled() ? "fast builder" : "plain loop")
+                                  << " (RELION_GPU_PAIR_LIST=0 selects the plain loop)." << std::endl;
+                    return true;
+                }();
+                (void) said_pairs;
                 { stagetimer::Scope st_pair(stagetimer::PAIR_LIST);
                 significant_num = makeJobsForDiff2Fine(op,
                                                        sp,                                                // alot of different type inputs...
