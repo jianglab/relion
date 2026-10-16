@@ -10,6 +10,8 @@
 #include "src/acc/cuda/cuda_settings.h"
 #include "src/acc/cuda/custom_allocator.cuh"
 #include "src/acc/stage_timer.h"
+#include "src/acc/pinned_pool.h"
+#include "src/gpu_switch.h"
 #endif
 
 
@@ -47,6 +49,17 @@ void cudaCpyHostToDevice( T *h_ptr, T *d_ptr, size_t size)
 	DEBUG_HANDLE_ERROR(cudaMemcpy( d_ptr, h_ptr, size * sizeof(T), cudaMemcpyHostToDevice));
 };
 
+// The pinned staging buffers of all threads come from this pool (see pinned_pool.h);
+// RELION_GPU_PINNED_POOL=0 makes every thread allocate and free its own, as before.
+static inline pinnedpool::Pool &pinnedHostPool()
+{
+	static pinnedpool::Pool pool(
+		[](size_t n) -> void * { void *p = NULL; HANDLE_ERROR(cudaMallocHost(&p, n)); return p; },
+		[](void *p) { cudaFreeHost(p); },
+		gpuswitch::on("RELION_GPU_PINNED_POOL"));
+	return pool;
+}
+
 // Copy pageable host memory to the device through this thread's pinned, double-buffered
 // staging. A copy straight from pageable memory makes the driver synchronise the stream
 // and take a lock shared by all threads, so threads uploading at the same time (and
@@ -70,10 +83,25 @@ static inline void stagedHostToDevice(void *d_ptr, const void *h_ptr, size_t byt
 	struct Stage
 	{
 		void *buf[2] = {NULL, NULL};
+		size_t cap[2] = {0, 0};
 		cudaEvent_t ev[2] = {NULL, NULL};
 		bool used[2] = {false, false};
 		int device = -1;
 		int next = 0;
+		// when the thread ends the buffers go back to the pool, once the copies still reading them are done
+		~Stage()
+		{
+			for (int i = 0; i < 2; i++)
+			{
+				if (ev[i] != NULL)
+				{
+					cudaEventSynchronize(ev[i]);
+					cudaEventDestroy(ev[i]);
+				}
+				pinnedHostPool().release(buf[i], cap[i]);
+			}
+			cudaGetLastError();
+		}
 	};
 	thread_local Stage st;
 	int dev = 0;
@@ -90,7 +118,7 @@ static inline void stagedHostToDevice(void *d_ptr, const void *h_ptr, size_t byt
 			}
 			st.used[i] = false;
 			if (st.buf[i] == NULL)
-				HANDLE_ERROR(cudaMallocHost(&st.buf[i], chunk));
+				st.buf[i] = pinnedHostPool().acquire(chunk, st.cap[i]);
 			HANDLE_ERROR(cudaEventCreateWithFlags(&st.ev[i], cudaEventDisableTiming));
 		}
 		st.device = dev;
@@ -141,8 +169,15 @@ static inline bool stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t byt
 	}();
 	stagetimer::countDown(bytes); 
 	const size_t max_bytes = (size_t) 64 << 20;
-	thread_local void *stage = NULL;
-	thread_local size_t capacity = 0;
+	struct Bounce
+	{
+		void *ptr = NULL;
+		size_t capacity = 0;
+		~Bounce() { pinnedHostPool().release(ptr, capacity); }
+	};
+	thread_local Bounce bounce;
+	void *&stage = bounce.ptr;
+	size_t &capacity = bounce.capacity;
 	if (!on || bytes == 0 || bytes > max_bytes)
 	{
 		DEBUG_HANDLE_ERROR(cudaMemcpyAsync(h_ptr, d_ptr, bytes, cudaMemcpyDeviceToHost, stream));
@@ -150,10 +185,8 @@ static inline bool stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t byt
 	}
 	if (bytes > capacity)
 	{
-		if (stage != NULL)
-			DEBUG_HANDLE_ERROR(cudaFreeHost(stage));
-		capacity = std::max(bytes, (size_t) 1 << 20);
-		HANDLE_ERROR(cudaMallocHost(&stage, capacity));
+		pinnedHostPool().release(stage, capacity);
+		stage = pinnedHostPool().acquire(std::max(bytes, (size_t) 1 << 20), capacity);
 	}
 	DEBUG_HANDLE_ERROR(cudaMemcpyAsync(stage, d_ptr, bytes, cudaMemcpyDeviceToHost, stream));
 	DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));

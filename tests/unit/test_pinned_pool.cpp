@@ -1,0 +1,109 @@
+/*
+ * tests/unit/test_pinned_pool.cpp
+ *
+ * The pinned buffer pool hands the same buffers to the next thread instead of allocating again, and
+ * the pool-off setting is plain allocate and free. Plain malloc stands in for cudaMallocHost.
+ */
+
+#include <catch2/catch.hpp>
+
+#include "src/acc/pinned_pool.h"
+
+#include <cstdlib>
+#include <thread>
+#include <vector>
+
+namespace
+{
+int g_allocs = 0, g_frees = 0;
+void *countingAlloc(size_t n) { g_allocs++; return malloc(n); }
+void countingFree(void *p) { g_frees++; free(p); }
+}
+
+TEST_CASE("pinned pool sizes are powers of two from one MB", "[pinned_pool]")
+{
+	CHECK(pinnedpool::roundUp(1) == ((size_t) 1 << 20));
+	CHECK(pinnedpool::roundUp((size_t) 1 << 20) == ((size_t) 1 << 20));
+	CHECK(pinnedpool::roundUp(((size_t) 1 << 20) + 1) == ((size_t) 2 << 20));
+	CHECK(pinnedpool::roundUp((size_t) 8 << 20) == ((size_t) 8 << 20));
+}
+
+TEST_CASE("pinned pool reuses released buffers", "[pinned_pool]")
+{
+	g_allocs = g_frees = 0;
+	pinnedpool::Pool pool(countingAlloc, countingFree, true);
+	size_t c1 = 0, c2 = 0, c3 = 0;
+	void *a = pool.acquire(3 << 20, c1);
+	CHECK(c1 == ((size_t) 4 << 20));
+	pool.release(a, c1);
+	CHECK(pool.freeBlocks() == 1);
+	void *b = pool.acquire(2 << 20, c2); // fits in the 4 MB buffer
+	CHECK(b == a);
+	CHECK(c2 == c1);
+	CHECK(g_allocs == 1);
+	void *c = pool.acquire(16 << 20, c3); // too big for anything free: a new one
+	CHECK(c != b);
+	CHECK(g_allocs == 2);
+	CHECK(pool.reuses() == 1);
+	pool.release(b, c2);
+	pool.release(c, c3);
+	CHECK(pool.freeBytes() == c2 + c3);
+	// the smallest free buffer that is big enough
+	size_t c4 = 0;
+	void *d = pool.acquire(1 << 20, c4);
+	CHECK(d == b);
+	pool.release(d, c4);
+	// everything stays in the pool (nothing is freed until the program ends)
+	CHECK(g_frees == 0);
+}
+
+TEST_CASE("pinned pool gives back what exceeds its limit", "[pinned_pool]")
+{
+	g_allocs = g_frees = 0;
+	pinnedpool::Pool pool(countingAlloc, countingFree, true, (size_t) 4 << 20);
+	size_t c1 = 0, c2 = 0;
+	void *a = pool.acquire(4 << 20, c1);
+	void *b = pool.acquire(4 << 20, c2);
+	pool.release(a, c1);
+	pool.release(b, c2); // would take the free bytes to 8 MB: freed
+	CHECK(g_frees == 1);
+	CHECK(pool.freeBytes() == ((size_t) 4 << 20));
+}
+
+TEST_CASE("pinned pool switched off allocates and frees every time", "[pinned_pool]")
+{
+	g_allocs = g_frees = 0;
+	pinnedpool::Pool pool(countingAlloc, countingFree, false);
+	size_t c = 0;
+	void *a = pool.acquire(3 << 20, c);
+	CHECK(c == ((size_t) 3 << 20)); // exact size, as the old code did
+	pool.release(a, c);
+	void *b = pool.acquire(3 << 20, c);
+	pool.release(b, c);
+	CHECK(g_allocs == 2);
+	CHECK(g_frees == 2);
+	CHECK(pool.freeBlocks() == 0);
+}
+
+TEST_CASE("pinned pool is safe for threads taking and returning buffers", "[pinned_pool]")
+{
+	g_allocs = g_frees = 0;
+	pinnedpool::Pool pool(
+		[](size_t n) -> void * { return malloc(n); }, [](void *p) { free(p); }, true);
+	std::vector<std::thread> threads;
+	for (int t = 0; t < 8; t++)
+		threads.emplace_back([&pool]() {
+			for (int i = 0; i < 200; i++)
+			{
+				size_t cap = 0;
+				char *p = (char *) pool.acquire((size_t)((i % 5) + 1) << 20, cap);
+				p[0] = 1; p[cap - 1] = 1; // the whole buffer is ours
+				pool.release(p, cap);
+			}
+		});
+	for (auto &t : threads) t.join();
+	// a handful of buffers served 1600 requests
+	CHECK(pool.allocations() <= 64);
+	CHECK(pool.reuses() >= 1600 - 64);
+}
+

@@ -65,6 +65,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_bulk_threads.cpp
     test_gpu_reconstruct.cpp
     test_gpu_switch.cpp
+    test_pinned_pool.cpp
     test_tuning_cache.cpp
     test_gpu_pool_plan.cpp
 )
@@ -101,7 +102,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch pinned_pool)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]
