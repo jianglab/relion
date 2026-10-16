@@ -49,7 +49,7 @@ struct Lock
 	int fd = -1;
 	Lock(const std::string &path, bool exclusive, bool create)
 	{
-		fd = open((path + ".lock").c_str(), (create ? O_CREAT : 0) | O_RDWR | O_CLOEXEC, 0600);
+		fd = open((path + ".lock").c_str(), (create ? O_CREAT : 0) | (exclusive ? O_RDWR : O_RDONLY) | O_CLOEXEC, 0600);
 		if (fd >= 0 && flock(fd, exclusive ? LOCK_EX : LOCK_SH) != 0) { close(fd); fd = -1; }
 	}
 	~Lock() { if (fd >= 0) { flock(fd, LOCK_UN); close(fd); } }

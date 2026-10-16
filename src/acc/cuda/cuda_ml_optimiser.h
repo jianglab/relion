@@ -4,6 +4,7 @@
 #include "src/mpi.h"
 #include "src/ml_optimiser.h"
 #include "src/acc/cuda/cuda_mem_utils.h"
+#include "src/acc/cuda/gpu_mem_trace.h"
 #include "src/acc/acc_projector_plan.h"
 #include "src/acc/acc_projector.h"
 #include "src/acc/acc_backprojector.h"
@@ -103,6 +104,7 @@ public:
 
 	~MlDeviceBundle()
 	{
+		gpuMemTrace("iteration end, before the bundle is released");
 		finishLeanIteration();
 		projectors.clear();
 		backprojectors.clear();
@@ -111,6 +113,7 @@ public:
 		if (keep_allocator && allocator != NULL && retainAllocator(device_id, allocator))
 			allocator = NULL;
 		delete allocator;
+		gpuMemTrace("bundle released");
 	}
 
 	static bool retainAllocator(int device, CudaCustomAllocator *a);

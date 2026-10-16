@@ -14,6 +14,8 @@
 #include "src/gpu_reconstruct.h"
 
 #include <cuda_runtime.h>
+#include "src/acc/cuda/gpu_mem_trace.h"
+#include "src/acc/gpu_pool_plan.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -178,6 +180,7 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 	int ndev = 0;
 	if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0) { cudaGetLastError(); reason = "no GPU"; return false; }
 
+	gpuMemTrace("helical symmetrisation in Fourier space: start");
 	const size_t plane_vox = (size_t)in.ydim * in.xdim;
 	const size_t plane_bytes = plane_vox * 3 * sizeof(RFLOAT); // data (2) + weight (1)
 	const long int nm = kmax + 1;                              // values of |z|: 0 .. kmax
@@ -188,6 +191,15 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 	// a group of c values of |z| has 2c + 2 input planes and 2c output planes
 	long int c = free_b > reserve ? (long int)(((free_b - reserve) / plane_bytes - 2) / 4) : 0;
 	c = std::min(c, nm);
+	// RELION_GPU_LEAN_MEMORY: do not fill the card. The groups only cut the work into pieces (the result
+	// does not depend on them), and a piece of a quarter to one GB moves the data just as fast as a piece
+	// that takes everything that is free, which would be the whole volume, twice, on a large model.
+	long int c_free = c;
+	if (gpupool::leanMemoryMode() > 0)
+	{
+		const size_t budget = std::max((size_t)256 << 20, std::min((size_t)1 << 30, (size_t)(free_b / 8)));
+		c = std::min(c, std::max(1L, (long int)(((budget / plane_bytes) - 2) / 4)));
+	}
 	// Manual override for experts and for the tests: the most values of |z| in a group
 	if (const char *ep = getenv("RELION_GPU_SYMMETRISE_PLANES"))
 		if (atoi(ep) > 0) c = std::min(c, (long int)atoi(ep));
@@ -224,6 +236,7 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 		cudaGetLastError();
 		return false;
 	}
+	gpuMemTrace("helical symmetrisation in Fourier space: planes in the card", (double) ((size_t)(8 * c + 2) * plane_vox * 3 * sizeof(RFLOAT) / 2));
 	cudaMemcpy(dR, in.R.data(), in.R.size() * sizeof(RFLOAT), cudaMemcpyHostToDevice);
 	if (in.has_rise)
 	{
@@ -317,6 +330,8 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 	std::ostringstream o;
 	o << c << " values of |z| per group, " << ngroups << " group" << (ngroups > 1 ? "s" : "") << ", "
 	  << (free_b >> 20) << " MB free at the start";
+	if (c < c_free)
+		o << " (lean memory: groups kept small, " << c_free << " would fit)";
 	choice = o.str();
 	return true;
 }

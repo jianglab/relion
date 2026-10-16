@@ -1130,6 +1130,35 @@ __global__ void cuda_kernel_window_transform(
 	}
 }
 
+// Same as cuda_kernel_window_transform, with the rows of the output oPitchX elements apart (oPitchX >= oszX);
+// the elements between oszX and oPitchX are set to zero. This is the layout cuFFT wants for an in-place
+// real-to-complex transform.
+template <typename T>
+__global__ void cuda_kernel_window_transform_pitched(
+				T *d_in, T *d_out,
+				int iszX, int iszY, int iszZ,
+				int oftX, int oftY, int oftZ, int oszX, int oszY, int oszZ, int oPitchX
+				)
+{
+	int idx = blockIdx.x*blockDim.x + threadIdx.x;
+	int idy = blockIdx.y*blockDim.y + threadIdx.y;
+	int idz = blockIdx.z*blockDim.z + threadIdx.z;
+
+	if(idx < oPitchX && idy < oszY && idz <oszZ){
+		const size_t o = ((size_t)idz*oszY + idy)*oPitchX + idx;
+		if( (idx>=oftX) && (idx<oftX+iszX) && (idx<oszX) &&
+			(idy>=oftY) && (idy<oftY+iszY) &&
+			(idz>=oftZ) && (idz<oftZ+iszZ))
+		{
+			d_out[o] = d_in[((size_t)(idz - oftZ)*iszY + (idy - oftY))*iszX + (idx - oftX)];
+		}
+		else
+		{
+			d_out[o] = 0.0;
+		}
+	}
+}
+
 template <typename T>
 __global__ void cuda_kernel_centerFFT_2D(T *img_in,
 										 int image_size,

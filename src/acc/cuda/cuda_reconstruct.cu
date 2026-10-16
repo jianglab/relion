@@ -14,6 +14,7 @@
 #include "src/error.h"
 
 #include <cuda_runtime.h>
+#include "src/acc/cuda/gpu_mem_trace.h"
 #include <cufft.h>
 #include <algorithm>
 #include <cmath>
@@ -319,6 +320,7 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 		return false;
 	};
 
+	gpuMemTrace("GPU reconstruction: start (cuFFT work area already planned)", (double)work);
 	DevBuf dFw, dFc, dIn, dWin, dRad, dSums, dCounts, dFlags, dShellInv, dShellPos, dStage;
 	cudaError_t e;
 	const int threads = 256;
@@ -350,6 +352,7 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 	dStage.release();
 	kDecenter<C><<<gridFor(n_vol), threads>>>(dIn.as<C>(), dFc.as<C>(), d, in.start_z, in.start_y, in.start_x, in.max_r2);
 	dIn.release();
+	gpuMemTrace("GPU reconstruction: weight and data decentred", (double)(bw + bc));
 
 	// 1/1000th of the radially averaged weight (sums in double)
 	std::vector<double> sums(in.r_max, 0.);
@@ -395,6 +398,7 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 	if ((e = dWin.alloc(bwin)) != cudaSuccess) return fail("GPU memory", e);
 	kWindowFourierCenter<C><<<gridFor(n_win), threads>>>(dFc.as<C>(), d, dWin.as<C>(), dw);
 	dFc.release();
+	gpuMemTrace("GPU reconstruction: padded window in the card", (double)bwin);
 	if (execC2R(plan, dWin.as<C>(), dWin.as<R>()) != CUFFT_SUCCESS)
 	{
 		cufftDestroy(plan);
@@ -402,6 +406,7 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 		return false;
 	}
 	cufftDestroy(plan);
+	gpuMemTrace("GPU reconstruction: inverse transform done");
 	DevBuf dOut;
 	if ((e = dOut.alloc(n_out * sizeof(RFLOAT))) != cudaSuccess) { reason = std::string("GPU memory: ") + cudaGetErrorString(e); return false; }
 	kWindowReal<R><<<gridFor(n_out), threads>>>(dWin.as<R>(), N, dOut.as<RFLOAT>(), in.ori_size, (R)in.normfft);

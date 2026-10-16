@@ -140,6 +140,41 @@ TEST_CASE("tuning_cache falls back silently", "[tuning_cache]")
 	CHECK_FALSE(dir.get("t", "k", e));
 }
 
+TEST_CASE("tuning_cache in a read-only directory still reads and never fails the caller", "[tuning_cache]")
+{
+	TempDir td;
+	REQUIRE(!td.dir.empty());
+	tuning::Entry e;
+	{
+		tuning::Cache w(ctxA(), td.file());
+		REQUIRE(w.put("t", "k", "v1"));
+	}
+	// a read-only directory does not protect a file inside it, so the files are made read-only too
+	chmod(td.file().c_str(), 0400);
+	chmod((td.file() + ".lock").c_str(), 0400);
+	chmod(td.dir.c_str(), 0500);
+	if (access(td.dir.c_str(), W_OK) == 0 || access(td.file().c_str(), W_OK) == 0)
+	{
+		chmod(td.dir.c_str(), 0700);
+		chmod(td.file().c_str(), 0600);
+		chmod((td.file() + ".lock").c_str(), 0600);
+		WARN("directory is writable even when read-only (running as root?): test skipped");
+		return;
+	}
+	tuning::Cache ro(ctxA(), td.file());
+	CHECK(ro.get("t", "k", e)); // the existing rows can still be read
+	CHECK(e.value == "v1");
+	CHECK_FALSE(ro.put("t", "k2", "v2")); // writing fails quietly
+	CHECK_FALSE(ro.get("t", "k2", e));
+	// a home directory that cannot be written: the .relion folder cannot even be made
+	tuning::Cache ro2(ctxA(), td.dir + "/sub/tuning.csv");
+	CHECK_FALSE(ro2.put("t", "k", "v"));
+	CHECK_FALSE(ro2.get("t", "k", e));
+	chmod(td.dir.c_str(), 0700);
+	chmod(td.file().c_str(), 0600);
+	chmod((td.file() + ".lock").c_str(), 0600);
+}
+
 TEST_CASE("tuning_cache environment switches", "[tuning_cache]")
 {
 	TempDir td;

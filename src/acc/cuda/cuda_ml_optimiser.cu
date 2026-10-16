@@ -20,6 +20,7 @@
 #include "src/acc/cuda/cuda_kernels/diff2.cuh"
 #include "src/acc/cuda/cuda_kernels/wavg.cuh"
 #include "src/acc/cuda/cuda_mem_utils.h"
+#include "src/acc/cuda/gpu_mem_trace.h"
 #include "src/acc/group_size_tuner.h"
 #include "src/acc/cuda/cuda_fft.h"
 #include "src/acc/data_types.h"
@@ -93,7 +94,8 @@ namespace
 
 
 // ---- Lean GPU memory pool -------------------------------------------------------------------------
-// RELION_GPU_LEAN_MEMORY=1 (=2: also report every iteration) makes the expectation step hold only the GPU
+// Lean memory is the default; RELION_GPU_LEAN_MEMORY=0 restores the old pool, =2 also reports every iteration.
+// It makes the expectation step hold only the GPU
 // memory it uses instead of all that is free: a first chunk from the peak of the iteration before (or of
 // an earlier run, remembered in the tuning cache), and more chunks when something does not fit, up to
 // what the old pool would have taken. See gpu_pool_plan.h for the rules, documentation/gpu_lean_memory.md.
@@ -102,11 +104,7 @@ namespace
 {
 	int leanMode()
 	{
-		static const int m = []() {
-			const char *e = getenv("RELION_GPU_LEAN_MEMORY");
-			return (e && *e) ? std::max(0, atoi(e)) : 0;
-		}();
-		return m;
+		return gpupool::leanMemoryMode();
 	}
 	struct LeanRecord
 	{
@@ -216,8 +214,9 @@ void MlDeviceBundle::setupLeanPool(size_t cap)
 		char mg[64] = "";
 		if (plan.margin > 0.)
 			snprintf(mg, sizeof(mg), ", margin %.0f%%", 100. * (plan.margin - 1.));
-		printf(" GPU memory, device %d (lean pool): first chunk %zu MB (%s%s); more is taken only when needed, up to %zu MB (the most the old pool would take)\n",
-		       device_id, allocator->chunkSize() / (1000*1000), reason.c_str(), mg, cap / (1000*1000));
+		printf(" GPU memory, device %d (lean pool%s): first chunk %zu MB (%s%s); more is taken only when needed, up to %zu MB (the most the old pool would take)\n",
+		       device_id, gpupool::leanMemoryFromEnvironment() ? "" : ", the default; RELION_GPU_LEAN_MEMORY=0 restores the old pool",
+		       allocator->chunkSize() / (1000*1000), reason.c_str(), mg, cap / (1000*1000));
 		fflush(stdout);
 	}
 }
@@ -334,6 +333,7 @@ size_t MlDeviceBundle::checkFixedSizedObjects(int shares)
 
 	HANDLE_ERROR(cudaSetDevice(device_id));
 
+	gpuMemTrace("first look at the card (checkFixedSizedObjects)");
 	size_t free(0), total(0);
 	DEBUG_HANDLE_ERROR(cudaMemGetInfo( &free, &total ));
 	float margin(1.05);
@@ -368,6 +368,7 @@ void MlDeviceBundle::setupFixedSizedObjects()
 
 	unsigned nr_proj = baseMLO->mymodel.PPref.size();
 	unsigned nr_bproj = baseMLO->wsum_model.BPref.size();
+	gpuMemTrace("iteration start, before the models");
 
 	// The allocator kept from the last iteration, if the models of this one still fit next to it
 	CudaCustomAllocator *kept = NULL;
@@ -419,6 +420,7 @@ void MlDeviceBundle::setupFixedSizedObjects()
 		projectors[imodel].initMdl(baseMLO->mymodel.PPref[imodel].data.data);
 
 	}
+	gpuMemTrace("projector models (textures)", [&]() { double b = 0; for (unsigned i = 0; i < nr_proj; i++) b += 2. * sizeof(XFLOAT) * (double) baseMLO->mymodel.PPref[i].data.nzyxdim; return b; }());
 
 	for (int imodel = 0; imodel < nr_bproj; imodel++)
 	{
@@ -433,6 +435,7 @@ void MlDeviceBundle::setupFixedSizedObjects()
 
 		backprojectors[imodel].initMdl();
 	}
+	gpuMemTrace("back-projector models", [&]() { double b = 0; for (unsigned i = 0; i < nr_bproj; i++) b += 3. * sizeof(XFLOAT) * (double) baseMLO->wsum_model.BPref[i].data.nzyxdim; return b; }());
 
 	/*======================================================
 	                    CUSTOM ALLOCATOR
@@ -441,6 +444,7 @@ void MlDeviceBundle::setupFixedSizedObjects()
 	int memAlignmentSize;
 	cudaDeviceGetAttribute ( &memAlignmentSize, cudaDevAttrTextureAlignment, device_id );
 	allocator = kept != NULL ? kept : new CudaCustomAllocator(0, memAlignmentSize);
+	gpuMemTrace(kept != NULL ? "end of fixed-size setup (old pool kept)" : "end of fixed-size setup (empty pool)");
 }
 
 void MlDeviceBundle::setupTunableSizedObjects(size_t allocationSize)
@@ -467,6 +471,16 @@ void MlDeviceBundle::setupTunableSizedObjects(size_t allocationSize)
 		setupLeanPool(allocationSize); // allocationSize is the most the pool may hold
 	else
 	{
+	{
+		static std::map<int, bool> told;
+		if (!told[device_id])
+		{
+			told[device_id] = true;
+			printf(" GPU memory, device %d (old pool, RELION_GPU_LEAN_MEMORY=0): all free memory, %zu MB, is taken for the expectation step\n",
+			       device_id, allocationSize / (1000*1000));
+			fflush(stdout);
+		}
+	}
 	// A chunk kept from the last iteration is used again when it is about the size that would be
 	// allocated now (the size given includes the chunk's own bytes)
 	const size_t have = allocator->chunkSize();
@@ -528,7 +542,9 @@ void MlDeviceBundle::setupTunableSizedObjects(size_t allocationSize)
 		}
 	}
 
+	gpuMemTrace("pool and projection plans ready", allocator->chunkSize());
 	setupBackprojectAccumulator();
+	gpuMemTrace("end of tunable-size setup");
 };
 
 // Whether this iteration's back-projections can be accumulated per orientation, and the room for

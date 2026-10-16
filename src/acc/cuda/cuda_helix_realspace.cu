@@ -13,6 +13,7 @@
 #include "src/gpu_reconstruct.h"
 
 #include <cuda_runtime.h>
+#include "src/acc/cuda/gpu_mem_trace.h"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -143,6 +144,7 @@ bool helicalSymmetryRealSpace(const HelixRealSpaceInput &in, RFLOAT *v, std::str
 {
 	relionReleaseRetainedGpuMemory(); // the chunk kept for the next expectation step
 	bad = false;
+	gpuMemTrace("helical symmetrisation in real space: start");
 	int ndev = 0;
 	if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0) { cudaGetLastError(); reason = "no GPU"; return false; }
 	const size_t n = (size_t)in.zdim * in.ydim * in.xdim, bytes = n * sizeof(RFLOAT);
@@ -172,6 +174,7 @@ bool helicalSymmetryRealSpace(const HelixRealSpaceInput &in, RFLOAT *v, std::str
 		cudaGetLastError();
 		return false;
 	}
+	gpuMemTrace("helical symmetrisation in real space: buffers in the card", (double) (2 * bytes));
 	cudaMemcpy(dv, v, bytes, cudaMemcpyHostToDevice);
 	cudaMemcpy(dsin, in.sin_rec.data(), in.sin_rec.size() * sizeof(RFLOAT), cudaMemcpyHostToDevice);
 	cudaMemcpy(dcos, in.cos_rec.data(), in.cos_rec.size() * sizeof(RFLOAT), cudaMemcpyHostToDevice);

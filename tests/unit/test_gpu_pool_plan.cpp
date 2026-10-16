@@ -45,6 +45,17 @@ TEST_CASE("lean pool margin grows with the change between peaks", "[gpu_pool]")
 		}
 }
 
+TEST_CASE("reference transform block: buffers plus 2% and 16 MB, far below the old 50% margin", "[gpu_pool]")
+{
+	const size_t GB = (size_t) 1 << 30;
+	const size_t sum = 11 * GB;
+	const size_t lean = gpupool::transformPoolBytes(sum);
+	CHECK(lean > sum);
+	CHECK(lean < sum + sum / 20);
+	CHECK(lean < (size_t) (1.5 * (double) sum) - 4 * GB);
+	CHECK(gpupool::transformPoolBytes(0) == ((size_t) 16 << 20));
+}
+
 TEST_CASE("lean pool plan: first chunk from the peak, never above the cap", "[gpu_pool]")
 {
 	const size_t cap = 20 * GB;
@@ -331,5 +342,66 @@ TEST_CASE("the old pool is a single chunk and its cap is its size", "[gpu_pool][
 	CHECK(pool.getTotalFreeSpace() == 64 * MB);
 	CHECK(pool.getLargestContinuousFreeSpace() == 64 * MB);
 	CHECK(pool.chunksGrown() == 0);
+}
+
+#include <cufft.h>
+
+TEST_CASE("in-place real-to-complex 3D transform gives the same numbers as the out-of-place one", "[gpu_pool][gpu_inplace_fft]")
+{
+	if (!gpuVisible())
+	{
+		WARN("no GPU visible: test skipped");
+		return;
+	}
+	for (int N : {48, 64, 100, 128})
+	{
+		const size_t nx2 = N / 2 + 1, nreal = (size_t) N * N * N, ncplx = (size_t) N * N * nx2;
+		size_t free_b = 0, total_b = 0;
+		REQUIRE(cudaMemGetInfo(&free_b, &total_b) == cudaSuccess);
+		if (free_b < 6 * ncplx * 16 + ((size_t) 64 << 20))
+		{
+			WARN("too little free GPU memory: test skipped");
+			return;
+		}
+		std::vector<double> h(nreal), hp(ncplx * 2, 0.);
+		unsigned long long r = 12345;
+		for (auto &x : h)
+		{
+			r = r * 6364136223846793005ULL + 1442695040888963407ULL;
+			x = (double) (r >> 11) / 9007199254740992.0 - 0.5;
+		}
+		for (size_t z = 0; z < (size_t) N; z++)
+			for (size_t y = 0; y < (size_t) N; y++)
+				for (size_t x = 0; x < (size_t) N; x++)
+					hp[(z * N + y) * 2 * nx2 + x] = h[(z * N + y) * N + x];
+
+		double *dm = NULL, *dip = NULL;
+		cufftDoubleComplex *dout = NULL;
+		REQUIRE(cudaMalloc(&dm, nreal * 8) == cudaSuccess);
+		REQUIRE(cudaMalloc(&dout, ncplx * 16) == cudaSuccess);
+		REQUIRE(cudaMalloc(&dip, ncplx * 16) == cudaSuccess);
+		REQUIRE(cudaMemcpy(dm, h.data(), nreal * 8, cudaMemcpyHostToDevice) == cudaSuccess);
+		REQUIRE(cudaMemcpy(dip, hp.data(), ncplx * 16, cudaMemcpyHostToDevice) == cudaSuccess);
+
+		int n[3] = {N, N, N};
+		cufftHandle plan;
+		size_t ws = 0;
+		REQUIRE(cufftCreate(&plan) == CUFFT_SUCCESS);
+		REQUIRE(cufftMakePlanMany(plan, 3, n, NULL, 0, 0, NULL, 0, 0, CUFFT_D2Z, 1, &ws) == CUFFT_SUCCESS);
+		REQUIRE(cufftExecD2Z(plan, dm, dout) == CUFFT_SUCCESS);
+		REQUIRE(cufftExecD2Z(plan, dip, (cufftDoubleComplex *) dip) == CUFFT_SUCCESS);
+		std::vector<double> a(ncplx * 2), b(ncplx * 2);
+		REQUIRE(cudaMemcpy(a.data(), dout, ncplx * 16, cudaMemcpyDeviceToHost) == cudaSuccess);
+		REQUIRE(cudaMemcpy(b.data(), dip, ncplx * 16, cudaMemcpyDeviceToHost) == cudaSuccess);
+		size_t differing = 0;
+		for (size_t i = 0; i < a.size(); i++)
+			if (a[i] != b[i])
+				differing++;
+		CHECK(differing == 0);
+		cufftDestroy(plan);
+		cudaFree(dm);
+		cudaFree(dout);
+		cudaFree(dip);
+	}
 }
 #endif

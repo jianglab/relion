@@ -3,8 +3,8 @@
 
 // Sizing rules of the "lean" GPU memory pool (RELION_GPU_LEAN_MEMORY, see custom_allocator.cuh).
 //
-// By default the expectation step takes ALL free GPU memory in one block and hands it out in pieces.
-// The lean pool holds a first chunk sized from what the job really used and adds chunks only when an
+// The old pool (RELION_GPU_LEAN_MEMORY=0) takes ALL free GPU memory in one block and hands it out in pieces.
+// The lean pool (the default) holds a first chunk sized from what the job really used and adds chunks only when an
 // allocation does not fit, up to the same limit (the "cap": what the old pool would have taken). Pure
 // C++ with no GPU calls, so the rules can be tested without a GPU.
 
@@ -12,10 +12,35 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace gpupool
 {
+
+// RELION_GPU_LEAN_MEMORY: unset or 1 (default) lean memory, 2 lean memory and the pool is reported at every
+// iteration, 0 the old way (the expectation step takes all free GPU memory).
+inline bool leanMemoryFromEnvironment()
+{
+	const char *e = getenv("RELION_GPU_LEAN_MEMORY");
+	return e && *e;
+}
+
+inline int leanMemoryMode()
+{
+	static const int m = []() {
+		const char *e = getenv("RELION_GPU_LEAN_MEMORY");
+		return (e && *e) ? std::max(0, atoi(e)) : 1;
+	}();
+	return m;
+}
+
+// The block the Fourier transform of a reference takes for its buffers (see Projector::computeFourierTransformMap):
+// what the buffers add up to, plus 2% and 16 MB for the alignment of the blocks. The default way takes 50% more.
+inline size_t transformPoolBytes(size_t sum_of_buffers)
+{
+	return (size_t) ((double) sum_of_buffers * 1.02) + ((size_t) 16 << 20);
+}
 
 // Smallest chunk worth a driver call. cudaMalloc has a granularity of a few MB and each call
 // stalls the device, so smaller chunks only add calls.
