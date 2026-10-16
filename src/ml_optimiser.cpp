@@ -2297,12 +2297,13 @@ void MlOptimiser::initialiseGeneral(int rank)
     gpurec::setGpuRequested(do_gpu);
     if (do_gpu && verb > 0)
     {
-        const char *names[] = {"RELION_GPU_FLOAT2_TEX", "RELION_GPU_COARSE_XT", "RELION_GPU_RECONSTRUCT", "RELION_GPU_SYMMETRISE", "RELION_JOIN_SKIP_BPREF"};
+        size_t n_names = 0;
+        const char *const *names = gpuswitch::defaultOnNames(n_names);
         std::string off;
-        for (const char *n : names)
-            if (!gpuswitch::on(n))
-                off += std::string(off.empty() ? "" : ", ") + n;
-        std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join) are on by default, each backing off to the older path when its conditions are not met; "
+        for (size_t i = 0; i < n_names; i++)
+            if (!gpuswitch::on(names[i]))
+                off += std::string(off.empty() ? "" : ", ") + names[i];
+        std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join, pooled pinned copy buffers) are on by default, each backing off to the older path when its conditions are not met; "
                   << (off.empty() ? "none is switched off" : "switched off: " + off) << " (VAR=0 turns one off)." << std::endl;
     }
     // --skip_align / --skip_rotate keep the GPU (upstream switches the accelerators off here);

@@ -85,6 +85,8 @@ column. Details and measurements are in `gpu_performance.md` and
 | `RELION_GPU_ORIENT_CACHE=0` | Caches the orientation lists between particles. `RELION_GPU_ORIENT_CACHE_VERBOSE` (any value) says why a cache was or was not used. | Debugging memory. |
 | `RELION_GPU_GROUP_COARSE=0` | With particle groups, the coarse differences of a group in two launches. `RELION_GPU_GROUP_CHECK=1` compares them with the single-particle pass (use with `RELION_GPU_COARSE_DETERMINISTIC=1`). | Debugging. |
 | `RELION_GPU_PINNED_STAGING=off` | Copies host data to the GPU through a pinned staging buffer. | Comparison. |
+| `RELION_GPU_PINNED_POOL=0` | The pinned staging buffers are shared by all threads of a program (a pool, at most 2 GB kept idle) instead of one `cudaMallocHost` per thread. `=0` allocates and frees one per thread, as before. | Debugging memory. |
+| `RELION_GPU_PINNED_BIG_COPY=0` | Copies of 1 MB or more in the GPU helical symmetrisation go through two pinned 8 MB buffers, overlapped with the transfer. `=0` is a plain `cudaMemcpy`. Same bytes either way. | Comparison. |
 | `RELION_GPU_RECONSTRUCT=0` | The M-step reconstruction on the GPU, also with `--skip_align`. | A card too small for the reconstruction. |
 | `RELION_GPU_SYMMETRISE=0` | Helical Fourier-space symmetrisation on the GPU. `=check` runs both and compares. `RELION_GPU_SYMMETRISE_PLANES=N` limits the planes per group (default: from free memory). | Comparison. |
 | `RELION_GPU_SKIP_ALIGN=0` | GPU for `--skip_align` / `--skip_rotate`. `=0` switches the GPU off for them as upstream does (the job window then refuses the GPU). | Comparison. |

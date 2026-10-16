@@ -1,6 +1,7 @@
 #ifndef GPU_SWITCH_H_
 #define GPU_SWITCH_H_
 
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 
@@ -27,6 +28,18 @@ inline int mode(const char *name)
 }
 
 inline bool on(const char *name) { return mode(name) != 0; }
+
+/// Switches that are on by default and are listed in the "GPU speed-ups" line at verbosity > 0
+/// (one entry per switch: add a new default-on switch here, and test/doc follow from this list).
+inline const char *const *defaultOnNames(size_t &count)
+{
+	static const char *const names[] = {
+		"RELION_GPU_FLOAT2_TEX", "RELION_GPU_COARSE_XT", "RELION_GPU_RECONSTRUCT", "RELION_GPU_SYMMETRISE",
+		"RELION_JOIN_SKIP_BPREF", "RELION_GPU_PINNED_POOL", "RELION_GPU_PINNED_BIG_COPY",
+	};
+	count = sizeof(names) / sizeof(names[0]);
+	return names;
+}
 
 }
 

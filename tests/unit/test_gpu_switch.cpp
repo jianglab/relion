@@ -10,6 +10,7 @@
 #include "src/gpu_reconstruct.h"
 
 #include <cstdlib>
+#include <string>
 
 TEST_CASE("GPU speed-up switches are on unless switched off", "[gpu_switch]")
 {
@@ -49,4 +50,22 @@ TEST_CASE("GPU reconstruction and symmetrisation switches default to on", "[gpu_
 	CHECK(gpurec::symmetriseMode() == 2);
 	unsetenv("RELION_GPU_RECONSTRUCT");
 	unsetenv("RELION_GPU_SYMMETRISE");
+}
+
+TEST_CASE("Every default-on GPU switch in the list is on when unset and off with 0", "[gpu_switch]")
+{
+	size_t n = 0;
+	const char *const *names = gpuswitch::defaultOnNames(n);
+	REQUIRE(n >= 7);
+	for (size_t i = 0; i < n; i++)
+	{
+		INFO("switch " << names[i]);
+		const char *old = getenv(names[i]);
+		const std::string saved = old ? old : "";
+		unsetenv(names[i]);
+		CHECK(gpuswitch::on(names[i]));
+		setenv(names[i], "0", 1);
+		CHECK(!gpuswitch::on(names[i]));
+		if (old) setenv(names[i], saved.c_str(), 1); else unsetenv(names[i]);
+	}
 }
