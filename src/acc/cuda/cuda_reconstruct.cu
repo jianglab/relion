@@ -24,6 +24,7 @@
 #include <type_traits>
 
 void relionReleaseRetainedGpuMemory(); // cuda_ml_optimiser.cu
+bool relionHasRetainedGpuMemory();     // cuda_ml_optimiser.cu
 
 namespace gpurec
 {
@@ -423,12 +424,26 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 
 bool reconstructSkipGridding(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool &warned_zero_weight)
 {
-	relionReleaseRetainedGpuMemory(); // the chunk kept for the next expectation step
+	// RELION_GPU_KEEP_POOL=1: leave the chunk kept for the next expectation step on the device and give it
+	// back only when the reconstruction does not fit next to it. Freeing and allocating again the
+	// ~20 GB chunk takes 0.1 to 0.2 s per iteration; the reconstruction of the usual box sizes fits next to
+	// it (the chunk is sized to leave room for the threads' own needs). The results do not change.
+	static const bool keep_pool = [] { const char *e = getenv("RELION_GPU_KEEP_POOL"); return e && atoi(e) > 0; }();
+	if (!keep_pool)
+		relionReleaseRetainedGpuMemory(); // the chunk kept for the next expectation step
 	int ndev = 0;
 	if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0) { cudaGetLastError(); reason = "no GPU"; return false; }
-	if (in.double_precision)
-		return run<double>(in, vol_out, reason, warned_zero_weight);
-	return run<float>(in, vol_out, reason, warned_zero_weight);
+	bool ok = in.double_precision ? run<double>(in, vol_out, reason, warned_zero_weight)
+	                              : run<float>(in, vol_out, reason, warned_zero_weight);
+	if (!ok && keep_pool && relionHasRetainedGpuMemory())
+	{
+		cudaGetLastError();
+		relionReleaseRetainedGpuMemory();
+		reason.clear();
+		ok = in.double_precision ? run<double>(in, vol_out, reason, warned_zero_weight)
+		                         : run<float>(in, vol_out, reason, warned_zero_weight);
+	}
+	return ok;
 }
 
 }

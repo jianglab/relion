@@ -282,6 +282,14 @@ size_t MlDeviceBundle::retainedBytes() const
 	return allocator == NULL ? 0 : allocator->chunkSize();
 }
 
+bool relionHasRetainedGpuMemory()
+{
+	omp_set_lock(retainedLock());
+	const bool has = !retainedAllocators().empty();
+	omp_unset_lock(retainedLock());
+	return has;
+}
+
 void relionReleaseRetainedGpuMemory()
 {
 	std::map<int, CudaCustomAllocator*> mine;
