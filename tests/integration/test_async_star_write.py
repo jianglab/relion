@@ -44,8 +44,8 @@ def test_async_star_write_identical_files(test_data_dir, relion_bin, relion_runn
     plain = test_data_dir / "plain"
     on = test_data_dir / "on"
     chk = test_data_dir / "chk"
-    _run(relion_bin, relion_runner, paths, plain, {})
-    _run(relion_bin, relion_runner, paths, on, {"RELION_ASYNC_STAR_WRITE": "1"})
+    _run(relion_bin, relion_runner, paths, plain, {"RELION_ASYNC_STAR_WRITE": "0"})
+    _run(relion_bin, relion_runner, paths, on, {})   # the default
     r = _run(relion_bin, relion_runner, paths, chk, {"RELION_ASYNC_STAR_WRITE": "check"})
 
     lines = [l for l in r.stderr.splitlines() if l.startswith("ASYNC_STAR_WRITE check")]

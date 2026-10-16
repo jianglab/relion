@@ -34,17 +34,17 @@ public:
         return on;
     }
 
-    // RELION_ASYNC_STAR_WRITE: 0 (default) the STAR files of an iteration are formatted and written by the
-    // calling thread as before; 1 the text is formatted at once (from a snapshot where the tables change
+    // RELION_ASYNC_STAR_WRITE: 1 (default) the text is formatted at once (from a snapshot where the tables change
     // later) and the file is opened, written and closed by the background thread, so the next step does not
-    // wait for the file system; "check" is 1, and the background thread also reads each file back and
+    // wait for the file system; 0 or "off": the STAR files of an iteration are formatted and written by the
+    // calling thread as before; "check" is 1, and the background thread also reads each file back and
     // compares it with the text (data.star: with a text formatted by the calling thread too), and reports
     // any difference. The files are byte for byte the same in all modes.
     static int starMode()
     {
         static const int m = []{ const char *e = getenv("RELION_ASYNC_STAR_WRITE");
-            if (!e || !*e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
-            return !strcmp(e, "check") ? 2 : 1; }();
+            if (e && (!strcmp(e, "0") || !strcmp(e, "off"))) return 0;
+            return e && !strcmp(e, "check") ? 2 : 1; }();
         return m;
     }
 
