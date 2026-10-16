@@ -20,6 +20,7 @@ SWITCHES = [
     "RELION_GPU_PINNED_BIG_COPY",
     "RELION_GPU_FUSED_WEIGHTS",
     "RELION_GPU_BLOCK_SORT",
+    "RELION_GPU_WAVG_SUM",
 ]
 
 
@@ -78,6 +79,41 @@ def test_small_speedups_default_and_off_agree(test_data_dir, relion_bin, relion_
     assert "none is switched off" in r_def.stdout
     for name in SWITCHES:
         assert name in r_off.stdout          # named in the "switched off:" list
+    ll_def = _log_likelihood(d_def / "run_it003_model.star")
+    ll_off = _log_likelihood(d_off / "run_it003_model.star")
+    assert abs(ll_def - ll_off) <= 1e-3 * abs(ll_off), (ll_def, ll_off)
+
+
+def test_class2d_default_and_off_agree(test_data_dir, relion_bin, relion_runner):
+    """2D classification uses the weighted-average sums and the block-wise sort, which the 3D run above
+    does not reach: the default run exits cleanly and agrees with the run that has them switched off."""
+    if not _have_cuda_gpu(relion_bin, SWITCHES[0]):
+        pytest.skip("needs a CUDA GPU and a build with the small GPU speed-ups")
+    from fixtures import generate_test_dataset
+
+    paths = generate_test_dataset(test_data_dir / "data_ss2d", relion_bin, relion_runner,
+                                  num_particles=60, size=32, angpix=1.0)
+
+    def run(tag, extra_env):
+        out = test_data_dir / tag
+        out.mkdir()
+        cmd = [str(relion_bin / "relion_refine"),
+               "--i", paths["star_file"], "--o", str(out / "run"),
+               "--K", "3", "--iter", "3", "--ctf", "--tau2_fudge", "2",
+               "--particle_diameter", "25", "--flatten_solvent", "--zero_mask", "--oversampling", "1",
+               "--psi_step", "20", "--offset_range", "5", "--offset_step", "2",
+               "--norm", "--scale", "--j", "4", "--random_seed", "7", "--dont_check_norm",
+               "--gpu", "0"]
+        env = dict(os.environ)
+        for name in SWITCHES:
+            env.pop(name, None)
+        env.update(extra_env)
+        r = relion_runner(cmd, timeout=900, env=env)
+        assert r.returncode == 0, f"{tag} failed (exit {r.returncode}):\n{r.stderr[-3000:]}"
+        return out
+
+    d_def = run("ss2d_default", {})
+    d_off = run("ss2d_off", {name: "0" for name in SWITCHES})
     ll_def = _log_likelihood(d_def / "run_it003_model.star")
     ll_off = _log_likelihood(d_off / "run_it003_model.star")
     assert abs(ll_def - ll_off) <= 1e-3 * abs(ll_off), (ll_def, ll_off)

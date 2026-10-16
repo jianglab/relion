@@ -312,14 +312,11 @@ inline bool gpuShiftTable()
 	return on;
 }
 
-// RELION_GPU_WAVG_SUM=1: the class-batched weighted averages of 2D data from the weights' sum and
-// the weighted sum of the shifted images (see cuda_kernel_wavg_sum); float noise, off by default
+// RELION_GPU_WAVG_SUM: the class-batched weighted averages of 2D data from the weights' sum and
+// the weighted sum of the shifted images (see cuda_kernel_wavg_sum); float noise, on by default
 inline bool gpuWavgSum()
 {
-	static const bool on = []() {
-		const char *e = getenv("RELION_GPU_WAVG_SUM");
-		return e && std::string(e) != "0" && std::string(e) != "off";
-	}();
+	static const bool on = gpuswitch::on("RELION_GPU_WAVG_SUM");
 	return on;
 }
 

@@ -38,6 +38,7 @@ inline const char *const *defaultOnNames(size_t &count)
 		"RELION_JOIN_SKIP_BPREF", "RELION_GPU_PINNED_POOL", "RELION_GPU_PINNED_BIG_COPY",
 		"RELION_GPU_FUSED_WEIGHTS",
 		"RELION_GPU_BLOCK_SORT",
+		"RELION_GPU_WAVG_SUM",
 	};
 	count = sizeof(names) / sizeof(names[0]);
 	return names;
