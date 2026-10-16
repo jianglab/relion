@@ -22,7 +22,10 @@
 #include "src/gui_jobwindow.h"
 #include "src/pipeline_jobs.h"
 
+#include <FL/Fl_Group.H>
+#include <FL/Fl_Tabs.H>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -276,5 +279,48 @@ TEST_CASE("GUI: Class3D several reference maps set the number of classes", "[gui
 				REQUIRE(problems.empty());
 			}
 		}
+	}
+}
+
+TEST_CASE("GUI: no tab of any job window has overlapping or out-of-tab widgets", "[gui][layout]")
+{
+	for (const auto &t : allGuiJobTypes())
+	{
+		JobWindow window;
+		window.initialise(t.first, false);
+		for (int k = 0; k < window.tabs->children(); k++)
+		{
+			Fl_Group *tab = window.tabs->child(k)->as_group();
+			if (!tab) continue;
+			INFO("job type " << t.second << ", tab " << (tab->label() ? tab->label() : "?"));
+			const auto problems = layoutProblems(tab);
+			std::string all;
+			for (const auto &p : problems)
+				all += "\n  " + p;
+			INFO("layout problems:" << all);
+			REQUIRE(problems.empty());
+		}
+	}
+}
+
+TEST_CASE("GUI: Class2D filament context parameters are greyed out while Off", "[gui][layout][filament_context]")
+{
+	JobWindow window;
+	window.initialise(PROC_2DCLASS, false);
+	REQUIRE(window.guientries.find("filctx_mode") != window.guientries.end());
+	REQUIRE(window.group8 != nullptr);
+	for (const char *name : {"filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
+		REQUIRE(window.guientries.find(name) != window.guientries.end());
+
+	REQUIRE_FALSE(window.group8->active());
+
+	SECTION("loading a job that uses a mode activates them")
+	{
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[1]);
+		REQUIRE(window.group8->active());
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[2]);
+		REQUIRE(window.group8->active());
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[0]);
+		REQUIRE_FALSE(window.group8->active());
 	}
 }

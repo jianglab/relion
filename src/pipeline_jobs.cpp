@@ -4124,6 +4124,17 @@ A range of 15 degrees is the same as sigma = 5 degrees. Note that the ranges of 
 	joboptions["do_restrict_xoff"] = JobOption("Restrict helical offsets to rise:", true, "Set to Yes if you want to restrict the translational offsets along the helices to the rise of the helix given below. Set to No to allow free (conventional) translational offsets.");
 	joboptions["helical_rise"] = JobOption("Helical rise (A):", 4.75, -1, 100, 1, "The helical rise (in Angstroms). Translational offsets along the helical axis will be limited from -rise/2 to +rise/2, with a flat prior.");
 
+	joboptions["filctx_mode"] = JobOption("Filament context:", job_filament_context_options, 0, "The segments of one filament are not independent: they share the polymorph, and along a twisted filament the 2D classes (views) follow each other in a fixed order. \
+If set to anything but Off, each segment gets a prior over the classes from the other segments of its filament, computed from their class likelihoods of the previous iteration (the segment's own data is never counted in its prior). \
+'Markov chain' (along the filament) learns, from the data, how likely the class of the next segment is given the class of this one (use it when the views follow each other along the filament). \
+'Per filament' (one class distribution per filament) lets all segments of a filament share one class distribution (use it when every filament is of one kind). \
+Needs several classes and particles with rlnHelicalTubeID and rlnMicrographName (and rlnHelicalTrackLengthAngst, unless the likelihood power is given below), as written by helical extraction. Off is the default; the RELION_FILAMENT_CONTEXT environment variable does not apply to jobs started from this window.");
+	joboptions["filctx_temper"] = JobOption("Likelihood power:", std::string("-1"), "Overlapping segments share pixels, so their likelihoods repeat the same noise. Each likelihood is raised to this power before it is used for the prior of its neighbours, so that every pixel of the filament counts about once. \
+A negative value (the default) uses the distance between consecutive segments divided by the box length, which needs rlnHelicalTrackLengthAngst in the particle STAR file.");
+	joboptions["filctx_gap"] = JobOption("Gap (segments):", 1, 1, 20, 1, "Segments closer than this many steps along the filament are left out of a segment's prior. 1 leaves out only the segment itself. Larger values make the prior less dependent on the immediate neighbours, which share most of their pixels with the segment.");
+	joboptions["filctx_floor"] = JobOption("Class floor:", 0.02, 0., 1., 0.01, "This fraction of the overall class distribution is mixed into every prior, so that no class can be ruled out completely by the other segments of the filament.");
+	joboptions["filctx_alpha"] = JobOption("Global class weight:", 1., 0., 100., 1., "Only for 'Per filament': how strongly the overall class distribution counts against the evidence from the other segments of the filament. Larger values make filaments with few segments follow the overall distribution more.");
+
 
 	joboptions["nr_pool"] = JobOption("Number of pooled particles:", 3, 1, 16, 1, "Particles are processed in individual batches by MPI followers. During each batch, a stack of particle images is only opened and closed once to improve disk access times. \
 All particle images of a single batch are read into memory together. The size of these batches is at least one particle per thread used. The nr_pooled_particles parameter controls how many particles are read together for each thread. If it is set to 3 and one uses 8 threads, batches of 3x8=24 particles will be read together. \
@@ -4388,6 +4399,46 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 			{
 				command_after_scratch += " --helix --helical_rise_initial " + joboptions["helical_rise"].getString();
 			}
+		}
+
+		// Filament context: one of the two is always emitted, so that an environment variable cannot decide behind the window's back
+		const std::string filctx_choice = joboptions["filctx_mode"].getString();
+		if (filctx_choice == job_filament_context_options[1] || filctx_choice == job_filament_context_options[2])
+		{
+			command_after_scratch += (filctx_choice == job_filament_context_options[1]) ? " --filament_context chain" : " --filament_context filament";
+
+			RFLOAT temper = joboptions["filctx_temper"].getNumber(error_message);
+			if (error_message != "") return false;
+			command_after_scratch += " --filament_temper " + floatToString(temper);
+
+			RFLOAT gap = joboptions["filctx_gap"].getNumber(error_message);
+			if (error_message != "") return false;
+			if (gap < 1.)
+			{
+				error_message = "ERROR: the filament context gap should be at least 1.";
+				return false;
+			}
+			command_after_scratch += " --filament_gap " + integerToString((int)gap);
+
+			RFLOAT flr = joboptions["filctx_floor"].getNumber(error_message);
+			if (error_message != "") return false;
+			if (flr < 0. || flr > 1.)
+			{
+				error_message = "ERROR: the filament context floor should be between 0 and 1.";
+				return false;
+			}
+			command_after_scratch += " --filament_floor " + floatToString(flr);
+
+			if (filctx_choice == job_filament_context_options[2])
+			{
+				RFLOAT alpha = joboptions["filctx_alpha"].getNumber(error_message);
+				if (error_message != "") return false;
+				command_after_scratch += " --filament_alpha " + floatToString(alpha);
+			}
+		}
+		else
+		{
+			command_after_scratch += " --filament_context off";
 		}
 	}
 

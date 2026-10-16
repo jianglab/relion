@@ -1646,6 +1646,20 @@ void JobWindow::initialiseClass2DWindow()
 
 	guientries["do_restrict_xoff"].cb_menu_i();
 
+	current_y += STEPY/2;
+	group8 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group8->end();
+	place("filctx_mode", TOGGLE_LEAVE_ACTIVE, group8);
+
+	group8->begin();
+	place("filctx_temper");
+	place("filctx_gap");
+	place("filctx_floor");
+	place("filctx_alpha");
+	group8->end();
+
+	guientries["filctx_mode"].cb_menu_i(); // grey out the parameters while Off
+
 	group4->end();
 	guientries["do_helix"].cb_menu_i(); // to make default effective
 

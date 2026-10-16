@@ -2,6 +2,8 @@
 #include "src/acc/stage_timer.h"
 static omp_lock_t global_mutex;
 
+#include <limits>
+
 #ifdef _SYCL_ENABLED
 #include "src/acc/sycl/sycl_virtual_dev.h"
 using deviceStream_t = virtualSYCL*;
@@ -1712,6 +1714,35 @@ void getAllSquaredDifferencesCoarse(
     op.min_diff2 = AccUtilities::getMinOnDevice<XFLOAT>(allWeights);
     //std::cerr << " min_diff2 coarse= " << op.min_diff2 << std::endl;
 
+	// Filament context: each class's best coarse score for this segment
+	if (baseMLO->filctx_opt.mode != filctx::OFF && !baseMLO->filctx_loglik.empty() && sp.nr_images == 1)
+	{
+		// allWeights may live on the device only: copy into a host buffer of our own
+		std::vector<XFLOAT> hw(allWeights_size);
+#if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED)
+		if (allWeights_size > 0)
+		{
+			allWeights.cpToHost(&hw[0], allWeights_size);
+			allWeights.streamSync();
+		}
+#else
+		for (size_t i = 0; i < allWeights_size; i++) hw[i] = allWeights[i];
+#endif
+		const int K = baseMLO->mymodel.nr_classes;
+		float *row = &baseMLO->filctx_loglik[(size_t)op.part_id * K];
+		for (int k = 0; k < K; k++) row[k] = -1e30f;
+		size_t pos = 0;
+		for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+		{
+			const size_t n = (size_t)projectorPlans[iclass].orientation_num * translation_num;
+			XFLOAT best = std::numeric_limits<XFLOAT>::max();
+			for (size_t i = pos; i < pos + n; i++)
+				if (hw[i] < best) best = hw[i];
+			if (n > 0) row[iclass] = (float)(op.min_diff2 - best);
+			pos += n;
+		}
+	}
+
 #ifdef TIMING
 	if (op.part_id == baseMLO->exp_my_first_part_id)
 		baseMLO->timer.toc(baseMLO->TIMING_ESP_DIFF1);
@@ -2435,7 +2466,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 					pdf = op.directions_prior[idir] * op.psi_prior[ipsi];
 				pdf *= baseMLO->helicalContextPrior(op.part_id, exp_iclass);
 
-				pdfs[iorientclass] = pdf;
+				pdfs[iorientclass] = pdf * baseMLO->filamentClassFactor(op.part_id, exp_iclass);
 			}
 
 	pdfs.cpToDevice();

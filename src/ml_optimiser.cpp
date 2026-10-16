@@ -538,6 +538,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
+    parseFilamentContext();
 
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
@@ -797,6 +798,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
+    parseFilamentContext();
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
     // so existing job.star files and scripts keep working; --dont_align_halves is
@@ -2865,6 +2867,8 @@ void MlOptimiser::initialiseGeneral(int rank)
         minimum_nr_particles_sigma2_noise = (mymodel.data_dim == 3 || mydata.is_tomo) ? 10 : 1000;
     }
 
+    initialiseFilamentContext();
+
 #ifdef DEBUG
     std::cerr << "Leaving initialiseGeneral" << std::endl;
 #endif
@@ -4888,6 +4892,8 @@ void MlOptimiser::expectation()
         progress_bar(my_nr_particles);
     IT_MARK(5);
 
+    updateFilamentContext();
+
     // If requested, enforce that all segments from the same filament have the same class
     enforceFilamentConsistency();
 
@@ -5116,6 +5122,9 @@ void MlOptimiser::expectationSetup()
     // Initialise per-class orientation tracking for filament consistency
     if (do_keep_full_filaments && mymodel.nr_classes > 1)
         exp_per_class_metadata_.initZeros(mydata.numberOfParticles(), mymodel.nr_classes * METADATA_NR_CLASS_PARAMS);
+
+    if (filctx_opt.mode != filctx::OFF)
+        filctx_loglik.assign((size_t)mydata.numberOfParticles() * mymodel.nr_classes, 0.f);
 }
 
 void MlOptimiser::expectationSetupCheckMemory(int myverb)
@@ -9445,6 +9454,9 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
     bool do_polarity_evidence = do_helical_polarity && exp_ipass == 0 && !(do_skip_align || do_skip_rotate);
     double polarity_wsum[2] = {0., 0.};
 
+    if (exp_ipass == 0 && filctx_opt.mode != filctx::OFF && !filctx_loglik.empty())
+        storeFilamentLoglik(part_id, exp_Mweight, exp_nr_dir * exp_nr_psi * exp_nr_trans * exp_nr_oversampled_rot * exp_nr_oversampled_trans, exp_min_diff2);
+
     RFLOAT my_sigma2_offset_x, my_sigma2_offset_y, my_sigma2_offset_z;
     if (offset_range_x > 0.) // after initialise() this implies also y/z ranges are > 0
     {
@@ -9634,6 +9646,7 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
 
                     if (pdf_orientation_mean != 0.)
                         pdf_orientation /= pdf_orientation_mean;
+                    pdf_orientation *= filamentClassFactor(part_id, exp_iclass);
 
                     // Loop over all translations
                     long int ihidden = iorientclass * exp_nr_trans;
@@ -12286,6 +12299,111 @@ void MlOptimiser::reportResources(const std::vector<resrep::ProcessStats> &procs
         for (const auto &a : advice)
             std::cout << "  - " << a << std::endl;
         std::cout << "  (set RELION_RESOURCE_REPORT=off to silence these notes)" << std::endl;
+    }
+}
+
+void MlOptimiser::parseFilamentContext()
+{
+    filctx_opt = filctx::optionsFromEnvironment();
+    std::string mode = parser.getOption("--filament_context", "Use the other segments of a filament as a prior on a segment's class: off, chain (Markov chain along the filament) or filament (one class distribution per filament). Default: RELION_FILAMENT_CONTEXT, else off", "");
+    if (!mode.empty())
+        filctx_opt.mode = filctx::modeFromString(mode, "--filament_context");
+    std::string temper = parser.getOption("--filament_temper", "Filament context: power on the segment likelihoods (<= 0: segment step / box length). Default: RELION_FILAMENT_TEMPER", "");
+    if (!temper.empty())
+        filctx_opt.temper = textToFloat(temper);
+    std::string gap = parser.getOption("--filament_gap", "Filament context: leave out segments closer than this many steps (>= 1). Default: RELION_FILAMENT_GAP, else 1", "");
+    if (!gap.empty())
+    {
+        if (textToInteger(gap) < 1)
+            REPORT_ERROR("ERROR: --filament_gap should be at least 1.");
+        filctx_opt.gap = textToInteger(gap);
+    }
+    std::string flr = parser.getOption("--filament_floor", "Filament context: fraction of the global class distribution mixed into the prior (0-1). Default: RELION_FILAMENT_FLOOR, else 0.02", "");
+    if (!flr.empty())
+    {
+        double f = textToFloat(flr);
+        if (f < 0. || f > 1.)
+            REPORT_ERROR("ERROR: --filament_floor should be between 0 and 1.");
+        filctx_opt.floor = f;
+    }
+    std::string alpha = parser.getOption("--filament_alpha", "Filament context, filament mode: weight of the global class distribution. Default: RELION_FILAMENT_ALPHA, else 1", "");
+    if (!alpha.empty())
+        filctx_opt.alpha = textToFloat(alpha);
+}
+
+void MlOptimiser::initialiseFilamentContext()
+{
+    if (filctx_opt.mode == filctx::OFF)
+        return;
+    if (mymodel.nr_classes < 2 || mymodel.nr_bodies > 1 || mydata.is_tomo)
+        REPORT_ERROR("ERROR: filament context is for 2D or 3D classification of helical segments (several classes, no multi-body or tomography).");
+
+    double step;
+    filctx_filaments = filctx::groupFilaments(mydata.MDimg, step);
+    if (filctx_filaments.empty())
+        REPORT_ERROR("ERROR: filament context needs rlnHelicalTubeID (and rlnMicrographName) in the particle STAR file.");
+    long int nr_in_filaments = 0;
+    for (const auto &f : filctx_filaments) nr_in_filaments += f.size();
+
+    const bool step_in_angstrom = mydata.MDimg.containsLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM);
+    const RFLOAT box_length = mymodel.ori_size * mymodel.pixel_size;
+    if (filctx_opt.temper > 0.)
+        filctx_temper = filctx_opt.temper;
+    else if (step > 0. && step_in_angstrom)
+        filctx_temper = std::min(1., step / box_length);
+    else
+        REPORT_ERROR("ERROR: filament context cannot work out the distance between segments (no rlnHelicalTrackLengthAngst); set --filament_temper (or RELION_FILAMENT_TEMPER).");
+
+    if (verb > 0)
+        std::cout << " Filament context: " << filctx::modeName(filctx_opt.mode) << ", " << filctx_filaments.size()
+                  << " filaments holding " << nr_in_filaments << " of " << mydata.numberOfParticles() << " segments"
+                  << ", likelihood power " << filctx_temper << ", gap " << filctx_opt.gap
+                  << ", floor " << filctx_opt.floor << std::endl;
+}
+
+void MlOptimiser::storeFilamentLoglik(long int part_id, const MultidimArray<RFLOAT> &Mdiff2, long int per_class, RFLOAT min_diff2)
+{
+    const int K = mymodel.nr_classes;
+    float *row = &filctx_loglik[(size_t)part_id * K];
+    for (int k = 0; k < K; k++)
+    {
+        RFLOAT best = LARGE_NUMBER;
+        const long int start = (long int)k * per_class;
+        for (long int i = start; i < start + per_class && i < XSIZE(Mdiff2); i++)
+        {
+            const RFLOAT d = DIRECT_A1D_ELEM(Mdiff2, i);
+            if (d != -999. && d < best) best = d;
+        }
+        // relative to the best class, so a row of zeros only ever means "not computed"
+        row[k] = (best < LARGE_NUMBER) ? (float)(min_diff2 - best) : -1e30f;
+    }
+}
+
+void MlOptimiser::updateFilamentContext()
+{
+    if (filctx_opt.mode == filctx::OFF || filctx_loglik.empty())
+        return;
+    const int K = mymodel.nr_classes;
+    std::vector<double> pi(K, 0.);
+    double s = 0.;
+    for (int k = 0; k < K; k++) s += pi[k] = std::max((RFLOAT)0., mymodel.pdf_class[k]);
+    for (int k = 0; k < K; k++) pi[k] = (s > 0.) ? pi[k] / s : 1. / K;
+
+    filctx::computePriors(filctx_filaments, filctx_loglik, K, pi, filctx_opt, filctx_temper, filctx_T, filctx_logprior);
+
+    if (verb > 0 && filctx_opt.mode == filctx::CHAIN)
+    {
+        double stay = 0.;
+        for (int k = 0; k < K; k++) stay += pi[k] * filctx_T[(size_t)k * K + k];
+        std::cout << " Filament context: probability that the next segment keeps its class = " << stay << std::endl;
+        FileName fn_t = fn_out + "_it" + integerToString(iter, 3) + "_filament_transitions.txt";
+        std::ofstream fh(fn_t.c_str());
+        for (int j = 0; j < K; j++)
+        {
+            for (int k = 0; k < K; k++)
+                fh << (k ? " " : "") << filctx_T[(size_t)j * K + k];
+            fh << "\n";
+        }
     }
 }
 

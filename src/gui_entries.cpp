@@ -172,6 +172,9 @@ void GuiEntry::initialise(int x, int y, Fl_Group * deactivate_this_group, bool _
 					choice->add(joboption.radio_options[i].c_str());
 					if (joboption.radio_options[i] == joboption.default_value) choice->picked(choice->mvalue());
 				}
+				// A choice whose first option is "Off" greys out its group while Off is selected
+				if (deactivate_this_group != NULL && !joboption.radio_options.empty() && joboption.radio_options[0] == "Off")
+					my_deactivate_group = deactivate_this_group;
 			}
 			else // boolean
 			{
@@ -264,6 +267,9 @@ void GuiEntry::setValue(std::string _value)
 		if (_value.substr(0,2) != "$$")
 			slider->value(fltkTextToFloat(inp->value()));
 	}
+	// A loaded job must show its own state: re-apply the greying of a choice's group
+	if (joboption.joboption_type == JOBOPTION_RADIO && my_deactivate_group != NULL)
+		cb_menu_i();
 	if (on_change)
 		on_change();
 }
@@ -479,7 +485,7 @@ void GuiEntry::cb_menu_i()
 			if (myval.substr(0,2) == "$$")
 				my_deactivate_group->activate();
 			else if ( actually_activate && (strcmp(inp->value(), "Yes") == 0) ||
-				!actually_activate && (strcmp(inp->value(), "No") == 0))
+				!actually_activate && (strcmp(inp->value(), "No") == 0 || strcmp(inp->value(), "Off") == 0))
 				my_deactivate_group->deactivate();
 			else
 				my_deactivate_group->activate();

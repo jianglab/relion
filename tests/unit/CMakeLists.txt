@@ -47,6 +47,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_helix_coords.cpp
     test_helix_mask.cpp
     test_resource_report.cpp
+    test_filament_context.cpp
     test_import_project.cpp
     test_rectangular_box.cpp
     test_rectangular_projector.cpp
