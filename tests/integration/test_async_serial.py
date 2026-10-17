@@ -103,16 +103,47 @@ def test_async_serial_off_value_keeps_the_sequential_order(test_data_dir, relion
     assert "ASYNC_SERIAL" not in off.stdout
 
 
+def _angles(star):
+    """The orientation columns of the particle table of a data.star, as strings."""
+    blocks, cols, rows = [], [], []
+    for line in star.read_text().splitlines():
+        if line.startswith("data_"):
+            blocks.append((cols, rows))
+            cols, rows = [], []
+        elif line.startswith("_rln"):
+            cols.append(line.split()[0])
+        elif cols and line.strip() and not line.startswith(("loop_", "#")):
+            rows.append(line.split())
+    blocks.append((cols, rows))
+    cols, rows = max(blocks, key=lambda b: len(b[1]))
+    idx = [cols.index(c) for c in ("_rlnAngleRot", "_rlnAngleTilt", "_rlnAnglePsi")]
+    return [tuple(r[i] for i in idx) for r in rows]
+
+
+def _log_likelihood(model_star):
+    for line in model_star.read_text().splitlines():
+        if line.startswith("_rlnLogLikelihood"):
+            return float(line.split()[1])
+    raise AssertionError("no _rlnLogLikelihood in " + str(model_star))
+
+
 @pytest.mark.integration
-def test_async_serial_on_gpu_is_bit_identical(test_data_dir, relion_bin, fixtures_module, relion_runner):
-    """On a GPU the weighted sums are also zeroed in the background; same files again."""
+def test_async_serial_on_gpu_stays_within_run_to_run_spread(test_data_dir, relion_bin, fixtures_module, relion_runner):
+    """GPU runs are not byte-reproducible (atomic additions), so a run with the switch is compared with
+    two runs without it: same orientations after the first iteration, and a likelihood that differs
+    from the first run by no more than a few times what the two plain runs differ by."""
     if not _have_mpi(relion_bin) or not _have_cuda_gpu(relion_bin):
         pytest.skip("needs a CUDA GPU, relion_refine_mpi, mpirun and a build with RELION_ASYNC_SERIAL")
     fixtures_module["generate_test_dataset"](str(test_data_dir), relion_bin, relion_runner,
                                              num_particles=60, size=32, angpix=1.0)
     gpu = ["--gpu", "0"]
-    _refine(relion_bin, relion_runner, test_data_dir, test_data_dir / "gseq", {}, gpu)
+    for tag in ("gseq", "gseq2"):
+        _refine(relion_bin, relion_runner, test_data_dir, test_data_dir / tag, {}, gpu)
     asy = _refine(relion_bin, relion_runner, test_data_dir, test_data_dir / "gasy",
                   {"RELION_ASYNC_SERIAL": "1"}, gpu)
     assert "weighted sums are zeroed in the background" in asy.stdout, asy.stdout[-3000:]
-    _same_files(test_data_dir / "gseq", test_data_dir / "gasy")
+    assert _angles(test_data_dir / "gasy" / "run_it001_data.star") == \
+        _angles(test_data_dir / "gseq" / "run_it001_data.star")
+    ll = {t: _log_likelihood(test_data_dir / t / "run_it001_half1_model.star") for t in ("gseq", "gseq2", "gasy")}
+    spread = abs(ll["gseq"] - ll["gseq2"])
+    assert abs(ll["gasy"] - ll["gseq"]) <= max(10 * spread, 1e-5 * abs(ll["gseq"])), ll

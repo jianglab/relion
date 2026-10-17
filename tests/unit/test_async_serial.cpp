@@ -126,7 +126,7 @@ TEST_CASE("FFTW per-thread plan thread count: transforms equal and the global co
 	MultidimArray<Complex> ref;
 	{
 		FourierTransformer t;
-		t.FourierTransform(v, ref, false);
+		t.FourierTransform(v, ref, true);
 	}
 
 	MultidimArray<Complex> other;
@@ -134,7 +134,7 @@ TEST_CASE("FFTW per-thread plan thread count: transforms equal and the global co
 	{
 		relionFftwSetThreadPlanThreads(4);
 		FourierTransformer t;
-		t.FourierTransform(v, other, false);
+		t.FourierTransform(v, other, true);
 		relionFftwSetThreadPlanThreads(0);
 	});
 	th.join();
