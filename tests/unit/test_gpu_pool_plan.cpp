@@ -148,9 +148,9 @@ TEST_CASE("lean pool problem key names the sizes and nothing else", "[gpu_pool]"
 	Problem p;
 	p.ori_size = 256; p.nr_classes = 4; p.ref_dim = 3; p.model_bytes = 123456789;
 	p.threads_on_device = 8; p.ranks_on_device = 2; p.current_size = 120; p.coarse_size = 64;
-	p.nr_orientations = 3686400; p.nr_pool = 8;
+	p.nr_orientations = 3686400; p.nr_pool = 8; p.cap_class = capClass(5 * GB);
 	const std::string k = problemKey(p);
-	CHECK(k == "box=256;K=4;dim=3;model=123456789;thr=8;ranks=2;cur=120;coarse=64;orient=3686400;pool=8");
+	CHECK(k == "box=256;K=4;dim=3;model=123456789;thr=8;ranks=2;cur=120;coarse=64;orient=3686400;pool=8;cap=49");
 	CHECK(k.find(',') == std::string::npos); // it is a CSV field
 	CHECK(k.find('/') == std::string::npos); // no path
 	Problem q = p;
@@ -158,6 +158,38 @@ TEST_CASE("lean pool problem key names the sizes and nothing else", "[gpu_pool]"
 	CHECK(problemKey(q) != k);
 	q = p; q.ranks_on_device = 1;
 	CHECK(problemKey(q) != k);
+}
+
+TEST_CASE("lean pool cap class: a peak is remembered per limit, not across limits", "[gpu_pool]")
+{
+	CHECK(capClass(0) == 0);
+	CHECK(capClass(1 * MB) == 0);
+	CHECK(capClass(2 * MB) == 4);
+	CHECK(capClass(1024 * MB) == 40);
+	CHECK(capClass(2048 * MB) == capClass(1024 * MB) + 4); // one octave is four classes
+	// monotone, and another process taking or giving back a few per cent keeps the class
+	CHECK(capClass(5 * GB) >= capClass(4 * GB));
+	CHECK(capClass(5 * GB) == capClass((size_t) (4.9 * (double) GB)));
+	CHECK(capClass(1081 * MB) != capClass(20 * GB));
+
+	Problem big, small;
+	big.ori_size = small.ori_size = 128; big.nr_classes = small.nr_classes = 3; big.ref_dim = small.ref_dim = 3;
+	big.cap_class = capClass(20 * GB);
+	small.cap_class = capClass(1081 * MB);
+	CHECK(problemKey(big) != problemKey(small));
+	big.cap_class = small.cap_class;
+	CHECK(problemKey(big) == problemKey(small));
+
+	// A peak taken at a large limit (1241 MB there) is not found under the small one, so the first chunk comes
+	// from "no measurement yet" (small, grows as needed), not from that peak clamped up to the limit.
+	const size_t cap = 1081 * MB;
+	const Plan from_other_limit = plan(cap, 0, 0, 0);
+	CHECK(std::string(from_other_limit.reason) == "no measurement yet");
+	CHECK(from_other_limit.first_chunk < cap / 4);
+	// the same peak found under its own limit still gives the old rule: 243 MB * 1.2 = 292 MB, not the limit
+	const Plan own = plan(cap, 0, 0, 243 * MB);
+	CHECK(own.first_chunk == (size_t) std::ceil(243. * (double) MB * 1.2));
+	CHECK(own.first_chunk < cap / 3);
 }
 
 TEST_CASE("lean pool peak survives a tuning cache round trip, per GPU and problem", "[gpu_pool][tuning_cache]")
@@ -206,6 +238,23 @@ bool gpuVisible()
 	int n = 0;
 	return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
 }
+
+size_t freeGpuBytes()
+{
+	size_t free_b = 0, total_b = 0;
+	return cudaMemGetInfo(&free_b, &total_b) == cudaSuccess ? free_b : 0;
+}
+
+// A pool test that finds the GPU out of memory because another process took it during the test (a shared
+// GPU, several jobs at once) is not a failure of the pool: if less than `need` bytes are free now, say so and
+// give up. With enough memory free, the error is a real one and is thrown again.
+void skipIfGpuTaken(const RelionError &e, size_t need)
+{
+	if (freeGpuBytes() >= need)
+		throw;
+	WARN("GPU memory was taken by another process during the test (" << freeGpuBytes() / MB << " MB free, "
+	     << need / MB << " MB needed): test skipped. Error: " << e.msg);
+}
 }
 
 TEST_CASE("lean CudaCustomAllocator holds a small chunk, grows on demand within its cap", "[gpu_pool][gpu_allocator]")
@@ -215,15 +264,17 @@ TEST_CASE("lean CudaCustomAllocator holds a small chunk, grows on demand within 
 		WARN("no GPU visible: test skipped");
 		return;
 	}
-	size_t free_b = 0, total_b = 0;
-	REQUIRE(cudaMemGetInfo(&free_b, &total_b) == cudaSuccess);
-	const size_t cap = std::min<size_t>(768 * MB, free_b / 4);
-	if (cap < 256 * MB)
+	const size_t first_chunk = 128 * MB, block = 48 * MB;
+	// The test holds 8 blocks at once (384 MB) and the chunks it grows are not filled to the last byte, so the
+	// cap must be well above that: 1.5 times, 576 MB. A third of the free memory is left to other processes.
+	const size_t need = 8 * block * 3 / 2;
+	const size_t cap = std::min<size_t>(768 * MB, freeGpuBytes() / 3);
+	if (cap < need)
 	{
-		WARN("too little free GPU memory: test skipped");
+		WARN("too little free GPU memory (" << freeGpuBytes() / MB << " MB free, " << 3 * need / MB << " MB needed): test skipped");
 		return;
 	}
-	const size_t first_chunk = 128 * MB, block = 48 * MB;
+	try {
 
 	CudaCustomAllocator pool(0, 512);
 	pool.configureLean(cap, first_chunk);
@@ -291,6 +342,7 @@ TEST_CASE("lean CudaCustomAllocator holds a small chunk, grows on demand within 
 	pool.configureLean(cap, kMinChunk);
 	CHECK(pool.chunkSize() == kMinChunk);
 	CHECK(pool.getNumberOfAllocs() == 0);
+	} catch (const RelionError &e) { skipIfGpuTaken(e, need * 4 / 3); }
 }
 
 TEST_CASE("lean CudaCustomAllocator never holds more than its cap", "[gpu_pool][gpu_allocator]")
@@ -300,14 +352,15 @@ TEST_CASE("lean CudaCustomAllocator never holds more than its cap", "[gpu_pool][
 		WARN("no GPU visible: test skipped");
 		return;
 	}
-	size_t free_b = 0, total_b = 0;
-	REQUIRE(cudaMemGetInfo(&free_b, &total_b) == cudaSuccess);
-	const size_t cap = std::min<size_t>(256 * MB, free_b / 4);
-	if (cap < 192 * MB)
+	// 15 blocks of 16 MB = 240 MB must fit under the cap, so the cap is the full 256 MB, and a third of the
+	// free memory is left to other processes
+	const size_t cap = std::min<size_t>(256 * MB, freeGpuBytes() / 3);
+	if (cap < 256 * MB)
 	{
-		WARN("too little free GPU memory: test skipped");
+		WARN("too little free GPU memory (" << freeGpuBytes() / MB << " MB free, " << 768 << " MB needed): test skipped");
 		return;
 	}
+	try {
 	CudaCustomAllocator pool(0, 512);
 	pool.configureLean(cap, 64 * MB);
 	std::vector<CudaCustomAllocator::Alloc*> blocks;
@@ -318,6 +371,7 @@ TEST_CASE("lean CudaCustomAllocator never holds more than its cap", "[gpu_pool][
 	CHECK(pool.getPotentialFreeSpace() == pool.getTotalFreeSpace() + (cap - pool.chunkSize()));
 	for (auto *b : blocks)
 		pool.free(b);
+	} catch (const RelionError &e) { skipIfGpuTaken(e, 3 * cap / 2); }
 }
 
 TEST_CASE("the old pool is a single chunk and its cap is its size", "[gpu_pool][gpu_allocator]")
@@ -327,11 +381,23 @@ TEST_CASE("the old pool is a single chunk and its cap is its size", "[gpu_pool][
 		WARN("no GPU visible: test skipped");
 		return;
 	}
+	if (freeGpuBytes() < 4 * 64 * MB)
+	{
+		WARN("too little free GPU memory (" << freeGpuBytes() / MB << " MB free, " << 4 * 64 << " MB needed): test skipped");
+		return;
+	}
 	CudaCustomAllocator pool(0, 512);
 	CHECK(pool.chunkSize() == 0);
 	CHECK_FALSE(pool.isLean());
 	pool.resize(64 * MB);
 	CHECK_FALSE(pool.isLean());
+	if (pool.chunkSize() < 64 * MB)
+	{
+		// The pool backs off to what is free when another process took the memory since the check above
+		// (the designed behavior, it says so on the output): that is not what this test is about.
+		WARN("GPU memory was taken by another process: the pool was reduced to " << pool.chunkSize() / MB << " MB, test skipped");
+		return;
+	}
 	CHECK(pool.chunkSize() == 64 * MB);
 	CHECK(pool.capSize() == 64 * MB);
 	CHECK(pool.numberOfChunks() == 1);

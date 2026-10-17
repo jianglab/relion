@@ -47,8 +47,12 @@ covers the drift of the peak between iterations (finer sampling, larger images).
 The peak is stored in the tuning cache (`src/tuning_cache.h`, default `~/.relion/tuning.csv`,
 `RELION_TUNING_FILE` to move it, `RELION_TUNING_CACHE=off` to disable): tunable `gpu_pool_peak`, per GPU model
 and SM count, key = the sizes the peak depends on (box, number of classes, dimension, model bytes, threads and
-ranks sharing the card, current and coarse image size, number of orientations, pool size). The key holds
-numbers only, no names or paths. A row is written when the peak differs by more than 10% from the last row
+ranks sharing the card, current and coarse image size, number of orientations, pool size, and the class of the
+cap, `cap=` in the key: the cap rounded down to a quarter of an octave). The cap is in the key because with plenty of
+room the pool adds chunks instead of waiting for freed blocks, so a peak measured under a large cap overstates what a
+run under a small cap needs, and as a first chunk it would be clamped up to the whole cap (a B3 run under a 1.9 GB
+cap held all 1.9 GB while using 0.96 GB). A run under a new cap starts small and grows, and the next run under that
+cap finds its own peak. The key holds numbers only, no names or paths. A row is written when the peak differs by more than 10% from the last row
 written for the same key. The cache is only a starting point: a wrong value costs a few extra chunk
 allocations in the first iteration, never a different result.
 

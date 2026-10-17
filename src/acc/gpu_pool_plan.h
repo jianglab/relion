@@ -125,6 +125,17 @@ inline bool keepChunks(size_t nr_chunks, size_t held, size_t target)
 // Description of the problem a peak was measured for. The peak depends on the box, the references,
 // the threads sharing the pool and the sizes of the iteration (current/coarse image size and the number of
 // orientations); a different job with the same description needs about the same.
+// The most the pool may hold is part of the problem a peak was measured for: with plenty of room the pool
+// adds chunks instead of waiting for freed memory to be reusable, so a peak measured with a large cap
+// overstates what a run under a small cap needs, and the first chunk (clamped to the cap) would take the
+// whole of it. The cap is therefore rounded down to a quarter of an octave (steps of 19%, so that another
+// process taking or giving back a little memory does not change the class).
+inline int capClass(size_t cap)
+{
+	const double mb = (double) cap / (double) ((size_t) 1 << 20);
+	return mb < 1. ? 0 : (int) std::floor(4. * std::log2(mb));
+}
+
 struct Problem
 {
 	int ori_size = 0, nr_classes = 0, ref_dim = 0;
@@ -134,14 +145,15 @@ struct Problem
 	int current_size = 0, coarse_size = 0;
 	long nr_orientations = 0;   // orientations x psi x oversampling of one pass
 	int nr_pool = 0;
+	int cap_class = 0;          // capClass() of the most the pool may hold
 };
 
 inline std::string problemKey(const Problem &p)
 {
 	char b[256];
-	snprintf(b, sizeof(b), "box=%d;K=%d;dim=%d;model=%zu;thr=%d;ranks=%d;cur=%d;coarse=%d;orient=%ld;pool=%d",
+	snprintf(b, sizeof(b), "box=%d;K=%d;dim=%d;model=%zu;thr=%d;ranks=%d;cur=%d;coarse=%d;orient=%ld;pool=%d;cap=%d",
 	         p.ori_size, p.nr_classes, p.ref_dim, p.model_bytes, p.threads_on_device, p.ranks_on_device,
-	         p.current_size, p.coarse_size, p.nr_orientations, p.nr_pool);
+	         p.current_size, p.coarse_size, p.nr_orientations, p.nr_pool, p.cap_class);
 	return b;
 }
 

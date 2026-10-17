@@ -166,6 +166,7 @@ void MlDeviceBundle::setupLeanPool(size_t cap)
 		pr.nr_orientations = nr_dir * nr_psi * (long) m->sampling.oversamplingFactorOrientations(m->adaptive_oversampling);
 	}
 	pr.nr_pool = m->nr_pool;
+	pr.cap_class = gpupool::capClass(cap);
 	lean_key = gpupool::problemKey(pr);
 
 	size_t peak_last = 0, peak_prev = 0;
