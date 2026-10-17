@@ -1300,6 +1300,7 @@ void MlOptimiserMpi::expectation()
 	// Initialise some stuff
 	// A. Update current size (may have been changed to ori_size in autoAdjustAngularSampling) and resolution pointers
 	updateImageSizeAndResolutionPointers();
+	setupPrepAhead();
 
 	// B. Set the PPref Fourier transforms, initialise wsum_model, etc.
 	// The leader only holds metadata, it does not set up the wsum_model (to save memory)
