@@ -904,6 +904,32 @@ void getFourierTransformsAndCtfs(long int part_id,
 			else
 			{
 				CTIC(accMLO->timer,"CTFRead2D");
+				// RELION_PREP_AHEAD: the CTF image is a pure function of the key below; reuse an earlier copy of it
+				CtfMemo *ctf_memo = (op.is_tomo ? NULL : baseMLO->ctf_memo_.get());
+				CtfMemo::Key ctf_key;
+				bool ctf_from_memo = false;
+				if (ctf_memo != NULL)
+				{
+					ctf_key = CtfMemo::makeKey(
+						DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_DEFOCUS_U),
+						DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_DEFOCUS_V),
+						DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_DEFOCUS_ANGLE),
+						DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_BFACTOR),
+						DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_KFACTOR),
+						DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_PHASE_SHIFT),
+						my_pixel_size, optics_group, XSIZE(Fctf), YSIZE(Fctf), baseMLO->image_full_size[optics_group],
+						(baseMLO->ctf_phase_flipped ? 1u : 0u) | (baseMLO->only_flip_phases ? 2u : 0u)
+						| (baseMLO->intact_ctf_first_peak ? 4u : 0u) | (baseMLO->do_ctf_padding ? 8u : 0u)
+						| (ctf_premultiplied ? 16u : 0u));
+					CtfMemo::Ptr hit = ctf_memo->find(ctf_key);
+					if (hit)
+					{
+						Fctf = *hit;
+						ctf_from_memo = true;
+					}
+				}
+				if (!ctf_from_memo)
+				{
 				CTF ctf;
 
                 if (op.is_tomo)
@@ -938,6 +964,9 @@ void getFourierTransformsAndCtfs(long int part_id,
 						DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
 					}
 				}
+				if (ctf_memo != NULL)
+					ctf_memo->insert(ctf_key, Fctf);
+				} // end if !ctf_from_memo
 
                                 CTOC(accMLO->timer,"CTFRead2D");
 			}

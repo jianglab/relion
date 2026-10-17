@@ -46,6 +46,7 @@
 #include "src/acc/settings.h"
 #include <src/jaz/tomography/optimisation_set.h>
 #include "src/prefetch.h"
+#include "src/ctf_memo.h"
 #include "src/fftw_rect.h"
 #include "src/resource_report.h"
 #include "src/filament_context.h"
@@ -842,6 +843,8 @@ public:
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;
 	AsyncImagePrefetcher *prefetcher_ = nullptr;
+	// RELION_PREP_AHEAD: exact memo of the host-built CTF images of the accelerated expectation (null when off)
+	std::shared_ptr<CtfMemo> ctf_memo_;
 	bool prefetch_speculative_ = false; // MPI follower: the next pool is a guess (the one after this), checked on arrival
 	int prefetch_hits_ = 0, prefetch_misses_ = 0;
 	double exp_time_serial_s = 0., exp_time_par_s = 0.; // RELION_ITER_TIMING: pool set-up/reading vs. threaded part of expectationSomeParticles
@@ -1229,6 +1232,7 @@ public:
 	 */
 	bool keepProjectorHostData();
 
+	void setupPrepAhead();
 	void expectation();
 
 	/* Setup expectation step. We divide the heavy steps over mpi followers,

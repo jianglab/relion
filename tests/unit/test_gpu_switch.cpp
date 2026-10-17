@@ -69,3 +69,23 @@ TEST_CASE("Every default-on GPU switch in the list is on when unset and off with
 		if (old) setenv(names[i], saved.c_str(), 1); else unsetenv(names[i]);
 	}
 }
+
+TEST_CASE("Opt-in switches are off unless set to an on value", "[gpu_switch]")
+{
+	const char *name = "RELION_TEST_OPT_IN_SWITCH";
+	unsetenv(name);
+	CHECK(!gpuswitch::optIn(name));
+	for (const char *off : {"0", "off", "no", "false", ""})
+	{
+		setenv(name, off, 1);
+		INFO("value '" << off << "'");
+		CHECK(!gpuswitch::optIn(name));
+	}
+	for (const char *on : {"1", "on", "yes", "check"})
+	{
+		setenv(name, on, 1);
+		INFO("value " << on);
+		CHECK(gpuswitch::optIn(name));
+	}
+	unsetenv(name);
+}

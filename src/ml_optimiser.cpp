@@ -2334,6 +2334,8 @@ void MlOptimiser::initialiseGeneral(int rank)
         for (size_t i = 0; i < n_names; i++)
             if (!gpuswitch::on(names[i]))
                 off += std::string(off.empty() ? "" : ", ") + names[i];
+        if (gpuswitch::optIn("RELION_PREP_AHEAD"))
+            std::cout << " RELION_PREP_AHEAD is on: the CTF images of the expectation step are memoised per distinct set of CTF values (exact copies, capped at RELION_PREP_AHEAD_CTF_MB, default 256 MB or 1/32 of the free memory)." << std::endl;
         std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join, pooled pinned copy buffers, weighted-average sums of 2D data, block-wise sort of the weights, one-pass significance selection of the weights, one-block significance pass of --skip_align, per-thread cache of small device blocks reused on the same stream) are on by default, each backing off to the older path when its conditions are not met; "
                   << (off.empty() ? "none is switched off" : "switched off: " + off) << " (VAR=0 turns one off)." << std::endl;
     }
@@ -4649,6 +4651,34 @@ bool MlOptimiser::keepProjectorHostData()
 }
 
 
+void MlOptimiser::setupPrepAhead()
+{
+    if (!(do_gpu || do_cpu || do_sycl) || !gpuswitch::optIn("RELION_PREP_AHEAD") || mydata.is_tomo || mymodel.data_dim != 2)
+    {
+        ctf_memo_.reset();
+        return;
+    }
+    if (!ctf_memo_)
+    {
+        // Cap: RELION_PREP_AHEAD_CTF_MB, else 256 MB, never more than 1/32 of the available memory
+        size_t cap = (size_t)256 << 20;
+        const char *e = getenv("RELION_PREP_AHEAD_CTF_MB");
+        if (e != NULL && atof(e) > 0.) cap = (size_t)(atof(e) * 1048576.);
+        else
+        {
+            std::ifstream mi("/proc/meminfo");
+            std::string key, unit;
+            size_t kb = 0;
+            while (mi >> key >> kb >> unit)
+                if (key == "MemAvailable:") { cap = std::min(cap, (kb << 10) / 32); break; }
+            }
+        ctf_memo_ = std::make_shared<CtfMemo>(cap);
+    }
+    std::ostringstream sig;
+    for (size_t i = 0; i < image_current_size.size(); i++) sig << image_current_size[i] << ",";
+    ctf_memo_->beginIteration(sig.str());
+}
+
 void MlOptimiser::expectation()
 {
 
@@ -4663,6 +4693,7 @@ void MlOptimiser::expectation()
     // Initialise some stuff
     // A. Update current size (may have been changed to ori_size in autoAdjustAngularSampling) and resolution pointers
     updateImageSizeAndResolutionPointers();
+    setupPrepAhead();
 
     // B. Initialise Fouriertransform, set weights in wsum_model to zero, initialise AB-matrices for FFT-phase shifts, etc
     expectationSetup();

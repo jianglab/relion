@@ -67,6 +67,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_bulk_threads.cpp
     test_gpu_reconstruct.cpp
     test_gpu_switch.cpp
+    test_ctf_memo.cpp
     test_pinned_pool.cpp
     test_tuning_cache.cpp
     test_gpu_pool_plan.cpp
