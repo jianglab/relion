@@ -4672,8 +4672,14 @@ void MlOptimiser::setupPrepAhead()
             while (mi >> key >> kb >> unit)
                 if (key == "MemAvailable:") { cap = std::min(cap, (kb << 10) / 32); break; }
             }
-        ctf_memo_ = std::make_shared<CtfMemo>(cap);
+        ctf_memo_ = std::make_shared<CtfMemo>(cap, gpuswitch::mode("RELION_PREP_AHEAD") == 2);
     }
+    if (getenv("RELION_ITER_TIMING") != NULL && ctf_memo_->hits() + ctf_memo_->misses() > 0)
+        std::cerr << "PREP_AHEAD CTF memo before iteration " << iter << ": " << ctf_memo_->entries() << " images, "
+                  << (ctf_memo_->bytes() >> 10) << " kB, hits " << ctf_memo_->hits() << ", misses " << ctf_memo_->misses()
+                  << ", skipped (cap) " << ctf_memo_->skipped()
+                  << (ctf_memo_->checking() ? ", check: " + std::to_string(ctf_memo_->checkedSame()) + " identical, " + std::to_string(ctf_memo_->checkedDifferent()) + " DIFFERENT" : std::string())
+                  << std::endl;
     std::ostringstream sig;
     for (size_t i = 0; i < image_current_size.size(); i++) sig << image_current_size[i] << ",";
     ctf_memo_->beginIteration(sig.str());

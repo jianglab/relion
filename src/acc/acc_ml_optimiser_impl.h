@@ -908,6 +908,7 @@ void getFourierTransformsAndCtfs(long int part_id,
 				CtfMemo *ctf_memo = (op.is_tomo ? NULL : baseMLO->ctf_memo_.get());
 				CtfMemo::Key ctf_key;
 				bool ctf_from_memo = false;
+				CtfMemo::Ptr ctf_check_copy;
 				if (ctf_memo != NULL)
 				{
 					ctf_key = CtfMemo::makeKey(
@@ -922,7 +923,9 @@ void getFourierTransformsAndCtfs(long int part_id,
 						| (baseMLO->intact_ctf_first_peak ? 4u : 0u) | (baseMLO->do_ctf_padding ? 8u : 0u)
 						| (ctf_premultiplied ? 16u : 0u));
 					CtfMemo::Ptr hit = ctf_memo->find(ctf_key);
-					if (hit)
+					if (hit && ctf_memo->checking())
+						ctf_check_copy = hit;   // compute it again below and compare
+					else if (hit)
 					{
 						Fctf = *hit;
 						ctf_from_memo = true;
@@ -964,7 +967,10 @@ void getFourierTransformsAndCtfs(long int part_id,
 						DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
 					}
 				}
-				if (ctf_memo != NULL)
+				if (ctf_check_copy)
+					ctf_memo->recordCheck(memcmp(MULTIDIM_ARRAY(*ctf_check_copy), MULTIDIM_ARRAY(Fctf), sizeof(RFLOAT) * NZYXSIZE(Fctf)) == 0
+					                      && NZYXSIZE(*ctf_check_copy) == NZYXSIZE(Fctf));
+				else if (ctf_memo != NULL)
 					ctf_memo->insert(ctf_key, Fctf);
 				} // end if !ctf_from_memo
 

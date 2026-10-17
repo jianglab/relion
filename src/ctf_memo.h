@@ -30,7 +30,17 @@ public:
 		std::string str() const { return std::string((const char *)this, sizeof(Key)); }
 	};
 
-	explicit CtfMemo(size_t max_bytes) : max_bytes_(max_bytes) {}
+	explicit CtfMemo(size_t max_bytes, bool check = false) : max_bytes_(max_bytes), check_(check) {}
+
+	// RELION_PREP_AHEAD=check: a hit is also computed again and compared bit for bit
+	bool checking() const { return check_; }
+	void recordCheck(bool same)
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		(same ? checked_same_ : checked_diff_)++;
+	}
+	size_t checkedSame() const { std::lock_guard<std::mutex> lock(mutex_); return checked_same_; }
+	size_t checkedDifferent() const { std::lock_guard<std::mutex> lock(mutex_); return checked_diff_; }
 
 	static Key makeKey(double defU, double defV, double angle, double bfactor, double kfactor, double phase_shift,
 	                   double pixel_size, int optics_group, int xdim, int ydim, int full_size, unsigned flags)
@@ -86,7 +96,9 @@ private:
 	mutable std::mutex mutex_;
 	std::unordered_map<std::string, Ptr> map_;
 	std::string signature_;
-	size_t max_bytes_, bytes_ = 0, hits_ = 0, misses_ = 0, skipped_ = 0;
+	size_t max_bytes_;
+	bool check_;
+	size_t bytes_ = 0, hits_ = 0, misses_ = 0, skipped_ = 0, checked_same_ = 0, checked_diff_ = 0;
 };
 
 #endif /* CTF_MEMO_H_ */
