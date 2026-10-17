@@ -54,6 +54,7 @@
 #endif
 #include "src/gpu_reconstruct.h"
 #include "src/gpu_switch.h"
+#include "src/async_serial.h"
 #include "src/fixed_class_initialisation.h"
 #include "src/class2d_consensus_metadata.h"
 #include "src/spatial_frequency_grid.h"
@@ -5051,6 +5052,7 @@ void MlOptimiser::expectation()
 #ifdef _CUDA_ENABLED
             b->flushBackprojectAccumulator();
 #endif
+            waitForWsumZeroing();
 
             for (int j = 0; j < b->projectors.size(); j++)
                 b->projectors[j].clear();
@@ -5222,6 +5224,8 @@ void MlOptimiser::expectation()
     // portion of expectation
     relionFftwPlanThreads(nr_threads);
 
+    waitForWsumZeroing();
+
     // Clean up some memory
     if (!keepProjectorHostData())
         for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
@@ -5233,6 +5237,15 @@ void MlOptimiser::expectation()
 
 }
 
+
+void MlOptimiser::waitForWsumZeroing()
+{
+    if (!wsum_zero_task_.pending())
+        return;
+    const double waited = wsum_zero_task_.wait();
+    if (getenv("RELION_ITER_TIMING") != NULL)
+        fprintf(stderr, "SETUP_TIMING it%d wsum_zero_background ms %.0f waited_ms %.0f\n", iter, 1e3 * wsum_zero_task_.fillSeconds(), 1e3 * waited);
+}
 
 void MlOptimiser::expectationSetup()
 {
@@ -5254,8 +5267,28 @@ void MlOptimiser::expectationSetup()
     mymodel.setFourierTransformMaps(!fix_tau, nr_threads, strict_lowres_exp, my_fourier_mask);
     auto setup_t1 = std::chrono::steady_clock::now();
 
-    // Initialise all weighted sums to zero
-    wsum_model.initZeros();
+    // Initialise all weighted sums to zero. With RELION_ASYNC_SERIAL on a GPU, only the sizes are set
+    // here and the zero-fill of the big arrays runs in the background: the GPU accumulates into its own
+    // copy and the host arrays are first written when the E-step ends (waitForWsumZeroing).
+    bool zero_deferred = false;
+    if (asyncserial::enabled() && do_gpu)
+    {
+        std::vector<asyncserial::ZeroSpan> spans;
+        wsum_model.initZeros(&spans);
+        const int zt = asyncserial::helperThreads(nr_threads);
+        zero_deferred = wsum_zero_task_.start(spans, zt);
+        if (!zero_deferred)
+            for (const asyncserial::ZeroSpan &sp : spans)
+                memset(sp.p, 0, sp.bytes);
+        if (verb > 0 && !wsum_zero_reported_)
+        {
+            wsum_zero_reported_ = true;
+            std::cout << " RELION_ASYNC_SERIAL: the weighted sums are zeroed in the background (" << zt
+                      << " threads, lowest priority) while the E-step runs" << std::endl;
+        }
+    }
+    else
+        wsum_model.initZeros();
     if (setup_tm)
     {
         auto setup_t2 = std::chrono::steady_clock::now();

@@ -1937,7 +1937,7 @@ void MlWsumModel::initialise(MlModel &_model, FileName fn_sym, bool asymmetric_p
 
 }
 
-void MlWsumModel::initZeros()
+void MlWsumModel::initZeros(std::vector<asyncserial::ZeroSpan> *deferred)
 {
 
 	LL = 0.;
@@ -1952,9 +1952,18 @@ void MlWsumModel::initZeros()
 
 	for (int iclass = 0; iclass < nr_classes * nr_bodies; iclass++)
 	{
-		BPref[iclass].initZeros(current_size);
+		// With `deferred`, only the sizes are set here; the caller zero-fills the big arrays later
+		if (deferred != NULL)
+			BPref[iclass].initZerosDeferred(current_size, *deferred);
+		else
+			BPref[iclass].initZeros(current_size);
 		if (pseudo_halfsets)
-			BPref[iclass + nr_classes].initZeros(current_size);
+		{
+			if (deferred != NULL)
+				BPref[iclass + nr_classes].initZerosDeferred(current_size, *deferred);
+			else
+				BPref[iclass + nr_classes].initZeros(current_size);
+		}
 
 		// Assume pdf_direction is already of the right size...
 		pdf_direction[iclass].initZeros();

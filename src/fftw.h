@@ -154,6 +154,9 @@
 // RELION_FFTW_THREADS=1 keeps all transforms single-threaded.
 void relionFftwInitThreads();
 void relionFftwPlanThreads(int nr_threads);
+// The calling thread makes its plans with this many FFTW threads whatever the planner currently has (0: off).
+// For a background thread that must plan as the foreground code would, while the foreground changes the count.
+void relionFftwSetThreadPlanThreads(int nr_threads);
 void relionFftwCleanupThreads();
 // Threads for RELION's own loops over an array of n elements: as many as FFTW plans with (one inside
 // the particle loop, all outside), and one for small arrays

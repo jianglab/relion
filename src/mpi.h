@@ -75,6 +75,8 @@ class MpiNode
 
 public:
 	int rank, size;
+	// Thread support MPI_Init_thread granted (MPI_THREAD_MULTIPLE: any thread may call MPI)
+	int thread_level = 0;
 
 	MPI_Group worldG, followerG; // groups of ranks (in practice only used to create communicators)
 	MPI_Comm worldC, followerC; // communicators

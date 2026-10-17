@@ -2060,6 +2060,7 @@ void MlOptimiserMpi::expectation()
 					// Spread the per-orientation back-projection sums into the volumes before they are read back
 					b->flushBackprojectAccumulator();
 #endif
+					waitForWsumZeroing();
 
 					for (int j = 0; j < b->projectors.size(); j++)
 						b->projectors[j].clear();
@@ -2241,6 +2242,8 @@ void MlOptimiserMpi::expectation()
 	// Allow parallel FFTW execution to continue now that we are outside the parallel
 	// portion of expectation
 	relionFftwPlanThreads(nr_threads);
+
+	waitForWsumZeroing();
 
 	// Just make sure the temporary arrays are empty...
 	exp_imagedata.clear();
@@ -3728,17 +3731,17 @@ void MlOptimiserMpi::alignClassesMpi()
 	}
 }
 
-void MlOptimiserMpi::alignHalves()
+int MlOptimiserMpi::alignHalvesFreedom() const
 {
 	if (!do_split_random_halves || mymodel.nr_classes > 1)
-		return;
+		return 0;
 
 	// alignMapToMap is a 3D search throughout - a 3D Projector, ZYZ Euler angles
 	// and 4x4 matrices - so it cannot be pointed at 2D references, where it aborts
 	// in applyGeometry with "2D transformation matrix is not 3x3".  Same guard as
 	// MlOptimiser::alignClasses().
 	if (mymodel.ref_dim != 3)
-		return;
+		return 0;
 
 	// Determine search DOF from symmetry
 	int nr_freedom = 6;
@@ -3758,12 +3761,174 @@ void MlOptimiserMpi::alignHalves()
 				nr_freedom = 0; // Dn, T, O, I: skip
 		}
 	}
+	return nr_freedom;
+}
 
+// Rank 2 sends its map to rank 1; rank 1 aligns and broadcasts params.  For a cubic map
+// the search works on a 64-cube, so each rank reduces its own map (in parallel) and only
+// the small cubes travel; the parameters found are the same as for the full-size maps.
+void MlOptimiserMpi::alignHalvesExchange(int ibody, int reconstruct_rank1, int reconstruct_rank2, HalvesCubes &cubes)
+{
+	MPI_Status status;
+	const bool reduce_first = XSIZE(mymodel.Iref[ibody]) == YSIZE(mymodel.Iref[ibody])
+			&& XSIZE(mymodel.Iref[ibody]) == ZSIZE(mymodel.Iref[ibody])
+			&& alignWorkSize(XSIZE(mymodel.Iref[ibody])) != XSIZE(mymodel.Iref[ibody]);
+	cubes.angpix = reduce_first
+			? mymodel.pixel_size * XSIZE(mymodel.Iref[ibody]) / alignWorkSize(XSIZE(mymodel.Iref[ibody]))
+			: mymodel.pixel_size;
+	const bool align_timing = getenv("RELION_ALIGN_TIMING") != NULL;
+	const double t_align0 = align_timing ? MPI_Wtime() : 0.;
+	if (node->rank == reconstruct_rank2)
+	{
+		MultidimArray<RFLOAT> half2_small;
+		if (reduce_first)
+		{
+			half2_small = mymodel.Iref[ibody];
+			reduceMapForAlignment(half2_small);
+		}
+		if (align_timing)
+			fprintf(stderr, "ALIGN_TIMING rank %d reduce %.3f s\n", node->rank, MPI_Wtime() - t_align0);
+		const MultidimArray<RFLOAT> &to_send = reduce_first ? half2_small : mymodel.Iref[ibody];
+		node->relion_MPI_Send(MULTIDIM_ARRAY(to_send), MULTIDIM_SIZE(to_send),
+				MY_MPI_DOUBLE, reconstruct_rank1, MPITAG_IMAGE, MPI_COMM_WORLD);
+	}
+	else if (node->rank == reconstruct_rank1)
+	{
+		cubes.half1 = mymodel.Iref[ibody];
+		if (reduce_first)
+			reduceMapForAlignment(cubes.half1);
+		if (align_timing)
+			fprintf(stderr, "ALIGN_TIMING rank %d reduce %.3f s\n", node->rank, MPI_Wtime() - t_align0);
+		cubes.half2.resize(cubes.half1);
+		node->relion_MPI_Recv(MULTIDIM_ARRAY(cubes.half2),
+				MULTIDIM_SIZE(cubes.half2),
+				MY_MPI_DOUBLE, reconstruct_rank2, MPITAG_IMAGE, MPI_COMM_WORLD, status);
+		if (align_timing)
+			fprintf(stderr, "ALIGN_TIMING rank %d received at %.3f s\n", node->rank, MPI_Wtime() - t_align0);
+	}
+}
+
+void MlOptimiserMpi::alignHalvesSearch(int nr_freedom, RFLOAT maxres, const HalvesCubes &cubes, int threads, RFLOAT params[6])
+{
+	RFLOAT best_rot = 0., best_tilt = 0., best_psi = 0.;
+	RFLOAT best_dx = 0., best_dy = 0., best_dz = 0.;
+	// alignCuboidMapToMap leaves its inputs as they are when it does not apply the result
+	MultidimArray<RFLOAT> half2(cubes.half2);
+	alignCuboidMapToMap(half2, cubes.half1, nr_freedom,
+			cubes.angpix, maxres,
+			3, 1., 1.,
+			best_rot, best_tilt, best_psi,
+			best_dx, best_dy, best_dz,
+			threads, false);
+	params[0] = best_rot; params[1] = best_tilt; params[2] = best_psi;
+	params[3] = best_dx;  params[4] = best_dy;  params[5] = best_dz;
+}
+
+void MlOptimiserMpi::startAlignHalvesAsync()
+{
+	AlignHalvesJob &job = halves_job_;
+	if (!asyncserial::enabled() || job.disabled || job.running)
+		return;
+	// The followers run with verbosity 0, so the leader reports for them (once)
+	if (node->isLeader() && verb > 0 && do_gpu && !wsum_zero_reported_)
+	{
+		wsum_zero_reported_ = true;
+		std::cout << " RELION_ASYNC_SERIAL: on the GPU the weighted sums are zeroed in the background ("
+				<< asyncserial::helperThreads(nr_threads) << " threads, lowest priority) while the E-step runs" << std::endl;
+	}
+	if (!do_split_random_halves || !do_align_halves || mymodel.nr_bodies != 1 || node->size < 3)
+		return;
+	const int nr_freedom = alignHalvesFreedom();
 	if (nr_freedom == 0)
 		return;
+	// Both ranks of the pair run MPI from the background thread
+	if (node->thread_level < MPI_THREAD_MULTIPLE)
+	{
+		job.disabled = true;
+		if (verb > 0)
+			std::cout << " RELION_ASYNC_SERIAL: this MPI does not grant MPI_THREAD_MULTIPLE, so the half-map alignment stays in its place after the E-step" << std::endl;
+		return;
+	}
+	if (node->isLeader() && verb > 0 && !job.reported)
+	{
+		job.reported = true;
+		std::cout << " RELION_ASYNC_SERIAL: the half-map alignment runs in the background during the E-step ("
+				<< asyncserial::helperThreads(nr_threads) << " threads, lowest priority; RELION_ASYNC_SERIAL_THREADS overrides)" << std::endl;
+	}
+	if (node->rank != 1 && node->rank != 2)
+		return;
+
+	job.nr_freedom = nr_freedom;
+	job.maxres = XMIPP_MAX(low_resol_join_halves, 1./mymodel.current_resolution);
+	job.exchange_failed = job.search_failed = false;
+	job.exchange_error.clear();
+	job.cubes = HalvesCubes();
+	const int threads = asyncserial::helperThreads(nr_threads);
+	const int plan_threads = nr_threads;
+	const int rank = node->rank;
+	try
+	{
+		job.start_time = MPI_Wtime();
+		job.th = std::thread([this, &job, threads, plan_threads, rank]()
+		{
+			asyncserial::lowerThreadPriority();
+			// Plan FFTs as the code after the E-step would, whatever the E-step has set meanwhile
+			relionFftwSetThreadPlanThreads(plan_threads);
+			try
+			{
+				alignHalvesExchange(0, 1, 2, job.cubes);
+			}
+			catch (std::exception &e)
+			{
+				job.exchange_failed = true;
+				job.exchange_error = e.what();
+			}
+			catch (...)
+			{
+				job.exchange_failed = true;
+				job.exchange_error = "unknown error";
+			}
+			if (rank == 1 && !job.exchange_failed)
+			{
+				try
+				{
+					alignHalvesSearch(job.nr_freedom, job.maxres, job.cubes, threads, job.params);
+				}
+				catch (...)
+				{
+					job.search_failed = true; // alignHalves() redoes it in place
+				}
+			}
+			job.busy_seconds = MPI_Wtime() - job.start_time;
+		});
+	}
+	catch (...)
+	{
+		// No thread: the search stays in its place after the E-step
+		return;
+	}
+	job.running = true;
+}
+
+void MlOptimiserMpi::joinAlignHalvesAsync()
+{
+	if (halves_job_.running)
+	{
+		halves_job_.th.join();
+		halves_job_.running = false;
+	}
+}
+
+void MlOptimiserMpi::alignHalves()
+{
+	const int nr_freedom = alignHalvesFreedom();
+	if (nr_freedom == 0)
+	{
+		joinAlignHalvesAsync();
+		return;
+	}
 
 	RFLOAT maxres = XMIPP_MAX(low_resol_join_halves, 1./mymodel.current_resolution);
-	MPI_Status status;
 
 	for (int ibody = 0; ibody < mymodel.nr_bodies; ibody++)
 	{
@@ -3775,73 +3940,56 @@ void MlOptimiserMpi::alignHalves()
 
 		RFLOAT best_rot = 0., best_tilt = 0., best_psi = 0.;
 		RFLOAT best_dx = 0., best_dy = 0., best_dz = 0.;
+		RFLOAT params[6] = {0, 0, 0, 0, 0, 0};
 
-		// Rank 2 sends its map to rank 1; rank 1 aligns and broadcasts params.  For a cubic map
-		// the search works on a 64-cube, so each rank reduces its own map (in parallel) and only
-		// the small cubes travel; the parameters found are the same as for the full-size maps.
-		const bool reduce_first = XSIZE(mymodel.Iref[ibody]) == YSIZE(mymodel.Iref[ibody])
-				&& XSIZE(mymodel.Iref[ibody]) == ZSIZE(mymodel.Iref[ibody])
-				&& alignWorkSize(XSIZE(mymodel.Iref[ibody])) != XSIZE(mymodel.Iref[ibody]);
-		const RFLOAT align_angpix = reduce_first
-				? mymodel.pixel_size * XSIZE(mymodel.Iref[ibody]) / alignWorkSize(XSIZE(mymodel.Iref[ibody]))
-				: mymodel.pixel_size;
-		const bool align_timing = getenv("RELION_ALIGN_TIMING") != NULL;
-		const double t_align0 = align_timing ? MPI_Wtime() : 0.;
-		if (node->rank == reconstruct_rank2)
+		if (halves_job_.running)
 		{
-			MultidimArray<RFLOAT> half2_small;
-			if (reduce_first)
+			// The search ran beside the E-step: wait for what is left of it
+			AlignHalvesJob &job = halves_job_;
+			const double t_wait0 = MPI_Wtime();
+			joinAlignHalvesAsync();
+			const double waited = MPI_Wtime() - t_wait0;
+			if (job.exchange_failed)
+				REPORT_ERROR("Background exchange of the half-maps for alignment failed: " + job.exchange_error);
+			if (node->rank == 1)
 			{
-				half2_small = mymodel.Iref[ibody];
-				reduceMapForAlignment(half2_small);
+				if (job.search_failed)
+					alignHalvesSearch(nr_freedom, maxres, job.cubes, nr_threads, job.params);
+				for (int i = 0; i < 6; i++)
+					params[i] = job.params[i];
 			}
-			if (align_timing)
-				fprintf(stderr, "ALIGN_TIMING rank %d reduce %.3f s\n", node->rank, MPI_Wtime() - t_align0);
-			const MultidimArray<RFLOAT> &to_send = reduce_first ? half2_small : mymodel.Iref[ibody];
-			node->relion_MPI_Send(MULTIDIM_ARRAY(to_send), MULTIDIM_SIZE(to_send),
-					MY_MPI_DOUBLE, reconstruct_rank1, MPITAG_IMAGE, MPI_COMM_WORLD);
+			if (getenv("RELION_ITER_TIMING") != NULL || getenv("RELION_ALIGN_TIMING") != NULL)
+				fprintf(stderr, "ASYNC_SERIAL it%d rank %d halves_busy %.3f s waited %.3f s\n", iter, node->rank, job.busy_seconds, waited);
+			// No gain when the search is waited for in full: stop running it in the background
+			if (job.busy_seconds > 0.5 && waited > 0.9 * job.busy_seconds)
+			{
+				if (++job.no_gain_count >= 2)
+				{
+					job.disabled = true;
+					if (verb > 0)
+						std::cout << " RELION_ASYNC_SERIAL: the half-map alignment was waited for in full twice; it stays in its place after the E-step from now on" << std::endl;
+				}
+			}
+			else
+				job.no_gain_count = 0;
+			job.cubes = HalvesCubes();
 		}
-		else if (node->rank == reconstruct_rank1)
+		else
 		{
-			MultidimArray<RFLOAT> half1_small;
-			if (reduce_first)
-			{
-				half1_small = mymodel.Iref[ibody];
-				reduceMapForAlignment(half1_small);
-			}
-			const MultidimArray<RFLOAT> &half1 = reduce_first ? half1_small : mymodel.Iref[ibody];
-			if (align_timing)
-				fprintf(stderr, "ALIGN_TIMING rank %d reduce %.3f s\n", node->rank, MPI_Wtime() - t_align0);
-			MultidimArray<RFLOAT> half2_Iref;
-			half2_Iref.resize(half1);
-			node->relion_MPI_Recv(MULTIDIM_ARRAY(half2_Iref),
-					MULTIDIM_SIZE(half2_Iref),
-					MY_MPI_DOUBLE, reconstruct_rank2, MPITAG_IMAGE, MPI_COMM_WORLD, status);
-			if (align_timing)
-				fprintf(stderr, "ALIGN_TIMING rank %d received at %.3f s\n", node->rank, MPI_Wtime() - t_align0);
-
-			alignCuboidMapToMap(half2_Iref, half1, nr_freedom,
-					align_angpix, maxres,
-					3, 1., 1.,
-					best_rot, best_tilt, best_psi,
-					best_dx, best_dy, best_dz,
-					nr_threads, false);
-
-			// rank 1 is a follower, whose verb is 0: the line is only reachable through RELION_ALIGN_TIMING
-			if (verb > 0 || align_timing)
-				std::cout << " Aligning half2 to half1: rot=" << best_rot
-					<< " tilt=" << best_tilt << " psi=" << best_psi
-					<< " dx=" << best_dx << " dy=" << best_dy << " dz=" << best_dz
-					<< std::endl;
+			HalvesCubes cubes;
+			alignHalvesExchange(ibody, reconstruct_rank1, reconstruct_rank2, cubes);
+			if (node->rank == reconstruct_rank1)
+				alignHalvesSearch(nr_freedom, maxres, cubes, nr_threads, params);
 		}
+
+		// rank 1 is a follower, whose verb is 0: the line is only reachable through RELION_ALIGN_TIMING
+		if (node->rank == reconstruct_rank1 && (verb > 0 || getenv("RELION_ALIGN_TIMING") != NULL))
+			std::cout << " Aligning half2 to half1: rot=" << params[0]
+				<< " tilt=" << params[1] << " psi=" << params[2]
+				<< " dx=" << params[3] << " dy=" << params[4] << " dz=" << params[5]
+				<< std::endl;
 
 		// Broadcast best params from rank 1 to all
-		RFLOAT params[6];
-		if (node->rank == reconstruct_rank1)
-		{
-			params[0] = best_rot; params[1] = best_tilt; params[2] = best_psi;
-			params[3] = best_dx;  params[4] = best_dy;  params[5] = best_dz;
-		}
 		node->relion_MPI_Bcast(params, 6, MY_MPI_DOUBLE, reconstruct_rank1, MPI_COMM_WORLD);
 		best_rot = params[0]; best_tilt = params[1]; best_psi = params[2];
 		best_dx  = params[3]; best_dy  = params[4]; best_dz  = params[5];
@@ -4722,6 +4870,8 @@ void MlOptimiserMpi::iterate()
 		if (do_helical_context || do_helical_polarity)
 			helical_context.resetEvidence();
 		sclock.mark("pre_expectation", iter, node->rank);
+		// RELION_ASYNC_SERIAL: the half-map alignment of this iteration runs beside the E-step
+		startAlignHalvesAsync();
 		startResourceMonitor();
 		expectation();
 		stopResourceMonitor();
@@ -4734,6 +4884,7 @@ void MlOptimiserMpi::iterate()
 
 		if (do_skip_maximization)
 		{
+			joinAlignHalvesAsync();
 			// Only write data.star file and break from the iteration loop
 			if (node->isLeader())
 			{

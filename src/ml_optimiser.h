@@ -845,6 +845,9 @@ public:
 	AsyncImagePrefetcher *prefetcher_ = nullptr;
 	// RELION_PREP_AHEAD: exact memo of the host-built CTF images of the accelerated expectation (null when off)
 	std::shared_ptr<CtfMemo> ctf_memo_;
+	// RELION_ASYNC_SERIAL: zero-fill of the weighted sums runs here while the E-step does its work (see async_serial.h)
+	asyncserial::DeferredZero wsum_zero_task_;
+	bool wsum_zero_reported_ = false;
 	bool prefetch_speculative_ = false; // MPI follower: the next pool is a guess (the one after this), checked on arrival
 	int prefetch_hits_ = 0, prefetch_misses_ = 0;
 	double exp_time_serial_s = 0., exp_time_par_s = 0.; // RELION_ITER_TIMING: pool set-up/reading vs. threaded part of expectationSomeParticles
@@ -1242,6 +1245,9 @@ public:
 	void expectationSetup(std::vector<bool> cheapSetup);
 
 	void expectationSetup();
+
+	// Joins the background zero-fill of the weighted sums (RELION_ASYNC_SERIAL); a no-op when none runs
+	void waitForWsumZeroing();
 
 	/* Check whether everything fits into memory, possibly adjust nr_pool and setup thread task managers */
 	void expectationSetupCheckMemory(int myverb = 1);

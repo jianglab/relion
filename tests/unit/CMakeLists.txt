@@ -60,6 +60,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_cache_init.cpp
     test_parallel_hint.cpp
     test_slurm_script.cpp
+    test_async_serial.cpp
     test_particle_order.cpp
     test_async_file_writer.cpp
     test_helix_symmetry_parallel.cpp

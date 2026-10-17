@@ -35,6 +35,7 @@
 #include "src/mask.h"
 #include "src/tabfuncs.h"
 #include "src/symmetries.h"
+#include "src/async_serial.h"
 #include <src/jaz/single_particle/complex_io.h>
 
 #include <vector>
@@ -185,10 +186,13 @@ public:
 	}
 
 	// Initialise data and weight arrays to the given size and set all values to zero
-	void initialiseDataAndWeight(int current_size = -1);
+	void initialiseDataAndWeight(int current_size = -1, bool keep_content = true);
 
 	// Initialise data and weight arrays to the given size and set all values to zero
 	void initZeros(int current_size = -1);
+
+	// Like initZeros, but only sizes the arrays: their zero-fill is appended to `deferred` for the caller to run later
+	void initZerosDeferred(int current_size, std::vector<asyncserial::ZeroSpan> &deferred);
 
 	/*
 	* Set a 2D Fourier Transform back into the 2D or 3D data array

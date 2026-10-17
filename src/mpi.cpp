@@ -61,6 +61,7 @@ MpiNode::MpiNode(int &argc, char ** argv)
 	//MPI Initialization
 	int provided;
 	MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
+	thread_level = provided;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	MPI_Comm_size(MPI_COMM_WORLD, &size);
 	// Handle errors

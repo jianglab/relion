@@ -39,10 +39,15 @@
 
 
 
-void BackProjector::initialiseDataAndWeight(int current_size)
+void BackProjector::initialiseDataAndWeight(int current_size, bool keep_content)
 {
 
-	initialiseData(current_size);
+	initialiseData(current_size, keep_content);
+	// Resizing copies the old values element by element (seconds for a full-size 3D array): not wanted
+	// when the caller zeroes the arrays afterwards
+	if (!keep_content && weight.data != NULL && (NSIZE(weight) != NSIZE(data) || XSIZE(weight) != XSIZE(data) ||
+			YSIZE(weight) != YSIZE(data) || ZSIZE(weight) != ZSIZE(data)))
+		weight.clear();
 	weight.resize(data);
 	if (rect)
 	{
@@ -58,6 +63,13 @@ void BackProjector::initZeros(int current_size)
 	initialiseDataAndWeight(current_size);
 	data.initZeros();
 	weight.initZeros();
+}
+
+void BackProjector::initZerosDeferred(int current_size, std::vector<asyncserial::ZeroSpan> &deferred)
+{
+	initialiseDataAndWeight(current_size, false);
+	deferred.push_back({(void*) data.data, (size_t) data.nzyxdim * sizeof(Complex)});
+	deferred.push_back({(void*) weight.data, (size_t) weight.nzyxdim * sizeof(RFLOAT)});
 }
 
 void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,

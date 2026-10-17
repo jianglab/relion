@@ -212,9 +212,36 @@ struct Scratch
 	~Scratch() { free(base); }
 };
 
+// Plan thread count requested by the calling thread (0: use whatever the planner has)
+static thread_local int g_plan_threads_override = 0;
+
+// Within the planner's critical section: plan with the calling thread's own thread count, then give the planner its old one back
+struct PlanThreadsScope
+{
+	int old = 0;
+	PlanThreadsScope()
+	{
+#if defined(RELION_HAVE_FFTW_THREADS) && !defined(MKLFFT)
+		if (g_plan_threads_override > 0 && g_fftw_threads_inited)
+		{
+			old = RFFTW(planner_nthreads)();
+			RFFTW(plan_with_nthreads)(g_plan_threads_override);
+		}
+#endif
+	}
+	~PlanThreadsScope()
+	{
+#if defined(RELION_HAVE_FFTW_THREADS) && !defined(MKLFFT)
+		if (old > 0)
+			RFFTW(plan_with_nthreads)(old);
+#endif
+	}
+};
+
 // Make a plan (called inside the planner's critical section)
 rfftw_plan makePlan(PlanKind kind, int ndim, const int *N, void *in, void *out, int sign = FFTW_FORWARD)
 {
+	PlanThreadsScope plan_threads_scope;
 	PlanSettings &ps = planSettings();
 	if (getenv("RELION_FFTW_DEBUG") != NULL)
 	{
@@ -2101,10 +2128,20 @@ void relionFftwInitThreads()
 	g_fftw_threads_inited = true;
 }
 
+// The setter takes the planner's lock: a background thread that plans with its own thread count
+// (relionFftwSetThreadPlanThreads) changes the planner's count and restores it inside that lock
 void relionFftwPlanThreads(int nr_threads)
 {
 	if (relionFftwThreadsAllowed())
+	{
+		#pragma omp critical(FourierTransformer_fftw_plan)
 		RELION_FFTW_THREADS_API(plan_with_nthreads)(nr_threads);
+	}
+}
+
+void relionFftwSetThreadPlanThreads(int nr_threads)
+{
+	g_plan_threads_override = std::max(0, nr_threads);
 }
 
 void relionFftwCleanupThreads()
@@ -2117,6 +2154,7 @@ void relionFftwCleanupThreads()
 // Without FFTW's thread library every transform is single-threaded
 void relionFftwInitThreads() {}
 void relionFftwPlanThreads(int) {}
+void relionFftwSetThreadPlanThreads(int) {}
 void relionFftwCleanupThreads() {}
 #endif
 

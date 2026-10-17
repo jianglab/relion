@@ -22,6 +22,9 @@
 #define ML_OPTIMISER_MPI_H_
 #include "src/mpi.h"
 #include "src/ml_optimiser.h"
+#include "src/async_serial.h"
+#include <exception>
+#include <thread>
 
 // definition of MPITAG has been moved to header mpi.h
 
@@ -48,6 +51,7 @@ public:
 	/** Destructor, calls MPI_Finalize */
     ~MlOptimiserMpi()
     {
+        joinAlignHalvesAsync();
         delete node;
     }
 
@@ -140,6 +144,29 @@ public:
     void alignClassesMpi();
 
     /**
+     * RELION_ASYNC_SERIAL: start the half-map alignment search of this iteration in a background thread,
+     * so that it runs beside the E-step (the maps it reads do not change during the E-step).
+     * alignHalves() then only waits for it and applies the result. Does nothing when the switch is off
+     * or the case is not supported. Joined (and its result dropped) by joinAlignHalvesAsync().
+     */
+    void startAlignHalvesAsync();
+    void joinAlignHalvesAsync();
+
+    // The reduced half-maps the search works on (see alignHalvesExchange)
+    struct HalvesCubes
+    {
+        MultidimArray<RFLOAT> half1, half2;
+        RFLOAT angpix = 0.;
+    };
+
+    // Degrees of freedom of the search for this job, 0 when alignHalves does nothing
+    int alignHalvesFreedom() const;
+    // Rank 2 reduces its half-map and sends it to rank 1, which reduces its own and receives it
+    void alignHalvesExchange(int ibody, int reconstruct_rank1, int reconstruct_rank2, HalvesCubes &cubes);
+    // Rank 1: the search itself; pure computation
+    void alignHalvesSearch(int nr_freedom, RFLOAT maxres, const HalvesCubes &cubes, int threads, RFLOAT params[6]);
+
+    /**
      * Adjust angular sampling based on the expected angular accuracies for gradient optimization
      */
     void updateAngularSamplingGrad(long int my_first_part_id, long int my_last_part_id, bool verb = true);
@@ -160,8 +187,26 @@ public:
     // Gather each process's CPU/GPU use of the E-step on the leader, which reports it
     void gatherResourceReport(const resrep::ProcessStats &mine);
 
-#ifdef _SYCL_ENABLED
 private:
+	// State of the background half-map alignment (RELION_ASYNC_SERIAL)
+	struct AlignHalvesJob
+	{
+		std::thread th;
+		bool running = false;
+		bool exchange_failed = false, search_failed = false;
+		std::string exchange_error;
+		HalvesCubes cubes;
+		RFLOAT params[6] = {0, 0, 0, 0, 0, 0};
+		int nr_freedom = 0;
+		RFLOAT maxres = 0.;
+		double start_time = 0., busy_seconds = 0.;
+		// Back-off: the search is not worth running in the background when it is waited for in full
+		int no_gain_count = 0;
+		bool disabled = false;
+		bool reported = false;
+	} halves_job_;
+
+#ifdef _SYCL_ENABLED
 	int syclDevicePerRank;
 #endif
 

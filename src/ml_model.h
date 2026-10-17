@@ -559,7 +559,7 @@ public:
 	void initialise(MlModel &_model, FileName fn_sym = "c1", bool asymmetric_padding = false, bool _skip_gridding = false, bool _pseudo_halfsets = false);
 
 	// Initialize all weighted sums to zero (with resizing the BPrefs to current_size)
-	void initZeros();
+	void initZeros(std::vector<asyncserial::ZeroSpan> *deferred = NULL);
 
 	// Return the current pack size
 	unsigned long long getPackSize();
