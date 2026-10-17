@@ -3144,6 +3144,14 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
     else
     {
         wsum_model.current_size  = mymodel.getPixelFromResolution(1./ini_high);
+        // A box of 0 or 1 pixels leaves the back-projector with r_max = 0, and its reconstruction then reads outside its arrays
+        const int min_current_size = 2;
+        if (wsum_model.current_size < min_current_size)
+        {
+            std::cerr << " WARNING: --ini_high " << ini_high << " A is lower than the resolution of the first Fourier shell of this box ("
+                      << mymodel.ori_size * mymodel.pixel_size << " A); using the lowest resolution the initial reconstruction can handle." << std::endl;
+            wsum_model.current_size = min_current_size;
+        }
     }
     wsum_model.initZeros();
 
