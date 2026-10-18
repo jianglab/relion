@@ -149,6 +149,9 @@ public:
 	std::vector<RFLOAT> directions_prior, psi_prior, local_sqrtXi2;
 	std::vector<RFLOAT> highres_Xi2_img;
     RFLOAT min_diff2;
+	// The fine pass left its minimum difference to be made on the device (RELION_GPU_ASYNC_FINE);
+	// min_diff2 is only valid once the weight conversion has resolved it
+	bool min_diff2_deferred = false;
 	MultidimArray<bool> Mcoarse_significant;
 	// And from storeWeightedSums
 	RFLOAT sum_weight, significant_weight, max_weight;

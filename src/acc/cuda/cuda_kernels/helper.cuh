@@ -216,7 +216,8 @@ __global__ void cuda_kernel_exponentiate_weights_fine_batched(
 		int *d_job_class,
 		long int pdf_orientation_stride,
 		long int pdf_offset_stride,
-		long int job_num);
+		long int job_num,
+		const XFLOAT *d_min_diff2 = NULL);
 
 #define HELIX_MASK_BLOCK 256
 #define HELIX_MASK_PARTIALS 32
@@ -933,6 +934,16 @@ static __global__ void cuda_kernel_scatter_weights(
 	const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
 	if (i < n)
 		dense[pos[i]] = w[i];
+}
+
+// The same map from the weights' own index arrays (the class's part of them, on the device):
+// dense[base + rot_idx[i] * translation_num + trans_idx[i]] = w[i]
+static __global__ void cuda_kernel_scatter_weights_idx(const size_t *rot_idx, const size_t *trans_idx, const XFLOAT *w,
+		size_t n, size_t base, size_t translation_num, XFLOAT *dense)
+{
+	size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+	if (i < n)
+		dense[base + rot_idx[i] * translation_num + trans_idx[i]] = w[i];
 }
 
 #define WEIGHT_MAP_BLOCK_SIZE 512

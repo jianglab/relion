@@ -341,6 +341,27 @@ inline bool gpuFusedWeights()
 	return on;
 }
 
+// RELION_GPU_ASYNC_STORE=1 (or "check"): in storeWeightedSums the downloads of the particle's
+// per-class sums are queued as asynchronous copies into pinned buffers and added up later (in the
+// same order, so the sums are identical), the dense (orientation, translation) weight map is made
+// on the device from the weights and index arrays that are already there instead of from a host
+// copy, and the host copy of the fine weights is made only when filament consistency needs it.
+// "check" also runs the older path and compares exactly. Off by default while it is validated.
+inline int gpuAsyncStore()
+{
+	static const int m = gpuswitch::optIn("RELION_GPU_ASYNC_STORE");
+	return m;
+}
+
+// RELION_GPU_ASYNC_FINE=1 (or "check"): the minimum of the fine-pass differences stays on the device
+// when the fused significance pass follows (it is read back together with that pass's result), so the
+// host does not wait for a separate reduction and read-back per particle. Off by default.
+inline int gpuAsyncFine()
+{
+	static const int m = gpuswitch::optIn("RELION_GPU_ASYNC_FINE");
+	return m;
+}
+
 // RELION_GPU_FUSED_PREP=1: the particle preparation with fewer round trips to the host: the
 // background value of the soft mask is made on the GPU from the partial sums, and the wait
 // after the mask is left to the copy that follows; off by default while it is validated

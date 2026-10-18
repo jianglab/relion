@@ -2445,6 +2445,16 @@ void getAllSquaredDifferencesFine(
     // SHWS6July2022: only search for smallest diff2 after all img_id have been summed
     if(baseMLO->adaptive_oversampling!=0)
     {
+#ifdef _CUDA_ENABLED
+        // RELION_GPU_ASYNC_FINE: when the fused significance pass follows, the minimum stays on the device
+        // (see convertAllSquaredDifferencesToWeights); "check" also makes it here and compares
+        if (gpuAsyncFine() != 0 && gpuFusedWeights() && gpuClassBatching() && !baseMLO->is_som_iter && accMLO->classStreamsShared)
+        {
+            op.min_diff2_deferred = true;
+            op.min_diff2 = gpuAsyncFine() == 2 ? (RFLOAT) AccUtilities::getMinOnDevice<XFLOAT>(FinePassWeights.weights) : 0.;
+        }
+        else
+#endif
         op.min_diff2 = (RFLOAT) AccUtilities::getMinOnDevice<XFLOAT>(FinePassWeights.weights);
     }
     CTOC(accMLO->timer,"collect_data_1");
@@ -3056,6 +3066,12 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
         }
         else
         {
+            // The fine pass left its minimum on the device (RELION_GPU_ASYNC_FINE): it is resolved below,
+            // either used from the device by the fused pass or made here and read back
+            bool minPending = op.min_diff2_deferred;
+            op.min_diff2_deferred = false;
+            const RFLOAT eager_min_diff2 = op.min_diff2; // "check" mode: the blocking value
+            // (all of this runs on the one stream, so the waits that follow are only needed on the older path)
 
 #ifdef _HIP_ENABLED
             for (int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -3073,6 +3089,18 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             XFLOAT weights_max = std::numeric_limits<XFLOAT>::lowest();
 
             pdf_offset.streamSync();
+            auto resolveMin = [&]()
+            {
+#ifdef _CUDA_ENABLED
+                if (minPending)
+                {
+                    minPending = false;
+                    accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+                    pdf_offset.streamSync();
+                    op.min_diff2 = (RFLOAT) AccUtilities::getMinOnDevice<XFLOAT>(PassWeights.weights);
+                }
+#endif
+            };
 
 #ifdef _CUDA_ENABLED
             // All classes at once: their weights tile PassWeights, so one launch with
@@ -3080,6 +3108,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             // the per-class maxima) and one rescale give the same values as per class
             bool batched = false;
             bool fusedFine = false, fusedSkip = false;
+            AccPtr<XFLOAT> devMin = ptrFactory.make<XFLOAT>(1);
             if (gpuClassBatching())
             {
                 std::vector<unsigned long> job_idx, job_num;
@@ -3112,6 +3141,17 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     memcpy(&jobs[2 * b1], job_class.data(), n * sizeof(int));
                     jobs.cpToDevice();
                     long block_num = ceil((double)n / (double)SUMW_BLOCK_SIZE);
+                    const bool fusedEligible = gpuFusedWeights() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling != 0 &&
+                            accMLO->classStreamsShared && total > 1 && total <= ((size_t) 1 << 22);
+                    if (minPending && fusedEligible)
+                    {
+                        // the minimum goes from the reduction to the kernel on the device
+                        devMin.setStream(jobs.getStream());
+                        devMin.deviceAlloc();
+                        CudaKernels::minToDevice<XFLOAT>(PassWeights.weights, ~devMin);
+                    }
+                    else
+                        resolveMin();
                     cuda_kernel_exponentiate_weights_fine_batched<<<block_num, SUMW_BLOCK_SIZE, 0, jobs.getStream()>>>(
                             ~pdf_orientation,
                             ~pdf_orientation_zeros,
@@ -3128,10 +3168,10 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                             (int *) &(~jobs)[2 * b1],
                             sp.nr_dir * sp.nr_psi,
                             sp.nr_trans,
-                            n);
+                            n,
+                            minPending ? ~devMin : (const XFLOAT *) NULL);
                     LAUNCH_HANDLE_ERROR(cudaGetLastError());
-                    if (gpuFusedWeights() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling != 0 &&
-                            accMLO->classStreamsShared && total > 1 && total <= ((size_t) 1 << 22))
+                    if (fusedEligible)
                         fusedFine = true; // maximum, exponentiation and significance below, on the GPU
                     else if (CudaKernels::gpuSkipAlignBlock() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling == 0 && baseMLO->do_skip_align &&
                             accMLO->classStreamsShared && total >= 1 && total <= BS_MAX_N && baseMLO->mymodel.nr_bodies == 1)
@@ -3148,6 +3188,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             if (!batched)
 #endif
             {
+            resolveMin();
 
             for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++) // TODO could use classStreams
             {
@@ -3245,13 +3286,30 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             if (fusedFine)
             {
                 typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;
-                AccPtr<char> fres = ptrFactory.make<char>(sizeof(SigRes));
+                // with the minimum on the device, it follows the result in the same copy
+                const size_t minOff = (sizeof(SigRes) + 15) & ~(size_t) 15;
+                AccPtr<char> fres = ptrFactory.make<char>(minPending ? minOff + sizeof(XFLOAT) : sizeof(SigRes));
                 fres.setStream(PassWeights.weights.getStream());
                 fres.allAlloc();
                 CudaKernels::fusedWeightPass<XFLOAT>(PassWeights.weights, baseMLO->adaptive_fraction, 0, ~fres, false);
+                if (minPending)
+                    DEBUG_HANDLE_ERROR(cudaMemcpyAsync(&(~fres)[minOff], ~devMin, sizeof(XFLOAT), cudaMemcpyDeviceToDevice, fres.getStream()));
                 fres.cpToHostWait();
                 SigRes r;
                 memcpy(&r, &fres[0], sizeof(SigRes));
+                if (minPending)
+                {
+                    XFLOAT m;
+                    memcpy(&m, &fres[minOff], sizeof(XFLOAT));
+                    op.min_diff2 = (RFLOAT) m;
+                    minPending = false;
+                    if (gpuAsyncFine() == 2 && memcmp(&eager_min_diff2, &op.min_diff2, sizeof(RFLOAT)) != 0)
+                    {
+                        fprintf(stderr, "ASYNC_FINE_CHECK device minimum %.9g differs from the blocking one %.9g (particle %ld)\n",
+                                (double) op.min_diff2, (double) eager_min_diff2, (long) op.part_id);
+                        CRITICAL("RELION_GPU_ASYNC_FINE=check: device minimum differs");
+                    }
+                }
                 op.min_diff2 += 50 - r.wmax;
                 op.sum_weight = r.sum_weight;
                 if (op.sum_weight==0)
@@ -3769,6 +3827,20 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     }
 
     CTIC(accMLO->timer,"collect_data_2_post_kernel");
+    // RELION_GPU_ASYNC_STORE: the two arrays come down as queued copies into a pinned buffer and the
+    // host adds them up (in the same order as below) only when the maximization has been queued, so
+    // the GPU is not left waiting while the host adds. "check" also takes the blocking copy and compares.
+    const int asyncStoreMode = gpuAsyncStore();
+    bool collectAsync = false;
+#ifdef _CUDA_ENABLED
+    AsyncDownload collectDl;
+    if (asyncStoreMode != 0)
+        collectAsync = collectDl.start(~p_weights, p_weights.getSize() * sizeof(XFLOAT),
+                ~p_thr_wsum_prior_offsetxyz_class, p_thr_wsum_prior_offsetxyz_class.getSize() * sizeof(XFLOAT),
+                cudaStreamPerThread);
+#endif
+    if (!collectAsync || asyncStoreMode == 2)
+    {
     p_weights.cpToHost();
     p_thr_wsum_prior_offsetxyz_class.cpToHost();
 
@@ -3777,8 +3849,36 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 #else
     DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
 #endif
+    }
+    bool collectSumsDone = false;
+    auto addCollectedSums = [&]()
+    {
+    if (collectSumsDone) return;
+    collectSumsDone = true;
+    const XFLOAT *pw = &p_weights[0];
+    const XFLOAT *pt = &p_thr_wsum_prior_offsetxyz_class[0];
+#ifdef _CUDA_ENABLED
+    if (collectAsync)
+    {
+        collectDl.wait();
+        if (asyncStoreMode == 2)
+        {
+            if (memcmp(collectDl.first<XFLOAT>(), pw, p_weights.getSize() * sizeof(XFLOAT)) != 0 ||
+                memcmp(collectDl.second<XFLOAT>(), pt, p_thr_wsum_prior_offsetxyz_class.getSize() * sizeof(XFLOAT)) != 0)
+            {
+                fprintf(stderr, "ASYNC_STORE_CHECK collected sums differ from the blocking copy (particle %ld)\n", (long) op.part_id);
+                CRITICAL("RELION_GPU_ASYNC_STORE=check: asynchronous download differs from the blocking one");
+            }
+        }
+        else
+        {
+            pw = collectDl.first<XFLOAT>();
+            pt = collectDl.second<XFLOAT>();
+        }
+    }
+#endif
     int iorient = 0;
-    partial_pos=0;
+    long int partial_pos = 0;
     for (long int iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
     {
         long int fake_class = iclass-sp.iclass_min; // if we only have the third class to do, the third class will be the "first" we do, i.e. the "fake" first.
@@ -3801,21 +3901,23 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 
                 // store partials according to indices of the relevant dimension
                 unsigned ithr_wsum_pdf_direction = baseMLO->mymodel.nr_bodies > 1 ? ibody : iclass;
-                DIRECT_MULTIDIM_ELEM(thr_wsum_pdf_direction[ithr_wsum_pdf_direction], mydir) += p_weights[n];
+                DIRECT_MULTIDIM_ELEM(thr_wsum_pdf_direction[ithr_wsum_pdf_direction], mydir) += pw[n];
             }
-            thr_sumw_group                                                               += p_weights[n];
-            thr_wsum_pdf_class[iclass]                                                   += p_weights[n];
+            thr_sumw_group                                                               += pw[n];
+            thr_wsum_pdf_class[iclass]                                                   += pw[n];
 
-            thr_wsum_sigma2_offset                                                       += my_pixel_size * my_pixel_size * p_thr_wsum_prior_offsetxyz_class[sigma2_offset+n];
+            thr_wsum_sigma2_offset                                                       += my_pixel_size * my_pixel_size * pt[sigma2_offset+n];
 
             if (baseMLO->mymodel.ref_dim == 2)
             {
-                thr_wsum_prior_offsetx_class[iclass] += my_pixel_size * p_thr_wsum_prior_offsetxyz_class[offsetx_class+n];
-                thr_wsum_prior_offsety_class[iclass] += my_pixel_size * p_thr_wsum_prior_offsetxyz_class[offsety_class+n];
+                thr_wsum_prior_offsetx_class[iclass] += my_pixel_size * pt[offsetx_class+n];
+                thr_wsum_prior_offsety_class[iclass] += my_pixel_size * pt[offsety_class+n];
             }
         }
         partial_pos+=block_num;
     } // end loop iclass
+    };
+    if (!collectAsync) addCollectedSums();
     CTOC(accMLO->timer,"collect_data_2_post_kernel");
 
 	/*======================================================
@@ -3883,6 +3985,16 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
         DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, icol_zoff) = ZZ(shifts);
 
     // Per-class best orientation tracking for filament consistency (see CPU storeWeightedSums)
+    // The host copy of the fine weights and their orientation indices is also what the dense weight map
+    // is made from below; with RELION_GPU_ASYNC_STORE that is done on the device, and the copy is left
+    // out unless the consistency check needs it (or "check" compares the two ways of making the map).
+    const bool needHostFineWeights = (ibody == 0 && baseMLO->do_keep_full_filaments && baseMLO->mymodel.nr_classes > 1);
+    bool deviceScatter = false;
+#ifdef _CUDA_ENABLED
+    deviceScatter = asyncStoreMode != 0;
+#endif
+    if (!deviceScatter || needHostFineWeights || asyncStoreMode == 2)
+    {
     FinePassWeights.weights.cpToHost();
     FinePassWeights.rot_idx.cpToHost();
 #ifdef _HIP_ENABLED
@@ -3890,8 +4002,9 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 #else
     DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
 #endif
+    }
 
-    if (ibody == 0 && baseMLO->do_keep_full_filaments && baseMLO->mymodel.nr_classes > 1)
+    if (needHostFineWeights)
     {
         for (long int iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
         {
@@ -4238,14 +4351,24 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
 				if ((baseMLO->mymodel.pdf_class[c] > 0.) && (ProjectionData.class_entries[c] > 0))
 					nSparse += FPCMasks[c].weightNum;
-			AccPtr<size_t> sparse_pos = ptrFactory.make<size_t>(nSparse);
-			AccPtr<XFLOAT> sparse_w = ptrFactory.make<XFLOAT>(nSparse);
-			if (nSparse > 0)
+			// With RELION_GPU_ASYNC_STORE the map is made from the weights and index arrays that are on
+			// the device (scatter_weights_idx per class); "check" does both and compares
+			const bool hostSparse = !deviceScatter || asyncStoreMode == 2;
+			AccPtr<size_t> sparse_pos = ptrFactory.make<size_t>(hostSparse ? nSparse : 0);
+			AccPtr<XFLOAT> sparse_w = ptrFactory.make<XFLOAT>(hostSparse ? nSparse : 0);
+			if (nSparse > 0 && hostSparse)
 			{
 				sparse_pos.allAlloc();
 				sparse_w.allAlloc();
 			}
 			size_t sparseFill = 0;
+			AccPtr<XFLOAT> check_dense = ptrFactory.make<XFLOAT>(asyncStoreMode == 2 ? (size_t)(ProjectionData.orientationNumAllClasses * translation_num) : 0);
+			if (deviceScatter)
+			{
+				if (asyncStoreMode == 2)
+					check_dense.allAlloc();
+				deviceInitValue<XFLOAT>(asyncStoreMode == 2 ? check_dense : sorted_weights, std::numeric_limits<XFLOAT>::lowest());
+			}
 #else
 			sorted_weights.allAlloc();
 #endif
@@ -4384,10 +4507,19 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				stagetimer::Scope st_wm(stagetimer::WAVG_SETUP);
 
 #ifdef _CUDA_ENABLED
-				for (long unsigned i = 0; i < thisClassFinePassWeights.weights.getSize(); i++, sparseFill++)
+				if (hostSparse)
+					for (long unsigned i = 0; i < thisClassFinePassWeights.weights.getSize(); i++, sparseFill++)
+					{
+						sparse_pos[sparseFill] = classPos + (thisClassFinePassWeights.rot_idx[i]) * translation_num + thisClassFinePassWeights.trans_idx[i];
+						sparse_w[sparseFill] = thisClassFinePassWeights.weights[i];
+					}
+				if (deviceScatter && thisClassFinePassWeights.weights.getSize() > 0)
 				{
-					sparse_pos[sparseFill] = classPos + (thisClassFinePassWeights.rot_idx[i]) * translation_num + thisClassFinePassWeights.trans_idx[i];
-					sparse_w[sparseFill] = thisClassFinePassWeights.weights[i];
+					const size_t n = thisClassFinePassWeights.weights.getSize();
+					cuda_kernel_scatter_weights_idx<<<(unsigned) ((n + 255) / 256), 256, 0, cudaStreamPerThread>>>(
+							~thisClassFinePassWeights.rot_idx, ~thisClassFinePassWeights.trans_idx, ~thisClassFinePassWeights.weights,
+							n, classPos, translation_num, asyncStoreMode == 2 ? ~check_dense : ~sorted_weights);
+					LAUNCH_HANDLE_ERROR(cudaGetLastError());
 				}
 #else
 				for (long unsigned i = 0; i < orientation_num*translation_num; i++)
@@ -4407,6 +4539,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 #endif
 			{ stagetimer::Scope st_wm2(stagetimer::WAVG_SETUP);
 #ifdef _CUDA_ENABLED
+			if (hostSparse)
+			{
 			deviceInitValue<XFLOAT>(sorted_weights, std::numeric_limits<XFLOAT>::lowest());
 			if (sparseFill > 0)
 			{
@@ -4415,6 +4549,21 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				cuda_kernel_scatter_weights<<<(unsigned) ((sparseFill + 255) / 256), 256, 0, sorted_weights.getStream()>>>(
 						~sparse_pos, ~sparse_w, sparseFill, ~sorted_weights);
 				LAUNCH_HANDLE_ERROR(cudaGetLastError());
+			}
+			}
+			if (asyncStoreMode == 2)
+			{
+				const size_t nd = (size_t)(ProjectionData.orientationNumAllClasses * translation_num);
+				std::vector<XFLOAT> ref(nd);
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+				DEBUG_HANDLE_ERROR(cudaMemcpy(ref.data(), ~sorted_weights, nd * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+				check_dense.cpToHost();
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+				if (nd > 0 && memcmp(ref.data(), &check_dense[0], nd * sizeof(XFLOAT)) != 0)
+				{
+					fprintf(stderr, "ASYNC_STORE_CHECK dense weight map from the device differs from the host-made one (particle %ld)\n", (long) op.part_id);
+					CRITICAL("RELION_GPU_ASYNC_STORE=check: device-made weight map differs");
+				}
 			}
 #else
 			sorted_weights.cpToDevice();
@@ -4619,6 +4768,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				AAXA_pos += image_size;
 				classPos += orientation_num*translation_num;
 			}
+
+			addCollectedSums(); // before the SOM block adds to the same sums
 
 			/*======================================================
 								      SOM
@@ -5020,6 +5171,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
             thr_wsum_signal_product_spectra += exp_wsum_scale_correction_XA;
             thr_wsum_reference_power_spectra += exp_wsum_scale_correction_AA;
         }
+
+        addCollectedSums(); // when the maximization block did not run
 
         // Calculate DLL for each particle
         RFLOAT logsigma2 = 0.;

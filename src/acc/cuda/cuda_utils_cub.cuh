@@ -162,6 +162,22 @@ if (ptr.getAllocator() == NULL)
 	return min_val[0];
 }
 
+// The minimum of the array, left on the device at d_out (queued on the array's stream, no wait):
+// the caller reads it back with something else, or uses it from another kernel
+template <typename T>
+static void minToDevice(AccPtr<T> &ptr, T *d_out)
+{
+	size_t temp_storage_size = 0;
+	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Min( NULL, temp_storage_size, ~ptr, d_out, ptr.getSize()));
+	if(temp_storage_size==0)
+		temp_storage_size=1;
+	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size);
+	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Min( alloc->getPtr(), temp_storage_size, ~ptr, d_out, ptr.getSize(), ptr.getStream()));
+	// the scratch goes back to the allocator only when the reduction has finished (other threads share it)
+	alloc->markReadyEvent(ptr.getStream());
+	alloc->doFreeWhenReady();
+}
+
 template <typename T>
 static T getSumOnDevice(AccPtr<T> &ptr)
 {

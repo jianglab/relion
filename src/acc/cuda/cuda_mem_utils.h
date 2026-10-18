@@ -195,6 +195,59 @@ static inline bool stagedDeviceToHost(void *h_ptr, const void *d_ptr, size_t byt
 	return true;
 }
 
+// An asynchronous download of two device arrays into one pinned buffer from the pool, with an event
+// that tells when both are in: the caller goes on with host work and calls wait() when it needs the
+// data (RELION_GPU_ASYNC_STORE). start() returns false, with nothing queued, when the buffer or the
+// copies cannot be had: the caller then takes the blocking copy.
+class AsyncDownload
+{
+	void *buf_ = NULL;
+	size_t cap_ = 0, off2_ = 0;
+	cudaEvent_t ev_ = NULL;
+	bool pending_ = false;
+	void drop()
+	{
+		if (ev_) { cudaEventDestroy(ev_); ev_ = NULL; }
+		pinnedHostPool().release(buf_, cap_);
+		buf_ = NULL; cap_ = 0; pending_ = false;
+	}
+public:
+	AsyncDownload() {}
+	AsyncDownload(const AsyncDownload &) = delete;
+	AsyncDownload &operator=(const AsyncDownload &) = delete;
+	~AsyncDownload() { if (pending_) cudaEventSynchronize(ev_); drop(); }
+
+	bool start(const void *d1, size_t b1, const void *d2, size_t b2, cudaStream_t stream)
+	{
+		off2_ = (b1 + 255) & ~(size_t) 255;
+		buf_ = pinnedHostPool().acquire(std::max(off2_ + b2, (size_t) 1 << 20), cap_);
+		if (buf_ == NULL) { cudaGetLastError(); drop(); return false; }
+		if (cudaEventCreateWithFlags(&ev_, cudaEventDisableTiming) != cudaSuccess ||
+			cudaMemcpyAsync(buf_, d1, b1, cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+			cudaMemcpyAsync((char *) buf_ + off2_, d2, b2, cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+			cudaEventRecord(ev_, stream) != cudaSuccess)
+		{
+			cudaGetLastError();
+			cudaStreamSynchronize(stream); // anything already queued writes into the buffer
+			drop();
+			return false;
+		}
+		pending_ = true;
+		stagetimer::countDown(b1 + b2);
+		return true;
+	}
+	bool active() const { return buf_ != NULL; }
+	// Blocks until both arrays have arrived
+	void wait()
+	{
+		if (pending_) { DEBUG_HANDLE_ERROR(cudaEventSynchronize(ev_)); pending_ = false; }
+	}
+	template <typename T> const T *first() const { return (const T *) buf_; }
+	template <typename T> const T *second() const { return (const T *) ((const char *) buf_ + off2_); }
+	// True when the event says the data is in already (the host did not have to wait)
+	bool ready() const { return pending_ && cudaEventQuery(ev_) == cudaSuccess; }
+};
+
 // Big one-off copies between a pageable host array and the device (legacy default stream), through
 // two pinned buffers from the pool: the copy of one chunk overlaps the memcpy of the next, so the
 // transfer runs at close to the speed of the bus instead of the driver's pageable path (which stages

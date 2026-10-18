@@ -2340,6 +2340,14 @@ void MlOptimiser::initialiseGeneral(int rank)
         std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join, pooled pinned copy buffers, weighted-average sums of 2D data, block-wise sort of the weights, one-pass significance selection of the weights, one-block significance pass of --skip_align, per-thread cache of small device blocks reused on the same stream) are on by default, each backing off to the older path when its conditions are not met; "
                   << (off.empty() ? "none is switched off" : "switched off: " + off) << " (VAR=0 turns one off)." << std::endl;
     }
+    if (do_gpu && verb > 0)
+    {
+        const int as = gpuswitch::optIn("RELION_GPU_ASYNC_STORE"), af = gpuswitch::optIn("RELION_GPU_ASYNC_FINE");
+        if (as || af)
+            std::cout << " GPU host-wait reduction (opt-in): asynchronous store of the weighted sums "
+                      << (as == 2 ? "on, with check" : as ? "on" : "off") << " (RELION_GPU_ASYNC_STORE), fine-pass minimum kept on the device "
+                      << (af == 2 ? "on, with check" : af ? "on" : "off") << " (RELION_GPU_ASYNC_FINE)." << std::endl;
+    }
     // --skip_align / --skip_rotate keep the GPU (upstream switches the accelerators off here);
     // RELION_GPU_SKIP_ALIGN=0 restores the upstream behaviour. Only the CUDA code was validated for
     // this case: a HIP build keeps the upstream behaviour unless RELION_GPU_SKIP_ALIGN=1 asks for the GPU.

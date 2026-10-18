@@ -138,4 +138,41 @@ TEST_CASE("pinned big copies move the same bytes as cudaMemcpy", "[pinned_pool]"
 		cudaFree(d);
 	}
 }
+
+TEST_CASE("asynchronous two-array download returns the bytes of both arrays", "[pinned_pool]")
+{
+	int ndev = 0;
+	if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0)
+	{
+		cudaGetLastError();
+		WARN("no GPU - skipping");
+		return;
+	}
+	for (size_t n1 : {(size_t) 1, (size_t) 1000, (size_t) 300000})
+	{
+		const size_t n2 = n1 * 4 + 3;
+		std::vector<float> a(n1), b(n2);
+		for (size_t i = 0; i < n1; i++) a[i] = 0.5f * i;
+		for (size_t i = 0; i < n2; i++) b[i] = -1.25f * i;
+		float *da = NULL, *db = NULL;
+		REQUIRE(cudaMalloc(&da, n1 * sizeof(float)) == cudaSuccess);
+		REQUIRE(cudaMalloc(&db, n2 * sizeof(float)) == cudaSuccess);
+		REQUIRE(cudaMemcpy(da, a.data(), n1 * sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess);
+		REQUIRE(cudaMemcpy(db, b.data(), n2 * sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess);
+		{
+			AsyncDownload dl;
+			REQUIRE(dl.start(da, n1 * sizeof(float), db, n2 * sizeof(float), cudaStreamPerThread));
+			dl.wait();
+			CHECK(memcmp(dl.first<float>(), a.data(), n1 * sizeof(float)) == 0);
+			CHECK(memcmp(dl.second<float>(), b.data(), n2 * sizeof(float)) == 0);
+		}
+		{
+			// destroyed with the copy still pending: waits, gives the buffer back, no crash
+			AsyncDownload dl;
+			REQUIRE(dl.start(da, n1 * sizeof(float), db, n2 * sizeof(float), cudaStreamPerThread));
+		}
+		cudaFree(da);
+		cudaFree(db);
+	}
+}
 #endif

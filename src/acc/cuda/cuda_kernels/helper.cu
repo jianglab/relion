@@ -96,8 +96,11 @@ __global__ void cuda_kernel_exponentiate_weights_fine_batched(
 		int *d_job_class,
 		long int pdf_orientation_stride,
 		long int pdf_offset_stride,
-		long int job_num)
+		long int job_num,
+		const XFLOAT *d_min_diff2)
 {
+	if (d_min_diff2 != NULL)
+		min_diff2 = *d_min_diff2; // kept on the device (RELION_GPU_ASYNC_FINE)
 	long int jobid = blockIdx.x*SUMW_BLOCK_SIZE+threadIdx.x;
 
 	if (jobid<job_num)

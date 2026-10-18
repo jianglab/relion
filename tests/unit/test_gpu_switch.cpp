@@ -89,3 +89,21 @@ TEST_CASE("Opt-in switches are off unless set to an on value", "[gpu_switch]")
 	}
 	unsetenv(name);
 }
+
+TEST_CASE("Opt-in GPU switches are off unless asked for", "[gpu_switch]")
+{
+	const char *name = "RELION_TEST_GPU_OPTIN";
+	unsetenv(name);
+	CHECK(gpuswitch::optIn(name) == 0);
+	for (const char *off : {"", "0", "off", "no", "false"})
+	{
+		setenv(name, off, 1);
+		INFO("value " << off);
+		CHECK(gpuswitch::optIn(name) == 0);
+	}
+	setenv(name, "1", 1);
+	CHECK(gpuswitch::optIn(name) == 1);
+	setenv(name, "check", 1);
+	CHECK(gpuswitch::optIn(name) == 2);
+	unsetenv(name);
+}
