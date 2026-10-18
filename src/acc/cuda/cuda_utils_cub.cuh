@@ -18,6 +18,8 @@
 
 #if (CUDA_VERSION >= 11000)
     #include <cub/cub.cuh>
+#include <cooperative_groups.h>
+#include <atomic>
 #else
     // #define CUB_NS_QUALIFIER ::cub // for compatibility with CUDA 11.5
     #include <cub/device/device_radix_sort.cuh>
@@ -754,10 +756,10 @@ __device__ __forceinline__ void rs_level(int level, int &top, int &sh, int &nb, 
 	off = level == 0 ? 0 : (level == 1 ? 2048 : 3072);
 }
 
-static __global__ void cuda_kernel_rs_hist(const float *w, size_t n, const RadixSelState *st, unsigned *g_cnt, double *g_sum, int level)
+// body of cuda_kernel_rs_hist (shared with cuda_kernel_rs_all): s_cnt / s_sum are 2048 shared bins each
+static __device__ __forceinline__ void rs_hist_body(const float *w, size_t n, const RadixSelState *st, unsigned *g_cnt, double *g_sum, int level,
+		unsigned *s_cnt, double *s_sum)
 {
-	__shared__ unsigned s_cnt[2048];
-	__shared__ double s_sum[2048];
 	int top, sh, nb, off;
 	rs_level(level, top, sh, nb, off);
 	const unsigned prefix = st->prefix;
@@ -791,17 +793,23 @@ static __global__ void cuda_kernel_rs_hist(const float *w, size_t n, const Radix
 	}
 }
 
+static __global__ void cuda_kernel_rs_hist(const float *w, size_t n, const RadixSelState *st, unsigned *g_cnt, double *g_sum, int level)
+{
+	__shared__ unsigned s_cnt[2048];
+	__shared__ double s_sum[2048];
+	rs_hist_body(w, n, st, g_cnt, g_sum, level, s_cnt, s_sum);
+}
+
 // One block of 1024 threads: scan the bins of a level, choose the bin, and after the last level write the result
 // mode 0: the position where the running sum passes (1 - adaptive_fraction) of the total, and its weight
 // mode 1: the weight at sorted position rank_target, used in place of that weight if the count above exceeds max_sig
-static __global__ void __launch_bounds__(1024) cuda_kernel_rs_select(RadixSelState *st, const unsigned *g_cnt, const double *g_sum,
+static __device__ __forceinline__ void rs_select_body(RadixSelState *st, const unsigned *g_cnt, const double *g_sum,
 		int level, int mode, double adaptive_fraction, double rank_target, unsigned long long n, long max_sig,
-		SignificanceResult<float> *r)
+		SignificanceResult<float> *r, double *sh_s, unsigned long long *sh_c, int &s_found, int &s_last, int fast_scan)
 {
-	__shared__ double sh_s[1024];
-	__shared__ unsigned long long sh_c[1024];
-	__shared__ int s_found, s_last;
 	const int tid = threadIdx.x;
+	__shared__ unsigned long long s_woff_c[32];
+	__shared__ double s_woff_s[32];
 	int top, sh, nb, off;
 	rs_level(level, top, sh, nb, off);
 	const int b0 = 2 * tid, b1 = b0 + 1;
@@ -815,6 +823,8 @@ static __global__ void __launch_bounds__(1024) cuda_kernel_rs_select(RadixSelSta
 		s_last = -1;
 	}
 	__syncthreads();
+	if (!fast_scan)
+	{
 	for (int d = 1; d < 1024; d <<= 1)
 	{
 		unsigned long long cv = 0;
@@ -827,6 +837,57 @@ static __global__ void __launch_bounds__(1024) cuda_kernel_rs_select(RadixSelSta
 		__syncthreads();
 		sh_c[tid] += cv;
 		sh_s[tid] += sv;
+		__syncthreads();
+	}
+	}
+	else
+	{
+		// the same inclusive scan with warp shuffles: 5 steps in registers, the 32 warp totals scanned by warp 0 (3 barriers instead of 20)
+		const int lane = tid & 31, wid = tid >> 5;
+		unsigned long long cv = sh_c[tid];
+		double sv = sh_s[tid];
+		#pragma unroll
+		for (int d = 1; d < 32; d <<= 1)
+		{
+			const unsigned long long cu = __shfl_up_sync(0xffffffffu, cv, d);
+			const double su = __shfl_up_sync(0xffffffffu, sv, d);
+			if (lane >= d)
+			{
+				cv += cu;
+				sv += su;
+			}
+		}
+		__syncthreads();
+		sh_c[tid] = cv;
+		sh_s[tid] = sv;
+		__syncthreads();
+		if (wid == 0)
+		{
+			// warp totals (the last lane of each warp) scanned inclusive in the 32 lanes of warp 0
+			unsigned long long tc = sh_c[lane * 32 + 31];
+			double ts = sh_s[lane * 32 + 31];
+			#pragma unroll
+			for (int d = 1; d < 32; d <<= 1)
+			{
+				const unsigned long long cu = __shfl_up_sync(0xffffffffu, tc, d);
+				const double su = __shfl_up_sync(0xffffffffu, ts, d);
+				if (lane >= d)
+				{
+					tc += cu;
+					ts += su;
+				}
+			}
+			__syncwarp();
+			unsigned long long oc = __shfl_up_sync(0xffffffffu, tc, 1);
+			double os = __shfl_up_sync(0xffffffffu, ts, 1);
+			if (lane == 0) { oc = 0; os = 0.; }
+			// exclusive offset of warp w = inclusive total of warp w - 1: through shared memory to every thread
+			s_woff_c[lane] = oc;
+			s_woff_s[lane] = os;
+		}
+		__syncthreads();
+		sh_c[tid] += s_woff_c[wid];
+		sh_s[tid] += s_woff_s[wid];
 		__syncthreads();
 	}
 	const unsigned long long ex_c = tid > 0 ? sh_c[tid - 1] : 0ull;
@@ -923,6 +984,45 @@ static __global__ void __launch_bounds__(1024) cuda_kernel_rs_select(RadixSelSta
 	}
 }
 
+static __global__ void __launch_bounds__(1024) cuda_kernel_rs_select(RadixSelState *st, const unsigned *g_cnt, const double *g_sum,
+		int level, int mode, double adaptive_fraction, double rank_target, unsigned long long n, long max_sig,
+		SignificanceResult<float> *r)
+{
+	__shared__ double sh_s[1024];
+	__shared__ unsigned long long sh_c[1024];
+	__shared__ int s_found, s_last;
+	rs_select_body(st, g_cnt, g_sum, level, mode, adaptive_fraction, rank_target, n, max_sig, r, sh_s, sh_c, s_found, s_last, 0);
+}
+
+// ---- RELION_GPU_SELECT_FUSED=1: the whole selection (3 levels, 1 or 2 chains) in ONE cooperative launch ----
+// cuda_kernel_rs_hist and cuda_kernel_rs_select alternate 3 x (1 or 2) times, each its own launch (a pass of 48 blocks, then one block
+// of 1024 threads on the bins): 6-12 launches and their gaps per particle. Here every block does its part of the histogram, a grid-wide
+// barrier, block 0 chooses the bin, a barrier, and so on: the same two bodies, so the same values (the histogram sums are added in
+// shared/global atomics as before: double rounding order only). All blocks are 1024 threads and co-resident (at most one per SM).
+static __global__ void __launch_bounds__(1024) cuda_kernel_rs_all(const float *w, size_t n, char *base, size_t chain_bytes, int nchain,
+		double adaptive_fraction, double rank_target, unsigned long long nn, long max_sig, SignificanceResult<float> *r, int fast_scan)
+{
+	__shared__ unsigned s_cnt[2048];
+	__shared__ double s_sum[2048];
+	__shared__ double sh_s[1024];
+	__shared__ unsigned long long sh_c[1024];
+	__shared__ int s_found, s_last;
+	for (int c = 0; c < nchain; c++)
+	{
+		RadixSelState *st = (RadixSelState *) (base + c * chain_bytes);
+		unsigned *cnt = (unsigned *) (base + c * chain_bytes + 64);
+		double *sum = (double *) (base + c * chain_bytes + 64 + RS_BINS * sizeof(unsigned));
+		for (int level = 0; level < 3; level++)
+		{
+			rs_hist_body(w, n, st, cnt, sum, level, s_cnt, s_sum);
+			cooperative_groups::this_grid().sync();
+			if (blockIdx.x == 0)
+				rs_select_body(st, cnt, sum, level, c, adaptive_fraction, rank_target, nn, max_sig, r, sh_s, sh_c, s_found, s_last, fast_scan);
+			cooperative_groups::this_grid().sync();
+		}
+	}
+}
+
 // -1: follow RELION_GPU_SIGNIF_SELECT; 0 or 1: forced (tests)
 inline int &gpuSignifSelectOverride()
 {
@@ -958,6 +1058,26 @@ inline int radixSelectBlocks(size_t n)
 	return (int) std::max<size_t>(1, std::min<size_t>((n + per - 1) / per, 2 * (size_t) sms[dev]));
 }
 
+// RELION_GPU_SELECT_FUSED: unset or on = 2 (one cooperative launch, warp-shuffle scans), "1" = one launch with the plain scans, off = 0
+inline int rsFusedMode()
+{
+	const char *e = getenv("RELION_GPU_SELECT_FUSED");
+	if (e == NULL)
+		return 2;
+	if (gpuswitch::isOffValue(e))
+		return 0;
+	return atoi(e) == 1 ? 1 : 2;
+}
+
+// how many selections ran as one cooperative launch (0) and how many fell back to the separate launches (1)
+// test hook (RELION_GPU_SELECT_FUSED_REFUSE=1 or set from a unit test): ask for more blocks than can be co-resident, so the driver refuses the cooperative launch and the fallback runs
+inline std::atomic<int> &rsFusedRefuse(){ static std::atomic<int> v(getenv("RELION_GPU_SELECT_FUSED_REFUSE") != NULL && atoi(getenv("RELION_GPU_SELECT_FUSED_REFUSE")) != 0); return v; }
+inline std::atomic<long> &rsFusedCount(int which)
+{
+	static std::atomic<long> c[2];
+	return c[which];
+}
+
 // Fills r (sum_weight, threshold, idx, idx_capped, significant_weight) as the sort, scan and significance kernels do.
 // scratch: radixSelectScratchBytes() bytes, device. Everything on stream, nothing waited for.
 static void radixSelectSignificance(const float *weights, size_t n, cudaStream_t stream, void *scratch, double adaptive_fraction,
@@ -968,6 +1088,51 @@ static void radixSelectSignificance(const float *weights, size_t n, cudaStream_t
 	cudaMemsetAsync(base, 0, 2 * chain_bytes, stream);
 	const int nchain = (max_significants > 0 && n > (size_t) max_significants) ? 2 : 1;
 	const int blocks = radixSelectBlocks(n);
+	// RELION_GPU_SELECT_FUSED: on by default (2); 1 = one launch with the plain scans of the bins, 2 = also warp-shuffle scans, 0/off = separate launches
+	static const int fused_mode = rsFusedMode();
+	const bool fused = fused_mode > 0;
+	if (fused)
+	{
+		// one cooperative launch: as many blocks as fit, one per SM at most (1024 threads each)
+		// the co-resident capacity of the card, found once per device; a cooperative launch that does not fit fails (no hang)
+		static int capacity[64] = {0};
+		int dev = 0;
+		cudaGetDevice(&dev);
+		if (dev < 0 || dev >= 64)
+			dev = 0;
+		if (capacity[dev] == 0)
+		{
+			int sms = 0, per_sm = 0, coop = 0;
+			cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+			cudaDeviceGetAttribute(&coop, cudaDevAttrCooperativeLaunch, dev);
+			cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, cuda_kernel_rs_all, 1024, 0);
+			capacity[dev] = coop ? std::max(1, per_sm) * std::max(1, sms) : -1;
+		}
+		if (capacity[dev] > 0) // else: no cooperative launch on this card, the separate launches below
+		{
+			const int cb = rsFusedRefuse().load() ? capacity[dev] + 1 : std::max(1, std::min(blocks, capacity[dev]));
+			SignificanceResult<float> *rr = r;
+			double rank_target = (double) (n - (size_t) max_significants);
+			unsigned long long nn = (unsigned long long) n;
+			size_t cbytes = chain_bytes;
+			int nch = nchain;
+			long ms = max_significants;
+			int fast = fused_mode >= 2 ? 1 : 0;
+			void *args[] = { &weights, &n, &base, &cbytes, &nch, &adaptive_fraction, &rank_target, &nn, &ms, &rr, &fast };
+			const cudaError_t coop_err = cudaLaunchCooperativeKernel((void *) cuda_kernel_rs_all, dim3(cb), dim3(1024), args, 0, stream);
+			if (coop_err == cudaSuccess)
+			{
+				rsFusedCount(0)++;
+				LAUNCH_HANDLE_ERROR(cudaGetLastError());
+				return;
+			}
+			cudaGetLastError(); // not launchable: the separate launches below
+			if (rsFusedCount(1)++ == 0)
+				fprintf(stderr, " WARNING: RELION_GPU_SELECT_FUSED: the cooperative launch was refused (%s), the selection uses separate launches.\n", cudaGetErrorString(coop_err));
+		}
+		else if (rsFusedCount(1)++ == 0)
+			fprintf(stderr, " WARNING: RELION_GPU_SELECT_FUSED: this card cannot launch cooperative kernels, the selection uses separate launches.\n");
+	}
 	for (int c = 0; c < nchain; c++)
 	{
 		RadixSelState *st = (RadixSelState *) (base + c * chain_bytes);

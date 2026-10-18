@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <random>
 
 namespace
@@ -102,5 +104,63 @@ TEST_CASE("radix selection of the significant weight equals the sort-and-scan on
 			CHECK(below <= thr * (1 + 1e-3));
 			CHECK(upto >= thr * (1 - 1e-3));
 		}
+	}
+}
+
+// Run with the fused selection on, for example:
+//   RELION_GPU_SELECT_FUSED=2 relion_unit_tests "[gpu_signif_select_stress]"
+// STRESS_SECONDS sets the length (default 3), STRESS_THREADS the number of host threads (default 8).
+// The cooperative launch needs all its blocks resident at once: several threads (and processes) launching
+// at the same time, and other kernels on the card, must neither deadlock nor change the result.
+TEST_CASE("a refused cooperative launch falls back to the separate launches with the same result", "[gpu_signif_select]")
+{
+	std::vector<float> w(300000);
+	unsigned long long state = 12345;
+	for (auto &x : w)
+	{
+		state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+		x = std::exp(-6.f * (float) ((state >> 33) % 100000) / 100000.f);
+	}
+	gpusel::OnceOutcome normal, refused;
+	if (!gpusel::radixSelectOnce(w, false, normal) || !gpusel::radixSelectOnce(w, true, refused))
+	{
+		WARN("no usable GPU: skipped");
+		return;
+	}
+	if (normal.fused_launches == 0)
+	{
+		WARN("the fused selection is off or not supported here: skipped");
+		return;
+	}
+	CHECK(refused.fused_launches == 0);
+	CHECK(refused.fallbacks == 1); // the launch was tried and refused
+	CHECK(refused.idx == normal.idx);
+	CHECK(refused.idx_capped == normal.idx_capped);
+	CHECK(refused.significant_weight == normal.significant_weight);
+	CHECK(refused.sum_weight == Approx(normal.sum_weight).epsilon(1e-6));
+}
+
+TEST_CASE("the radix selection does not deadlock or change its result under concurrent launches", "[gpu_signif_select_stress][.]")
+{
+	const char *sec = getenv("STRESS_SECONDS");
+	const char *thr = getenv("STRESS_THREADS");
+	const double seconds = sec ? atof(sec) : 3.0;
+	const int threads = thr ? atoi(thr) : 8;
+	const char *only = getenv("STRESS_COMPETE_ONLY");
+	for (int compete = (only && atoi(only)) ? 1 : 0; compete < 2; compete++)
+	{
+		INFO("threads " << threads << " competing kernels " << compete);
+		gpusel::StressOutcome out;
+		if (!gpusel::stressRadixSelect(threads, seconds, 300000, compete != 0, 30.0, out))
+		{
+			WARN("no GPU visible: test skipped");
+			return;
+		}
+		INFO("selections done " << out.launches << " cooperative launch supported " << out.cooperative);
+		std::cout << "  stress: threads " << threads << " competing " << compete << ": " << out.launches << " selections, " << out.fused_launches
+				<< " cooperative launches, " << out.fallbacks << " fallbacks" << std::endl;
+		REQUIRE_FALSE(out.stalled);
+		CHECK(out.mismatches == 0);
+		CHECK(out.launches > 0);
 	}
 }

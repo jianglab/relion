@@ -39,6 +39,7 @@ inline const char *const *defaultOnNames(size_t &count)
 		"RELION_GPU_FUSED_WEIGHTS",
 		"RELION_GPU_BLOCK_SORT",
 		"RELION_GPU_WAVG_SUM",
+		"RELION_GPU_SELECT_FUSED",
 	};
 	count = sizeof(names) / sizeof(names[0]);
 	return names;
