@@ -3604,6 +3604,77 @@ void MlOptimiserMpi::joinTwoHalvesAtLowResolution()
 #endif
 }
 
+void MlOptimiserMpi::alignClassesMpi()
+{
+	// Same scope as MlOptimiser::alignClasses(): 3D classes of an ordinary run
+	if (mymodel.nr_bodies > 1 || do_split_random_halves || mymodel.nr_classes <= 1 || mymodel.ref_dim != 3)
+		return;
+
+	const int nr_freedom = classAlignmentFreedom();
+	if (nr_freedom == 0)
+		return;
+
+	// Every rank holds every class map here (the references are broadcast after the
+	// reconstruction), but only the followers keep an up-to-date pdf_class: the leader
+	// never runs maximizationOtherParameters. So rank 1 picks the largest class and tells all.
+	int iclass_ref = 0;
+	if (node->rank == 1)
+	{
+		RFLOAT max_pdf = mymodel.pdf_class[0];
+		for (int iclass = 1; iclass < mymodel.nr_classes; iclass++)
+			if (mymodel.pdf_class[iclass] > max_pdf)
+			{
+				max_pdf = mymodel.pdf_class[iclass];
+				iclass_ref = iclass;
+			}
+	}
+	node->relion_MPI_Bcast(&iclass_ref, 1, MPI_INT, 1, MPI_COMM_WORLD);
+
+	if (verb > 0)
+		std::cout << " Aligning " << mymodel.nr_classes << " classes to class " << iclass_ref + 1
+				<< " (largest) with " << ((nr_freedom == 2) ? "2" : "6") << " DOF ..." << std::endl;
+
+	const RFLOAT maxres = mymodel.current_resolution;
+	const int nr_followers = node->size - 1;
+
+	// Class i is searched by the follower that reconstructed it; all ranks then get the
+	// parameters and apply them to their own copy of the map, so the maps stay identical.
+	for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+	{
+		if (iclass == iclass_ref) continue;
+		// pdf_class is only trustworthy on followers; a class without particles is left alone
+		int skip = 0;
+		if (node->rank == 1 && do_fix_classes && mymodel.pdf_class[iclass] == 0.)
+			skip = 1;
+		node->relion_MPI_Bcast(&skip, 1, MPI_INT, 1, MPI_COMM_WORLD);
+		if (skip) continue;
+
+		const int owner = (iclass % nr_followers) + 1;
+		RFLOAT params[6] = {0., 0., 0., 0., 0., 0.};
+		if (node->rank == owner)
+		{
+			alignCuboidMapToMap(mymodel.Iref[iclass], mymodel.Iref[iclass_ref], nr_freedom,
+					mymodel.pixel_size, maxres, 3, 1., 1.,
+					params[0], params[1], params[2], params[3], params[4], params[5],
+					nr_threads, false);
+		}
+		node->relion_MPI_Bcast(params, 6, MY_MPI_DOUBLE, owner, MPI_COMM_WORLD);
+
+		if (verb > 0)
+			std::cout << "  Class " << iclass + 1 << " to class " << iclass_ref + 1
+					<< ": rot=" << params[0] << " tilt=" << params[1] << " psi=" << params[2]
+					<< " dx=" << params[3] << " dy=" << params[4] << " dz=" << params[5] << std::endl;
+
+		applyMapTransformation(mymodel.Iref[iclass], params[0], params[1], params[2],
+				params[3], params[4], params[5], mymodel.pixel_size);
+
+		// The leader's metadata is the authoritative copy that is written to the data star file
+		if (node->isLeader())
+			applyClassAlignmentToParticles(iclass, nr_freedom, params[0], params[1], params[2],
+					params[3], params[4], params[5]);
+	}
+}
+
 void MlOptimiserMpi::alignHalves()
 {
 	if (!do_split_random_halves || mymodel.nr_classes > 1)
@@ -4860,6 +4931,10 @@ void MlOptimiserMpi::iterate()
 		// Skip center classes in the final stages of gradient refinement
 		if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
 			centerClasses();
+
+		// Align all classes to the largest class at the last iteration
+		if (do_align_classes && mymodel.nr_classes > 1 && iter == nr_iter)
+			alignClassesMpi();
 
 		// Directly use fn_out, without "_it" specifier, so unmasked refs will be overwritten at every iteration
 		if (do_write_unmasked_refs && node->rank == 1)

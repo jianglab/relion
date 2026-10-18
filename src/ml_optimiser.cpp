@@ -6405,35 +6405,9 @@ void MlOptimiser::centerClasses()
     }
 }
 
-void MlOptimiser::alignClasses()
+int MlOptimiser::classAlignmentFreedom()
 {
-    if (mymodel.nr_bodies > 1 || do_split_random_halves)
-        return;
-
-    if (mymodel.nr_classes <= 1)
-        return;
-
-    // alignMapToMap is a 3D search throughout - a 3D Projector, ZYZ Euler angles
-    // and 4x4 matrices - so it cannot be pointed at 2D class averages.  Doing so
-    // aborted in applyGeometry with "2D transformation matrix is not 3x3" as soon
-    // as a non-zero rotation was found.  This matches the --align_classes help
-    // text, which already scopes the option to Class3D.
-    if (mymodel.ref_dim != 3)
-        return;
-
-    // Identify the largest class
-    int iclass_ref = 0;
-    RFLOAT max_pdf = mymodel.pdf_class[0];
-    for (int iclass = 1; iclass < mymodel.nr_classes; iclass++)
-    {
-        if (mymodel.pdf_class[iclass] > max_pdf)
-        {
-            max_pdf = mymodel.pdf_class[iclass];
-            iclass_ref = iclass;
-        }
-    }
-
-    // Determine search DOF from symmetry
+    // Search degrees of freedom from the symmetry: 6 (C1), 2 (Cn with n >= 2, or helical), 0 (Dn, T, O, I: the symmetry fixes the orientation)
     int nr_freedom = 6; // default C1
     if ( (do_helical_refine) && (!ignore_helical_symmetry) )
     {
@@ -6463,6 +6437,113 @@ void MlOptimiser::alignClasses()
             }
         }
     }
+    return nr_freedom;
+}
+
+void MlOptimiser::applyClassAlignmentToParticles(int iclass, int nr_freedom,
+        RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+        RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz)
+{
+    const bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
+    FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
+    {
+        int this_class;
+        mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, this_class);
+        if (this_class != iclass + 1) continue; // 1-indexed
+
+        RFLOAT rot, tilt, psi, dx, dy, dz;
+        mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot);
+        mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt);
+        mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi);
+        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
+        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
+        dz = 0.;
+        if (has_z)
+            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
+
+        const RFLOAT dx_old = dx, dy_old = dy;
+        applyInverseOrientationAdjustment(
+            nr_freedom,
+            best_rot, best_tilt, best_psi,
+            best_dx, best_dy, best_dz,
+            rot, tilt, psi, dx, dy, dz);
+
+        if (!has_z)
+        {
+            // The offsets of 2D particle images are in the image plane, but the map was moved in
+            // 3D: the image-plane offset that follows from a 3D shift t depends on the particle's
+            // (new) orientation, it is the first two components of A * t. Subtracting t from the
+            // offsets, as for 3D data, left the particles inconsistent with the aligned map.
+            Matrix2D<RFLOAT> A;
+            Euler_angles2matrix(rot, tilt, psi, A);
+            const RFLOAT tx = (nr_freedom == 6) ? best_dx : 0.;
+            const RFLOAT ty = (nr_freedom == 6) ? best_dy : 0.;
+            const RFLOAT tz = best_dz;
+            dx = dx_old + A(0, 0) * tx + A(0, 1) * ty + A(0, 2) * tz;
+            dy = dy_old + A(1, 0) * tx + A(1, 1) * ty + A(1, 2) * tz;
+        }
+
+        mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot);
+        mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt);
+        mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi);
+        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
+        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
+        if (has_z)
+            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
+
+        // Also adjust priors if they exist
+        RFLOAT prior_x, prior_y, prior_z;
+        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
+        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
+        if (prior_x < 999.)
+        {
+            // the priors move with the offsets
+            prior_x += dx - dx_old;
+            prior_y += dy - dy_old;
+            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
+            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
+            if (has_z)
+            {
+                mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
+                if (prior_z < 999.)
+                {
+                    prior_z -= best_dz;
+                    mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
+                }
+            }
+        }
+    }
+}
+
+void MlOptimiser::alignClasses()
+{
+    if (mymodel.nr_bodies > 1 || do_split_random_halves)
+        return;
+
+    if (mymodel.nr_classes <= 1)
+        return;
+
+    // alignMapToMap is a 3D search throughout - a 3D Projector, ZYZ Euler angles
+    // and 4x4 matrices - so it cannot be pointed at 2D class averages.  Doing so
+    // aborted in applyGeometry with "2D transformation matrix is not 3x3" as soon
+    // as a non-zero rotation was found.  This matches the --align_classes help
+    // text, which already scopes the option to Class3D.
+    if (mymodel.ref_dim != 3)
+        return;
+
+    // Identify the largest class
+    int iclass_ref = 0;
+    RFLOAT max_pdf = mymodel.pdf_class[0];
+    for (int iclass = 1; iclass < mymodel.nr_classes; iclass++)
+    {
+        if (mymodel.pdf_class[iclass] > max_pdf)
+        {
+            max_pdf = mymodel.pdf_class[iclass];
+            iclass_ref = iclass;
+        }
+    }
+
+    const int nr_freedom = classAlignmentFreedom();
 
     if (nr_freedom == 0)
         return;
@@ -6500,58 +6581,7 @@ void MlOptimiser::alignClasses()
                   << " dy=" << best_dy << " dz=" << best_dz << std::endl;
 
         // Apply the cumulative alignment to all particles in this class
-        const bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
-        FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
-        {
-            int this_class;
-            mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, this_class);
-            if (this_class != iclass + 1) continue; // 1-indexed
-
-            RFLOAT rot, tilt, psi, dx, dy, dz;
-            mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot);
-            mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt);
-            mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi);
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
-            dz = 0.;
-            if (has_z)
-                mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
-
-            applyInverseOrientationAdjustment(
-                nr_freedom,
-                best_rot, best_tilt, best_psi,
-                best_dx, best_dy, best_dz,
-                rot, tilt, psi, dx, dy, dz);
-
-            mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot);
-            mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt);
-            mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi);
-            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
-            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
-            if (has_z)
-                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
-
-            // Also adjust priors if they exist
-            RFLOAT prior_x, prior_y, prior_z;
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
-            if (prior_x < 999.)
-            {
-                prior_x -= best_dx;
-                prior_y -= best_dy;
-                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
-                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
-                if (has_z)
-                {
-                    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
-                    if (prior_z < 999.)
-                    {
-                        prior_z -= best_dz;
-                        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
-                    }
-                }
-            }
-        }
+        applyClassAlignmentToParticles(iclass, nr_freedom, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz);
     }
 
     std::cout << " Done aligning classes." << std::endl;

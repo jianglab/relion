@@ -32,6 +32,7 @@ set(RELION_UNIT_TEST_SOURCES
  test_backprojector_nonuniform.cpp
  test_s2_vs_smode_consistency.cpp
     test_align_map_to_map.cpp
+    test_class_alignment_particles.cpp
     test_pipeline_jobs.cpp
     test_reference_list.cpp
     test_class2d_consensus.cpp

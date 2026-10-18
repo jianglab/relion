@@ -1360,6 +1360,17 @@ public:
 	 */
 	void alignClasses();
 
+	/* Degrees of freedom of the class alignment: 6 (C1), 2 (Cn with n >= 2, or helical), 0 (Dn, T, O, I: nothing to align)
+	 */
+	int classAlignmentFreedom();
+
+	/* Apply the inverse of the transformation that was applied to the map of class iclass (0-based) to the orientations,
+	 * offsets and offset priors of all particles of that class in mydata.MDimg
+	 */
+	void applyClassAlignmentToParticles(int iclass, int nr_freedom,
+			RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+			RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz);
+
 	/* Updates the current resolution (from data_vs_prior array) and keeps track of best resolution thus far
 	 *  and precalculates a 2D Fourier-space array with pointers to the resolution of each point in a FFTW-centered array
 	 */

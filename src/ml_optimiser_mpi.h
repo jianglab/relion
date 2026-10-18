@@ -136,6 +136,9 @@ public:
      */
     void alignHalves();
 
+    // Align all classes to the largest one at the last iteration (see MlOptimiser::alignClasses)
+    void alignClassesMpi();
+
     /**
      * Adjust angular sampling based on the expected angular accuracies for gradient optimization
      */
