@@ -1248,16 +1248,13 @@ static void fusedWeightPass(AccPtr<T> &weights, double adaptive_fraction, long m
 	alloc->doFreeWhenReady();
 }
 
-// RELION_GPU_SKIPALIGN_BLOCK=1: the fine pass of --skip_align (no oversampling, a few weights per particle) in three launches
+// RELION_GPU_SKIPALIGN_BLOCK (on by default, =0 turns it off): the fine pass of --skip_align (no oversampling, a few weights per particle) in three launches
 // and one copy: partial maximum, exponentiation (the maximum stays on the GPU) and one block that sorts, sums and finds the
 // threshold. Replaces DeviceReduce::Max, the exponentiation, DeviceRadixSort, DeviceScan, DeviceReduce::ArgMax and the reads
 // of the sum, the smallest weight and the threshold. r: sum_weight, idx, first (smallest weight), max, wmax.
 inline bool gpuSkipAlignBlock()
 {
-	static const bool on = []() {
-		const char *e = getenv("RELION_GPU_SKIPALIGN_BLOCK");
-		return e && std::string(e) != "0" && std::string(e) != "off";
-	}();
+	static const bool on = gpuswitch::on("RELION_GPU_SKIPALIGN_BLOCK");
 	return on;
 }
 

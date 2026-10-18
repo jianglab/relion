@@ -3082,7 +3082,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     if (gpuFusedWeights() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling != 0 &&
                             accMLO->classStreamsShared && total > 1 && total <= ((size_t) 1 << 22))
                         fusedFine = true; // maximum, exponentiation and significance below, on the GPU
-                    else if (CudaKernels::gpuSkipAlignBlock() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling == 0 &&
+                    else if (CudaKernels::gpuSkipAlignBlock() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling == 0 && baseMLO->do_skip_align &&
                             accMLO->classStreamsShared && total >= 1 && total <= BS_MAX_N && baseMLO->mymodel.nr_bodies == 1)
                         fusedSkip = true; // --skip_align: the same in one block (RELION_GPU_SKIPALIGN_BLOCK)
                     else
