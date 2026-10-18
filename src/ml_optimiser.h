@@ -1367,6 +1367,10 @@ public:
 	/* Apply the inverse of the transformation that was applied to the map of class iclass (0-based) to the orientations,
 	 * offsets and offset priors of all particles of that class in mydata.MDimg
 	 */
+	void applyMapAlignmentToParticle(long int part_id, int nr_freedom,
+			RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+			RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz);
+
 	void applyClassAlignmentToParticles(int iclass, int nr_freedom,
 			RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
 			RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz);

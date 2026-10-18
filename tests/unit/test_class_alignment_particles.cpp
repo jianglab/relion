@@ -86,3 +86,26 @@ TEST_CASE("MlOptimiser: Cn class alignment changes only rot", "[align_classes]")
 	REQUIRE(tilt == Approx(20.));
 	REQUIRE(psi == Approx(30.));
 }
+
+TEST_CASE("MlOptimiser: one particle of a half is adjusted like a class, offset prior included", "[align_classes]")
+{
+	MlOptimiser opt;
+	opt.mymodel.data_dim = 2;
+	addParticle(opt.mydata.MDimg, 1, 0., 90., 0., -3., 4.);
+	addParticle(opt.mydata.MDimg, 2, 0., 90., 0., -3., 4.);
+
+	// tilt 90: image x is the map's -z axis, so a shift along z moves the particle along x
+	opt.applyMapAlignmentToParticle(1, 6, 0., 0., 0., 0., 0., 2.);
+
+	RFLOAT dx, dy, px, py;
+	opt.mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, 0);
+	REQUIRE(dx == Approx(-3.)); // the other particle is untouched
+	opt.mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, 1);
+	opt.mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, 1);
+	opt.mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, px, 1);
+	opt.mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, py, 1);
+	REQUIRE(dx == Approx(-5.));
+	REQUIRE(dy == Approx(4.));
+	REQUIRE(px == Approx(-5.));
+	REQUIRE(py == Approx(4.));
+}

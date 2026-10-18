@@ -3774,7 +3774,8 @@ void MlOptimiserMpi::alignHalves()
 					best_dx, best_dy, best_dz,
 					nr_threads, false);
 
-			if (verb > 0)
+			// rank 1 is a follower, whose verb is 0: the line is only reachable through RELION_ALIGN_TIMING
+			if (verb > 0 || align_timing)
 				std::cout << " Aligning half2 to half1: rot=" << best_rot
 					<< " tilt=" << best_tilt << " psi=" << best_psi
 					<< " dx=" << best_dx << " dy=" << best_dy << " dz=" << best_dz
@@ -3792,8 +3793,6 @@ void MlOptimiserMpi::alignHalves()
 		best_rot = params[0]; best_tilt = params[1]; best_psi = params[2];
 		best_dx  = params[3]; best_dy  = params[4]; best_dz  = params[5];
 
-		bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
-
 		// Adjust the leader's authoritative metadata for half2. Followers receive
 		// these updated values when expectation distributes the next set of jobs.
 		if (node->isLeader())
@@ -3807,29 +3806,8 @@ void MlOptimiserMpi::alignHalves()
 			{
 				long int part_id = mydata.sorted_idx[part_id_sorted];
 
-				RFLOAT rot, tilt, psi, dx, dy, dz;
-				mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot, part_id);
-				mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt, part_id);
-				mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi, part_id);
-				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
-				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
-				dz = 0;
-				if (has_z)
-					mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
-
-				applyInverseOrientationAdjustment(
-						nr_freedom,
-						best_rot, best_tilt, best_psi,
-						best_dx, best_dy, best_dz,
-						rot, tilt, psi, dx, dy, dz);
-
-				mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot, part_id);
-				mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt, part_id);
-				mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi, part_id);
-				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
-				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
-				if (has_z)
-					mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
+				applyMapAlignmentToParticle(part_id, nr_freedom,
+						best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz);
 			}
 		}
 	}

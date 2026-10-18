@@ -6440,78 +6440,85 @@ int MlOptimiser::classAlignmentFreedom()
     return nr_freedom;
 }
 
-void MlOptimiser::applyClassAlignmentToParticles(int iclass, int nr_freedom,
+void MlOptimiser::applyMapAlignmentToParticle(long int part_id, int nr_freedom,
         RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
         RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz)
 {
     const bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
+
+    RFLOAT rot, tilt, psi, dx, dy, dz;
+    mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
+    dz = 0.;
+    if (has_z)
+        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
+
+    const RFLOAT dx_old = dx, dy_old = dy, dz_old = dz;
+    applyInverseOrientationAdjustment(
+        nr_freedom,
+        best_rot, best_tilt, best_psi,
+        best_dx, best_dy, best_dz,
+        rot, tilt, psi, dx, dy, dz);
+
+    if (!has_z)
+    {
+        // The offsets of 2D particle images are in the image plane, but the map was moved in
+        // 3D: the image-plane offset that follows from a 3D shift t depends on the particle's
+        // (new) orientation, it is the first two components of A * t. Subtracting t from the
+        // offsets, as for 3D data, left the particles inconsistent with the aligned map.
+        Matrix2D<RFLOAT> A;
+        Euler_angles2matrix(rot, tilt, psi, A);
+        const RFLOAT tx = (nr_freedom == 6) ? best_dx : 0.;
+        const RFLOAT ty = (nr_freedom == 6) ? best_dy : 0.;
+        const RFLOAT tz = best_dz;
+        dx = dx_old + A(0, 0) * tx + A(0, 1) * ty + A(0, 2) * tz;
+        dy = dy_old + A(1, 0) * tx + A(1, 1) * ty + A(1, 2) * tz;
+    }
+
+    mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot, part_id);
+    mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt, part_id);
+    mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi, part_id);
+    mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
+    mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
+    if (has_z)
+        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
+
+    // The priors move with the offsets
+    RFLOAT prior_x, prior_y, prior_z;
+    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y, part_id);
+    if (prior_x < 999.)
+    {
+        prior_x += dx - dx_old;
+        prior_y += dy - dy_old;
+        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x, part_id);
+        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y, part_id);
+        if (has_z)
+        {
+            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z, part_id);
+            if (prior_z < 999.)
+            {
+                prior_z += dz - dz_old;
+                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z, part_id);
+            }
+        }
+    }
+}
+
+void MlOptimiser::applyClassAlignmentToParticles(int iclass, int nr_freedom,
+        RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+        RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz)
+{
     FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
     {
         int this_class;
-        mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, this_class);
+        mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, this_class, current_object);
         if (this_class != iclass + 1) continue; // 1-indexed
-
-        RFLOAT rot, tilt, psi, dx, dy, dz;
-        mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot);
-        mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt);
-        mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi);
-        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
-        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
-        dz = 0.;
-        if (has_z)
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
-
-        const RFLOAT dx_old = dx, dy_old = dy;
-        applyInverseOrientationAdjustment(
-            nr_freedom,
-            best_rot, best_tilt, best_psi,
-            best_dx, best_dy, best_dz,
-            rot, tilt, psi, dx, dy, dz);
-
-        if (!has_z)
-        {
-            // The offsets of 2D particle images are in the image plane, but the map was moved in
-            // 3D: the image-plane offset that follows from a 3D shift t depends on the particle's
-            // (new) orientation, it is the first two components of A * t. Subtracting t from the
-            // offsets, as for 3D data, left the particles inconsistent with the aligned map.
-            Matrix2D<RFLOAT> A;
-            Euler_angles2matrix(rot, tilt, psi, A);
-            const RFLOAT tx = (nr_freedom == 6) ? best_dx : 0.;
-            const RFLOAT ty = (nr_freedom == 6) ? best_dy : 0.;
-            const RFLOAT tz = best_dz;
-            dx = dx_old + A(0, 0) * tx + A(0, 1) * ty + A(0, 2) * tz;
-            dy = dy_old + A(1, 0) * tx + A(1, 1) * ty + A(1, 2) * tz;
-        }
-
-        mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot);
-        mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt);
-        mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi);
-        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
-        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
-        if (has_z)
-            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
-
-        // Also adjust priors if they exist
-        RFLOAT prior_x, prior_y, prior_z;
-        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
-        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
-        if (prior_x < 999.)
-        {
-            // the priors move with the offsets
-            prior_x += dx - dx_old;
-            prior_y += dy - dy_old;
-            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
-            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
-            if (has_z)
-            {
-                mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
-                if (prior_z < 999.)
-                {
-                    prior_z -= best_dz;
-                    mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
-                }
-            }
-        }
+        applyMapAlignmentToParticle(current_object, nr_freedom, best_rot, best_tilt, best_psi,
+                                    best_dx, best_dy, best_dz);
     }
 }
 
