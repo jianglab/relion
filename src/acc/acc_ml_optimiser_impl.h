@@ -3028,7 +3028,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             // global job positions, one maximum over the whole array (= the largest of
             // the per-class maxima) and one rescale give the same values as per class
             bool batched = false;
-            bool fusedFine = false;
+            bool fusedFine = false, fusedSkip = false;
             if (gpuClassBatching())
             {
                 std::vector<unsigned long> job_idx, job_num;
@@ -3082,6 +3082,9 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     if (gpuFusedWeights() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling != 0 &&
                             accMLO->classStreamsShared && total > 1 && total <= ((size_t) 1 << 22))
                         fusedFine = true; // maximum, exponentiation and significance below, on the GPU
+                    else if (CudaKernels::gpuSkipAlignBlock() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling == 0 &&
+                            accMLO->classStreamsShared && total >= 1 && total <= BS_MAX_N && baseMLO->mymodel.nr_bodies == 1)
+                        fusedSkip = true; // --skip_align: the same in one block (RELION_GPU_SKIPALIGN_BLOCK)
                     else
                     {
                     weights_max = AccUtilities::getMaxOnDevice<XFLOAT>(PassWeights.weights);
@@ -3165,6 +3168,29 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             }
 
 #ifdef _CUDA_ENABLED
+            if (fusedSkip)
+            {
+                typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;
+                AccPtr<char> fres = ptrFactory.make<char>(sizeof(SigRes));
+                fres.setStream(PassWeights.weights.getStream());
+                fres.allAlloc();
+                CudaKernels::skipAlignWeightPass<XFLOAT>(PassWeights.weights, baseMLO->adaptive_fraction, ~fres);
+                fres.cpToHostWait();
+                SigRes r;
+                memcpy(&r, &fres[0], sizeof(SigRes));
+                op.min_diff2 += 50 - r.wmax;
+                op.sum_weight = r.sum_weight;
+                if (op.sum_weight==0)
+                    CRITICAL(ERRSUMWEIGHTZERO); //"op.sum_weight[img_id]==0"
+                my_significant_weight = r.first;
+                op.max_index.fineIdx = PassWeights.ihidden_overs[r.max.key];
+                op.max_index.coarseIdx = op.max_index.fineIdx;
+                op.max_weight = r.max.value;
+                DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_NR_SIGN) = (RFLOAT) (PassWeights.weights.getSize() - (size_t) r.idx);
+                PassWeights.weights.cpToHost();
+                PassWeights.weights.streamSync();
+            }
+            else
             if (fusedFine)
             {
                 typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;

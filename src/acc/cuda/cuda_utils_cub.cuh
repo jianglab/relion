@@ -369,6 +369,7 @@ struct SignificanceResult
 	T significant_weight;         // sorted[idx_capped]
 	cub::KeyValuePair<int, T> max;// arg max of the weights
 	T wmax;                       // largest log-weight before the exponentiation (fused pass only)
+	T first;                      // sorted[0], the smallest weight (block-wise sort only)
 };
 
 template <typename T>
@@ -502,6 +503,8 @@ __global__ void cuda_kernel_block_sort_significance(const T *weights, int n, T *
 	}
 	Sort(temp.sort).Sort(keys);
 	__syncthreads();
+	if (tid == 0)
+		r->first = keys[0];
 	T cum[BS_ITEMS];
 	Scan(temp.scan).InclusiveSum(keys, cum);
 	for (int i = 0; i < BS_ITEMS; i++)
@@ -1243,6 +1246,45 @@ static void fusedWeightPass(AccPtr<T> &weights, double adaptive_fraction, long m
 
 	alloc->markReadyEvent(stream);
 	alloc->doFreeWhenReady();
+}
+
+// RELION_GPU_SKIPALIGN_BLOCK=1: the fine pass of --skip_align (no oversampling, a few weights per particle) in three launches
+// and one copy: partial maximum, exponentiation (the maximum stays on the GPU) and one block that sorts, sums and finds the
+// threshold. Replaces DeviceReduce::Max, the exponentiation, DeviceRadixSort, DeviceScan, DeviceReduce::ArgMax and the reads
+// of the sum, the smallest weight and the threshold. r: sum_weight, idx, first (smallest weight), max, wmax.
+inline bool gpuSkipAlignBlock()
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_SKIPALIGN_BLOCK");
+		return e && std::string(e) != "0" && std::string(e) != "off";
+	}();
+	return on;
+}
+
+template <typename T>
+static bool skipAlignWeightPass(AccPtr<T> &weights, double adaptive_fraction, char *d_res)
+{
+	cudaStream_t stream = weights.getStream();
+	const size_t n = weights.getSize();
+	if (n < 1 || n > BS_MAX_N)
+		return false;
+	const size_t al = 256;
+	auto up = [&](size_t b) { return (b + al - 1) / al * al; };
+	CudaCustomAllocator::Alloc *alloc = weights.getAllocator()->alloc(up(n * sizeof(T)) * 2 + up(128 * sizeof(MaxIdx<T>)));
+	char *base = (char *) alloc->getPtr();
+	T *sorted = (T *) base;
+	T *cumulative = (T *) (base + up(n * sizeof(T)));
+	MaxIdx<T> *partial = (MaxIdx<T> *) (base + 2 * up(n * sizeof(T)));
+	SignificanceResult<T> *r = (SignificanceResult<T> *) d_res;
+	const int bs = 512;
+	const int n_partial = (int) std::min<size_t>((n + bs - 1) / bs, 128);
+	cuda_kernel_fused_max_partial<T><<<n_partial, bs, 0, stream>>>(~weights, n, partial);
+	cuda_kernel_fused_exponentiate<T><<<(unsigned) ((n + bs - 1) / bs), bs, 0, stream>>>(~weights, n, partial, n_partial, (T) 50, r);
+	blockSortSignificance<T>(weights, sorted, cumulative, adaptive_fraction, 0, r, false, NULL);
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+	alloc->markReadyEvent(stream);
+	alloc->doFreeWhenReady();
+	return true;
 }
 
 } // namespace CudaKernels
