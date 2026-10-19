@@ -98,6 +98,8 @@ TEST_CASE("parallel hint: GPU ids and Slurm node descriptions", "[parhint]")
 TEST_CASE("parallel hint: tooltip from the current job settings", "[parhint]")
 {
 	setenv("RELION_CPUS_PER_GPU", "8", 1);
+	setenv("RELION_GPU_MEMORY_GB", "24", 1);
+	setenv("RELION_HOST_MEMORY_GB", "128", 1);
 	std::map<std::string, std::string> values, labels;
 	parhint::JobView view;
 	view.value = [&](const std::string &k) { auto it = values.find(k); return it == values.end() ? std::string() : it->second; };
@@ -119,7 +121,7 @@ TEST_CASE("parallel hint: tooltip from the current job settings", "[parhint]")
 	values["qsub_extra3"] = "2";
 	std::string t = parhint::tooltip(view, parhint::Field::MpiOrThreads);
 	CHECK(t.find("Suggested for 2 GPUs with 8 CPU cores per GPU") != std::string::npos);
-	CHECK(t.find("MPI processes: 3    Threads: 8") != std::string::npos);
+	CHECK(t.find("MPI processes: 5    Threads: 4") != std::string::npos);   // 2 workers per GPU, 16 cores
 	CHECK(t.find("\"Number of GPUs\" below") != std::string::npos);
 
 	// a local job: the GPU count comes from "Which GPUs to use"
@@ -128,7 +130,7 @@ TEST_CASE("parallel hint: tooltip from the current job settings", "[parhint]")
 	view.job_type = PROC_2DCLASS;
 	values["do_grad"] = "No";
 	t = parhint::tooltip(view, parhint::Field::MpiOrThreads);
-	CHECK(t.find("MPI processes: 5    Threads: 8") != std::string::npos);
+	CHECK(t.find("MPI processes: 25    Threads: 1") != std::string::npos);   // 6 workers per GPU, 32 cores
 	values["do_grad"] = "Yes";
 	t = parhint::tooltip(view, parhint::Field::MpiOrThreads);
 	CHECK(t.find("MPI processes: 1    Threads: 32") != std::string::npos);
@@ -304,5 +306,68 @@ TEST_CASE("auto threads: GPU memory and work size limits", "[parhint]")
 		CHECK(parhint::countParticlesInStar(fn) == 3);
 		CHECK(parhint::countParticlesInStar("no_such_file.star") == 0);
 		std::remove(fn.c_str());
+	}
+}
+
+TEST_CASE("ranks per GPU: workers by kind of work, limited by memory, cores and particles", "[parhint]")
+{
+	using parhint::Work;
+	using parhint::RankQuery;
+	unsetenv("RELION_RANKS_PER_GPU");
+	unsetenv("RELION_GPU_GB_PER_RANK");
+	auto ask = [](Work w, int gpus, int cores, double gpu_gb, long particles, double host_gb = 0)
+	{
+		RankQuery q;
+		q.work = w; q.gpus = gpus; q.cores = cores; q.gpu_bytes = gpu_gb * 1e9; q.particles = particles;
+		q.host_bytes = host_gb * 1e9;
+		return parhint::adviseRanks(q);
+	};
+	SECTION("nothing known: the measured target, a leader plus the workers")
+	{
+		auto a = ask(Work::Class2D, 1, 0, 0, 0);
+		CHECK(a.workers_per_gpu == 6);
+		CHECK(a.mpi == 7);
+		CHECK(a.threads == 2);          // 12 threads per GPU shared by 6 workers
+		CHECK(ask(Work::Class3D, 1, 0, 0, 0).workers_per_gpu == 4);
+		CHECK(ask(Work::SkipAlign, 1, 0, 0, 0).workers_per_gpu == 4);
+		CHECK_FALSE(a.reason.empty());
+	}
+	SECTION("auto-refine: even number of workers, at least 2 (one per half-set)")
+	{
+		auto a = ask(Work::AutoRefine, 1, 0, 0, 0);
+		CHECK(a.mpi == 3);
+		CHECK(ask(Work::AutoRefine, 2, 0, 0, 0).mpi == 5);
+		CHECK(ask(Work::AutoRefine, 1, 1, 0, 0).mpi == 3);   // one core: still 2 workers
+	}
+	SECTION("GPU memory: a 24 GB card holds 3 auto-refine workers, but 6 would not fit")
+	{
+		CHECK(ask(Work::AutoRefine, 1, 64, 24, 0).mpi == 3);
+		CHECK(ask(Work::Class3D, 1, 64, 6, 0).workers_per_gpu == 2);   // 6 GB card, 2 GB each, 75%
+		auto a = ask(Work::Class3D, 1, 64, 3, 0);
+		CHECK(a.workers_per_gpu == 1);
+		CHECK(a.mpi == 1);                                                  // one worker: no leader
+		CHECK(a.reason.find("GPU memory") != std::string::npos);
+	}
+	SECTION("host memory and cores")
+	{
+		CHECK(ask(Work::Class3D, 1, 64, 0, 0, 2.0).workers_per_gpu == 1);
+		CHECK(ask(Work::Class2D, 1, 3, 0, 0).workers_per_gpu == 3);
+		CHECK(ask(Work::Class2D, 2, 16, 0, 0).workers_per_gpu == 6);
+	}
+	SECTION("particles: at least 300 per worker")
+	{
+		CHECK(ask(Work::Class2D, 1, 64, 0, 1000).workers_per_gpu == 3);
+		CHECK(ask(Work::Class2D, 1, 64, 0, 50).workers_per_gpu == 1);
+		CHECK(ask(Work::Class2D, 1, 64, 0, 37000).workers_per_gpu == 6);
+	}
+	SECTION("environment overrides")
+	{
+		setenv("RELION_RANKS_PER_GPU", "9", 1);
+		CHECK(ask(Work::Class2D, 1, 2, 1, 10).workers_per_gpu == 9);
+		CHECK(ask(Work::AutoRefine, 1, 0, 0, 0).mpi == 11);   // 9 workers made even: 10, plus the leader
+		unsetenv("RELION_RANKS_PER_GPU");
+		setenv("RELION_GPU_GB_PER_RANK", "12", 1);
+		CHECK(ask(Work::Class2D, 1, 64, 24, 0).workers_per_gpu == 1);
+		unsetenv("RELION_GPU_GB_PER_RANK");
 	}
 }

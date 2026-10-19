@@ -117,6 +117,74 @@ long countParticlesInStar(const std::string &fn);
 /// THREADS_PER_GPU_CAP when unset or not a number.
 int autoThreadsCapFromEnv();
 
+
+/*
+ * Ranks (MPI worker processes) per GPU.
+ *
+ * One process issues about 120 CUDA calls per particle, most of them to kernels of 10 to 20
+ * microseconds, so it keeps a GPU only about a third busy, and more threads in the same
+ * process do not help (the threads of a process submit their work one at a time). More worker
+ * processes on the same GPU overlap their submissions. Measured on an RTX 3090, E-step time with
+ * 12 worker threads in all, split as 1, 2, 3, 4, 6 or 12 workers: see the table in
+ * documentation/ranks_per_gpu.md. The gain levels off at the workers per GPU given by
+ * WORKERS_PER_GPU below, which depend on how much GPU work a particle needs.
+ */
+
+/// What a job asks of the GPU.
+enum class Work
+{
+	Class2D,     // EM Class2D: tiny kernels, the host is the limit
+	Class3D,     // Class3D (or any 3D classification) with alignment
+	SkipAlign,   // 3D classification without alignment
+	AutoRefine   // Refine3D, MultiBody: the workers are split in two half-sets
+};
+
+/// Workers per GPU at which the E-step stops getting faster, by kind of work (measured).
+int workersPerGpuTarget(Work work);
+
+/// GPU memory one worker process takes (bytes, measured with the lean pool, small boxes;
+/// RELION_GPU_GB_PER_RANK overrides it).
+double gpuBytesPerWorker(Work work);
+
+struct RankQuery
+{
+	Work work = Work::Class3D;
+	int gpus = 1;                // GPUs of the job (>= 1)
+	int cores = 0;               // CPU cores for the job (0: unknown, no limit)
+	double gpu_bytes = 0;        // memory of one GPU (0: unknown, no limit)
+	double host_bytes = 0;       // memory of the computer for the job (0: unknown, no limit)
+	long particles = 0;          // particles of the data set (0: unknown, no limit)
+};
+
+struct RankAdvice
+{
+	int workers_per_gpu = 1;
+	int mpi = 1;                 // MPI processes to start: workers (+ the leader if more than 1)
+	int threads = 1;             // threads per worker
+	std::string reason;          // one short paragraph; names every limit that applied
+};
+
+// Share of the GPU memory that workers may use; the rest is for other users of the card and
+// for growth (the last iteration of an auto-refine needs more than the earlier ones).
+const double GPU_FREE_FRACTION_FOR_RANKS = 0.75;
+// CPU threads that feed one GPU when the number of cores is unknown (as measured).
+const int TOTAL_THREADS_PER_GPU = 12;
+const double HOST_FREE_FRACTION_FOR_RANKS = 0.6;
+
+// A worker gets at least this many particles per GPU thread slot; fewer and the fixed costs
+// of an iteration dominate.
+const long MIN_PARTICLES_PER_WORKER = 300;
+
+/// The recommended ranks per GPU for a GPU job. RELION_RANKS_PER_GPU (a positive number) overrides
+/// the workers per GPU; the limits of memory, cores and particles are then not applied, but
+/// the even number of workers of auto-refine still is. Never returns less than one worker.
+RankAdvice adviseRanks(const RankQuery &q);
+
+/// adviseRanks() for a GUI job (its kind of work, the particles of its input STAR file, the memory of the
+/// GPUs and the computer when they are known: this computer's for local jobs; for queue jobs only the GPU
+/// memory given in RELION_GPU_MEMORY_GB). `gpu_memory_note` says when the GPU memory is unknown.
+RankAdvice adviseRanksForJob(const JobView &job, int gpus, int cores_per_gpu, bool queue, std::string &gpu_memory_note);
+
 enum class Field { Cpus, MpiOrThreads };
 
 /// The tooltip text for the "Number of CPUs" field or the MPI and threads fields of a job

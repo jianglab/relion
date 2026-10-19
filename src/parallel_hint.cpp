@@ -398,6 +398,162 @@ bool autoSplit(const JobView &job, Suggestion &out)
 	return out.valid;
 }
 
+namespace
+{
+
+// Measured on an RTX 3090 (see documentation/ranks_per_gpu.md): where the E-step stops getting
+// faster with more worker processes on one GPU, and what a worker costs on the GPU and the host.
+struct WorkProfile { int workers; double gpu_gb; double host_gb; const char *name; };
+std::string gbText(double bytes)
+{
+	char buf[32];
+	snprintf(buf, sizeof buf, "%.1f GB", bytes / 1e9);
+	return buf;
+}
+
+WorkProfile profileOf(Work w)
+{
+	switch (w)
+	{
+	case Work::Class2D:    return {6, 0.4, 0.4, "EM Class2D"};
+	case Work::Class3D:    return {4, 2.0, 0.7, "3D classification with alignment"};
+	case Work::SkipAlign:  return {4, 2.5, 1.8, "3D classification without alignment"};
+	case Work::AutoRefine: return {2, 5.0, 14.0, "auto-refine"};
+	}
+	return {1, 1.0, 1.0, ""};
+}
+
+}
+
+int workersPerGpuTarget(Work work) { return profileOf(work).workers; }
+
+double gpuBytesPerWorker(Work work)
+{
+	if (const char *e = getenv("RELION_GPU_GB_PER_RANK"))
+		if (atof(e) > 0) return atof(e) * 1e9;
+	return profileOf(work).gpu_gb * 1e9;
+}
+
+RankAdvice adviseRanks(const RankQuery &q)
+{
+	const WorkProfile p = profileOf(q.work);
+	const int gpus = std::max(1, q.gpus);
+	const bool refine = q.work == Work::AutoRefine;
+	RankAdvice a;
+	std::ostringstream why;
+	int w = p.workers;                       // workers per GPU
+	why << p.name << ": the E-step stops getting faster at " << w << " worker" << (w == 1 ? "" : "s") << " per GPU.";
+
+	const char *env = getenv("RELION_RANKS_PER_GPU");
+	const long forced = env ? atol(env) : 0;
+	if (forced > 0)
+	{
+		w = (int)forced;
+		why.str("");
+		why << "RELION_RANKS_PER_GPU sets " << w << " worker" << (w == 1 ? "" : "s") << " per GPU.";
+	}
+	else
+	{
+		auto limit = [&](int cap, const std::string &what)
+		{
+			cap = std::max(1, cap);
+			if (cap < w) { w = cap; why << " Limited to " << cap << " by " << what << "."; }
+		};
+		if (q.gpu_bytes > 0)
+			limit((int)(q.gpu_bytes * GPU_FREE_FRACTION_FOR_RANKS / gpuBytesPerWorker(q.work)),
+			      "GPU memory (about " + gbText(gpuBytesPerWorker(q.work)) + " per worker)");
+		if (q.host_bytes > 0)
+			limit((int)(q.host_bytes * HOST_FREE_FRACTION_FOR_RANKS / (p.host_gb * 1e9)) / gpus,
+			      "the computer's memory (about " + gbText(p.host_gb * 1e9) + " per worker)");
+		if (q.cores > 0)
+			limit(q.cores / gpus, "the CPU cores (one per worker at least)");
+		if (q.particles > 0)
+			limit((int)std::min<long>(1000, q.particles / (gpus * MIN_PARTICLES_PER_WORKER)), "the number of particles");
+	}
+	int workers = w * gpus;
+	if (refine && workers % 2)               // auto-refine needs the same number of workers for each half-set
+	{
+		workers = (workers > 1 && forced <= 0) ? workers - 1 : workers + 1;
+		why << " Auto-refine needs an even number of workers: " << workers << ".";
+	}
+	a.workers_per_gpu = (workers + gpus - 1) / gpus;
+	a.mpi = (workers == 1 && !refine) ? 1 : workers + 1;
+	const int cores_per_worker = (q.cores > 0) ? q.cores / workers : TOTAL_THREADS_PER_GPU * gpus / workers;
+	a.threads = std::max(1, std::min(THREADS_PER_GPU_CAP, cores_per_worker));
+	if (a.mpi > 1) why << " The extra process is the leader, which only coordinates.";
+	a.reason = why.str();
+	return a;
+}
+
+namespace
+{
+
+// The work of a GUI job on the GPU
+Work workOf(const JobView &job, Kind kind)
+{
+	if (kind == Kind::AutoRefine) return Work::AutoRefine;
+	if (job.job_type == PROC_2DCLASS) return Work::Class2D;
+	return job.value("dont_skip_align") == "No" ? Work::SkipAlign : Work::Class3D;
+}
+
+// Memory of the smallest GPU of this computer in bytes (0: unknown); RELION_GPU_MEMORY_GB overrides
+double gpuBytesOfThisComputer()
+{
+	if (const char *e = getenv("RELION_GPU_MEMORY_GB"))
+		if (atof(e) > 0) return atof(e) * 1e9;
+	static double bytes = -1;
+	if (bytes < 0)
+	{
+		std::istringstream in(runCommand("timeout 5 nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null"));
+		double mb, best = 0;
+		while (in >> mb) best = (best == 0) ? mb : std::min(best, mb);
+		bytes = best * 1048576.0;
+	}
+	return bytes;
+}
+
+// Available memory of this computer in bytes (0: unknown); RELION_HOST_MEMORY_GB overrides
+double hostBytesOfThisComputer()
+{
+	if (const char *e = getenv("RELION_HOST_MEMORY_GB"))
+		if (atof(e) > 0) return atof(e) * 1e9;
+	std::ifstream in("/proc/meminfo");
+	std::string key, unit;
+	double kb;
+	while (in >> key >> kb >> unit)
+		if (key == "MemAvailable:") return kb * 1024.0;
+	return 0;
+}
+
+// Particles of the input STAR file, counted once per file and size
+long particlesOf(const std::string &fn)
+{
+	static std::map<std::string, std::pair<long, long>> cache;   // fn -> (file size, particles)
+	std::ifstream f(fn, std::ios::binary | std::ios::ate);
+	if (!f) return 0;
+	const long size = (long)f.tellg();
+	auto it = cache.find(fn);
+	if (it != cache.end() && it->second.first == size) return it->second.second;
+	const long n = countParticlesInStar(fn);
+	cache[fn] = {size, n};
+	return n;
+}
+
+}
+
+RankAdvice adviseRanksForJob(const JobView &job, int gpus, int cores_per_gpu, bool queue, std::string &gpu_memory_note)
+{
+	RankQuery q;
+	q.work = workOf(job, kindOf(job.job_type, job.value("do_grad") == "Yes"));
+	q.gpus = gpus;
+	q.cores = cores_per_gpu * gpus;
+	q.gpu_bytes = (queue && getenv("RELION_GPU_MEMORY_GB") == nullptr) ? 0 : gpuBytesOfThisComputer();
+	q.host_bytes = queue ? 0 : hostBytesOfThisComputer();
+	q.particles = particlesOf(job.value("fn_img"));
+	gpu_memory_note = (q.gpu_bytes > 0) ? "" : "GPU memory unknown (set RELION_GPU_MEMORY_GB)";
+	return adviseRanks(q);
+}
+
 std::string tooltip(const JobView &job, Field field)
 {
 	const Kind kind = kindOf(job.job_type, job.value("do_grad") == "Yes");
@@ -435,6 +591,19 @@ std::string tooltip(const JobView &job, Field field)
 			t << "\nVDAM does not support MPI: use 1 MPI process and a thread per core.";
 		if (kind == Kind::AutoRefine)
 			t << "\nAuto-refine needs an odd number of MPI processes, at least 3.";
+		return t.str();
+	}
+	if (kind == Kind::Classify || kind == Kind::AutoRefine)
+	{
+		std::string note;
+		const RankAdvice a = adviseRanksForJob(job, r.gpus, r.cores_per_gpu, r.queue, note);
+		t << "Suggested for " << plural(r.gpus, "GPU");
+		if (r.cores_per_gpu > 0) t << " with " << r.cores_per_gpu << " CPU cores per GPU";
+		t << ":\n    MPI processes: " << a.mpi << "    Threads: " << a.threads << "\n\n" << a.reason
+		  << "\nWorkers that share a GPU run on it at the same time; each takes about "
+		  << (int)(gpuBytesPerWorker(workOf(job, kind)) / 1e8 + 0.5) / 10.0 << " GB of its memory.";
+		if (!note.empty()) t << "\n(" << note << ".)";
+		sources(t, r);
 		return t.str();
 	}
 	const Suggestion s = suggest(kind, r.gpus, r.cores_per_gpu);
