@@ -47,6 +47,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "src/ml_optimiser.h"
+#include "src/parallel_hint.h"
 #include <thread>
 #ifdef __linux__
 #include <sched.h>
@@ -1791,9 +1792,31 @@ void MlOptimiser::initialise()
 
     if (nr_threads < 1)
     {
-        nr_threads = std::max<int>(1, resrep::allowedCores().size());
+        const int cores = std::max<int>(1, resrep::allowedCores().size());
+        int gpus = 0;
+        double free_gpu_bytes = 0;
+#if defined _CUDA_ENABLED || defined _HIP_ENABLED
+        if (do_gpu && accGPUGetDeviceCount(&gpus) == 0 && gpus > 0)
+        {
+            for (int d = 0; d < gpus; d++)
+            {
+                size_t f = 0, t = 0;
+                if (accGPUSetDevice(d) == 0 && accGPUMemGetInfo(&f, &t) == 0)
+                    free_gpu_bytes += (double)f;
+            }
+            accGPUSetDevice(0);
+        }
+        else
+            gpus = 0;
+#endif
+        const long nr_particles = (fn_data != "") ? parhint::countParticlesInStar(fn_data) : 0;
+        const int cap = parhint::autoThreadsCapFromEnv();
+        nr_threads = (cap > 0) ? parhint::autoThreads(cores, 1, gpus, cap, free_gpu_bytes, nr_particles) : cores;
         auto_threads_note = " Using " + integerToString(nr_threads) + " threads: --j was not given, and this process may use "
-                          + integerToString(nr_threads) + " CPU cores.";
+                          + integerToString(cores) + " CPU cores.";
+        if (nr_threads < cores)
+            auto_threads_note += " Limited by the GPUs (" + integerToString(cap) + " threads per GPU, and their free memory) or the number of particles ("
+                                 + integerToString((int)nr_particles) + "); RELION_AUTO_THREADS_CAP=off removes the limits.";
     }
 
     if (do_gpu)

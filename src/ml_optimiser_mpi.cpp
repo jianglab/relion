@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/ml_optimiser_mpi.h"
+#include "src/parallel_hint.h"
 #include <chrono>
 #include "src/gpu_reconstruct.h"
 #include "src/gpu_switch.h"
@@ -153,12 +154,57 @@ void MlOptimiserMpi::resolveAutoThreads()
 	for (int i = 0; i < nlocal; i++)
 		if (ranks[i] != 0 && CPU_EQUAL(&sets[i], &mine))
 			sharing++;
-	int my_threads = node->isLeader() ? std::numeric_limits<int>::max() : std::max(1, cores / std::max(1, sharing));
+	// GPUs this node offers and their free memory (a GPU job only), and the particles per worker
+	// (when the input file is known now): see parhint::autoThreads for the limits
+	int gpus = 0;
+	double free_gpu_bytes = 0;
+#if defined _CUDA_ENABLED || defined _HIP_ENABLED
+	if (do_gpu && !node->isLeader() && accGPUGetDeviceCount(&gpus) == 0 && gpus > 0)
+	{
+		for (int d = 0; d < gpus; d++)
+		{
+			size_t f = 0, t = 0;
+			if (accGPUSetDevice(d) == 0 && accGPUMemGetInfo(&f, &t) == 0)
+				free_gpu_bytes += (double)f;
+		}
+		accGPUSetDevice(0);
+	}
+	else
+		gpus = 0;
+#endif
+	long nr_particles = 0;
+	if (node->isLeader() && fn_data != "")
+		nr_particles = parhint::countParticlesInStar(fn_data);
+	MPI_Bcast(&nr_particles, 1, MPI_LONG, 0, MPI_COMM_WORLD);
+	const long per_worker = nr_particles / std::max(1, node->size - 1);
+	const int cap = parhint::autoThreadsCapFromEnv();
+	const bool limits_on = (cap > 0);       // RELION_AUTO_THREADS_CAP=off: cores only
+	const int by_cores = parhint::autoThreads(cores, sharing, 0);
+	const int by_cap = parhint::autoThreads(cores, sharing, gpus, cap);
+	const int mine_n = limits_on ? parhint::autoThreads(cores, sharing, gpus, cap, free_gpu_bytes, per_worker) : by_cores;
+	int my_threads = node->isLeader() ? std::numeric_limits<int>::max() : mine_n;
+	int my_cores = node->isLeader() ? std::numeric_limits<int>::max() : by_cores;
+	int my_cap = node->isLeader() ? std::numeric_limits<int>::max() : by_cap;
 	MPI_Allreduce(MPI_IN_PLACE, &my_threads, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+	MPI_Allreduce(MPI_IN_PLACE, &my_cores, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+	MPI_Allreduce(MPI_IN_PLACE, &my_cap, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+	double min_free_mb = node->isLeader() ? 1e30 : free_gpu_bytes / 1e6;
+	MPI_Allreduce(MPI_IN_PLACE, &min_free_mb, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
 	nr_threads = (my_threads == std::numeric_limits<int>::max()) ? cores : my_threads;
 
 	auto_threads_note = " Using " + integerToString(nr_threads) + " threads per process: --j was not given, and that is the number of CPU cores"
-	                    " each worker process may use (the fewest of any worker).";
+	                    " each worker process may use (the fewest of any worker)";
+	if (my_threads < my_cores)
+	{
+		if (my_cap < my_cores)
+			auto_threads_note += ", limited to " + integerToString(cap) + " per GPU because more threads do not speed up GPU jobs";
+		if (my_threads < my_cap)
+			auto_threads_note += (my_cap < my_cores ? ", and further" : ", limited") + std::string(" by the free GPU memory (") +
+			                     integerToString((int)std::min(min_free_mb, 1e9)) + " MB seen by one worker) or the number of particles ("
+			                     + integerToString((int)nr_particles) + ")";
+		auto_threads_note += " (RELION_AUTO_THREADS_CAP=off removes the limits)";
+	}
+	auto_threads_note += ".";
 }
 
 void MlOptimiserMpi::initialise()
