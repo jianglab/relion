@@ -486,7 +486,7 @@ foreach (_target ${RELION_TARGETS})
 	list(FIND GUI_TARGETS ${_target} IS_GUI_TARGET)
 	if((NOT ${IS_GUI_TARGET} LESS 0) OR (${_target} STREQUAL "relion"))
 		add_dependencies(${_target} relion_gui_lib)
-		target_link_libraries(${_target} relion_gui_lib ${FLTK_LIBRARIES} ${X11})
+		target_link_libraries(${_target} relion_gui_lib ${FLTK_LIBRARIES} ${X11_LIBRARIES})
 	endif()
 
 	if(TIFF_FOUND)
