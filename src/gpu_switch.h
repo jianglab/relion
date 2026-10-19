@@ -50,6 +50,7 @@ inline const char *const *defaultOnNames(size_t &count)
 		"RELION_GPU_SELECT_FUSED",
 		"RELION_GPU_SKIPALIGN_BLOCK",
 		"RELION_GPU_ALLOC_CACHE",
+		"RELION_GPU_BP_SCATTER_HOST",
 	};
 	count = sizeof(names) / sizeof(names[0]);
 	return names;

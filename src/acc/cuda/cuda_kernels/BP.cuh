@@ -237,7 +237,7 @@ __device__ __forceinline__ size_t bpModelStride(const XFLOAT *g_model_real, cons
 	return (g_model_imag - g_model_real == 1) ? 3 : 1;
 }
 
-template < bool DATA3D, bool CTF_PREMULTIPLIED >
+template < bool DATA3D, bool CTF_PREMULTIPLIED, bool USE_SHIFT = false, bool HOIST_DIV = false >
 __global__ void cuda_kernel_backproject3D(
 		XFLOAT *g_img_real,
 		XFLOAT *g_img_imag,
@@ -276,8 +276,13 @@ __global__ void cuda_kernel_backproject3D(
 		                      // and so collide in the atomic additions; only the order of the sums changes
 		BPAccumView acc = BPAccumView(), // per-orientation accumulation (see BPAccumView), with
 		const unsigned *g_slots = NULL,  // each orientation's slot, class after class
-		int tile = 0)  // 2D data only (RELION_GPU_BP_TILE=1): a warp takes a tile of 16 x 2 pixels
+		int tile = 0,  // 2D data only (RELION_GPU_BP_TILE=1): a warp takes a tile of 16 x 2 pixels
 		               // instead of 32 consecutive ones; only the order of the atomic additions changes
+		const float2 *g_shift = NULL, // USE_SHIFT: (cos, sin) of every translation's phase at every pixel of
+		               // 2D data, table[translation * img_xyz + pixel] (cuda_kernel_shift_table), read instead of
+		               // a sincosf per pixel and translation; float noise
+		int PR = BP_PACK_RUNS) // tile == 2: runs (of 4) staged in shared memory at a time, 1, 2 or 4; fewer runs
+		               // use less shared memory (more blocks per SM), the same terms are added in the same loop order within a run
 {
 	unsigned tid = threadIdx.x;
 	unsigned img = blockIdx.x;
@@ -291,9 +296,13 @@ __global__ void cuda_kernel_backproject3D(
 		if (scatter)
 		{
 			const unsigned long long cnt = g_class_start[ci + 1] - g_class_start[ci];
-			unsigned long long stride = (unsigned long long) (cnt * 0.6180339887) | 1;
-			while (stride < cnt && gcdU(stride, cnt) != 1)
-				stride += 2;
+			unsigned long long stride = c.scatter_stride; // made on the host (runBackProjectKernelBatched)
+			if (stride == 0)
+			{
+				stride = (unsigned long long) (cnt * 0.6180339887) | 1;
+				while (stride < cnt && gcdU(stride, cnt) != 1)
+					stride += 2;
+			}
 			if (cnt > 2)
 				img = (unsigned) (((unsigned long long) local * stride) % cnt);
 		}
@@ -335,7 +344,9 @@ __global__ void cuda_kernel_backproject3D(
 			for (unsigned long t = 0; t < translation_num; t++)
 				if (s_w[t] >= significant_weight)
 				{
-					s_w[kk] = s_w[t];
+					// HOIST_DIV (only launched with the compacted list): weight / weight_norm once per translation here,
+					// not per pixel in the loops; the same quotient
+					s_w[kk] = HOIST_DIV ? s_w[t] / weight_norm : s_w[t];
 					s_t[kk] = (int) t;
 					kk++;
 				}
@@ -396,8 +407,8 @@ __global__ void cuda_kernel_backproject3D(
 	{
 		const unsigned lane = tid & 31, wid = tid >> 5;
 		const size_t pk_off = compact ? (((size_t) translation_num * (sizeof(XFLOAT) + sizeof(int)) + 15) & ~(size_t) 15) : 0;
-		XFLOAT *pk_val = (XFLOAT *) (bp_dynamic + pk_off) + (size_t) wid * (32 * 6 * BP_PACK_RUNS);
-		size_t *pk_base = (size_t *) (bp_dynamic + pk_off + (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (32 * 6 * BP_PACK_RUNS) * sizeof(XFLOAT)) + (size_t) wid * (32 * BP_PACK_RUNS);
+		XFLOAT *pk_val = (XFLOAT *) (bp_dynamic + pk_off) + (size_t) wid * (32 * 6 * PR);
+		size_t *pk_base = (size_t *) (bp_dynamic + pk_off + (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (32 * 6 * PR) * sizeof(XFLOAT)) + (size_t) wid * (32 * PR);
 		const unsigned n_pass = (img_xyz + BP_REF3D_BLOCK_SIZE - 1) / BP_REF3D_BLOCK_SIZE;
 		const unsigned pb = (unsigned) (((unsigned long) blockIdx.y * n_pass) / n_chunks);
 		const unsigned pe = (unsigned) (((unsigned long) (blockIdx.y + 1) * n_pass) / n_chunks);
@@ -421,6 +432,7 @@ __global__ void cuda_kernel_backproject3D(
 				real = (XFLOAT) 0.0;
 				imag = (XFLOAT) 0.0;
 				XFLOAT temp_real, temp_imag;
+				#pragma unroll 1
 				for (unsigned long kk = 0; kk < nr_loop; kk++)
 				{
 					const unsigned long itrans = compact ? (unsigned long) s_t[kk] : kk;
@@ -429,15 +441,22 @@ __global__ void cuda_kernel_backproject3D(
 					{
 						if (CTF_PREMULTIPLIED)
 						{
-							weight = (weight / weight_norm) * minvsigma2;
+							weight = (HOIST_DIV ? weight : weight / weight_norm) * minvsigma2;
 							Fweight += weight * ctf;
 						}
 						else
 						{
-							weight = (weight / weight_norm) * ctf * minvsigma2;
+							weight = (HOIST_DIV ? weight : weight / weight_norm) * ctf * minvsigma2;
 							Fweight += weight * ctf;
 						}
-						translatePixel(x, y, g_trans_x[itrans], g_trans_y[itrans], img_real, img_imag, temp_real, temp_imag);
+						if (USE_SHIFT)
+						{
+							const float2 cs = __ldg(&g_shift[itrans * img_xyz + pixel]);
+							temp_real = cs.x * img_real - cs.y * img_imag;
+							temp_imag = cs.x * img_imag + cs.y * img_real;
+						}
+						else
+							translatePixel(x, y, g_trans_x[itrans], g_trans_y[itrans], img_real, img_imag, temp_real, temp_imag);
 						real += temp_real * weight;
 						imag += temp_imag * weight;
 					}
@@ -475,17 +494,17 @@ __global__ void cuda_kernel_backproject3D(
 				z0 -= mdl_initz;
 				pos = __popc(ballot & ((1u << lane) - 1u));
 			}
-			// the four runs (y, z neighbours) go through the staging buffer BP_PACK_RUNS at a time
-			for (int rb = 0; rb < 4; rb += BP_PACK_RUNS)
+			// the four runs (y, z neighbours) go through the staging buffer PR at a time
+			for (int rb = 0; rb < 4; rb += PR)
 			{
 				__syncwarp();
 				if (go)
 				{
 					const XFLOAT mfx = (XFLOAT) 1.0 - fx, mfy = (XFLOAT) 1.0 - fy, mfz = (XFLOAT) 1.0 - fz;
-					XFLOAT *v = pk_val + pos * (6 * BP_PACK_RUNS);
-					size_t *b = pk_base + pos * BP_PACK_RUNS;
+					XFLOAT *v = pk_val + pos * (6 * PR);
+					size_t *b = pk_base + pos * PR;
 #pragma unroll
-					for (int r = 0; r < BP_PACK_RUNS; r++)
+					for (int r = 0; r < PR; r++)
 					{
 						const int run = rb + r;
 						const int zz = z0 + (run >> 1), yy = y0 + (run & 1);
@@ -501,11 +520,11 @@ __global__ void cuda_kernel_backproject3D(
 					}
 				}
 				__syncwarp();
-				const unsigned total = n_act * (6 * BP_PACK_RUNS);
+				const unsigned total = n_act * (6 * PR);
 				for (unsigned k = lane; k < total; k += 32)
 				{
-					const unsigned p = k / (6 * BP_PACK_RUNS), f = k - p * (6 * BP_PACK_RUNS), r = f / 6, e = f - r * 6;
-					cuda_atomic_add(&g_model_real[pk_base[p * BP_PACK_RUNS + r] + e], pk_val[k]);
+					const unsigned p = k / (6 * PR), f = k - p * (6 * PR), r = f / 6, e = f - r * 6;
+					cuda_atomic_add(&g_model_real[pk_base[p * PR + r] + e], pk_val[k]);
 				}
 			}
 			__syncwarp();
@@ -588,7 +607,8 @@ __global__ void cuda_kernel_backproject3D(
 
 		XFLOAT temp_real, temp_imag;
 		const unsigned long nr_loop = compact ? (unsigned long) s_nr : translation_num;
-		for (unsigned long kk = 0; kk < nr_loop; kk++)
+		#pragma unroll 1
+				for (unsigned long kk = 0; kk < nr_loop; kk++)
 		{
 			const unsigned long itrans = compact ? (unsigned long) s_t[kk] : kk;
 			weight = compact ? s_w[kk] : g_weights[img * translation_num + itrans];
@@ -597,17 +617,23 @@ __global__ void cuda_kernel_backproject3D(
 			{
 				if(CTF_PREMULTIPLIED)
 				{
-					weight = (weight / weight_norm) * minvsigma2;
+					weight = (HOIST_DIV ? weight : weight / weight_norm) * minvsigma2;
 					Fweight += weight * ctf; // SHWS 13feb2020: from now on when ctf_premultiplied, the ctf array actually contains ctf^2!
 				}
 				else
 				{
-					weight = (weight / weight_norm) * ctf * minvsigma2;
+					weight = (HOIST_DIV ? weight : weight / weight_norm) * ctf * minvsigma2;
 					Fweight += weight * ctf;
 				}
 				
 				if(DATA3D)
 					translatePixel(x, y, z, g_trans_x[itrans], g_trans_y[itrans], g_trans_z[itrans], img_real, img_imag, temp_real, temp_imag);
+				else if (USE_SHIFT)
+				{
+					const float2 cs = __ldg(&g_shift[itrans * img_xyz + pixel]);
+					temp_real = cs.x * img_real - cs.y * img_imag;
+					temp_imag = cs.x * img_imag + cs.y * img_real;
+				}
 				else
 					translatePixel(x, y,    g_trans_x[itrans], g_trans_y[itrans],                    img_real, img_imag, temp_real, temp_imag);
 

@@ -320,6 +320,18 @@ inline bool gpuWavgSum()
 	return on;
 }
 
+// RELION_GPU_BP_SHIFT=1: the class-batched back-projection of 2D data into a 3D reference reads the
+// (cos, sin) of the translations' phases from a table made once per particle (as cuda_kernel_wavg_sum
+// does) instead of a sincosf for every pixel and significant translation; float noise, off by default
+inline bool gpuBpShift()
+{
+	static const bool on = []() {
+		const char *e = getenv("RELION_GPU_BP_SHIFT");
+		return e && std::string(e) != "0" && std::string(e) != "off";
+	}();
+	return on;
+}
+
 // RELION_GPU_FUSED_WEIGHTS: the significance pass of the weights (maximum, exponentiation, sort,
 // scan, threshold, significance mask) as a few launches and one copy instead of about fifty driver
 // calls per pass (see CudaKernels::fusedWeightPass); on by default, RELION_GPU_FUSED_WEIGHTS=0 turns it off

@@ -402,6 +402,7 @@ struct BPClassJob
 	XFLOAT *model_imag;
 	XFLOAT *model_weight;
 	XFLOAT weight_norm;
+	unsigned scatter_stride; // class batching with scatter: the orientation stride of the class (0: the kernel works it out)
 };
 
 

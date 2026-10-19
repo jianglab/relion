@@ -1950,6 +1950,19 @@ void runBackProjectKernelBatched(
 {
 	if (jobs.empty())
 		return;
+	// The orientation stride of the scatter order, once per class on the host instead of a gcd loop in
+	// every block (the same values as the kernel's own; RELION_GPU_BP_SCATTER_HOST=0 leaves it to the kernel)
+	static const bool stride_on_host = gpuswitch::on("RELION_GPU_BP_SCATTER_HOST");
+	if (stride_on_host)
+		for (size_t c = 0; c < jobs.size() && c < orientation_nums.size(); c++)
+		{
+			const unsigned long long cnt = orientation_nums[c];
+			unsigned long long stride = (unsigned long long) (cnt * 0.6180339887) | 1;
+			auto gcd = [](unsigned long long a, unsigned long long b) { while (b) { unsigned long long t = a % b; a = b; b = t; } return a; };
+			while (stride < cnt && gcd(stride, cnt) != 1)
+				stride += 2;
+			jobs[c].scatter_stride = (unsigned) stride;
+		}
 	const BPClassJob *d_jobs;
 	const int *d_start;
 	const unsigned *d_slots = NULL;
@@ -2002,7 +2015,10 @@ void runBackProjectKernelBatched(
 		static const bool bp_pack = [] { const char *e = getenv("RELION_GPU_BP_PACK"); return !(e && atoi(e) == 0); }();
 		// The staging buffer of the packed path follows the compacted translations list in shared memory (at most
 		// 1024 translations are supported in single precision, so both fit in 48 KB; the check below is a safety net)
-		const size_t pk_bytes = (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (32 * 6 * BP_PACK_RUNS * sizeof(XFLOAT) + 32 * BP_PACK_RUNS * sizeof(size_t));
+		// RELION_GPU_BP_PACK_RUNS=1|2|4: runs staged at a time by the packed path (default 4, as before); 2 halves the
+		// shared memory per block, which lifts the occupancy
+		static const int bp_pack_runs = [] { const char *e = getenv("RELION_GPU_BP_PACK_RUNS"); int v = e ? atoi(e) : BP_PACK_RUNS; return (v == 1 || v == 2) ? v : 4; }();
+		const size_t pk_bytes = (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (32 * 6 * bp_pack_runs * sizeof(XFLOAT) + 32 * bp_pack_runs * sizeof(size_t));
 		int pack_state = 1;
 		const size_t pk_off = compact3 ? ((smem3 + 15) & ~(size_t) 15) : 0;
 		const bool pack_ok = bp_pack && !data_is_3D && BP.interleaved && bp_tile_mode == 0 && pk_off + pk_bytes <= 48 * 1024;
@@ -2021,14 +2037,47 @@ void runBackProjectKernelBatched(
 			if (!(reported.fetch_or(bit) & bit))
 				fprintf(stderr, "RELION_GPU_BP_PACK: %s\n", notes[pack_state]);
 		}
+		// RELION_GPU_BP_SHIFT=1: 2D data, up to 1024 translations, table up to 64 MB. The table numbers the rows beyond maxR
+		// differently from this kernel (see cuda_kernel_shift_table), but those pixels lie outside the sphere of maxR2 = maxR^2
+		// and add nothing, so any even-sized image with maxR <= imgY / 2 can use it
+		AccPtr<float2> bp_shifts = table.make<float2>();
+		bool use_shift = false;
+#ifndef ACC_DOUBLE_PRECISION
+		if (gpuBpShift() && !data_is_3D && (imgY % 2) == 0 && BP.maxR <= imgY / 2 && (int) BP.maxR2 == BP.maxR * BP.maxR && translation_num > 0 &&
+			translation_num <= 1024 && (size_t) imgX * imgY * translation_num * sizeof(float2) <= ((size_t) 64 << 20))
+		{
+			bp_shifts.setSize(translation_num * imgX * imgY);
+			bp_shifts.deviceAlloc();
+			cuda_kernel_shift_table<<<dim3((imgX * imgY + 127) / 128, translation_num), 128, 0, stream>>>(
+					trans_x, trans_y, ~bp_shifts, imgX * imgY, imgX, imgY, BP.maxR);
+			LAUNCH_HANDLE_ERROR(cudaGetLastError());
+			use_shift = true;
+		}
+#endif
+		// RELION_GPU_BP_DIVHOIST=1: with the compacted translation list, weight / weight_norm is made once per translation
+		// when the list is built (the same value as the division in the pixel loop); 2D data
+		static const bool bp_divhoist = [] { const char *e = getenv("RELION_GPU_BP_DIVHOIST"); return e && atoi(e) != 0; }();
+		const bool hoist_div = bp_divhoist && compact3 && !data_is_3D;
 		auto launch_bp = [&](int tl) {
-#define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<dim3(n, bp_chunks), BS, (!D3 && tl == 2) ? pk_off + pk_bytes : (compact3 ? smem3 : 0), stream>>>( \
+#define BP3D_BATCH(D3, CP, BS) BP3D_BATCH_S(D3, CP, false, BS)
+#define BP3D_BATCH_S(D3, CP, SH, BS) BP3D_BATCH_H(D3, CP, SH, false, BS)
+#define BP3D_BATCH_H(D3, CP, SH, HD, BS) cuda_kernel_backproject3D<D3, CP, SH, HD><<<dim3(n, bp_chunks), BS, (!D3 && tl == 2) ? pk_off + pk_bytes : (compact3 ? smem3 : 0), stream>>>( \
 			d_img_real, d_img_imag, trans_x, trans_y, trans_z, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgZ, imgX*imgY*imgZ, \
 			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ, d_jobs, d_start, nc, bp_chunks, compact3, bp_scatter, acc, d_slots, \
-			data_is_3D ? 0 : tl)
-		if (data_is_3D)
+			data_is_3D ? 0 : tl, ~bp_shifts, bp_pack_runs)
+		if (use_shift)
+		{
+			if (ctf_premultiplied) BP3D_BATCH_S(false, true, true, BP_REF3D_BLOCK_SIZE);
+			else                   BP3D_BATCH_S(false, false, true, BP_REF3D_BLOCK_SIZE);
+		}
+		else if (hoist_div)
+		{
+			if (ctf_premultiplied) BP3D_BATCH_H(false, true, false, true, BP_REF3D_BLOCK_SIZE);
+			else                   BP3D_BATCH_H(false, false, false, true, BP_REF3D_BLOCK_SIZE);
+		}
+		else if (data_is_3D)
 		{
 			if (ctf_premultiplied) BP3D_BATCH(true, true, BP_DATA3D_BLOCK_SIZE);
 			else                   BP3D_BATCH(true, false, BP_DATA3D_BLOCK_SIZE);
@@ -2039,6 +2088,8 @@ void runBackProjectKernelBatched(
 			else                   BP3D_BATCH(false, false, BP_REF3D_BLOCK_SIZE);
 		}
 #undef BP3D_BATCH
+#undef BP3D_BATCH_S
+#undef BP3D_BATCH_H
 		};
 		static int tile_checks_left = [] { const char *e = getenv("RELION_GPU_BP_TILE_CHECKS"); return e ? atoi(e) : 2; }();
 		if (bp_tile_mode == 2 && tile_checks_left > 0 && !data_is_3D && nc == 1 && acc.cap == 0 && BP.mdlXYZ > 0)
