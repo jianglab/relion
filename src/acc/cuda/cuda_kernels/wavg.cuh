@@ -41,17 +41,16 @@ __global__ void cuda_kernel_wavg(
 	int bid = blockIdx.x; //block ID
 	int tid = threadIdx.x;
 
-	AccProjectorKernel *pp = &projector_arg;
+	AccProjectorKernel projector = projector_arg; // by value (registers): a pointer to the kernel parameter copies the struct to local memory in every thread
 	if (n_classes > 0)
 	{
 		const WavgClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, bid)];
-		pp = const_cast<AccProjectorKernel *>(&c.projector);
+		projector = c.projector;
 		g_eulers = c.eulers;
 		g_weights = c.weights;
 		g_wdiff2s_AA = c.wdiff2s_AA;
 		g_wdiff2s_XA = c.wdiff2s_XA;
 	}
-	AccProjectorKernel &projector = *pp;
 
 	extern __shared__ XFLOAT buffer[];
 
@@ -232,7 +231,8 @@ __global__ void cuda_kernel_wavg_sum(
 	int bid;
 	const int tid = threadIdx.x;
 	const WavgClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, bid)];
-	AccProjectorKernel &projector = *const_cast<AccProjectorKernel *>(&c.projector);
+	const AccProjectorKernel &cp = c.projector;
+	AccProjectorKernel projector = cp;
 
 	extern __shared__ XFLOAT buffer[];
 	XFLOAT *s_eulers = &buffer[0];

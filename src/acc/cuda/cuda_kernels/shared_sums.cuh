@@ -102,8 +102,7 @@ __global__ void cuda_kernel_shared_sums(
 	const unsigned tid = threadIdx.x;
 	int local;
 	const SharedSumsClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
-	AccProjectorKernel *pp = const_cast<AccProjectorKernel *>(&c.projector);
-	AccProjectorKernel &projector = *pp;
+	AccProjectorKernel projector = c.projector; // by value, in registers
 	const int o0 = local * G;
 	const int ng = min(G, c.n_orient - o0);
 

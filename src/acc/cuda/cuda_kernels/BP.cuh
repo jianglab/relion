@@ -1163,13 +1163,13 @@ __global__ void cuda_kernel_backproject2D_SGD(
 	unsigned tid = threadIdx.x;
 	unsigned img = blockIdx.x;
 
-	AccProjectorKernel *pp = &projector_arg; // its methods are not const
+	AccProjectorKernel projector = projector_arg; // by value (registers), not through a pointer to the kernel parameter
 	if (n_classes > 0)
 	{
 		int local;
 		const BPSgdClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
 		img = local;
-		pp = const_cast<AccProjectorKernel *>(&c.projector);
+		projector = c.projector;
 		g_eulers = c.eulers;
 		g_weights = c.weights;
 		g_model_real = c.model_real;
@@ -1177,7 +1177,6 @@ __global__ void cuda_kernel_backproject2D_SGD(
 		g_model_weight = c.model_weight;
 		weight_norm = c.weight_norm;
 	}
-	AccProjectorKernel &projector = *pp;
 
 	int img_y_half = img_y / 2;
 	int max_r2_out = max_r2 * padding_factor * padding_factor;
@@ -1359,7 +1358,7 @@ __global__ void cuda_kernel_backproject2D_SGD_sum(
 	const unsigned tid = threadIdx.x;
 	int img;
 	const BPSgdClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, img)];
-	AccProjectorKernel &projector = *const_cast<AccProjectorKernel *>(&c.projector);
+	AccProjectorKernel projector = c.projector;
 	const XFLOAT weight_norm = c.weight_norm;
 	const int img_y_half = img_y / 2;
 	const int max_r2_out = max_r2 * padding_factor * padding_factor;
