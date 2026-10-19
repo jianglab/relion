@@ -61,8 +61,9 @@ def _move_half2(star_in, star_out, rot_shift=3.0, shift=(2.5, -2.0, 1.5)):
         rot = float(r[c["rlnAngleRot"]]) + rot_shift
         a = _euler(rot, float(r[c["rlnAngleTilt"]]), float(r[c["rlnAnglePsi"]]))
         r[c["rlnAngleRot"]] = repr(rot)
-        r[c["rlnOriginXAngst"]] = repr(float(r[c["rlnOriginXAngst"]]) + (a @ t)[0])
-        r[c["rlnOriginYAngst"]] = repr(float(r[c["rlnOriginYAngst"]]) + (a @ t)[1])
+        # float(): with NumPy 2, repr() of a numpy float is "np.float64(...)", which RELION cannot read
+        r[c["rlnOriginXAngst"]] = repr(float(r[c["rlnOriginXAngst"]]) + float((a @ t)[0]))
+        r[c["rlnOriginYAngst"]] = repr(float(r[c["rlnOriginYAngst"]]) + float((a @ t)[1]))
     with open(star_out, "w") as f:
         f.write("\n".join(lines[:start] + [" ".join(r) for r in rows] + lines[start + len(rows):]))
 
