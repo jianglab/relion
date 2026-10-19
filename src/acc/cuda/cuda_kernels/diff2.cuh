@@ -125,7 +125,7 @@ __global__ void cuda_kernel_diff2_coarse(
 		g_shift = P.shift; g_classes = P.classes; g_class_start = P.class_start; g_partial = P.partial;
 	}
 
-	AccProjectorKernel *pp = &projector_arg; // its methods are not const
+	AccProjectorKernel projector = projector_arg; // by value, in registers: the address of the kernel parameter would make every thread copy the struct to local memory
 	int orient0 = blockIdx.x * eulers_per_block;
 	// Orientations of this block: fewer than eulers_per_block in the last block of a class
 	// (class batching), whose empty places are computed with zero matrices and not stored
@@ -134,7 +134,7 @@ __global__ void cuda_kernel_diff2_coarse(
 	{
 		int local;
 		const CoarseClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
-		pp = const_cast<AccProjectorKernel *>(&c.projector);
+		projector = c.projector;
 		g_eulers = c.eulers;
 		g_diff2s = c.diff2s;
 		orient0 = rest_blocks ? c.n_even + local : local * eulers_per_block;
@@ -142,7 +142,6 @@ __global__ void cuda_kernel_diff2_coarse(
 			n_valid = min(eulers_per_block, c.n_orient - orient0);
 		orient_offset = c.orient_offset;
 	}
-	AccProjectorKernel &projector = *pp;
 
 	//Prefetch euler matrices
 	__shared__ XFLOAT s_eulers[eulers_per_block * 9];
