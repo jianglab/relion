@@ -414,10 +414,11 @@ public:
 			if (doFreeDevice)
 				ACC_PTR_DEBUG_FATAL("Device double allocation.\n");
 	#endif
-				doFreeDevice = true;
-
-				alloc = allocator->alloc(size * sizeof(T));
+				// set only after the allocation has succeeded: when it fails (CudaCustomAllocator out of memory raises an
+				// error) the destructor of this object must not try to free an allocation it does not have
+				alloc = allocator->alloc(size * sizeof(T), (cudaStream_t) stream);
 				dPtr = (T*) alloc->getPtr();
+				doFreeDevice = true;
 		}
 #elif _HIP_ENABLED
 		if (accType == accHIP)
@@ -1321,6 +1322,8 @@ public:
 				ACC_PTR_DEBUG_FATAL("Free device memory was called on NULL pointer in free_device().\n");
 	#endif
 			doFreeDevice = false;
+			if (alloc == NULL)
+				return;
 
 			if (!alloc->hasReadyMark())
 				alloc->markReadyEvent(stream);

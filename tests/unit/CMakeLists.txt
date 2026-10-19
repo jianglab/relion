@@ -32,6 +32,7 @@ set(RELION_UNIT_TEST_SOURCES
  test_backprojector_nonuniform.cpp
  test_s2_vs_smode_consistency.cpp
     test_align_map_to_map.cpp
+    test_class_alignment_particles.cpp
     test_pipeline_jobs.cpp
     test_reference_list.cpp
     test_class2d_consensus.cpp
@@ -48,6 +49,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_helix_mask.cpp
     test_recover_full_filaments.cpp
     test_resource_report.cpp
+    test_filament_context.cpp
     test_import_project.cpp
     test_rectangular_box.cpp
     test_rectangular_projector.cpp
@@ -64,7 +66,16 @@ set(RELION_UNIT_TEST_SOURCES
     test_fftw_plans.cpp
     test_bulk_threads.cpp
     test_gpu_reconstruct.cpp
+    test_gpu_switch.cpp
+    test_pinned_pool.cpp
+    test_tuning_cache.cpp
+    test_gpu_pool_plan.cpp
+    test_pair_list.cpp
 )
+
+if (CUDA_FOUND)
+    list(APPEND RELION_UNIT_TEST_SOURCES test_gpu_signif_select.cpp test_gpu_alloc_cache.cpp)
+endif()
 
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})
 
@@ -98,7 +109,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch pinned_pool gpu_signif_select pair_list)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]

@@ -3,6 +3,7 @@
 
 #include "src/acc/cuda/cuda_settings.h"
 #include "src/acc/cuda/cuda_mem_utils.h"
+#include "src/acc/cuda/gpu_mem_trace.h"
 #include <cuda_runtime.h>
 #include <cufft.h>
 
@@ -246,6 +247,7 @@ public:
 		fouriers.setSize(odist*batchSize[0]);
 		fouriers.deviceAlloc();
 		fouriers.hostAlloc();
+		gpuMemTrace("image FFT buffers", (double) (reals.getSize() + fouriers.getSize()) * sizeof(XFLOAT));
 
 //		DEBUG_HANDLE_ERROR(cudaMemGetInfo( &avail, &total ));
 //		needed = estimate(batchSize[0], fudge);
@@ -267,6 +269,7 @@ public:
 			HANDLE_CUFFT_ERROR( cufftSetStream(cufftPlanBackward, reals.getStream()));
 	    }
 		planSet = true;
+		gpuMemTrace("image FFT plans made (work areas of cuFFT)", (double) needed);
 	}
 
 	void forward()
@@ -289,6 +292,7 @@ public:
 	 		HANDLE_CUFFT_ERROR( cufftSetStream(cufftPlanBackward, reals.getStream()));
 	 	}
 		planSet = true;
+		gpuMemTrace("image FFT plans made (work areas of cuFFT)", (double) needed);
 	}
 
 	void forward()

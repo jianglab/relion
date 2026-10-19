@@ -674,9 +674,17 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 
 	// B. Write STAR file with metadata
 	fn_tmp = fn_out + "_model.star";
-	fh.open((fn_tmp).c_str(), std::ios::out);
-	if (!fh)
-		REPORT_ERROR( (std::string)"MlModel::write: Cannot write file: " + fn_tmp);
+	const std::string fn_star = fn_tmp; // fn_tmp is used again below
+	// RELION_ASYNC_STAR_WRITE: the text is formatted here, and the background thread opens and writes the file
+	const bool async_star = allow_async && AsyncFileWriter::enabled() && AsyncFileWriter::starMode() > 0;
+	std::ostringstream fstr;
+	if (!async_star)
+	{
+		fh.open((fn_tmp).c_str(), std::ios::out);
+		if (!fh)
+			REPORT_ERROR( (std::string)"MlModel::write: Cannot write file: " + fn_tmp);
+	}
+	std::ostream &fo = async_star ? static_cast<std::ostream &>(fstr) : static_cast<std::ostream &>(fh);
 
 	// Write the output STAR file
 	MDlog.setIsList(true);
@@ -722,7 +730,7 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 	MDlog.setValue(EMDL_MLMODEL_SIGMA_PSI, sqrt(sigma2_psi));
 	MDlog.setValue(EMDL_MLMODEL_LL, LL);
 	MDlog.setValue(EMDL_MLMODEL_AVE_PMAX, ave_Pmax);
-	MDlog.write(fh);
+	MDlog.write(fo);
 
 	// Calculate resolutions and total Fourier coverages for each class
 	calculateTotalFourierCoverage();
@@ -804,7 +812,7 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 			MDclass.setValue(EMDL_MLMODEL_HELICAL_TWIST, helical_twist[iclass]);
 		}
 	}
-	MDclass.write(fh);
+	MDclass.write(fo);
 
 	// Write radial_average of tau2_class and data_vs_prior_class for each reference
 	for (int iclass = 0; iclass < nr_classes_bodies; iclass++)
@@ -829,7 +837,7 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 			if (XSIZE(orientability_contrib[iclass]) == XSIZE(tau2_class[iclass]))
 				MDsigma.setValue(EMDL_MLMODEL_ORIENTABILITY_CONTRIBUTION, orientability_contrib[iclass](ii));
 		}
-		MDsigma.write(fh);
+		MDsigma.write(fo);
 	}
 
 	// Write scale-correction for all groups
@@ -843,7 +851,7 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 		MDgroup.setValue(EMDL_MLMODEL_GROUP_NR_PARTICLES, nr_particles_per_group[igroup]);
 		MDgroup.setValue(EMDL_MLMODEL_GROUP_SCALE_CORRECTION, scale_correction[igroup]);
 	}
-	MDgroup.write(fh);
+	MDgroup.write(fo);
 
 	// Write sigma models for each optics group
 	for (int igroup = 0; igroup < nr_optics_groups; igroup++)
@@ -862,7 +870,7 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 				MDsigma.setValue(EMDL_MLMODEL_SIGMA2_NOISE, aux);
 			}
 		}
-		MDsigma.write(fh);
+		MDsigma.write(fo);
 	}
 
 	// Write pdf_direction models for each class
@@ -880,10 +888,15 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 				MDclass.addObject();
 				MDclass.setValue(EMDL_MLMODEL_PDF_ORIENT, pdf_direction[iclass](ii));
 			}
-			MDclass.write(fh);
+			MDclass.write(fo);
 		}
 	}
 
+	if (async_star)
+	{
+		std::shared_ptr<std::string> text = std::make_shared<std::string>(fstr.str());
+		AsyncFileWriter::putText(fn_star, [text] { return text; }, true);
+	}
 }
 
 void  MlModel::readTauSpectrum(FileName fn_tau, int verb)

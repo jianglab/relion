@@ -8,6 +8,7 @@
  ***************************************************************************/
 
 #include "src/gpu_reconstruct.h"
+#include "src/gpu_switch.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -17,8 +18,7 @@ namespace gpurec
 
 bool requested()
 {
-	const char *e = getenv("RELION_GPU_RECONSTRUCT");
-	return e != NULL && (strcmp(e, "1") == 0 || strcmp(e, "single") == 0 || strcmp(e, "double") == 0);
+	return gpuswitch::on("RELION_GPU_RECONSTRUCT");
 }
 
 bool doublePrecision()
@@ -35,10 +35,7 @@ bool doublePrecision()
 
 int symmetriseMode()
 {
-	const char *e = getenv("RELION_GPU_SYMMETRISE");
-	if (e == NULL) return 0;
-	if (strcmp(e, "check") == 0) return 2;
-	return atoi(e) != 0 ? 1 : 0;
+	return gpuswitch::mode("RELION_GPU_SYMMETRISE");
 }
 
 static bool g_gpu_requested = false;
@@ -53,6 +50,8 @@ bool reconstructSkipGridding(const SkipGriddingInput &, RFLOAT *, std::string &r
 	reason = "this build has no CUDA";
 	return false;
 }
+
+bool keepPoolActive() { return false; }
 
 bool deviceAvailable() { return false; }
 

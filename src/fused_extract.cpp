@@ -124,7 +124,11 @@ void fourierTransform(const Samples& s, const Geometry& g, MultidimArray<Complex
 		opts.nthreads = 1;
 		int64_t modes[2] = {N1, N2};
 		const double tol = (sizeof(RFLOAT) == 4) ? 1e-5 : 1e-9;
-		int ier = FINUFFT_MAKEPLAN(1, 2, modes, -1, 1, tol, &guard.plan, &opts);
+		int ier;
+		#pragma omp critical(FourierTransformer_fftw_plan)
+		{
+			ier = FINUFFT_MAKEPLAN(1, 2, modes, -1, 1, tol, &guard.plan, &opts);
+		}
 		if (ier > 1) handleFinufftError(ier, "finufft_makeplan type1 (fused extraction)");
 		it = plans.insert(std::make_pair(key, std::move(guard))).first;
 	}

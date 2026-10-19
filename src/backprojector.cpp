@@ -1736,6 +1736,10 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 				reported_gpu = true;
 				std::cout << " Reconstructing the maps on the GPU, in " << (g.double_precision ? "double" : "single")
 				          << " precision (RELION_GPU_RECONSTRUCT)." << std::endl;
+				std::cout << (gpurec::keepPoolActive()
+				              ? " The memory of the expectation step stays in the GPU meanwhile, and is given back only if the reconstruction does not fit (RELION_GPU_KEEP_POOL=0 gives it back first)."
+				              : " The memory of the expectation step is given back to the GPU before each reconstruction (RELION_GPU_KEEP_POOL=0).")
+				          << std::endl;
 			}
 			if (zero_weight)
 				std::cerr << " WARNING: ignoring divide by zero in skip_gridding (GPU reconstruction)" << std::endl;

@@ -104,9 +104,14 @@ All on by default; for comparisons or if a problem is suspected:
 | `RELION_RESOURCE_REPORT=off` | no resource report at the end |
 | `RELION_PARTICLE_ORDER=micrograph` | shuffle whole micrographs instead of particles (see below); off by default |
 | `RELION_GPU_BP_LAYOUT=planar` | keep the real, imaginary and weight arrays of the 3D back-projection model apart, as upstream (default: interleaved, see "Interleaved back-projection model") |
-| `RELION_GPU_COARSE_XT=1` | coarse pass by the cross-term kernel (opt-in; `check` runs both and reports the largest relative difference) |
-| `RELION_GPU_BLOCKS_PER_SM=N` | thread blocks per multiprocessor that the pixel chunks of the coarse, weighted-average and back-projection kernels aim for (default 3) |
-| `RELION_GPU_RECONSTRUCT=1` | the M-step reconstructions (3D, skip_gridding) on the GPU whenever `--gpu` was given, also with `--skip_align`; falls back to the CPU with a message when the GPU lacks memory (being validated, off by default) |
+| `RELION_GPU_BP_PACK=0` | back-projection atomics one voxel component per lane, as before (default: on for 2D images with the interleaved 3D model; the packed path is used per launch when it fits, otherwise the launch falls back and the reason is printed once; see "Packed back-projection atomics") |
+| `RELION_GPU_COARSE_XT=0` | coarse pass by the direct kernel instead of the cross-term kernel (default: on where it applies, i.e. 3D references and 2D images with a table up to 128 MB, otherwise the direct kernel is used automatically; `check` runs both and reports the largest relative difference) |
+| `RELION_GPU_BLOCKS_PER_SM=N` | thread blocks per multiprocessor that the pixel chunks of the coarse, weighted-average and back-projection kernels aim for (default: chosen from the device, one full wave of 128-thread blocks per multiprocessor, e.g. 12 on sm_86, 16 on sm_80/90, 8 on sm_75; 3 when the GPU has under 2 GiB free; the choice and its reason are printed once per device) |
+| `RELION_GPU_RECONSTRUCT=1` | the M-step reconstructions (3D, skip_gridding) on the GPU whenever `--gpu` was given, also with `--skip_align`; `=0` turns it off. Default: on. Falls back to the CPU with a message when the GPU lacks memory or no GPU is visible |
+| `RELION_GPU_KEEP_POOL=0` | free the E-step memory chunk before each GPU reconstruction, as before (default: the chunk stays in the card and is given back only if the reconstruction does not fit next to it; saves the 0.1 to 0.2 s per iteration that freeing and allocating a ~20 GB chunk costs; B3 on an A5000, 25 iterations: maximization 2.9 s to 1.5 s, and with the old pool gpusetup 4.8 s to under 1 s; results unchanged. With the lean pool the chunk is small and mostly the maximization gain remains) |
+| `RELION_GPU_FLOAT2_TEX=0` | two single-channel projection textures instead of one two-channel texture (default: on for 3D references, CUDA, single precision) |
+| `RELION_GPU_SYMMETRISE=0` | helical Fourier-space symmetrisation on the CPU (default: on with `--gpu`; `check` runs both) |
+| `RELION_JOIN_SKIP_BPREF=0` | send the summed back-projection arrays back to the second follower at the join as upstream does (default: skipped, 3 ranks, converged auto-refine only) |
 | `RELION_FFTW_THREADS=1` | every FFT single-threaded, as upstream's non-MKL builds (see below) |
 | `RELION_STARTUP_THREADS=N` | threads for the start-up work: reading and writing STAR tables, and the noise estimate from the first particles. (Loops over large volumes at start-up, such as zeroing the Projector arrays, use the FFT thread count, see "Multi-threaded FFTs".) Default: the cores the process may use (up to 8), and one thread per 8192 table rows; `0` = the original one-thread code. Results are identical for every value |
 | `RELION_PREFETCH_THREADS=N` | most threads that read one pool of particle images ahead of the E-step. The prefetcher starts with one reader and doubles it (up to this limit, default `min(--j, 8)`) whenever a pool was not ready in time; `--no_prefetch` turns it off |
@@ -114,11 +119,11 @@ All on by default; for comparisons or if a problem is suspected:
 | `RELION_AUTO_PARALLEL=No` | GUI default: give MPI processes and threads by hand |
 | `RELION_SLURM_PREAMBLE` | site lines for RELION's own Slurm script |
 
-Opt-in (off by default):
+On by default in CUDA builds (`=0` switches it off):
 
 | Variable | Effect |
 |---|---|
-| `RELION_GPU_SKIP_ALIGN=1` | keep the GPU for `--skip_align` / `--skip_rotate` (Class3D without alignment); upstream switches the GPU off for these jobs |
+| `RELION_GPU_SKIP_ALIGN=0` | switch the GPU off for `--skip_align` / `--skip_rotate` (Class3D without alignment), as upstream does; the job window then refuses the GPU for such jobs. By default the GPU is kept (a HIP build keeps upstream's behaviour unless `=1`) |
 
 The GPU code for `--skip_align` had several defects that never showed because upstream
 never runs it: the job arrays of the fine pass were one element too short with a single
@@ -268,18 +273,18 @@ MKL versus FFTW, measured on our nodes (forward + inverse, double precision):
 | 3D 256–768³, 8 threads, FFTW plans as RELION makes them (`FFTW_ESTIMATE`) | MKL 1.6–2.6× faster | MKL 1.6–1.8× faster |
 | same, FFTW with measured plans (`FFTW_MEASURE`) | FFTW as fast or faster | MKL 20–40% faster |
 
-## Reconstructions on the GPU (opt-in)
+## Reconstructions on the GPU (on by default, `RELION_GPU_RECONSTRUCT=0` turns it off)
 
 With the E-step on the GPU, the M-step's reconstructions became the largest remaining cost of a
 Class3D iteration: per class, a padded Fourier volume (768 x 768 x 385 complex numbers for a 384 box at
 `--pad 2`, about 3.6 GB in double precision) goes through several passes and an inverse FFT on the CPU.
-`RELION_GPU_RECONSTRUCT=1` does `BackProjector::reconstruct()` for 3D maps with skip_gridding (the
+`RELION_GPU_RECONSTRUCT` (on unless `=0`) does `BackProjector::reconstruct()` for 3D maps with skip_gridding (the
 default) on the GPU (`src/acc/cuda/cuda_reconstruct.cu`): the same steps, kernel by kernel, with the
 inverse transform by cuFFT; the soft mask and the gridding correction of the 384³ result stay on the
 CPU.
 
 Precision follows RELION's GPU code, as upstream does it: CPU code in double (`DoublePrec_CPU=ON`),
-GPU code in single (`DoublePrec_ACC=OFF`). So `RELION_GPU_RECONSTRUCT=1` reconstructs in single
+GPU code in single (`DoublePrec_ACC=OFF`). So the GPU reconstruction is in single
 precision (the double arrays are converted on their way to the GPU, 64 MB at a time); `=double`
 forces double, `=single` single. Memory for a 384 box at padding 2: about 4.6 GB in single, 9 GB in
 double. With less free GPU memory, or on any CUDA error, the reconstruction runs on the CPU and the
@@ -445,6 +450,29 @@ upstream value by 1.6e-5 (relative). The sums over particles are made in
 separate buffers before they reach the volume, which loses less to float
 rounding than adding straight into a voxel that already holds a large sum.
 
+## Packed back-projection atomics (`RELION_GPU_BP_PACK`, on by default)
+
+The back-projection adds 24 floats per pixel into the 3D model (two neighbouring voxels in x, four
+(y, z) neighbours, real, imaginary and weight). With one voxel component per lane the atomic
+requests of a warp touch many sectors, and in local search (where the accumulator path of
+`RELION_GPU_BP_ACCUM` does not apply, about 1.1 visits per orientation) the kernel was bound by
+atomic request issue. The packed path lets a lane take one float of a run of one pixel: the warp
+compacts its active pixels with a ballot, stages values and addresses in shared memory (two of the
+four runs at a time, about 8 KB per block) and issues dense atomic additions. The terms are the
+same, only the order of the additions changes, so results differ from the default only by the
+noise of atomic float additions (the GPU back-projection is never bit-reproducible).
+
+Measured (helical auto-refine B5, 3 MPI ranks, one GPU): the back-projection kernel is 3.3x shorter
+(ncu, same launches) with 3.4x fewer L2 reduction sectors; local-search iterations are about 15%
+faster on an RTX 3090, and the full run on an RTX A5000 takes 862 s against 1005 s with the same
+final resolution (4.16337 A). Helical Class2D E-step -23%, Class3D B3 -19%.
+
+Automatic fallbacks, decided per launch and printed once per reason as
+`RELION_GPU_BP_PACK: ...`: 3D data, planar model layout (`RELION_GPU_BP_LAYOUT=planar`),
+`RELION_GPU_BP_TILE` set, and per-orientation accumulator buffers in use (silent, that launch only).
+`RELION_GPU_BP_PACK=0` turns the path off.
+Integration test: `tests/integration/test_bp_pack.py`.
+
 ## Interleaved back-projection model (`RELION_GPU_BP_LAYOUT`, on by default for 3D)
 
 Back-projection adds each pixel of a particle into the 8 neighbouring voxels of the
@@ -467,7 +495,7 @@ faster, and removing the atomic additions 3.2x, which is how the atomics were fo
 be the limit. The earlier idea that the run was bound by the host was wrong: host threads
 spin in `cudaStreamSynchronize` while the GPU works.
 
-## Cross-term coarse kernel (`RELION_GPU_COARSE_XT`, opt-in)
+## Cross-term coarse kernel (`RELION_GPU_COARSE_XT`, on by default)
 
 The coarse pass sums, per orientation and translation, the squared difference between
 the shifted image and the CTF-modified reference projection. Expanding the square
@@ -481,6 +509,10 @@ final resolution of the full run is identical to upstream (4.16337 A).
 aim for. For the coarse kernel, 3/6/12/24/48 blocks gave 10.2/7.6/4.2/2.4/1.6 ms per
 call, but the throughput of the whole iteration changed by 2% between 12 and 48,
 because back-projection and the fine pass then set the pace.
+
+The default is chosen from the device (threads per multiprocessor / 128, so 12 on sm_86), with the
+old 3 when the GPU has under 2 GiB free. Refining it from timings during the first iterations (try a few
+values, keep the fastest) is future work; the 12 was measured on sm_86 GPUs only.
 
 ## Full B5 run, and things that did not work
 
@@ -529,7 +561,7 @@ kernel time is meaningful, so compare runs at similar GPU load):
   by the texture fetches of the projection, not by arithmetic.
 - A layout where a warp holds 32 consecutive pixels of one orientation was slower (4.9 ms).
 
-`RELION_GPU_FLOAT2_TEX=1` (opt-in, 3D, CUDA, single precision) stores real and imaginary
+`RELION_GPU_FLOAT2_TEX` (on by default; `=0` off; 3D, CUDA, single precision) stores real and imaginary
 parts of the projector in one two-channel texture, so a projection needs one fetch instead of
 two. On the helical benchmark the coarse kernel goes from 3.6 to 2.7 ms and the fine kernel
 from 3.2 to 2.5 ms per call, with 11-12% more calls in the same time window. The classification
@@ -580,8 +612,8 @@ The final iteration of auto-refine joins the weighted sums of the two half sets 
 - **Pack and unpack** of the weighted sums (`MlWsumModel::pack` / `unpack`) copied element by element with a range test per element. The large arrays are now copied as blocks, on up to 4 threads (`RELION_PACK_THREADS` overrides). The join fell from about 25 s to 8.7 s; the final-iteration maximisation stage from 30.8 s to 15.1 s. The packed values are the same.
 - **Helical symmetry in Fourier space** evaluated cos and sin for every voxel although the phase depends only on z. They are now computed once per z plane (same values), and the number of threads follows the cores available divided by the ranks that symmetrise at the same time (never fewer than `--j`; `RELION_SYMMETRISE_THREADS` overrides, and the choice is printed with `RELION_ITER_TIMING=1`). On the helical benchmark the step fell from 9.6 s to 5.1 s with 3 to 4 threads. A unit test (`[helix_symmetry]`) checks that the result is bit for bit that of the original serial loop, with and without rise, at 1 and 4 threads.
 
-- **Skipping the send-back of the summed BPref arrays** (`RELION_JOIN_SKIP_BPREF=1`, opt-in; 3 ranks, converged auto-refine only). After the join the leader scattered the summed weighted sums, including the large BPref arrays, back to the follower of the second half. That follower only needs the unregularised reconstruction of its half, which re-reads BPref from the stored copy, so the arrays are no longer sent. Scatter 3.5 s to 0; final resolution and log-likelihood identical; final maps equal at float-atomic noise level (correlation of the full map 0.999997, half maps 0.9999 or better).
-- **Helical symmetry in Fourier space on the GPU** (`RELION_GPU_SYMMETRISE=1`, opt-in; `=check` runs both and compares). One thread per output voxel, operators summed in the same order as the CPU, in the model's precision. Planes are processed in groups of mirrored |z| values, sized from the free GPU memory (halved on allocation failure; `RELION_GPU_SYMMETRISE_PLANES` overrides for experts and tests). If the GPU cannot be used (no CUDA, rise/rotation layout not supported, no memory) the CPU code runs and the reason is printed once. On the helical benchmark the step took 3.0 s against 6.9-7.5 s on the CPU with 4 threads; the results differ by about 1e-16 relative (FMA contraction), not bit for bit. Most of the GPU time is pageable host-device transfer. Unit test: `[gpu_symmetrise]`.
+- **Skipping the send-back of the summed BPref arrays** (`RELION_JOIN_SKIP_BPREF`, on by default, `=0` off; 3 ranks, converged auto-refine only). After the join the leader scattered the summed weighted sums, including the large BPref arrays, back to the follower of the second half. That follower only needs the unregularised reconstruction of its half, which re-reads BPref from the stored copy, so the arrays are no longer sent. Scatter 3.5 s to 0; final resolution and log-likelihood identical; final maps equal at float-atomic noise level (correlation of the full map 0.999997, half maps 0.9999 or better).
+- **Helical symmetry in Fourier space on the GPU** (`RELION_GPU_SYMMETRISE`, on by default with `--gpu`, `=0` off; `=check` runs both and compares). One thread per output voxel, operators summed in the same order as the CPU, in the model's precision. Planes are processed in groups of mirrored |z| values, sized from the free GPU memory (halved on allocation failure; `RELION_GPU_SYMMETRISE_PLANES` overrides for experts and tests). If the GPU cannot be used (no CUDA, rise/rotation layout not supported, no memory) the CPU code runs and the reason is printed once. On the helical benchmark the step took 3.0 s against 6.9-7.5 s on the CPU with 4 threads; the results differ by about 1e-16 relative (FMA contraction), not bit for bit. Most of the GPU time is pageable host-device transfer. Unit test: `[gpu_symmetrise]`.
 
 - **Accuracy estimate on all cores** (`calculateExpectedAngularErrors`, automatic; `RELION_ACCURACY_THREADS=N` overrides). Under MPI only the first follower computes it, with its `--j` threads, while the GPU and the other ranks wait (about 3.3 s per iteration on the helical benchmark). The trials are independent, use a per-thread generator that reproduces the serial random sequence and are accumulated in particle order, so the result does not depend on the thread count. It now uses all cores the process may run on (`sched_getaffinity`), and the choice is printed once. Checked on a single-particle benchmark: the estimated accuracies of every class in iterations 1 and 2 are identical with 3 and with 8 threads; the maps differ only by float atomic-order noise (about 5e-6 relative).
 

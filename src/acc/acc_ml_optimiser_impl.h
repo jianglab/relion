@@ -1,6 +1,9 @@
 #include <memory>
 #include "src/acc/stage_timer.h"
+#include "src/acc/pair_list.h"
 static omp_lock_t global_mutex;
+
+#include <limits>
 
 #ifdef _SYCL_ENABLED
 #include "src/acc/sycl/sycl_virtual_dev.h"
@@ -1542,6 +1545,19 @@ void getAllSquaredDifferencesCoarse(
 				hold->table.reset(new AccPtr<char>(ptrFactory.make<char>()));
 			AccPtr<char> table_local = ptrFactory.make<char>();
 			AccPtr<char> &table = hold != NULL ? *hold->table : table_local;
+			CoarseCacheCtx cacheCtx;
+			CoarseCacheCtx *cacheCtxPtr = NULL;
+			if (hold == NULL && !accMLO->generateProjectionPlanOnTheFly && sp.nr_images == 1 && baseMLO->mymodel.nr_bodies == 1 &&
+			    baseMLO->mymodel.ref_dim == 3 && !accMLO->dataIs3D && !jobs.empty())
+			{
+				cacheCtx.cache = &accMLO->bundle->coarse_cache;
+				cacheCtx.allocator = accMLO->bundle->allocator;
+				cacheCtx.class_ids.assign(job_iclass.begin(), job_iclass.end());
+				cacheCtx.host_minvsigma2 = op.local_Minvsigma2.data;
+				cacheCtx.verb = baseMLO->verb;
+				cacheCtx.device = accMLO->bundle->device_id;
+				cacheCtxPtr = &cacheCtx;
+			}
 			runDiff2KernelCoarseBatched(
 					jobs, nums,
 					&(~trans_xyz)[trans_x_offset],
@@ -1554,7 +1570,8 @@ void getAllSquaredDifferencesCoarse(
 					image_size,
 					accMLO->dataIs3D,
 					table,
-					hold != NULL ? &hold->def : NULL);
+					hold != NULL ? &hold->def : NULL,
+					cacheCtxPtr);
 			if (hold != NULL)
 			{
 				// launched later for the whole group; keep what it reads
@@ -1711,6 +1728,35 @@ void getAllSquaredDifferencesCoarse(
 #endif
     op.min_diff2 = AccUtilities::getMinOnDevice<XFLOAT>(allWeights);
     //std::cerr << " min_diff2 coarse= " << op.min_diff2 << std::endl;
+
+	// Filament context: each class's best coarse score for this segment
+	if (baseMLO->filctx_opt.mode != filctx::OFF && !baseMLO->filctx_loglik.empty() && sp.nr_images == 1)
+	{
+		// allWeights may live on the device only: copy into a host buffer of our own
+		std::vector<XFLOAT> hw(allWeights_size);
+#if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED)
+		if (allWeights_size > 0)
+		{
+			allWeights.cpToHost(&hw[0], allWeights_size);
+			allWeights.streamSync();
+		}
+#else
+		for (size_t i = 0; i < allWeights_size; i++) hw[i] = allWeights[i];
+#endif
+		const int K = baseMLO->mymodel.nr_classes;
+		float *row = &baseMLO->filctx_loglik[(size_t)op.part_id * K];
+		for (int k = 0; k < K; k++) row[k] = -1e30f;
+		size_t pos = 0;
+		for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+		{
+			const size_t n = (size_t)projectorPlans[iclass].orientation_num * translation_num;
+			XFLOAT best = std::numeric_limits<XFLOAT>::max();
+			for (size_t i = pos; i < pos + n; i++)
+				if (hw[i] < best) best = hw[i];
+			if (n > 0) row[iclass] = (float)(op.min_diff2 - best);
+			pos += n;
+		}
+	}
 
 #ifdef TIMING
 	if (op.part_id == baseMLO->exp_my_first_part_id)
@@ -2033,6 +2079,13 @@ void getAllSquaredDifferencesFine(
                     chunkSize = D2F_CHUNK_2D;
 
                 // Do more significance checks on translations and create jobDivision
+                static const bool said_pairs = [&]() {
+                    if (baseMLO->verb > 0)
+                        std::cout << " GPU fine-pass pair list: " << (pairlist::fastEnabled() ? "fast builder" : "plain loop")
+                                  << " (RELION_GPU_PAIR_LIST=0 selects the plain loop)." << std::endl;
+                    return true;
+                }();
+                (void) said_pairs;
                 { stagetimer::Scope st_pair(stagetimer::PAIR_LIST);
                 significant_num = makeJobsForDiff2Fine(op,
                                                        sp,                                                // alot of different type inputs...
@@ -2435,7 +2488,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 					pdf = op.directions_prior[idir] * op.psi_prior[ipsi];
 				pdf *= baseMLO->helicalContextPrior(op.part_id, exp_iclass);
 
-				pdfs[iorientclass] = pdf;
+				pdfs[iorientclass] = pdf * baseMLO->filamentClassFactor(op.part_id, exp_iclass);
 			}
 
 	pdfs.cpToDevice();
@@ -2671,6 +2724,14 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             // The rest of the pass on the GPU in a few launches and one copy
             // (RELION_GPU_FUSED_WEIGHTS, see CudaKernels::fusedWeightPass)
             const size_t fused_n = (sp.iclass_max-sp.iclass_min+1) * sp.nr_dir * sp.nr_psi * sp.nr_trans;
+            static const bool said_weights = [&]() {
+                if (baseMLO->verb > 0)
+                    std::cout << " GPU significance pass: fused weight pass " << (gpuFusedWeights() ? "on" : "off")
+                              << " (RELION_GPU_FUSED_WEIGHTS), radix selection " << (CudaKernels::gpuSignifSelect() ? "on" : "off")
+                              << " (RELION_GPU_SIGNIF_SELECT); =0 turns either off." << std::endl;
+                return true;
+            }();
+            (void) said_weights;
             if (gpuFusedWeights() && gpuClassBatching() && fused_n > 1 && fused_n <= ((size_t) 1 << 22))
             {
                 typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;
@@ -2967,7 +3028,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             // global job positions, one maximum over the whole array (= the largest of
             // the per-class maxima) and one rescale give the same values as per class
             bool batched = false;
-            bool fusedFine = false;
+            bool fusedFine = false, fusedSkip = false;
             if (gpuClassBatching())
             {
                 std::vector<unsigned long> job_idx, job_num;
@@ -3021,6 +3082,9 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     if (gpuFusedWeights() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling != 0 &&
                             accMLO->classStreamsShared && total > 1 && total <= ((size_t) 1 << 22))
                         fusedFine = true; // maximum, exponentiation and significance below, on the GPU
+                    else if (CudaKernels::gpuSkipAlignBlock() && !baseMLO->is_som_iter && baseMLO->adaptive_oversampling == 0 && baseMLO->do_skip_align &&
+                            accMLO->classStreamsShared && total >= 1 && total <= BS_MAX_N && baseMLO->mymodel.nr_bodies == 1)
+                        fusedSkip = true; // --skip_align: the same in one block (RELION_GPU_SKIPALIGN_BLOCK)
                     else
                     {
                     weights_max = AccUtilities::getMaxOnDevice<XFLOAT>(PassWeights.weights);
@@ -3104,6 +3168,29 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             }
 
 #ifdef _CUDA_ENABLED
+            if (fusedSkip)
+            {
+                typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;
+                AccPtr<char> fres = ptrFactory.make<char>(sizeof(SigRes));
+                fres.setStream(PassWeights.weights.getStream());
+                fres.allAlloc();
+                CudaKernels::skipAlignWeightPass<XFLOAT>(PassWeights.weights, baseMLO->adaptive_fraction, ~fres);
+                fres.cpToHostWait();
+                SigRes r;
+                memcpy(&r, &fres[0], sizeof(SigRes));
+                op.min_diff2 += 50 - r.wmax;
+                op.sum_weight = r.sum_weight;
+                if (op.sum_weight==0)
+                    CRITICAL(ERRSUMWEIGHTZERO); //"op.sum_weight[img_id]==0"
+                my_significant_weight = r.first;
+                op.max_index.fineIdx = PassWeights.ihidden_overs[r.max.key];
+                op.max_index.coarseIdx = op.max_index.fineIdx;
+                op.max_weight = r.max.value;
+                DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_NR_SIGN) = (RFLOAT) (PassWeights.weights.getSize() - (size_t) r.idx);
+                PassWeights.weights.cpToHost();
+                PassWeights.weights.streamSync();
+            }
+            else
             if (fusedFine)
             {
                 typedef CudaKernels::SignificanceResult<XFLOAT> SigRes;
@@ -4573,10 +4660,11 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					    over == A.nr_over && sp.idir_min == 0 && sp.ipsi_min == 0 &&
 					    (size_t) sp.nr_dir * sp.nr_psi * over * baseMLO->mymodel.nr_classes == A.slots &&
 					    (unsigned) op.local_Minvsigma2.xdim == A.img_x && (unsigned) op.local_Minvsigma2.ydim == A.img_y &&
-					    op.local_Minvsigma2.zdim == 1 && sp.iclass_min == 0 &&
-					    sp.iclass_max + 1 == (unsigned long) baseMLO->mymodel.nr_classes &&
+					    op.local_Minvsigma2.zdim == 1 && sp.iclass_max < (unsigned long) baseMLO->mymodel.nr_classes &&
 					    baseMLO->mymodel.orientational_prior_mode == NOPRIOR)
 					{
+						// A sub-range of the classes is fine (a single random class per particle in the first
+						// iteration of a run that generates its own seeds): iorientclasses are absolute
 						for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
 						{
 							if((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))

@@ -144,21 +144,31 @@ void evaluateNonuniformFourierSamples2D_type3(
 	opts.modeord = 0;
 	const double tol = 1e-12;
 
-	int ier = finufft_makeplan(3, 2, NULL, -1, 1, tol, &plan, &opts);
+	int ier;
+	#pragma omp critical(FourierTransformer_fftw_plan)
+	{
+		ier = finufft_makeplan(3, 2, NULL, -1, 1, tol, &plan, &opts);
+	}
 	if (ier > 1) handleFinufftError(ier, "finufft_makeplan type3 (debug)");
 
-	ier = finufft_setpts(plan,
-		nj, xj.data(), yj.data(), NULL,
-		nk,
-		const_cast<RFLOAT*>(target_x.data()),
-		const_cast<RFLOAT*>(target_y.data()),
-		NULL);
+	#pragma omp critical(FourierTransformer_fftw_plan)
+	{
+		ier = finufft_setpts(plan,
+			nj, xj.data(), yj.data(), NULL,
+			nk,
+			const_cast<RFLOAT*>(target_x.data()),
+			const_cast<RFLOAT*>(target_y.data()),
+			NULL);
+	}
 	if (ier > 1) handleFinufftError(ier, "finufft_setpts type3 (debug)");
 
 	ier = finufft_execute(plan, source_buf.data(), output_buf.data());
 	if (ier > 1) handleFinufftError(ier, "finufft_execute type3 (debug)");
 
-	finufft_destroy(plan);
+	#pragma omp critical(FourierTransformer_fftw_plan)
+	{
+		finufft_destroy(plan);
+	}
 
 	const RFLOAT norm = 1.0 / ((RFLOAT)size * (RFLOAT)size);
 	samples.resize(nk);
@@ -236,7 +246,11 @@ void evaluateNonuniformFourierSamples2D(
 	opts.nthreads = tls_finufft_nthreads;
 	int64_t n_modes[2] = {size, size};
 
-		int ier = FINUFFT_MAKEPLAN(2, 2, n_modes, -1, 1, tol, &guard.plan, &opts);
+		int ier;
+		#pragma omp critical(FourierTransformer_fftw_plan)
+		{
+			ier = FINUFFT_MAKEPLAN(2, 2, n_modes, -1, 1, tol, &guard.plan, &opts);
+		}
 		if (ier > 1) handleFinufftError(ier, "finufft_makeplan type2");
 
 		// For type 2, the "nonuniform points" (xj/yj) are the target
@@ -377,7 +391,11 @@ void evaluateNonuniformFourierSamplesFromFourierVolume3D(
 		int64_t n_modes[3] = {M, M, (dim == 3) ? M : 1};
 
 		// isign = -1 together with x_j = +2*pi*q/P realises exp(-2*pi*i*q.r/P)
-		int ier = FINUFFT_MAKEPLAN(2, dim, n_modes, -1, 1, tol, &guard.plan, &opts);
+		int ier;
+		#pragma omp critical(FourierTransformer_fftw_plan)
+		{
+			ier = FINUFFT_MAKEPLAN(2, dim, n_modes, -1, 1, tol, &guard.plan, &opts);
+		}
 		if (ier > 1) handleFinufftError(ier, "finufft_makeplan type2 (Fourier volume)");
 
 		plan_it = tls_plan_cache.emplace(key, std::move(guard)).first;

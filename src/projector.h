@@ -46,6 +46,13 @@ void run_padTranslatedMap(RFLOAT *d_in, RFLOAT *d_out,
 						  size_t osX, size_t oeX, size_t osY, size_t oeY, size_t osZ, size_t oeZ,  //Output dimensions
 						  deviceStream_t stream = 0);
 
+#ifdef _CUDA_ENABLED
+void run_padTranslatedMapPitched(RFLOAT *d_in, RFLOAT *d_out,
+						  size_t isX, size_t ieX, size_t isY, size_t ieY, size_t isZ, size_t ieZ,
+						  size_t osX, size_t oeX, size_t osY, size_t oeY, size_t osZ, size_t oeZ,
+						  size_t outPitchX, deviceStream_t stream = 0);
+#endif
+
 void run_CenterFFTbySign(Complex *img_in, int xSize, int ySize, int zSize, deviceStream_t = 0);
 
 void run_calcPowerSpectrum(Complex *dFaux, int padoridim, Complex *ddata, int data_sz, RFLOAT *dpower_spectrum, RFLOAT *dcounter,

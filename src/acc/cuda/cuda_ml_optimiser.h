@@ -4,10 +4,12 @@
 #include "src/mpi.h"
 #include "src/ml_optimiser.h"
 #include "src/acc/cuda/cuda_mem_utils.h"
+#include "src/acc/cuda/gpu_mem_trace.h"
 #include "src/acc/acc_projector_plan.h"
 #include "src/acc/acc_projector.h"
 #include "src/acc/acc_backprojector.h"
 #include "src/acc/acc_bp_accum.h"
+#include "src/acc/cuda/coarse_cache.h"
 #include "src/acc/cuda/cuda_fft.h"
 #include "src/acc/cuda/cuda_benchmark_utils.h"
 #include <stack>
@@ -66,6 +68,11 @@ public:
 	void setupFixedSizedObjects();
 	void setupTunableSizedObjects(size_t allocationSize);
 
+	// Lean GPU memory pool (RELION_GPU_LEAN_MEMORY): see cuda_ml_optimiser.cu
+	std::string lean_key; // description of the problem of this iteration, for the tuning cache
+	void setupLeanPool(size_t cap);
+	void finishLeanIteration();
+
 	void syncAllBackprojects()
 	{
 		DEBUG_HANDLE_ERROR(cudaDeviceSynchronize());
@@ -89,6 +96,9 @@ public:
 	void setupBackprojectAccumulator();
 	void flushBackprojectAccumulator();
 
+	// The reference projections of the coarse pass, made on the first use in an iteration (RELION_GPU_COARSE_CACHE)
+	CoarseProjectionCache coarse_cache;
+
 	// Make this device current on the calling thread (worker threads start on device 0)
 	void bindThreadToDevice()
 	{
@@ -98,6 +108,9 @@ public:
 
 	~MlDeviceBundle()
 	{
+		gpuMemTrace("iteration end, before the bundle is released");
+		coarse_cache.release();
+		finishLeanIteration();
 		projectors.clear();
 		backprojectors.clear();
 		coarseProjectionPlans.clear();
@@ -105,6 +118,7 @@ public:
 		if (keep_allocator && allocator != NULL && retainAllocator(device_id, allocator))
 			allocator = NULL;
 		delete allocator;
+		gpuMemTrace("bundle released");
 	}
 
 	static bool retainAllocator(int device, CudaCustomAllocator *a);

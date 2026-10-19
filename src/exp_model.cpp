@@ -1369,6 +1369,39 @@ void Experiment::write(FileName fn_out, bool remove_offset_priors, bool allow_as
         if (MDimg.containsLabel(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM))
             MDimg.deactivateLabel(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM);
     }
+    if (allow_async && AsyncFileWriter::enabled() && AsyncFileWriter::starMode() > 0)
+    {
+        // RELION_ASYNC_STAR_WRITE: take a snapshot of the tables now and let the background thread do the
+        // formatting of the text (the part that takes time) and the writing.
+        struct Snapshot { MetaDataTable general, optics, img; std::vector<MetaDataTable> bodies; };
+        auto snap = std::make_shared<Snapshot>();
+        if (is_tomo) snap->general = obsModel.generalMdt;
+        snap->optics = obsModel.opticsMdt;
+        snap->img = MDimg;
+        if (nr_bodies > 1) snap->bodies.assign(MDbodies.begin(), MDbodies.begin() + nr_bodies);
+        const bool tomo = is_tomo;
+        std::shared_ptr<std::string> same;
+        if (AsyncFileWriter::starMode() == 2)
+        {
+            // the text the calling thread would have written, to compare with
+            std::ostringstream ref;
+            if (tomo) obsModel.generalMdt.write(ref);
+            obsModel.opticsMdt.write(ref);
+            MDimg.write(ref);
+            if (nr_bodies > 1) for (int ibody = 0; ibody < nr_bodies; ibody++) MDbodies[ibody].write(ref);
+            same = std::make_shared<std::string>(ref.str());
+        }
+        AsyncFileWriter::putText(fn_out, [snap, tomo]
+        {
+            std::ostringstream o;
+            if (tomo) snap->general.write(o);
+            snap->optics.write(o);
+            snap->img.write(o);
+            for (auto &b : snap->bodies) b.write(o);
+            return std::make_shared<std::string>(o.str());
+        }, true, same);
+        return;
+    }
     MDimg.write(ofs);
 
     if (nr_bodies > 1)

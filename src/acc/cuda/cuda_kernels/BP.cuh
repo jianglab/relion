@@ -388,6 +388,133 @@ __global__ void cuda_kernel_backproject3D(
 	__syncthreads();
 	XFLOAT *a_buf = s_abuf >= 0 ? acc.acc + (size_t) s_abuf * 3 * acc.pixels : NULL;
 
+	// tile == 2 (RELION_GPU_BP_PACK, on by default): the atomic additions of a warp are arranged so that a lane takes
+	// one float of a run (two neighbouring voxels, three floats each) of one pixel instead of one voxel
+	// of one component: the warp's requests land in about a fifth of the sectors. Same terms, only
+	// the order of the additions changes. Images only, interleaved model, no accumulation buffer.
+	if (tile == 2 && !DATA3D && a_buf == NULL && S == 3)
+	{
+		const unsigned lane = tid & 31, wid = tid >> 5;
+		const size_t pk_off = compact ? (((size_t) translation_num * (sizeof(XFLOAT) + sizeof(int)) + 15) & ~(size_t) 15) : 0;
+		XFLOAT *pk_val = (XFLOAT *) (bp_dynamic + pk_off) + (size_t) wid * (32 * 6 * BP_PACK_RUNS);
+		size_t *pk_base = (size_t *) (bp_dynamic + pk_off + (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (32 * 6 * BP_PACK_RUNS) * sizeof(XFLOAT)) + (size_t) wid * (32 * BP_PACK_RUNS);
+		const unsigned n_pass = (img_xyz + BP_REF3D_BLOCK_SIZE - 1) / BP_REF3D_BLOCK_SIZE;
+		const unsigned pb = (unsigned) (((unsigned long) blockIdx.y * n_pass) / n_chunks);
+		const unsigned pe = (unsigned) (((unsigned long) (blockIdx.y + 1) * n_pass) / n_chunks);
+		const unsigned long nr_loop = compact ? (unsigned long) s_nr : translation_num;
+		for (unsigned pass = pb; pass < pe; pass++)
+		{
+			const unsigned pixel = pass * BP_REF3D_BLOCK_SIZE + tid;
+			bool go = false;
+			XFLOAT xp = 0, yp = 0, zp = 0;
+			if (pixel < img_xyz)
+			{
+				int x = pixel % img_x;
+				int y = floorfracf(pixel, img_x);
+				if (y > img_y_half)
+					y = y - img_y;
+				minvsigma2 = __ldg(&g_Minvsigma2s[pixel]);
+				ctf = __ldg(&g_ctfs[pixel]);
+				img_real = __ldg(&g_img_real[pixel]);
+				img_imag = __ldg(&g_img_imag[pixel]);
+				Fweight = (XFLOAT) 0.0;
+				real = (XFLOAT) 0.0;
+				imag = (XFLOAT) 0.0;
+				XFLOAT temp_real, temp_imag;
+				for (unsigned long kk = 0; kk < nr_loop; kk++)
+				{
+					const unsigned long itrans = compact ? (unsigned long) s_t[kk] : kk;
+					weight = compact ? s_w[kk] : g_weights[img * translation_num + itrans];
+					if (compact || weight >= significant_weight)
+					{
+						if (CTF_PREMULTIPLIED)
+						{
+							weight = (weight / weight_norm) * minvsigma2;
+							Fweight += weight * ctf;
+						}
+						else
+						{
+							weight = (weight / weight_norm) * ctf * minvsigma2;
+							Fweight += weight * ctf;
+						}
+						translatePixel(x, y, g_trans_x[itrans], g_trans_y[itrans], img_real, img_imag, temp_real, temp_imag);
+						real += temp_real * weight;
+						imag += temp_imag * weight;
+					}
+				}
+				if (Fweight > (XFLOAT) 0.0)
+				{
+					xp = (s_eulers[0] * x + s_eulers[1] * y) * padding_factor;
+					yp = (s_eulers[3] * x + s_eulers[4] * y) * padding_factor;
+					zp = (s_eulers[6] * x + s_eulers[7] * y) * padding_factor;
+					go = !((xp * xp + yp * yp + zp * zp) > max_r2_vol);
+				}
+			}
+			const unsigned ballot = __ballot_sync(0xffffffffu, go);
+			const unsigned n_act = __popc(ballot);
+			__syncwarp();
+			XFLOAT fx = 0, fy = 0, fz = 0;
+			int x0 = 0, y0 = 0, z0 = 0;
+			unsigned pos = 0;
+			if (go)
+			{
+				if (xp < (XFLOAT) 0.0)
+				{
+					xp = -xp;
+					yp = -yp;
+					zp = -zp;
+					imag = -imag;
+				}
+				x0 = floorf(xp);
+				fx = xp - x0;
+				y0 = floorf(yp);
+				fy = yp - y0;
+				y0 -= mdl_inity;
+				z0 = floorf(zp);
+				fz = zp - z0;
+				z0 -= mdl_initz;
+				pos = __popc(ballot & ((1u << lane) - 1u));
+			}
+			// the four runs (y, z neighbours) go through the staging buffer BP_PACK_RUNS at a time
+			for (int rb = 0; rb < 4; rb += BP_PACK_RUNS)
+			{
+				__syncwarp();
+				if (go)
+				{
+					const XFLOAT mfx = (XFLOAT) 1.0 - fx, mfy = (XFLOAT) 1.0 - fy, mfz = (XFLOAT) 1.0 - fz;
+					XFLOAT *v = pk_val + pos * (6 * BP_PACK_RUNS);
+					size_t *b = pk_base + pos * BP_PACK_RUNS;
+#pragma unroll
+					for (int r = 0; r < BP_PACK_RUNS; r++)
+					{
+						const int run = rb + r;
+						const int zz = z0 + (run >> 1), yy = y0 + (run & 1);
+						const XFLOAT wz = (run >> 1) ? fz : mfz, wy = (run & 1) ? fy : mfy;
+						const XFLOAT d0 = wz * wy * mfx, d1 = wz * wy * fx;
+						b[r] = (size_t) (zz * mdl_x * mdl_y + yy * mdl_x + x0) * 3;
+						v[r * 6 + 0] = d0 * real;
+						v[r * 6 + 1] = d0 * imag;
+						v[r * 6 + 2] = d0 * Fweight;
+						v[r * 6 + 3] = d1 * real;
+						v[r * 6 + 4] = d1 * imag;
+						v[r * 6 + 5] = d1 * Fweight;
+					}
+				}
+				__syncwarp();
+				const unsigned total = n_act * (6 * BP_PACK_RUNS);
+				for (unsigned k = lane; k < total; k += 32)
+				{
+					const unsigned p = k / (6 * BP_PACK_RUNS), f = k - p * (6 * BP_PACK_RUNS), r = f / 6, e = f - r * 6;
+					cuda_atomic_add(&g_model_real[pk_base[p * BP_PACK_RUNS + r] + e], pk_val[k]);
+				}
+			}
+			__syncwarp();
+		}
+		return;
+	}
+	if (tile == 2)
+		tile = 0;
+
 	int pixel_pass_num(0);
 	const unsigned tiles_x = (img_x + 15) / 16;
 	if(DATA3D)

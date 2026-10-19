@@ -47,11 +47,13 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "src/ml_optimiser.h"
+#include "src/parallel_hint.h"
 #include <thread>
 #ifdef __linux__
 #include <sched.h>
 #endif
 #include "src/gpu_reconstruct.h"
+#include "src/gpu_switch.h"
 #include "src/fixed_class_initialisation.h"
 #include "src/class2d_consensus_metadata.h"
 #include "src/spatial_frequency_grid.h"
@@ -504,10 +506,16 @@ void MlOptimiser::parseContinue(int argc, char **argv)
         sampling.perturbation_factor = textToFloat(fnt);
     }
 
-    if (parser.checkOption("--skip_align", "Skip orientational assignment (only classify)?"))
+    // A model refined with --skip_align has no orientational distributions, so it cannot
+    // be continued with alignment (it crashed in the weighted sums): keep skipping it
+    bool was_skip_align = do_skip_align;
+    do_skip_align = parser.checkOption("--skip_align", "Skip orientational assignment (only classify)?");
+    if (was_skip_align && !do_skip_align)
+    {
+        if (verb > 0)
+            std::cout << " WARNING: the run being continued used --skip_align; continuing with --skip_align" << std::endl;
         do_skip_align = true;
-    else
-        do_skip_align = false; // do_skip_align should normally be false...
+    }
 
 	if (parser.checkOption("--fix_classes", "Keep every particle in its input class while refining orientations and translations?"))
 		do_fix_classes = true;
@@ -538,6 +546,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
+    parseFilamentContext();
 
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
@@ -797,6 +806,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
+    parseFilamentContext();
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
     // so existing job.star files and scripts keep working; --dont_align_halves is
@@ -1579,14 +1589,21 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
     if (do_write_optimiser && random_subset < 2)
     {
         fn_tmp = fn_root2+"_optimiser.star";
-        fh.open((fn_tmp).c_str(), std::ios::out);
-        if (!fh)
-            REPORT_ERROR( (std::string)"MlOptimiser::write: Cannot write file: " + fn_tmp);
+        // RELION_ASYNC_STAR_WRITE: the text is formatted here, and the background thread opens and writes the file
+        const bool async_star = AsyncFileWriter::enabled() && AsyncFileWriter::starMode() > 0;
+        std::ostringstream fstr;
+        if (!async_star)
+        {
+            fh.open((fn_tmp).c_str(), std::ios::out);
+            if (!fh)
+                REPORT_ERROR( (std::string)"MlOptimiser::write: Cannot write file: " + fn_tmp);
+        }
+        std::ostream &fo = async_star ? static_cast<std::ostream &>(fstr) : static_cast<std::ostream &>(fh);
 
         // Write the command line as a comment in the header
-        fh << "# RELION optimiser; version " << g_RELION_VERSION <<std::endl;
-        fh << "# ";
-        parser.writeCommandLine(fh);
+        fo << "# RELION optimiser; version " << g_RELION_VERSION <<std::endl;
+        fo << "# ";
+        parser.writeCommandLine(fo);
 
         if (do_split_random_halves && !do_join_random_halves)
         {
@@ -1720,8 +1737,14 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
         MD.setValue(EMDL_OPTIMISER_OFFSET_RANGE_Z, offset_range_z);
 
 
-        MD.write(fh);
-        fh.close();
+        MD.write(fo);
+        if (async_star)
+        {
+            std::shared_ptr<std::string> text = std::make_shared<std::string>(fstr.str());
+            AsyncFileWriter::putText(fn_tmp, [text] { return text; }, true);
+        }
+        else
+            fh.close();
     }
 
     // Then write the mymodel to file
@@ -1775,9 +1798,31 @@ void MlOptimiser::initialise()
 
     if (nr_threads < 1)
     {
-        nr_threads = std::max<int>(1, resrep::allowedCores().size());
+        const int cores = std::max<int>(1, resrep::allowedCores().size());
+        int gpus = 0;
+        double free_gpu_bytes = 0;
+#if defined _CUDA_ENABLED || defined _HIP_ENABLED
+        if (do_gpu && accGPUGetDeviceCount(&gpus) == 0 && gpus > 0)
+        {
+            for (int d = 0; d < gpus; d++)
+            {
+                size_t f = 0, t = 0;
+                if (accGPUSetDevice(d) == 0 && accGPUMemGetInfo(&f, &t) == 0)
+                    free_gpu_bytes += (double)f;
+            }
+            accGPUSetDevice(0);
+        }
+        else
+            gpus = 0;
+#endif
+        const long nr_particles = (fn_data != "") ? parhint::countParticlesInStar(fn_data) : 0;
+        const int cap = parhint::autoThreadsCapFromEnv();
+        nr_threads = (cap > 0) ? parhint::autoThreads(cores, 1, gpus, cap, free_gpu_bytes, nr_particles) : cores;
         auto_threads_note = " Using " + integerToString(nr_threads) + " threads: --j was not given, and this process may use "
-                          + integerToString(nr_threads) + " CPU cores.";
+                          + integerToString(cores) + " CPU cores.";
+        if (nr_threads < cores)
+            auto_threads_note += " Limited by the GPUs (" + integerToString(cap) + " threads per GPU, and their free memory) or the number of particles ("
+                                 + integerToString((int)nr_particles) + "); RELION_AUTO_THREADS_CAP=off removes the limits.";
     }
 
     if (do_gpu)
@@ -2277,12 +2322,28 @@ void MlOptimiser::initialiseGeneral(int rank)
     else
         blush_args = blush_args + " --gpu -1 ";
 
-    // RELION_GPU_SKIP_ALIGN=1 keeps the GPU for --skip_align / --skip_rotate (opt-in while it is
-    // being validated: upstream switches the accelerators off here)
     // (before --skip_align switches the GPU off: the M-step can still use it, RELION_GPU_RECONSTRUCT=1)
     gpurec::setGpuRequested(do_gpu);
-    const char *gpu_skip_align = getenv("RELION_GPU_SKIP_ALIGN");
-    const bool keep_gpu_skip_align = gpu_skip_align != NULL && std::string(gpu_skip_align) == "1";
+    if (do_gpu && verb > 0)
+    {
+        size_t n_names = 0;
+        const char *const *names = gpuswitch::defaultOnNames(n_names);
+        std::string off;
+        for (size_t i = 0; i < n_names; i++)
+            if (!gpuswitch::on(names[i]))
+                off += std::string(off.empty() ? "" : ", ") + names[i];
+        std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join, pooled pinned copy buffers, weighted-average sums of 2D data, block-wise sort of the weights, one-pass significance selection of the weights, one-block significance pass of --skip_align, per-thread cache of small device blocks reused on the same stream) are on by default, each backing off to the older path when its conditions are not met; "
+                  << (off.empty() ? "none is switched off" : "switched off: " + off) << " (VAR=0 turns one off)." << std::endl;
+    }
+    // --skip_align / --skip_rotate keep the GPU (upstream switches the accelerators off here);
+    // RELION_GPU_SKIP_ALIGN=0 restores the upstream behaviour. Only the CUDA code was validated for
+    // this case: a HIP build keeps the upstream behaviour unless RELION_GPU_SKIP_ALIGN=1 asks for the GPU.
+#ifdef _CUDA_ENABLED
+    const bool keep_gpu_skip_align = gpuswitch::on("RELION_GPU_SKIP_ALIGN");
+#else
+    const char *gpu_skip_align_env = getenv("RELION_GPU_SKIP_ALIGN");
+    const bool keep_gpu_skip_align = gpu_skip_align_env != NULL && std::string(gpu_skip_align_env) == "1";
+#endif
     if ((do_skip_align || do_skip_rotate) && !(keep_gpu_skip_align && do_gpu))
     {
         do_gpu = false;
@@ -2292,8 +2353,8 @@ void MlOptimiser::initialiseGeneral(int rank)
         std::cerr << "WARNING: you cannot use accelerators (like the GPU) when skipping alignments." << std::endl
                   << "Will continue without accelerators and maintain setting for external tasks (like Blush regularization)." << std::endl;
     }
-    else if (do_skip_align || do_skip_rotate)
-        std::cout << " Using the GPU although alignments are skipped (RELION_GPU_SKIP_ALIGN=1)." << std::endl;
+    else if ((do_skip_align || do_skip_rotate) && verb > 0)
+        std::cout << " Using the GPU although alignments are skipped: the GPU code for this case is on by default (RELION_GPU_SKIP_ALIGN=0 switches the GPU off for such jobs, as upstream does)." << std::endl;
 
     if (do_always_cc)
         do_calculate_initial_sigma_noise = false;
@@ -2865,6 +2926,8 @@ void MlOptimiser::initialiseGeneral(int rank)
         minimum_nr_particles_sigma2_noise = (mymodel.data_dim == 3 || mydata.is_tomo) ? 10 : 1000;
     }
 
+    initialiseFilamentContext();
+
 #ifdef DEBUG
     std::cerr << "Leaving initialiseGeneral" << std::endl;
 #endif
@@ -3110,6 +3173,14 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
     else
     {
         wsum_model.current_size  = mymodel.getPixelFromResolution(1./ini_high);
+        // A box of 0 or 1 pixels leaves the back-projector with r_max = 0, and its reconstruction then reads outside its arrays
+        const int min_current_size = 2;
+        if (wsum_model.current_size < min_current_size)
+        {
+            std::cerr << " WARNING: --ini_high " << ini_high << " A is lower than the resolution of the first Fourier shell of this box ("
+                      << mymodel.ori_size * mymodel.pixel_size << " A); using the lowest resolution the initial reconstruction can handle." << std::endl;
+            wsum_model.current_size = min_current_size;
+        }
     }
     wsum_model.initZeros();
 
@@ -4227,6 +4298,34 @@ void MlOptimiser::updateHelicalContext()
     }
 }
 
+// Cap on the significant coarse samples per particle. The VDAM gradient mode always caps it (as upstream
+// does). RELION_AUTO_MAXSIG=1 applies the same cap, 100 per class, to 3D EM runs, where it only binds in the
+// early iterations in which the posterior is nearly flat and tens of thousands of orientations "survive".
+void MlOptimiser::selectMaximumSignificants(bool announce)
+{
+    static const bool auto_cap = [] { const char *e = getenv("RELION_AUTO_MAXSIG"); return e && *e && atoi(e) > 0; }();
+    const char *reason = nullptr;
+    if (maximum_significants_arg != -1)
+        maximum_significants = maximum_significants_arg;
+    else if (do_grad)
+        maximum_significants = (mymodel.ref_dim == 2 ? 5 : 100) * mymodel.nr_classes;
+    else if (auto_cap && mymodel.ref_dim == 3)
+    {
+        maximum_significants = 100 * mymodel.nr_classes;
+        reason = "RELION_AUTO_MAXSIG=1: 100 per class, as in VDAM";
+    }
+    else
+        maximum_significants = -1;
+
+    static bool announced = false;
+    if (announce && !announced && reason != nullptr && verb > 0)
+    {
+        announced = true;
+        std::cout << " Maximum number of significant coarse samples per particle: " << maximum_significants
+                  << " (" << reason << ")" << std::endl;
+    }
+}
+
 void MlOptimiser::iterate()
 {
 
@@ -4303,15 +4402,7 @@ void MlOptimiser::iterate()
             grad_pseudo_halfsets = do_grad;
         }
 
-        if (maximum_significants_arg != -1)
-            maximum_significants = maximum_significants_arg;
-        else if (do_grad)
-        {
-            if (mymodel.ref_dim == 2)
-                maximum_significants = 5 * mymodel.nr_classes;
-            else
-                maximum_significants = 100 * mymodel.nr_classes;
-        }
+        selectMaximumSignificants(true);
 
         if(do_som)
         {
@@ -4879,6 +4970,8 @@ void MlOptimiser::expectation()
                       << prefetcher_->poolReadTimeUs() / 1.e6 / np << " s each on average; the E-step waited "
                       << prefetcher_->waitTimeUs() / 1.e6 << " s in total, " << prefetcher_->nrLatePools()
                       << " pools were late; up to " << prefetcher_->readers() << " threads read a pool (--no_prefetch turns the prefetcher off)." << std::endl;
+            if (!prefetcher_->warmReport().empty())
+                std::cout << " " << prefetcher_->warmReport() << std::endl;
         }
         delete prefetcher_;
         prefetcher_ = NULL;
@@ -4887,6 +4980,8 @@ void MlOptimiser::expectation()
     if (verb > 0)
         progress_bar(my_nr_particles);
     IT_MARK(5);
+
+    updateFilamentContext();
 
     // If requested, enforce that all segments from the same filament have the same class
     enforceFilamentConsistency();
@@ -5116,6 +5211,9 @@ void MlOptimiser::expectationSetup()
     // Initialise per-class orientation tracking for filament consistency
     if (do_keep_full_filaments && mymodel.nr_classes > 1)
         exp_per_class_metadata_.initZeros(mydata.numberOfParticles(), mymodel.nr_classes * METADATA_NR_CLASS_PARAMS);
+
+    if (filctx_opt.mode != filctx::OFF)
+        filctx_loglik.assign((size_t)mydata.numberOfParticles() * mymodel.nr_classes, 0.f);
 }
 
 void MlOptimiser::expectationSetupCheckMemory(int myverb)
@@ -6338,35 +6436,9 @@ void MlOptimiser::centerClasses()
     }
 }
 
-void MlOptimiser::alignClasses()
+int MlOptimiser::classAlignmentFreedom()
 {
-    if (mymodel.nr_bodies > 1 || do_split_random_halves)
-        return;
-
-    if (mymodel.nr_classes <= 1)
-        return;
-
-    // alignMapToMap is a 3D search throughout - a 3D Projector, ZYZ Euler angles
-    // and 4x4 matrices - so it cannot be pointed at 2D class averages.  Doing so
-    // aborted in applyGeometry with "2D transformation matrix is not 3x3" as soon
-    // as a non-zero rotation was found.  This matches the --align_classes help
-    // text, which already scopes the option to Class3D.
-    if (mymodel.ref_dim != 3)
-        return;
-
-    // Identify the largest class
-    int iclass_ref = 0;
-    RFLOAT max_pdf = mymodel.pdf_class[0];
-    for (int iclass = 1; iclass < mymodel.nr_classes; iclass++)
-    {
-        if (mymodel.pdf_class[iclass] > max_pdf)
-        {
-            max_pdf = mymodel.pdf_class[iclass];
-            iclass_ref = iclass;
-        }
-    }
-
-    // Determine search DOF from symmetry
+    // Search degrees of freedom from the symmetry: 6 (C1), 2 (Cn with n >= 2, or helical), 0 (Dn, T, O, I: the symmetry fixes the orientation)
     int nr_freedom = 6; // default C1
     if ( (do_helical_refine) && (!ignore_helical_symmetry) )
     {
@@ -6396,6 +6468,120 @@ void MlOptimiser::alignClasses()
             }
         }
     }
+    return nr_freedom;
+}
+
+void MlOptimiser::applyMapAlignmentToParticle(long int part_id, int nr_freedom,
+        RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+        RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz)
+{
+    const bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
+
+    RFLOAT rot, tilt, psi, dx, dy, dz;
+    mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
+    dz = 0.;
+    if (has_z)
+        mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
+
+    const RFLOAT dx_old = dx, dy_old = dy, dz_old = dz;
+    applyInverseOrientationAdjustment(
+        nr_freedom,
+        best_rot, best_tilt, best_psi,
+        best_dx, best_dy, best_dz,
+        rot, tilt, psi, dx, dy, dz);
+
+    if (!has_z)
+    {
+        // The offsets of 2D particle images are in the image plane, but the map was moved in
+        // 3D: the image-plane offset that follows from a 3D shift t depends on the particle's
+        // (new) orientation, it is the first two components of A * t. Subtracting t from the
+        // offsets, as for 3D data, left the particles inconsistent with the aligned map.
+        Matrix2D<RFLOAT> A;
+        Euler_angles2matrix(rot, tilt, psi, A);
+        const RFLOAT tx = (nr_freedom == 6) ? best_dx : 0.;
+        const RFLOAT ty = (nr_freedom == 6) ? best_dy : 0.;
+        const RFLOAT tz = best_dz;
+        dx = dx_old + A(0, 0) * tx + A(0, 1) * ty + A(0, 2) * tz;
+        dy = dy_old + A(1, 0) * tx + A(1, 1) * ty + A(1, 2) * tz;
+    }
+
+    mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot, part_id);
+    mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt, part_id);
+    mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi, part_id);
+    mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
+    mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
+    if (has_z)
+        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
+
+    // The priors move with the offsets
+    RFLOAT prior_x, prior_y, prior_z;
+    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x, part_id);
+    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y, part_id);
+    if (prior_x < 999.)
+    {
+        prior_x += dx - dx_old;
+        prior_y += dy - dy_old;
+        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x, part_id);
+        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y, part_id);
+        if (has_z)
+        {
+            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z, part_id);
+            if (prior_z < 999.)
+            {
+                prior_z += dz - dz_old;
+                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z, part_id);
+            }
+        }
+    }
+}
+
+void MlOptimiser::applyClassAlignmentToParticles(int iclass, int nr_freedom,
+        RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+        RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz)
+{
+    FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
+    {
+        int this_class;
+        mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, this_class, current_object);
+        if (this_class != iclass + 1) continue; // 1-indexed
+        applyMapAlignmentToParticle(current_object, nr_freedom, best_rot, best_tilt, best_psi,
+                                    best_dx, best_dy, best_dz);
+    }
+}
+
+void MlOptimiser::alignClasses()
+{
+    if (mymodel.nr_bodies > 1 || do_split_random_halves)
+        return;
+
+    if (mymodel.nr_classes <= 1)
+        return;
+
+    // alignMapToMap is a 3D search throughout - a 3D Projector, ZYZ Euler angles
+    // and 4x4 matrices - so it cannot be pointed at 2D class averages.  Doing so
+    // aborted in applyGeometry with "2D transformation matrix is not 3x3" as soon
+    // as a non-zero rotation was found.  This matches the --align_classes help
+    // text, which already scopes the option to Class3D.
+    if (mymodel.ref_dim != 3)
+        return;
+
+    // Identify the largest class
+    int iclass_ref = 0;
+    RFLOAT max_pdf = mymodel.pdf_class[0];
+    for (int iclass = 1; iclass < mymodel.nr_classes; iclass++)
+    {
+        if (mymodel.pdf_class[iclass] > max_pdf)
+        {
+            max_pdf = mymodel.pdf_class[iclass];
+            iclass_ref = iclass;
+        }
+    }
+
+    const int nr_freedom = classAlignmentFreedom();
 
     if (nr_freedom == 0)
         return;
@@ -6433,58 +6619,7 @@ void MlOptimiser::alignClasses()
                   << " dy=" << best_dy << " dz=" << best_dz << std::endl;
 
         // Apply the cumulative alignment to all particles in this class
-        const bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
-        FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
-        {
-            int this_class;
-            mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, this_class);
-            if (this_class != iclass + 1) continue; // 1-indexed
-
-            RFLOAT rot, tilt, psi, dx, dy, dz;
-            mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot);
-            mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt);
-            mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi);
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
-            dz = 0.;
-            if (has_z)
-                mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
-
-            applyInverseOrientationAdjustment(
-                nr_freedom,
-                best_rot, best_tilt, best_psi,
-                best_dx, best_dy, best_dz,
-                rot, tilt, psi, dx, dy, dz);
-
-            mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot);
-            mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt);
-            mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi);
-            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx);
-            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy);
-            if (has_z)
-                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz);
-
-            // Also adjust priors if they exist
-            RFLOAT prior_x, prior_y, prior_z;
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
-            mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
-            if (prior_x < 999.)
-            {
-                prior_x -= best_dx;
-                prior_y -= best_dy;
-                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x);
-                mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y);
-                if (has_z)
-                {
-                    mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
-                    if (prior_z < 999.)
-                    {
-                        prior_z -= best_dz;
-                        mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_PRIOR_ANGSTROM, prior_z);
-                    }
-                }
-            }
-        }
+        applyClassAlignmentToParticles(iclass, nr_freedom, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz);
     }
 
     std::cout << " Done aligning classes." << std::endl;
@@ -9445,6 +9580,9 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
     bool do_polarity_evidence = do_helical_polarity && exp_ipass == 0 && !(do_skip_align || do_skip_rotate);
     double polarity_wsum[2] = {0., 0.};
 
+    if (exp_ipass == 0 && filctx_opt.mode != filctx::OFF && !filctx_loglik.empty())
+        storeFilamentLoglik(part_id, exp_Mweight, exp_nr_dir * exp_nr_psi * exp_nr_trans * exp_nr_oversampled_rot * exp_nr_oversampled_trans, exp_min_diff2);
+
     RFLOAT my_sigma2_offset_x, my_sigma2_offset_y, my_sigma2_offset_z;
     if (offset_range_x > 0.) // after initialise() this implies also y/z ranges are > 0
     {
@@ -9634,6 +9772,7 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
 
                     if (pdf_orientation_mean != 0.)
                         pdf_orientation /= pdf_orientation_mean;
+                    pdf_orientation *= filamentClassFactor(part_id, exp_iclass);
 
                     // Loop over all translations
                     long int ihidden = iorientclass * exp_nr_trans;
@@ -12289,6 +12428,111 @@ void MlOptimiser::reportResources(const std::vector<resrep::ProcessStats> &procs
     }
 }
 
+void MlOptimiser::parseFilamentContext()
+{
+    filctx_opt = filctx::optionsFromEnvironment();
+    std::string mode = parser.getOption("--filament_context", "Use the other segments of a filament as a prior on a segment's class: off, chain (Markov chain along the filament) or filament (one class distribution per filament). Default: RELION_FILAMENT_CONTEXT, else off", "");
+    if (!mode.empty())
+        filctx_opt.mode = filctx::modeFromString(mode, "--filament_context");
+    std::string temper = parser.getOption("--filament_temper", "Filament context: power on the segment likelihoods (<= 0: segment step / box length). Default: RELION_FILAMENT_TEMPER", "");
+    if (!temper.empty())
+        filctx_opt.temper = textToFloat(temper);
+    std::string gap = parser.getOption("--filament_gap", "Filament context: leave out segments closer than this many steps (>= 1). Default: RELION_FILAMENT_GAP, else 1", "");
+    if (!gap.empty())
+    {
+        if (textToInteger(gap) < 1)
+            REPORT_ERROR("ERROR: --filament_gap should be at least 1.");
+        filctx_opt.gap = textToInteger(gap);
+    }
+    std::string flr = parser.getOption("--filament_floor", "Filament context: fraction of the global class distribution mixed into the prior (0-1). Default: RELION_FILAMENT_FLOOR, else 0.02", "");
+    if (!flr.empty())
+    {
+        double f = textToFloat(flr);
+        if (f < 0. || f > 1.)
+            REPORT_ERROR("ERROR: --filament_floor should be between 0 and 1.");
+        filctx_opt.floor = f;
+    }
+    std::string alpha = parser.getOption("--filament_alpha", "Filament context, filament mode: weight of the global class distribution. Default: RELION_FILAMENT_ALPHA, else 1", "");
+    if (!alpha.empty())
+        filctx_opt.alpha = textToFloat(alpha);
+}
+
+void MlOptimiser::initialiseFilamentContext()
+{
+    if (filctx_opt.mode == filctx::OFF)
+        return;
+    if (mymodel.nr_classes < 2 || mymodel.nr_bodies > 1 || mydata.is_tomo)
+        REPORT_ERROR("ERROR: filament context is for 2D or 3D classification of helical segments (several classes, no multi-body or tomography).");
+
+    double step;
+    filctx_filaments = filctx::groupFilaments(mydata.MDimg, step);
+    if (filctx_filaments.empty())
+        REPORT_ERROR("ERROR: filament context needs rlnHelicalTubeID (and rlnMicrographName) in the particle STAR file.");
+    long int nr_in_filaments = 0;
+    for (const auto &f : filctx_filaments) nr_in_filaments += f.size();
+
+    const bool step_in_angstrom = mydata.MDimg.containsLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM);
+    const RFLOAT box_length = mymodel.ori_size * mymodel.pixel_size;
+    if (filctx_opt.temper > 0.)
+        filctx_temper = filctx_opt.temper;
+    else if (step > 0. && step_in_angstrom)
+        filctx_temper = std::min(1., step / box_length);
+    else
+        REPORT_ERROR("ERROR: filament context cannot work out the distance between segments (no rlnHelicalTrackLengthAngst); set --filament_temper (or RELION_FILAMENT_TEMPER).");
+
+    if (verb > 0)
+        std::cout << " Filament context: " << filctx::modeName(filctx_opt.mode) << ", " << filctx_filaments.size()
+                  << " filaments holding " << nr_in_filaments << " of " << mydata.numberOfParticles() << " segments"
+                  << ", likelihood power " << filctx_temper << ", gap " << filctx_opt.gap
+                  << ", floor " << filctx_opt.floor << std::endl;
+}
+
+void MlOptimiser::storeFilamentLoglik(long int part_id, const MultidimArray<RFLOAT> &Mdiff2, long int per_class, RFLOAT min_diff2)
+{
+    const int K = mymodel.nr_classes;
+    float *row = &filctx_loglik[(size_t)part_id * K];
+    for (int k = 0; k < K; k++)
+    {
+        RFLOAT best = LARGE_NUMBER;
+        const long int start = (long int)k * per_class;
+        for (long int i = start; i < start + per_class && i < XSIZE(Mdiff2); i++)
+        {
+            const RFLOAT d = DIRECT_A1D_ELEM(Mdiff2, i);
+            if (d != -999. && d < best) best = d;
+        }
+        // relative to the best class, so a row of zeros only ever means "not computed"
+        row[k] = (best < LARGE_NUMBER) ? (float)(min_diff2 - best) : -1e30f;
+    }
+}
+
+void MlOptimiser::updateFilamentContext()
+{
+    if (filctx_opt.mode == filctx::OFF || filctx_loglik.empty())
+        return;
+    const int K = mymodel.nr_classes;
+    std::vector<double> pi(K, 0.);
+    double s = 0.;
+    for (int k = 0; k < K; k++) s += pi[k] = std::max((RFLOAT)0., mymodel.pdf_class[k]);
+    for (int k = 0; k < K; k++) pi[k] = (s > 0.) ? pi[k] / s : 1. / K;
+
+    filctx::computePriors(filctx_filaments, filctx_loglik, K, pi, filctx_opt, filctx_temper, filctx_T, filctx_logprior);
+
+    if (verb > 0 && filctx_opt.mode == filctx::CHAIN)
+    {
+        double stay = 0.;
+        for (int k = 0; k < K; k++) stay += pi[k] * filctx_T[(size_t)k * K + k];
+        std::cout << " Filament context: probability that the next segment keeps its class = " << stay << std::endl;
+        FileName fn_t = fn_out + "_it" + integerToString(iter, 3) + "_filament_transitions.txt";
+        std::ofstream fh(fn_t.c_str());
+        for (int j = 0; j < K; j++)
+        {
+            for (int k = 0; k < K; k++)
+                fh << (k ? " " : "") << filctx_T[(size_t)j * K + k];
+            fh << "\n";
+        }
+    }
+}
+
 void MlOptimiser::enforceFilamentConsistency()
 {
     if (!do_keep_full_filaments || mymodel.nr_classes <= 1)
@@ -12895,10 +13139,26 @@ void MlOptimiser::parseKeepAllIterations()
         keep_all_iterations = false;
 }
 
+static void pruneOldIterationsNow(const FileName fn_out, int iter, bool keep_first_iteration);
+
 void MlOptimiser::pruneOldIterations(int iter)
 {
     if (keep_all_iterations || iter <= 0) return;
 
+    // With RELION_ASYNC_STAR_WRITE the files of this iteration are still queued for the background writer,
+    // so the clean-up joins the queue too and runs after them.
+    if (AsyncFileWriter::enabled() && AsyncFileWriter::starMode() > 0)
+    {
+        const FileName fo = fn_out;
+        const bool keep_first = keep_first_iteration;
+        AsyncFileWriter::instance().submit([fo, iter, keep_first] { pruneOldIterationsNow(fo, iter, keep_first); });
+        return;
+    }
+    pruneOldIterationsNow(fn_out, iter, keep_first_iteration);
+}
+
+static void pruneOldIterationsNow(const FileName fn_out, int iter, bool keep_first_iteration)
+{
     // Only once this iteration really is on disk (gradient runs write only
     // every few iterations, and write() returns early in between)
     FileName fn_now;

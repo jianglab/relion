@@ -2,6 +2,7 @@
 #define ACC_ML_OPTIMISER_H_
 
 #include "src/acc/acc_ptr.h"
+#include "src/acc/host_block_cache.h"
 
 #ifdef ALTCPU
 #include <tbb/spin_mutex.h>
@@ -369,6 +370,47 @@ public:
 	}
 #endif
 
+#ifndef _SYCL_ENABLED
+	// The host arrays of the fine pass come from the per-thread cache (host_block_cache.h)
+	hostcache::Block hostBlocks[5] = {{NULL, 0}, {NULL, 0}, {NULL, 0}, {NULL, 0}, {NULL, 0}};
+
+	template <class T>
+	void cachedHostAlloc(AccPtr<T> &a, int slot)
+	{
+		a.freeHostIfSet();
+		releaseHostBlock(a, slot);
+		const size_t bytes = a.getSize() * sizeof(T);
+		if (!hostcache::enabled() || bytes < ((size_t) 1 << 20))
+		{
+			a.hostAlloc();
+			return;
+		}
+		hostBlocks[slot] = hostcache::acquire(bytes, MEM_ALIGN);
+		if (hostBlocks[slot].ptr == NULL)
+			CRITICAL(RAMERR);
+		a.setHostPtr((T *) hostBlocks[slot].ptr);
+	}
+
+	template <class T>
+	void releaseHostBlock(AccPtr<T> &a, int slot)
+	{
+		if (hostBlocks[slot].ptr != NULL)
+		{
+			a.setHostPtr((T *) NULL);
+			hostcache::release(hostBlocks[slot]);
+			hostBlocks[slot].ptr = NULL;
+		}
+	}
+
+	void host_alloc_all()
+	{
+		cachedHostAlloc(weights, 0);
+		cachedHostAlloc(rot_id, 1);
+		cachedHostAlloc(rot_idx, 2);
+		cachedHostAlloc(trans_idx, 3);
+		cachedHostAlloc(ihidden_overs, 4);
+	}
+#else
 	void host_alloc_all()
 	{
 		weights.freeHostIfSet();
@@ -382,6 +424,7 @@ public:
 		ihidden_overs.freeHostIfSet();
 		ihidden_overs.hostAlloc();
 	}
+#endif
 
 	void device_alloc_all()
 	{
@@ -415,6 +458,13 @@ public:
 		rot_idx.freeHostIfSet();
 		trans_idx.freeHostIfSet();
 		ihidden_overs.freeHostIfSet();
+#ifndef _SYCL_ENABLED
+		releaseHostBlock(weights, 0);
+		releaseHostBlock(rot_id, 1);
+		releaseHostBlock(rot_idx, 2);
+		releaseHostBlock(trans_idx, 3);
+		releaseHostBlock(ihidden_overs, 4);
+#endif
 	}
 	
 	~IndexedDataArray()

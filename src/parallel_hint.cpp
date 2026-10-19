@@ -14,13 +14,75 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <map>
 #include <set>
 #include <sstream>
+#include <string>
 #include <thread>
 
 namespace parhint
 {
+
+int autoThreads(int cores, int sharing, int gpus, int per_gpu_cap, double free_gpu_bytes, long particles_per_worker)
+{
+	const int share = std::max(1, sharing);
+	int n = std::max(1, cores) / share;
+	if (gpus > 0 && per_gpu_cap > 0)
+	{
+		// GPUs this process feeds: the GPUs of the node divided among its sharing workers
+		const int gpus_each = std::max(1, (gpus + share - 1) / share);
+		n = std::min(n, per_gpu_cap * gpus_each);
+	}
+	if (gpus > 0 && free_gpu_bytes > 0)
+	{
+		const double per_worker = free_gpu_bytes * GPU_FREE_FRACTION_FOR_THREADS / (GPU_BYTES_PER_THREAD * share);
+		n = std::min<double>(n, std::max(1.0, per_worker));
+	}
+	if (particles_per_worker > 0)
+		n = std::min<long>(n, std::max<long>(1, particles_per_worker / MIN_PARTICLES_PER_THREAD));
+	return std::max(1, n);
+}
+
+long countParticlesInStar(const std::string &fn)
+{
+	std::ifstream in(fn);
+	if (!in) return 0;
+	std::string line;
+	bool in_block = false, in_rows = false;
+	long n = 0;
+	while (std::getline(in, line))
+	{
+		if (line.compare(0, 5, "data_") == 0)
+		{
+			if (in_block && in_rows) break;
+			in_block = (line.compare(0, 14, "data_particles") == 0 || line == "data_" || line.compare(0, 6, "data_ ") == 0);
+			in_rows = false;
+		}
+		else if (!in_block) continue;
+		else if (line.compare(0, 5, "loop_") == 0) in_rows = false;
+		else if (!line.empty() && line[0] == '_') in_rows = true;
+		else if (in_rows)
+		{
+			const size_t f = line.find_first_not_of(" \t\r");
+			if (f == std::string::npos) break;           // blank line ends the table
+			if (line[f] != '#') n++;
+		}
+	}
+	return n;
+}
+
+int autoThreadsCapFromEnv()
+{
+	const char *e = getenv("RELION_AUTO_THREADS_CAP");
+	if (e == nullptr || *e == 0) return THREADS_PER_GPU_CAP;
+	const std::string v(e);
+	if (v == "off" || v == "0") return 0;
+	char *end = nullptr;
+	const long n = strtol(e, &end, 10);
+	return (end != e && *end == 0 && n > 0) ? (int)n : THREADS_PER_GPU_CAP;
+}
+
 
 namespace
 {

@@ -3,6 +3,7 @@
 
 #include "src/acc/acc_ml_optimiser.h"
 #include "src/acc/orientation_cache.h"
+#include "src/gpu_switch.h"
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -311,26 +312,20 @@ inline bool gpuShiftTable()
 	return on;
 }
 
-// RELION_GPU_WAVG_SUM=1: the class-batched weighted averages of 2D data from the weights' sum and
-// the weighted sum of the shifted images (see cuda_kernel_wavg_sum); float noise, off by default
+// RELION_GPU_WAVG_SUM: the class-batched weighted averages of 2D data from the weights' sum and
+// the weighted sum of the shifted images (see cuda_kernel_wavg_sum); float noise, on by default
 inline bool gpuWavgSum()
 {
-	static const bool on = []() {
-		const char *e = getenv("RELION_GPU_WAVG_SUM");
-		return e && std::string(e) != "0" && std::string(e) != "off";
-	}();
+	static const bool on = gpuswitch::on("RELION_GPU_WAVG_SUM");
 	return on;
 }
 
-// RELION_GPU_FUSED_WEIGHTS=1: the significance pass of the weights (maximum, exponentiation, sort,
+// RELION_GPU_FUSED_WEIGHTS: the significance pass of the weights (maximum, exponentiation, sort,
 // scan, threshold, significance mask) as a few launches and one copy instead of about fifty driver
-// calls per pass (see CudaKernels::fusedWeightPass); off by default while it is validated
+// calls per pass (see CudaKernels::fusedWeightPass); on by default, RELION_GPU_FUSED_WEIGHTS=0 turns it off
 inline bool gpuFusedWeights()
 {
-	static const bool on = []() {
-		const char *e = getenv("RELION_GPU_FUSED_WEIGHTS");
-		return e && std::string(e) != "0" && std::string(e) != "off";
-	}();
+	static const bool on = gpuswitch::on("RELION_GPU_FUSED_WEIGHTS");
 	return on;
 }
 
@@ -367,6 +362,8 @@ inline int gpuSharedSums()
 //
 // With `defer` nothing is launched: the objects the launch needs stay in `defer` (they must live until the
 // group's launch has finished) and runDiff2KernelCoarseGroup launches for several particles together.
+struct CoarseCacheCtx;
+
 struct CoarseDeferred
 {
 	std::unique_ptr<AccPtr<XFLOAT> > partial;
@@ -396,7 +393,8 @@ bool runDiff2KernelCoarseBatched(
 		unsigned long image_size,
 		bool data_is_3D,
 		AccPtr<char> &table,
-		CoarseDeferred *defer = NULL);
+		CoarseDeferred *defer = NULL,
+		CoarseCacheCtx *cc = NULL);
 
 // The deferred coarse launches of several particles together; `recs` holds the uploaded records
 bool runDiff2KernelCoarseGroup(std::vector<CoarseDeferred *> &items, AccPtr<char> &recs);

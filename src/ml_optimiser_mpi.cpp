@@ -18,8 +18,10 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/ml_optimiser_mpi.h"
+#include "src/parallel_hint.h"
 #include <chrono>
 #include "src/gpu_reconstruct.h"
+#include "src/gpu_switch.h"
 #include "src/mps_auto.h"
 #include "src/ml_optimiser.h"
 #ifdef _CUDA_ENABLED
@@ -152,12 +154,57 @@ void MlOptimiserMpi::resolveAutoThreads()
 	for (int i = 0; i < nlocal; i++)
 		if (ranks[i] != 0 && CPU_EQUAL(&sets[i], &mine))
 			sharing++;
-	int my_threads = node->isLeader() ? std::numeric_limits<int>::max() : std::max(1, cores / std::max(1, sharing));
+	// GPUs this node offers and their free memory (a GPU job only), and the particles per worker
+	// (when the input file is known now): see parhint::autoThreads for the limits
+	int gpus = 0;
+	double free_gpu_bytes = 0;
+#if defined _CUDA_ENABLED || defined _HIP_ENABLED
+	if (do_gpu && !node->isLeader() && accGPUGetDeviceCount(&gpus) == 0 && gpus > 0)
+	{
+		for (int d = 0; d < gpus; d++)
+		{
+			size_t f = 0, t = 0;
+			if (accGPUSetDevice(d) == 0 && accGPUMemGetInfo(&f, &t) == 0)
+				free_gpu_bytes += (double)f;
+		}
+		accGPUSetDevice(0);
+	}
+	else
+		gpus = 0;
+#endif
+	long nr_particles = 0;
+	if (node->isLeader() && fn_data != "")
+		nr_particles = parhint::countParticlesInStar(fn_data);
+	MPI_Bcast(&nr_particles, 1, MPI_LONG, 0, MPI_COMM_WORLD);
+	const long per_worker = nr_particles / std::max(1, node->size - 1);
+	const int cap = parhint::autoThreadsCapFromEnv();
+	const bool limits_on = (cap > 0);       // RELION_AUTO_THREADS_CAP=off: cores only
+	const int by_cores = parhint::autoThreads(cores, sharing, 0);
+	const int by_cap = parhint::autoThreads(cores, sharing, gpus, cap);
+	const int mine_n = limits_on ? parhint::autoThreads(cores, sharing, gpus, cap, free_gpu_bytes, per_worker) : by_cores;
+	int my_threads = node->isLeader() ? std::numeric_limits<int>::max() : mine_n;
+	int my_cores = node->isLeader() ? std::numeric_limits<int>::max() : by_cores;
+	int my_cap = node->isLeader() ? std::numeric_limits<int>::max() : by_cap;
 	MPI_Allreduce(MPI_IN_PLACE, &my_threads, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+	MPI_Allreduce(MPI_IN_PLACE, &my_cores, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+	MPI_Allreduce(MPI_IN_PLACE, &my_cap, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+	double min_free_mb = node->isLeader() ? 1e30 : free_gpu_bytes / 1e6;
+	MPI_Allreduce(MPI_IN_PLACE, &min_free_mb, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
 	nr_threads = (my_threads == std::numeric_limits<int>::max()) ? cores : my_threads;
 
 	auto_threads_note = " Using " + integerToString(nr_threads) + " threads per process: --j was not given, and that is the number of CPU cores"
-	                    " each worker process may use (the fewest of any worker).";
+	                    " each worker process may use (the fewest of any worker)";
+	if (my_threads < my_cores)
+	{
+		if (my_cap < my_cores)
+			auto_threads_note += ", limited to " + integerToString(cap) + " per GPU because more threads do not speed up GPU jobs";
+		if (my_threads < my_cap)
+			auto_threads_note += (my_cap < my_cores ? ", and further" : ", limited") + std::string(" by the free GPU memory (") +
+			                     integerToString((int)std::min(min_free_mb, 1e9)) + " MB seen by one worker) or the number of particles ("
+			                     + integerToString((int)nr_particles) + ")";
+		auto_threads_note += " (RELION_AUTO_THREADS_CAP=off removes the limits)";
+	}
+	auto_threads_note += ".";
 }
 
 void MlOptimiserMpi::initialise()
@@ -1513,7 +1560,10 @@ void MlOptimiserMpi::expectation()
 	if (do_gpu && ! node->isLeader())
 	{
 		for (int i = 0; i < accDataBundles.size(); i ++)
+		{
+			((MlDeviceBundle*)accDataBundles[i])->rank_shared_count = gpuDeviceShares[i];
 			((MlDeviceBundle*)accDataBundles[i])->setupTunableSizedObjects(allocationSizes[i]);
+		}
 	}
 #endif // _CUDA_ENABLED or _HIP_ENABLED
 #ifdef _SYCL_ENABLED
@@ -2003,6 +2053,10 @@ void MlOptimiserMpi::expectation()
 #endif
 					MlDeviceBundle* b = ((MlDeviceBundle*)accDataBundles[i]);
 					b->syncAllBackprojects();
+#ifdef _CUDA_ENABLED
+					// Spread the per-orientation back-projection sums into the volumes before they are read back
+					b->flushBackprojectAccumulator();
+#endif
 
 					for (int j = 0; j < b->projectors.size(); j++)
 						b->projectors[j].clear();
@@ -2192,6 +2246,18 @@ void MlOptimiserMpi::expectation()
 	if (verb > 0)
 	{
 		progress_bar(my_nr_particles);
+	}
+
+	// Filament context: every rank needs all segments' per-class scores (each segment was
+	// scored by one follower, the other rows are zero), then each works out the priors
+	if (filctx_opt.mode != filctx::OFF)
+	{
+		if (filctx_loglik.empty()) // the leader does not score particles
+			filctx_loglik.assign((size_t)mydata.numberOfParticles() * mymodel.nr_classes, 0.f);
+		const long int n = (long int)filctx_loglik.size(), chunk = 1L << 26;
+		for (long int off = 0; off < n; off += chunk)
+			MPI_Allreduce(MPI_IN_PLACE, &filctx_loglik[off], (int)std::min(chunk, n - off), MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+		updateFilamentContext();
 	}
 
 	// If requested, enforce that all segments from the same filament have the same class
@@ -2636,9 +2702,8 @@ void MlOptimiserMpi::combineWeightedSumsTwoRandomHalves()
 
 	// With two followers, rank 2 only reads back its own unregularised half when auto-refine has
 	// converged, which overwrites BPref, so the summed BPref need not be sent back to it (and
-	// rank 1 keeps its sum as it is). RELION_JOIN_SKIP_BPREF=1 turns this on.
-	const char *jsb = getenv("RELION_JOIN_SKIP_BPREF");
-	const bool skip_bpref = jsb && atoi(jsb) != 0 && node->size == 3 && do_auto_refine && has_converged &&
+	// rank 1 keeps its sum as it is). On unless RELION_JOIN_SKIP_BPREF=0.
+	const bool skip_bpref = gpuswitch::on("RELION_JOIN_SKIP_BPREF") && node->size == 3 && do_auto_refine && has_converged &&
 			do_join_random_halves && !do_grad && !do_external_reconstruct && !do_blush && mymodel.nr_bodies == 1;
 	if (!node->isLeader())
 		wsum_model.pack_skip_bpref = skip_bpref;
@@ -3589,6 +3654,77 @@ void MlOptimiserMpi::joinTwoHalvesAtLowResolution()
 #endif
 }
 
+void MlOptimiserMpi::alignClassesMpi()
+{
+	// Same scope as MlOptimiser::alignClasses(): 3D classes of an ordinary run
+	if (mymodel.nr_bodies > 1 || do_split_random_halves || mymodel.nr_classes <= 1 || mymodel.ref_dim != 3)
+		return;
+
+	const int nr_freedom = classAlignmentFreedom();
+	if (nr_freedom == 0)
+		return;
+
+	// Every rank holds every class map here (the references are broadcast after the
+	// reconstruction), but only the followers keep an up-to-date pdf_class: the leader
+	// never runs maximizationOtherParameters. So rank 1 picks the largest class and tells all.
+	int iclass_ref = 0;
+	if (node->rank == 1)
+	{
+		RFLOAT max_pdf = mymodel.pdf_class[0];
+		for (int iclass = 1; iclass < mymodel.nr_classes; iclass++)
+			if (mymodel.pdf_class[iclass] > max_pdf)
+			{
+				max_pdf = mymodel.pdf_class[iclass];
+				iclass_ref = iclass;
+			}
+	}
+	node->relion_MPI_Bcast(&iclass_ref, 1, MPI_INT, 1, MPI_COMM_WORLD);
+
+	if (verb > 0)
+		std::cout << " Aligning " << mymodel.nr_classes << " classes to class " << iclass_ref + 1
+				<< " (largest) with " << ((nr_freedom == 2) ? "2" : "6") << " DOF ..." << std::endl;
+
+	const RFLOAT maxres = mymodel.current_resolution;
+	const int nr_followers = node->size - 1;
+
+	// Class i is searched by the follower that reconstructed it; all ranks then get the
+	// parameters and apply them to their own copy of the map, so the maps stay identical.
+	for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+	{
+		if (iclass == iclass_ref) continue;
+		// pdf_class is only trustworthy on followers; a class without particles is left alone
+		int skip = 0;
+		if (node->rank == 1 && do_fix_classes && mymodel.pdf_class[iclass] == 0.)
+			skip = 1;
+		node->relion_MPI_Bcast(&skip, 1, MPI_INT, 1, MPI_COMM_WORLD);
+		if (skip) continue;
+
+		const int owner = (iclass % nr_followers) + 1;
+		RFLOAT params[6] = {0., 0., 0., 0., 0., 0.};
+		if (node->rank == owner)
+		{
+			alignCuboidMapToMap(mymodel.Iref[iclass], mymodel.Iref[iclass_ref], nr_freedom,
+					mymodel.pixel_size, maxres, 3, 1., 1.,
+					params[0], params[1], params[2], params[3], params[4], params[5],
+					nr_threads, false);
+		}
+		node->relion_MPI_Bcast(params, 6, MY_MPI_DOUBLE, owner, MPI_COMM_WORLD);
+
+		if (verb > 0)
+			std::cout << "  Class " << iclass + 1 << " to class " << iclass_ref + 1
+					<< ": rot=" << params[0] << " tilt=" << params[1] << " psi=" << params[2]
+					<< " dx=" << params[3] << " dy=" << params[4] << " dz=" << params[5] << std::endl;
+
+		applyMapTransformation(mymodel.Iref[iclass], params[0], params[1], params[2],
+				params[3], params[4], params[5], mymodel.pixel_size);
+
+		// The leader's metadata is the authoritative copy that is written to the data star file
+		if (node->isLeader())
+			applyClassAlignmentToParticles(iclass, nr_freedom, params[0], params[1], params[2],
+					params[3], params[4], params[5]);
+	}
+}
+
 void MlOptimiserMpi::alignHalves()
 {
 	if (!do_split_random_halves || mymodel.nr_classes > 1)
@@ -3688,7 +3824,8 @@ void MlOptimiserMpi::alignHalves()
 					best_dx, best_dy, best_dz,
 					nr_threads, false);
 
-			if (verb > 0)
+			// rank 1 is a follower, whose verb is 0: the line is only reachable through RELION_ALIGN_TIMING
+			if (verb > 0 || align_timing)
 				std::cout << " Aligning half2 to half1: rot=" << best_rot
 					<< " tilt=" << best_tilt << " psi=" << best_psi
 					<< " dx=" << best_dx << " dy=" << best_dy << " dz=" << best_dz
@@ -3706,8 +3843,6 @@ void MlOptimiserMpi::alignHalves()
 		best_rot = params[0]; best_tilt = params[1]; best_psi = params[2];
 		best_dx  = params[3]; best_dy  = params[4]; best_dz  = params[5];
 
-		bool has_z = (mymodel.data_dim == 3 || mydata.is_tomo);
-
 		// Adjust the leader's authoritative metadata for half2. Followers receive
 		// these updated values when expectation distributes the next set of jobs.
 		if (node->isLeader())
@@ -3721,29 +3856,8 @@ void MlOptimiserMpi::alignHalves()
 			{
 				long int part_id = mydata.sorted_idx[part_id_sorted];
 
-				RFLOAT rot, tilt, psi, dx, dy, dz;
-				mydata.MDimg.getValue(EMDL_ORIENT_ROT, rot, part_id);
-				mydata.MDimg.getValue(EMDL_ORIENT_TILT, tilt, part_id);
-				mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi, part_id);
-				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
-				mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
-				dz = 0;
-				if (has_z)
-					mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
-
-				applyInverseOrientationAdjustment(
-						nr_freedom,
-						best_rot, best_tilt, best_psi,
-						best_dx, best_dy, best_dz,
-						rot, tilt, psi, dx, dy, dz);
-
-				mydata.MDimg.setValue(EMDL_ORIENT_ROT, rot, part_id);
-				mydata.MDimg.setValue(EMDL_ORIENT_TILT, tilt, part_id);
-				mydata.MDimg.setValue(EMDL_ORIENT_PSI, psi, part_id);
-				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, dx, part_id);
-				mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, dy, part_id);
-				if (has_z)
-					mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
+				applyMapAlignmentToParticle(part_id, nr_freedom,
+						best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz);
 			}
 		}
 	}
@@ -4587,15 +4701,7 @@ void MlOptimiserMpi::iterate()
 			                    !grad_has_converged;
 		}
 
-		if (maximum_significants_arg != -1)
-			maximum_significants = maximum_significants_arg;
-		else if (do_grad)
-		{
-			if (mymodel.ref_dim == 2)
-				maximum_significants = 5 * mymodel.nr_classes;
-			else
-				maximum_significants = 100 * mymodel.nr_classes;
-		}
+		selectMaximumSignificants(node->isLeader());
 
 		// Update subset_size
 		updateSubsetSize(node->isLeader());
@@ -4853,6 +4959,10 @@ void MlOptimiserMpi::iterate()
 		// Skip center classes in the final stages of gradient refinement
 		if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
 			centerClasses();
+
+		// Align all classes to the largest class at the last iteration
+		if (do_align_classes && mymodel.nr_classes > 1 && iter == nr_iter)
+			alignClassesMpi();
 
 		// Directly use fn_out, without "_it" specifier, so unmasked refs will be overwritten at every iteration
 		if (do_write_unmasked_refs && node->rank == 1)

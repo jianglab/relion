@@ -962,6 +962,31 @@ void run_padTranslatedMap(
 #endif
 }
 
+#ifdef _CUDA_ENABLED
+void run_padTranslatedMapPitched(
+		RFLOAT *d_in, RFLOAT *d_out,
+		size_t isX, size_t ieX, size_t isY, size_t ieY, size_t isZ, size_t ieZ, //Input dimensions
+		size_t osX, size_t oeX, size_t osY, size_t oeY, size_t osZ, size_t oeZ,  //Output dimensions
+		size_t outPitchX,
+		deviceStream_t stream)
+{
+	size_t iszX = ieX - isX + 1;
+	size_t iszY = ieY - isY + 1;
+	size_t iszZ = ieZ - isZ + 1;
+	size_t oszX = oeX - osX + 1;
+	size_t oszY = oeY - osY + 1;
+	size_t oszZ = oeZ - osZ + 1;
+	dim3 block_dim(16,4,2);
+	dim3 grid_dim(ceil(outPitchX / (float) block_dim.x), ceil(oszY / (float) block_dim.y), ceil(oszZ / (float) block_dim.z));
+	cuda_kernel_window_transform_pitched<RFLOAT><<< grid_dim, block_dim, 0, stream >>>(
+			d_in, d_out,
+			iszX, iszY, iszZ,
+			isX-osX, isY-osY, isZ-osZ, oszX, oszY, oszZ, outPitchX
+			);
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+}
+#endif
+
 void run_CenterFFTbySign(Complex *img_in, int xSize, int ySize, int zSize, deviceStream_t stream)
 {
 #ifdef _CUDA_ENABLED

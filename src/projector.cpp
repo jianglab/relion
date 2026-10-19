@@ -32,6 +32,8 @@
 #include <src/jaz/image/buffered_image.h>
 #ifdef _CUDA_ENABLED
 	#include <cufft.h>
+	#include "src/acc/cuda/gpu_mem_trace.h"
+	#include "src/acc/gpu_pool_plan.h"
 #elif _HIP_ENABLED
 	#include <hipfft/hipfft.h>
 #endif
@@ -316,15 +318,44 @@ void Projector::computeFourierTransformMap(
 		Faux_sz *= padoridim;
 
 	mem_req =  (size_t)1024;
+	// RELION_GPU_LEAN_MEMORY: plan the transform first, which tells the work area it really needs (the
+	// estimate below is an upper bound), and take only what the buffers add up to. The plan, and so
+	// the result, is the same; the block is about a third smaller than the one of the default way.
+	cufftHandle lean_plan = 0;
+	bool have_lean_plan = false;
+	bool inplace_ft = false;
+	if(do_heavy && do_gpu && gpupool::leanMemoryMode() > 0)
+	{
+		if (cufftCreate(&lean_plan) == CUFFT_SUCCESS)
+		{
+			cufftSetAutoAllocation(lean_plan, 0);
+			if (cufftMakePlanMany(lean_plan, ref_dim, n, NULL, 0, 0, NULL, 0, 0, cufft_type, 1, &ws_sz) == CUFFT_SUCCESS)
+				have_lean_plan = true;
+			else
+				cufftDestroy(lean_plan);
+		}
+		cudaGetLastError();
+	}
 	if(do_heavy && do_gpu)
 	{
-	    cufftEstimateMany(ref_dim, n, NULL, 0, 0, NULL, 0, 0, cufft_type, 1, &ws_sz);
+		if (!have_lean_plan)
+			cufftEstimateMany(ref_dim, n, NULL, 0, 0, NULL, 0, 0, cufft_type, 1, &ws_sz);
 
+		// In-place transform (lean mode, 3D): the padded map is written with rows of 2*(N/2+1) numbers and
+		// the transform replaces it by its N*N*(N/2+1) complex numbers in the same memory, so the output
+		// array (as big as the input) is not needed. cuFFT gives the same numbers in place.
+		const char *inpl_env = getenv("RELION_GPU_LEAN_INPLACE_TRANSFORM");
+		inplace_ft = have_lean_plan && ref_dim == 3 && !(inpl_env && atoi(inpl_env) == 0);
+		const size_t Mpad_sz = inplace_ft ? (size_t)padoridim*(size_t)padoridim*(size_t)(2*(padoridim/2+1))
+		                                  : (size_t)MULTIDIM_SIZE(Mpad);
 		mem_req = (size_t)sizeof(RFLOAT)*MULTIDIM_SIZE(vol_in) +                   // dvol
-				  (size_t)sizeof(Complex)*Faux_sz +                                // dFaux
-				  (size_t)sizeof(RFLOAT)*MULTIDIM_SIZE(Mpad) +                     // dMpad
+				  (inplace_ft ? (size_t)0 : (size_t)sizeof(Complex)*Faux_sz) +     // dFaux
+				  (size_t)sizeof(RFLOAT)*Mpad_sz +                                 // dMpad
 				  ws_sz + 4096;                                                    // workspace for cuFFT + extra space for alingment
-        mem_req = mem_req * 1.5;           
+		if (have_lean_plan)
+			mem_req = gpupool::transformPoolBytes(mem_req);
+		else
+			mem_req = mem_req * 1.5;
 	}
 
 	CudaCustomAllocator *allocator = NULL;
@@ -343,10 +374,16 @@ void Projector::computeFourierTransformMap(
 			REPORT_ERROR("semop lock error");
 
 		HANDLE_ERROR(cudaMemGetInfo(&mem_free, &mem_tot));
+		gpuMemTrace("reference transform: before its buffers", (double) mem_req);
 		if(mem_free > mem_req)
+		{
 			allocator = new CudaCustomAllocator(mem_req, (size_t)16);
+			gpuMemTrace("reference transform: block taken", (double) mem_req);
+		}
 		else
 		{
+			if (have_lean_plan)
+				cufftDestroy(lean_plan);
 			// Say so once: the transform then runs on the CPU, much slower for large boxes
 			static bool reported = false;
 			if (!reported)
@@ -362,7 +399,7 @@ void Projector::computeFourierTransformMap(
 		}
 	}
 	AccPtrFactory ptrFactory(allocator);
-	AccPtr<RFLOAT> dMpad = ptrFactory.make<RFLOAT>(MULTIDIM_SIZE(Mpad));
+	AccPtr<RFLOAT> dMpad = ptrFactory.make<RFLOAT>(inplace_ft ? (size_t)padoridim*(size_t)padoridim*(size_t)(2*(padoridim/2+1)) : (size_t)MULTIDIM_SIZE(Mpad));
 	AccPtr<Complex> dFaux = ptrFactory.make<Complex>(Faux_sz);
 	AccPtr<RFLOAT> dvol = ptrFactory.make<RFLOAT>(MULTIDIM_SIZE(vol_in));
 	if(do_heavy && do_gpu)
@@ -481,6 +518,14 @@ void Projector::computeFourierTransformMap(
 		if(do_gpu)
 		{
 			dMpad.accAlloc();
+#ifdef _CUDA_ENABLED
+			if (inplace_ft)
+				run_padTranslatedMapPitched(~dvol, ~dMpad,
+					STARTINGX(vol_in),FINISHINGX(vol_in),STARTINGY(vol_in),FINISHINGY(vol_in),STARTINGZ(vol_in),FINISHINGZ(vol_in),
+					STARTINGX(Mpad),  FINISHINGX(Mpad),  STARTINGY(Mpad),  FINISHINGY(Mpad),  STARTINGZ(Mpad),  FINISHINGZ(Mpad),
+					(size_t)(2*(padoridim/2+1)));
+			else
+#endif
 			run_padTranslatedMap(~dvol, ~dMpad,
 				STARTINGX(vol_in),FINISHINGX(vol_in),STARTINGY(vol_in),FINISHINGY(vol_in),STARTINGZ(vol_in),FINISHINGZ(vol_in),   //Input dimensions
 				STARTINGX(Mpad),  FINISHINGX(Mpad),  STARTINGY(Mpad),  FINISHINGY(Mpad),  STARTINGZ(Mpad),  FINISHINGZ(Mpad)      //Output dimensions
@@ -515,21 +560,35 @@ void Projector::computeFourierTransformMap(
 #ifdef _CUDA_ENABLED
 		if(do_gpu)
 		{
-			dFaux.accAlloc();
+			if (inplace_ft)
+				dFaux.setDevicePtr((Complex*)~dMpad); // the transform of dMpad lands in its own memory
+			else
+				dFaux.accAlloc();
 			cufftResult err;
 			cufftHandle plan;
 
-			err = cufftCreate(&plan);
-			if(err != CUFFT_SUCCESS)
-				REPORT_ERROR("failed to create cufft plan");
-			cufftSetAutoAllocation(plan, 0); // do not allocate work area
-			//Allocate space with smart allocator
-			AccPtr<char> fft_ws = ptrFactory.make<char>(ws_sz);
-			fft_ws.accAlloc();
-			cufftSetWorkArea(plan, ~fft_ws);
-			err = cufftMakePlanMany(plan, ref_dim, n, NULL, 0, 0, NULL, 0, 0, cufft_type, 1, &ws_sz);
-			if(err != CUFFT_SUCCESS)
-				REPORT_ERROR("failed to create cufft plan");
+			// Work area from the pool, the plan made before when the lean way is on
+			AccPtr<char> fft_ws = ptrFactory.make<char>(std::max(ws_sz, (size_t) 1));
+			if (have_lean_plan)
+			{
+				plan = lean_plan;
+				fft_ws.accAlloc();
+				cufftSetWorkArea(plan, ~fft_ws);
+			}
+			else
+			{
+				err = cufftCreate(&plan);
+				if(err != CUFFT_SUCCESS)
+					REPORT_ERROR("failed to create cufft plan");
+				cufftSetAutoAllocation(plan, 0); // do not allocate work area
+				//Allocate space with smart allocator
+				fft_ws.accAlloc();
+				cufftSetWorkArea(plan, ~fft_ws);
+				err = cufftMakePlanMany(plan, ref_dim, n, NULL, 0, 0, NULL, 0, 0, cufft_type, 1, &ws_sz);
+				if(err != CUFFT_SUCCESS)
+					REPORT_ERROR("failed to create cufft plan");
+			}
+			gpuMemTrace("reference transform: buffers and work area in place", (double) ws_sz);
 
 			// do inverse FFT (dMpad->dFaux)
 			if(sizeof(RFLOAT) == sizeof(double))
@@ -612,7 +671,8 @@ void Projector::computeFourierTransformMap(
 	TIMING_TIC(TIMING_INIT2);
 	// Free memory: Mpad no longer needed
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
-	dMpad.freeIfSet();
+	if (!inplace_ft) // in place, dMpad is dFaux
+		dMpad.freeIfSet();
 #endif
 	Mpad.clear();
 
@@ -795,6 +855,9 @@ void Projector::computeFourierTransformMap(
 	if(allocator != NULL)
 	{
 		delete allocator;
+#ifdef _CUDA_ENABLED
+		gpuMemTrace("reference transform: block given back");
+#endif
 		if (semop(semid, &op_unlock[0], 1) < 0)
 			REPORT_ERROR("semop unlock error");
 	}

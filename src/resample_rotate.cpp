@@ -168,7 +168,11 @@ void resampleRotatedRectangle(const MultidimArray<RFLOAT> &src, MultidimArray<RF
 		opts.modeord = 0;
 		opts.nthreads = 1;
 		int64_t n_modes[3] = {Nx, Ny, 1};
-		int ier = FINUFFT_MAKEPLAN(2, 2, n_modes, +1, 1, 1e-12, &guard.plan, &opts);
+		int ier;
+		#pragma omp critical(FourierTransformer_fftw_plan)
+		{
+			ier = FINUFFT_MAKEPLAN(2, 2, n_modes, +1, 1, 1e-12, &guard.plan, &opts);
+		}
 		if (ier > 1) handleFinufftError(ier, "finufft_makeplan type2 (resample)");
 		ier = FINUFFT_SETPTS(guard.plan, (int64_t)index.size(), tx.data(), ty.data(), NULL, 0, NULL, NULL, NULL);
 		if (ier > 1) handleFinufftError(ier, "finufft_setpts type2 (resample)");

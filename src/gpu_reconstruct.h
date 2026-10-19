@@ -64,6 +64,10 @@ struct SkipGriddingInput
 bool reconstructSkipGridding(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason,
                              bool &warned_zero_weight);
 
+/// Whether the GPU memory kept for the next expectation step stays in the card during the reconstruction
+/// (default; RELION_GPU_KEEP_POOL=0 frees it first). False in a build without CUDA.
+bool keepPoolActive();
+
 /// Whether RELION_GPU_RECONSTRUCT asks for it: 1 (precision of the GPU code), single or double
 bool requested();
 /// Whether it asks for double precision (RELION_GPU_RECONSTRUCT=double, or a DoublePrec_ACC build)

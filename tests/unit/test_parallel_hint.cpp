@@ -9,7 +9,9 @@
 #include "src/parallel_hint.h"
 #include "src/pipeline_jobs.h"
 
+#include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <map>
 #include <string>
 
@@ -219,4 +221,88 @@ TEST_CASE("parallel hint: a job that chooses MPI processes and threads itself", 
 	CHECK(s.mpi == 1);
 	CHECK(s.threads == 8);
 	unsetenv("RELION_CPUS_PER_GPU");
+}
+
+TEST_CASE("auto threads: cores per worker, capped per GPU", "[parhint]")
+{
+	using parhint::autoThreads;
+	SECTION("CPU-only job: all cores of the worker, never the cap")
+	{
+		CHECK(autoThreads(64, 1, 0) == 64);
+		CHECK(autoThreads(64, 2, 0) == 32);
+	}
+	SECTION("GPU job: capped at 8 per GPU the process feeds")
+	{
+		CHECK(autoThreads(64, 2, 1) == 8);     // two workers, one GPU
+		CHECK(autoThreads(64, 1, 1) == 8);
+		CHECK(autoThreads(64, 2, 2) == 8);     // one GPU each
+		CHECK(autoThreads(64, 1, 4) == 32);    // one process, four GPUs
+		CHECK(autoThreads(64, 2, 3) == 16);    // 3 GPUs shared by 2 workers: up to 2 each
+	}
+	SECTION("the cores a job may use come first: an 8-CPU Slurm job with 2 workers gets 4")
+	{
+		CHECK(autoThreads(8, 2, 1) == 4);
+		CHECK(autoThreads(1, 2, 1) == 1);
+		CHECK(autoThreads(3, 4, 1) == 1);   // never below 1
+	}
+	SECTION("cap 0 switches the cap off, another number replaces it")
+	{
+		CHECK(autoThreads(64, 2, 1, 0) == 32);
+		CHECK(autoThreads(64, 2, 1, 6) == 6);
+	}
+	SECTION("RELION_AUTO_THREADS_CAP")
+	{
+		unsetenv("RELION_AUTO_THREADS_CAP");
+		CHECK(parhint::autoThreadsCapFromEnv() == parhint::THREADS_PER_GPU_CAP);
+		setenv("RELION_AUTO_THREADS_CAP", "off", 1);
+		CHECK(parhint::autoThreadsCapFromEnv() == 0);
+		setenv("RELION_AUTO_THREADS_CAP", "5", 1);
+		CHECK(parhint::autoThreadsCapFromEnv() == 5);
+		setenv("RELION_AUTO_THREADS_CAP", "junk", 1);
+		CHECK(parhint::autoThreadsCapFromEnv() == parhint::THREADS_PER_GPU_CAP);
+		unsetenv("RELION_AUTO_THREADS_CAP");
+	}
+}
+
+TEST_CASE("auto threads: GPU memory and work size limits", "[parhint]")
+{
+	using parhint::autoThreads;
+	const double GB = 1e9;
+	SECTION("GPU memory: 8 GB card, 2 workers: 4 threads each (8 per worker ran out of memory)")
+	{
+		CHECK(autoThreads(16, 2, 1, 8, 7.0 * GB) == 4);
+		CHECK(autoThreads(16, 2, 1, 8, 7.0 * GB) < 8);
+	}
+	SECTION("a 24 GB card does not limit below the per-GPU cap")
+	{
+		CHECK(autoThreads(64, 2, 1, 8, 22.0 * GB) == 8);
+	}
+	SECTION("almost no GPU memory still gives one thread; unknown memory (0) is no limit")
+	{
+		CHECK(autoThreads(64, 2, 1, 8, 0.1 * GB) == 1);
+		CHECK(autoThreads(64, 2, 1, 8, 0) == 8);
+	}
+	SECTION("memory counts only for GPU jobs")
+	{
+		CHECK(autoThreads(64, 2, 0, 8, 1.0 * GB) == 32);
+	}
+	SECTION("work: at least 128 particles per thread")
+	{
+		CHECK(autoThreads(64, 2, 1, 8, 0, 300) == 2);
+		CHECK(autoThreads(64, 2, 1, 8, 0, 50) == 1);
+		CHECK(autoThreads(64, 2, 1, 8, 0, 2300) == 8);
+		CHECK(autoThreads(64, 2, 0, 8, 0, 300) == 2);   // CPU jobs too
+	}
+	SECTION("count particles in a STAR file")
+	{
+		const std::string fn = "test_count_particles.star";
+		{
+			std::ofstream o(fn);
+			o << "# version 30001\n\ndata_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n\n"
+			  << "data_particles\n\nloop_\n_rlnImageName #1\n_rlnDefocusU #2\na@x 1\nb@x 2\nc@x 3\n\n";
+		}
+		CHECK(parhint::countParticlesInStar(fn) == 3);
+		CHECK(parhint::countParticlesInStar("no_such_file.star") == 0);
+		std::remove(fn.c_str());
+	}
 }

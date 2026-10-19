@@ -1,4 +1,11 @@
+#include <algorithm>
 #include <atomic>
+#include <vector>
+#include <map>
+#include <mutex>
+#include <string>
+#include "src/gpu_switch.h"
+#include "src/acc/pair_list.h"
 /*
 #undef ALTCPU
 #ifdef _CUDA_ENABLED
@@ -46,6 +53,38 @@ long int makeJobsForDiff2Fine(
 	dataMask.jobExtent.freeHostIfSet();
 	dataMask.jobOrigin.hostAlloc();
 	dataMask.jobExtent.hostAlloc();
+
+	// RELION_GPU_PAIR_LIST=0 (or "reference") uses the plain loop below
+	const bool plainLoop = !pairlist::fastEnabled();
+	bool regular = !plainLoop && nr_over_trans > 0 && translation_num > 0 && (long unsigned) translation_num == iover_transes.size() &&
+			iover_transes.size() == ihiddens.size() && translation_num % nr_over_trans == 0 && chunk >= 1;
+	for (long unsigned j = 0; regular && j < (long unsigned) translation_num; j++)
+		regular = ihiddens[j] == j / nr_over_trans && iover_transes[j] == j % nr_over_trans;
+	if (regular)
+	{
+		pairlist::Input in;
+		in.orientation_num = orientation_num;
+		in.nt = translation_num / nr_over_trans;
+		in.nov = nr_over_trans;
+		in.nor = nr_over_orient;
+		in.nr_trans = sp.nr_trans;
+		in.rot_mod = sp.nr_dir * sp.nr_psi;
+		in.chunk = chunk;
+		in.iorientclasses = &FineProjectionData.iorientclasses[0];
+		in.iover_rots = &FineProjectionData.iover_rots[0];
+		in.sig = op.Mcoarse_significant.data;
+		pairlist::Output out;
+		out.rot_id = &FPW.rot_id[w_base];
+		out.rot_idx = &FPW.rot_idx[w_base];
+		out.trans_idx = &FPW.trans_idx[w_base];
+		out.ihidden_overs = &FPW.ihidden_overs[w_base];
+		out.job_origin = &dataMask.jobOrigin[0];
+		out.job_extent = &dataMask.jobExtent[0];
+		pairlist::build(in, out);
+		dataMask.setNumberOfJobs(out.jobs);
+		dataMask.setNumberOfWeights(out.pairs);
+		return (long int) out.pairs;
+	}
 
 	dataMask.jobOrigin[k]=0;
 	for (long unsigned i = 0; i < orientation_num; i++)
@@ -1290,15 +1329,222 @@ static int envChunkOverride(const char *name)
 	return e ? atoi(e) : 0;
 }
 
-// Blocks per multiprocessor that pixel chunks aim for (RELION_GPU_BLOCKS_PER_SM, default 3)
+#ifndef ACC_DOUBLE_PRECISION
+// Run-time choice of how many 16-translation tiles one coarse_xt block handles (RELION_GPU_XT_TILES).
+// A bigger value reads each reference projection once for several tiles, which saves texture/L2
+// traffic when a particle has more than 16 translations. Every value gives bit-identical results, so
+// the choice can be timed on real launches: candidates are launched in turn, timed with events
+// (read later, never waiting), and the median of the last few launches per candidate decides.
+// A smaller value wins ties and anything under a 3% gain. One launch in 256 re-times the candidate
+// with the oldest sample, so a changed workload or a busy GPU is noticed.
+// On by default (automatic choice). RELION_GPU_XT_TILES=N fixes the value, =off (or 0) keeps 1 tile.
+struct XtTileTuner
+{
+	static const int MAXC = 6, RING = 5;
+	struct Pending { cudaEvent_t t0, t1; int cand; double work; };
+	struct State
+	{
+		int ncand = 0, cands[MAXC] = {0};
+		double samples[MAXC][RING];
+		int count[MAXC] = {0};
+		bool dead[MAXC] = {false};
+		int best = 0;
+		bool announced = false;
+		long calls = 0;
+		std::vector<Pending> pending;
+	};
+	std::mutex mtx;
+	std::map<std::pair<int, int>, State> states;
+	std::vector<std::pair<cudaEvent_t, cudaEvent_t> > free_events;
+
+	static double median(const double *v, int n)
+	{
+		double t[RING];
+		for (int i = 0; i < n; i++) t[i] = v[i];
+		std::sort(t, t + n);
+		return t[n / 2];
+	}
+
+	void collect(State &st)
+	{
+		for (size_t i = 0; i < st.pending.size(); )
+		{
+			Pending &pd = st.pending[i];
+			if (cudaEventQuery(pd.t1) == cudaErrorNotReady) { i++; continue; }
+			float ms = 0;
+			if (cudaEventElapsedTime(&ms, pd.t0, pd.t1) == cudaSuccess && ms > 0)
+			{
+				const int c = pd.cand;
+				st.samples[c][st.count[c] % RING] = 1e3 * ms / pd.work;
+				st.count[c]++;
+			}
+			cudaGetLastError();
+			free_events.push_back(std::make_pair(pd.t0, pd.t1));
+			st.pending.erase(st.pending.begin() + i);
+		}
+	}
+
+	void decide(State &st, int device, int ntt)
+	{
+		for (int c = 0; c < st.ncand; c++)
+			if (!st.dead[c] && st.count[c] < RING)
+				return;
+		int best = st.best;
+		double bm = 1e300;
+		for (int c = 0; c < st.ncand; c++)
+			if (!st.dead[c] && c == best) bm = median(st.samples[c], RING);
+		if (bm == 1e300) best = 0;
+		int pick = best;
+		double pm = bm;
+		for (int c = 0; c < st.ncand; c++)
+		{
+			if (st.dead[c] || c == best) continue;
+			const double m = median(st.samples[c], RING);
+			if (m < pm * 0.97 || (m < pm && cands_less(st, c, pick))) { pick = c; pm = m; }
+		}
+		if (pick != st.best || !st.announced)
+		{
+			fprintf(stderr, " GPU coarse_xt tiles: device %d, %d translation tiles -> %d per block (measured, per-launch median relative to 1 tile:",
+					device, ntt, st.cands[pick]);
+			const double base = median(st.samples[0], RING);
+			for (int c = 0; c < st.ncand; c++)
+				if (!st.dead[c]) fprintf(stderr, " %d:%.2f", st.cands[c], median(st.samples[c], RING) / base);
+			fprintf(stderr, "); 3%% margin, re-checked every 256 launches)\n");
+			st.best = pick;
+			st.announced = true;
+		}
+	}
+	static bool cands_less(const State &st, int a, int b) { return st.cands[a] < st.cands[b]; }
+
+	// Returns the number of tiles to launch with; the caller reports the event pair with finish()
+
+	int begin(int device, int ntt, cudaStream_t stream, int &cand_out, std::pair<cudaEvent_t, cudaEvent_t> &ev)
+	{
+		std::lock_guard<std::mutex> lock(mtx);
+		State &st = states[std::make_pair(device, ntt)];
+		if (st.ncand == 0)
+		{
+			static const int all[] = {1, 2, 3, 4, 6, 8};
+			for (int k = 0; k < 6; k++)
+				if (all[k] <= std::max(ntt, 1) && st.ncand < MAXC)
+					st.cands[st.ncand++] = all[k];
+			if (st.ncand == 0) { st.cands[0] = 1; st.ncand = 1; }
+		}
+		collect(st);
+		decide(st, device, ntt);
+		int cand = st.best;
+		bool exploring = false;
+		for (int c = 0; c < st.ncand; c++)
+			if (!st.dead[c] && st.count[c] + (int) std::count_if(st.pending.begin(), st.pending.end(),
+					[c](const Pending &p) { return p.cand == c; }) < RING)
+			{
+				cand = c;
+				exploring = true;
+				break;
+			}
+		if (!exploring && st.calls > 0 && st.calls % 256 == 0)
+		{
+			int oldest = -1;
+			long oc = 1L << 60;
+			for (int c = 0; c < st.ncand; c++)
+				if (!st.dead[c] && c != st.best && st.count[c] < oc) { oldest = c; oc = st.count[c]; }
+			if (oldest >= 0) cand = oldest;
+		}
+		st.calls++;
+		cand_out = cand;
+		ev = std::make_pair((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+		if ((int) st.pending.size() < 64)
+		{
+			if (!free_events.empty()) { ev = free_events.back(); free_events.pop_back(); }
+			else
+			{
+				cudaEvent_t a = NULL, b = NULL;
+				if (cudaEventCreate(&a) == cudaSuccess && cudaEventCreate(&b) == cudaSuccess)
+					ev = std::make_pair(a, b);
+				else
+					cudaGetLastError();
+			}
+			if (ev.first != NULL)
+				cudaEventRecord(ev.first, stream);
+		}
+		return st.cands[cand];
+	}
+
+	// Records the stop event after the launch and queues the pair to be read later
+	void finish(int device, int ntt, std::pair<cudaEvent_t, cudaEvent_t> ev, int cand, double work, cudaStream_t stream)
+	{
+		if (ev.first == NULL) return;
+		cudaEventRecord(ev.second, stream);
+		std::lock_guard<std::mutex> lock(mtx);
+		Pending pd = {ev.first, ev.second, cand, work};
+		states[std::make_pair(device, ntt)].pending.push_back(pd);
+	}
+
+	void discard(std::pair<cudaEvent_t, cudaEvent_t> ev)
+	{
+		if (ev.first == NULL) return;
+		std::lock_guard<std::mutex> lock(mtx);
+		free_events.push_back(ev);
+	}
+
+	void mark_dead(int device, int ntt, int tiles)
+	{
+		std::lock_guard<std::mutex> lock(mtx);
+		State &st = states[std::make_pair(device, ntt)];
+		for (int c = 0; c < st.ncand; c++)
+			if (st.cands[c] == tiles && c > 0) st.dead[c] = true;
+		if (st.dead[st.best]) st.best = 0;
+		for (size_t i = 0; i < st.pending.size(); )
+			if (st.cands[st.pending[i].cand] == tiles) { free_events.push_back(std::make_pair(st.pending[i].t0, st.pending[i].t1)); st.pending.erase(st.pending.begin() + i); }
+			else i++;
+	}
+};
+static XtTileTuner &xtTileTuner() { static XtTileTuner t; return t; }
+#endif
+
+// Blocks per multiprocessor that pixel chunks aim for. RELION_GPU_BLOCKS_PER_SM=N overrides. By
+// default one full wave of 128-thread blocks per multiprocessor (as many as the device keeps
+// resident: 12 on sm_86, 16 on sm_80/90, 8 on sm_75), and the old 3 when the GPU has under 6 GiB
+// in total, because the chunks need partial-sum buffers. The size test uses the total, not the
+// free memory: by the time this runs the allocator has already reserved nearly all of the free
+// memory, so a free-memory test always fell back to 3. Chosen once per device and said once.
 static size_t gpuBlocksPerSM()
 {
-	static const size_t b = []()
+	static std::mutex mutex;
+	static std::map<int, size_t> chosen;
+	int dev = 0;
+	DEBUG_HANDLE_ERROR(cudaGetDevice(&dev));
+	std::lock_guard<std::mutex> lock(mutex);
+	auto it = chosen.find(dev);
+	if (it != chosen.end())
+		return it->second;
+	size_t b = 3;
+	std::string why;
+	const char *e = getenv("RELION_GPU_BLOCKS_PER_SM");
+	const int v = (e != NULL) ? atoi(e) : 0;
+	if (v > 0)
 	{
-		const char *e = getenv("RELION_GPU_BLOCKS_PER_SM");
-		const int v = (e != NULL) ? atoi(e) : 0;
-		return (size_t) ((v > 0) ? v : 3);
-	}();
+		b = (size_t) v;
+		why = "RELION_GPU_BLOCKS_PER_SM";
+	}
+	else
+	{
+		int threads = 0, sms = 0;
+		size_t free_b = 0, total_b = 0;
+		cudaDeviceGetAttribute(&threads, cudaDevAttrMaxThreadsPerMultiProcessor, dev);
+		cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+		cudaMemGetInfo(&free_b, &total_b);
+		if (threads > 0 && total_b >= ((size_t) 6 << 30))
+		{
+			b = (size_t) std::max(3, threads / 128);
+			why = "device " + std::to_string(dev) + ": " + std::to_string(sms) + " multiprocessors, up to " +
+			      std::to_string(threads) + " threads each";
+		}
+		else
+			why = "device " + std::to_string(dev) + " has " + std::to_string(total_b >> 20) + " MiB in total, safe default";
+	}
+	chosen[dev] = b;
+	std::cout << " GPU pixel chunks: " << b << " blocks per multiprocessor (" << why << "; RELION_GPU_BLOCKS_PER_SM=N overrides)." << std::endl;
 	return b;
 }
 
@@ -1751,8 +1997,32 @@ void runBackProjectKernelBatched(
 			if (!e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
 			return strcmp(e, "check") ? 1 : 2;
 		}();
+		// RELION_GPU_BP_PACK: the atomic additions of a warp are packed into runs of neighbouring floats
+		// (see cuda_kernel_backproject3D); same terms, order of the additions only; on unless =0
+		static const bool bp_pack = [] { const char *e = getenv("RELION_GPU_BP_PACK"); return !(e && atoi(e) == 0); }();
+		// The staging buffer of the packed path follows the compacted translations list in shared memory (at most
+		// 1024 translations are supported in single precision, so both fit in 48 KB; the check below is a safety net)
+		const size_t pk_bytes = (size_t) (BP_REF3D_BLOCK_SIZE / 32) * (32 * 6 * BP_PACK_RUNS * sizeof(XFLOAT) + 32 * BP_PACK_RUNS * sizeof(size_t));
+		int pack_state = 1;
+		const size_t pk_off = compact3 ? ((smem3 + 15) & ~(size_t) 15) : 0;
+		const bool pack_ok = bp_pack && !data_is_3D && BP.interleaved && bp_tile_mode == 0 && pk_off + pk_bytes <= 48 * 1024;
+		if (bp_pack)
+		{
+			if (!pack_ok)
+				pack_state = data_is_3D ? 2 : !BP.interleaved ? 3 : bp_tile_mode != 0 ? 4 : 5;
+			static const char *const notes[] = {"",
+				"on (default; RELION_GPU_BP_PACK=0 turns it off)",
+				"not used: 3D data",
+				"not used: planar model layout",
+				"not used: RELION_GPU_BP_TILE is set",
+				"not used: shared memory"};
+			static std::atomic<unsigned> reported(0);
+			const unsigned bit = 1u << pack_state;
+			if (!(reported.fetch_or(bit) & bit))
+				fprintf(stderr, "RELION_GPU_BP_PACK: %s\n", notes[pack_state]);
+		}
 		auto launch_bp = [&](int tl) {
-#define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<dim3(n, bp_chunks), BS, compact3 ? smem3 : 0, stream>>>( \
+#define BP3D_BATCH(D3, CP, BS) cuda_kernel_backproject3D<D3, CP><<<dim3(n, bp_chunks), BS, (!D3 && tl == 2) ? pk_off + pk_bytes : (compact3 ? smem3 : 0), stream>>>( \
 			d_img_real, d_img_imag, trans_x, trans_y, trans_z, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgZ, imgX*imgY*imgZ, \
@@ -1810,7 +2080,7 @@ void runBackProjectKernelBatched(
 					md, mr, mr > 0 ? md / mr : 0.f, h_sum[1] > 0 ? sqrt(h_sum[0] / h_sum[1]) : 0.0);
 		}
 		else
-			launch_bp(bp_tile_mode == 1 ? 1 : 0);
+			launch_bp(pack_ok ? 2 : (bp_tile_mode == 1 ? 1 : 0));
 	}
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
@@ -1901,6 +2171,168 @@ static void launchDiff2CoarseBatched(
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 
+#ifndef ACC_DOUBLE_PRECISION
+#include "src/acc/cuda/cuda_kernels/coarse_cache.cuh"
+
+static CoarseShapeTuner &coarseShapeTuner() { static CoarseShapeTuner t; return t; }
+
+// The cache for the classes of this pass: built on the first call of the iteration, then reused. Returns whether it can
+// serve this pass (same classes, orientations and pixel mask as it was built for).
+static bool coarseCacheReady(
+		CoarseCacheCtx &ctx,
+		std::vector<CoarseClassJob> &classes,
+		const std::vector<size_t> &nums,
+		int image_size,
+		unsigned long translation_num,
+		deviceStream_t stream)
+{
+	CoarseProjectionCache &cc = *ctx.cache;
+	{
+		std::lock_guard<std::mutex> lock(cc.mtx);
+		if (!cc.tried)
+		{
+			cc.tried = true;
+			cc.allocator = ctx.allocator;
+			std::vector<int> pix;
+			cc.mask.assign(image_size, 0);
+			for (int p = 0; p < image_size; p++)
+				if (ctx.host_minvsigma2[p] != 0)
+				{
+					cc.mask[p] = 1;
+					pix.push_back(p);
+				}
+			size_t O_total = 0;
+			for (size_t n : nums)
+				O_total += n;
+			const size_t K = pix.size();
+			size_t bytes = K * O_total * sizeof(float2) + K * sizeof(int) + 1024;
+			size_t budget = std::min<size_t>((size_t) 4 << 30, ctx.allocator->getPotentialFreeSpace() / 4);
+			const char *mb = getenv("RELION_GPU_COARSE_CACHE_MB");
+			if (mb != NULL && atoi(mb) > 0)
+				budget = (size_t) atoi(mb) << 20;
+			if (K == 0 || O_total == 0 || O_total >= ((size_t) 1 << 31) || K >= ((size_t) 1 << 24) || bytes > budget)
+			{
+				if (ctx.verb > 0)
+					std::cout << " GPU coarse pass: the projection cache would need " << (bytes >> 20) << " MB and may use " << (budget >> 20)
+					          << " MB (RELION_GPU_COARSE_CACHE_MB), using the cross-term kernel." << std::endl;
+				return false;
+			}
+			cc.image_size = image_size;
+			cc.K = (int) K;
+			cc.O_total = O_total;
+			cc.bytes = bytes;
+			cc.block = ctx.allocator->alloc(bytes);
+			char *base = (char *) cc.block->getPtr();
+			cc.d_pix = (int *) base;
+			cc.d_R = (float2 *) (base + ((K * sizeof(int) + 255) / 256) * 256);
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(cc.d_pix, pix.data(), K * sizeof(int), cudaMemcpyHostToDevice, stream));
+			size_t off = 0;
+			for (size_t c = 0; c < classes.size(); c++)
+			{
+				cc.class_ids.push_back(ctx.class_ids[c]);
+				cc.eulers.push_back(classes[c].eulers);
+				cc.n_orient.push_back(nums[c]);
+				cc.offset.push_back(off);
+				cuda_kernel_cc_build<<<(unsigned) ((nums[c] + 127) / 128), 128, 0, stream>>>(
+						classes[c].projector, classes[c].eulers, cc.d_pix, (int) K, (int) nums[c], O_total, off, cc.d_R);
+				LAUNCH_HANDLE_ERROR(cudaGetLastError());
+				off += nums[c];
+			}
+			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+			cc.ok = true;
+			if (ctx.verb > 0)
+				std::cout << " GPU coarse pass: projection cache of " << K << " pixels x " << O_total << " orientations ("
+				          << (bytes >> 20) << " MB), one pass over it per particle (RELION_GPU_COARSE_CACHE=0 for the cross-term kernel)." << std::endl;
+		}
+		if (!cc.ok)
+			return false;
+	}
+	if (cc.image_size != image_size || cc.class_ids != ctx.class_ids || classes.size() != cc.eulers.size())
+		return false;
+	for (size_t c = 0; c < classes.size(); c++)
+	{
+		if (cc.eulers[c] != classes[c].eulers || cc.n_orient[c] != nums[c])
+			return false;
+		if (classes[c].diff2s != classes[0].diff2s + cc.offset[c] * translation_num)
+			return false;
+	}
+	for (int p = 0; p < image_size; p++)
+		if (ctx.host_minvsigma2[p] != 0 && !cc.mask[p])
+			return false;
+	return true;
+}
+
+// One particle against the cache (see cuda_kernel_cc_score). `diff2s` of the classes are consecutive in memory.
+static void coarseCacheScore(
+		CoarseCacheCtx &ctx,
+		std::vector<CoarseClassJob> &classes,
+		XFLOAT *trans_x, XFLOAT *trans_y,
+		XFLOAT *corr_img, XFLOAT *Fimg_real, XFLOAT *Fimg_imag,
+		unsigned long translation_num, unsigned long image_size,
+		AccPtr<char> &table)
+{
+	CoarseProjectionCache &cc = *ctx.cache;
+	deviceStream_t stream = table.getStream();
+	const int T = (int) translation_num;
+	const int tiles = (T + 31) / 32;
+	const int TT = (((T + tiles - 1) / tiles + 3) / 4) * 4;
+	const int tpad = tiles * TT;
+	AccPtr<float2> A = table.make<float2>();
+	A.setSize((size_t) cc.K * tpad);
+	A.deviceAlloc();
+	AccPtr<float> W = table.make<float>();
+	W.setSize(cc.K);
+	W.deviceAlloc();
+	const size_t n_prep = (size_t) cc.K * tpad;
+	cuda_kernel_cc_prepare<<<(unsigned) ((n_prep + 127) / 128), 128, 0, stream>>>(
+			trans_x, trans_y, Fimg_real, Fimg_imag, corr_img, cc.d_pix, ~A, ~W,
+			cc.K, T, tpad, TT, classes[0].projector.imgX, classes[0].projector.imgY, classes[0].projector.maxR);
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+
+	static const int forced_tm = [] { const char *e = getenv("RELION_GPU_COARSE_CACHE_TM"); return e ? atoi(e) : 0; }();
+	const int cands[2] = {2, 1};
+	CoarseShapeTuner &tuner = coarseShapeTuner();
+	std::pair<cudaEvent_t, cudaEvent_t> ev((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+	int cand = 0;
+	int tm = forced_tm > 0 ? (forced_tm >= 2 ? 2 : 1) : 0;
+	if (tm == 0)
+	{
+		cand = tuner.begin(ctx.device, TT, 2, cands, ev);
+		tm = cands[cand];
+	}
+	if (ev.first != NULL)
+		cudaEventRecord(ev.first, stream);
+	const float2 *R = cc.d_R;
+	float *out = classes[0].diff2s;
+	const size_t O = cc.O_total;
+#define CC_SCORE(TTV, TMV) cuda_kernel_cc_score<TTV, TMV><<<dim3((unsigned) ((O + (size_t) CC_SB * TMV - 1) / ((size_t) CC_SB * TMV)), (unsigned) tiles), CC_SB, 0, stream>>>( \
+		R, cc.K, O, ~A, ~W, cc.d_pix, Fimg_real, Fimg_imag, T, out)
+#define CC_TT_CASE(TTV) case TTV: if (tm == 2) CC_SCORE(TTV, 2); else CC_SCORE(TTV, 1); break
+	switch (TT)
+	{
+		CC_TT_CASE(4);
+		CC_TT_CASE(8);
+		CC_TT_CASE(12);
+		CC_TT_CASE(16);
+		CC_TT_CASE(20);
+		CC_TT_CASE(24);
+		CC_TT_CASE(28);
+		CC_TT_CASE(32);
+		default: REPORT_ERROR("BUG: coarseCacheScore: unexpected translation tile");
+	}
+#undef CC_TT_CASE
+#undef CC_SCORE
+	cudaError_t err = cudaGetLastError();
+	if (err != cudaSuccess)
+		LAUNCH_HANDLE_ERROR(err);
+	if (ev.first != NULL)
+	{
+		cudaEventRecord(ev.second, stream);
+		tuner.finish(ctx.device, TT, ev, cand, 1e-3 * (double) O * (double) cc.K * (double) tiles);
+	}
+}
+#endif
+
 bool runDiff2KernelCoarseBatched(
 		std::vector<CoarseClassJob> &classes,
 		std::vector<size_t> &orientation_nums,
@@ -1914,7 +2346,8 @@ bool runDiff2KernelCoarseBatched(
 		unsigned long image_size,
 		bool data_is_3D,
 		AccPtr<char> &table,
-		CoarseDeferred *defer)
+		CoarseDeferred *defer,
+		CoarseCacheCtx *cc)
 {
 	if (classes.empty())
 		return true;
@@ -2004,14 +2437,76 @@ bool runDiff2KernelCoarseBatched(
 	// RELION_GPU_COARSE_XT=1: cross-term form of the coarse differences (cuda_kernel_diff2_coarse_xt);
 	// =check runs both and reports how far they differ
 	static const int xt_mode = [] {
-		const char *e = getenv("RELION_GPU_COARSE_XT");
-		if (!e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
-		return strcmp(e, "check") ? 1 : 2;
+		return gpuswitch::mode("RELION_GPU_COARSE_XT");
 	}();
 	const size_t xt_tpad = ((translation_num + XT_TRANS - 1) / XT_TRANS) * XT_TRANS;
 	const bool use_xt = xt_mode && ref3D && !data_is_3D && image_size * xt_tpad * sizeof(float2) <= ((size_t) 128 << 20);
+	if (xt_mode)
+	{
+		static std::atomic<int> reported_xt(-1);
+		const int now = use_xt ? 1 : 0;
+		if (reported_xt.exchange(now) != now)
+			std::cout << " GPU coarse pass: " << (use_xt ? "cross-term kernel (RELION_GPU_COARSE_XT=0 for the direct one)"
+			          : "direct kernel (the cross-term kernel is for 3D references and 2D images with a table up to 128 MB)") << "." << std::endl;
+	}
 #else
 	const bool use_xt = false;
+#endif
+#ifndef ACC_DOUBLE_PRECISION
+	// RELION_GPU_COARSE_CACHE: cached reference projections (see cuda_kernels/coarse_cache.cuh); =check also runs the
+	// cross-term kernel and reports how far the two differ
+	if (cc != NULL && cc->cache != NULL && use_xt && defer == NULL && xt_mode == 1 && !data_is_3D && ref3D && translation_num > 0)
+	{
+		static const int cache_mode = gpuswitch::mode("RELION_GPU_COARSE_CACHE");
+		if (cache_mode != 0 && coarseCacheReady(*cc, classes, orientation_nums, (int) image_size, translation_num, table.getStream()))
+		{
+			static std::atomic<int> reported(0);
+			std::vector<std::vector<XFLOAT> > before(nc);
+			if (cache_mode == 2)
+			{
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(table.getStream()));
+				for (size_t c = 0; c < nc; c++)
+				{
+					before[c].resize(orientation_nums[c] * translation_num);
+					DEBUG_HANDLE_ERROR(cudaMemcpy(before[c].data(), classes[c].diff2s, before[c].size() * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+				}
+			}
+			coarseCacheScore(*cc, classes, trans_x, trans_y, corr_img, Fimg_real, Fimg_imag, translation_num, image_size, table);
+			if (cache_mode == 2)
+			{
+				std::vector<std::vector<XFLOAT> > cached(nc);
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(table.getStream()));
+				for (size_t c = 0; c < nc; c++)
+				{
+					cached[c].resize(before[c].size());
+					DEBUG_HANDLE_ERROR(cudaMemcpy(cached[c].data(), classes[c].diff2s, cached[c].size() * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+					DEBUG_HANDLE_ERROR(cudaMemcpy(classes[c].diff2s, before[c].data(), before[c].size() * sizeof(XFLOAT), cudaMemcpyHostToDevice));
+				}
+				runDiff2KernelCoarseBatched(classes, orientation_nums, trans_x, trans_y, trans_z, corr_img, Fimg_real, Fimg_imag,
+						translation_num, image_size, data_is_3D, table, NULL, NULL);
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(table.getStream()));
+				double max_abs = 0, max_rel = 0, sum_sq = 0;
+				long n_all = 0;
+				for (size_t c = 0; c < nc; c++)
+				{
+					std::vector<XFLOAT> xt(cached[c].size());
+					DEBUG_HANDLE_ERROR(cudaMemcpy(xt.data(), classes[c].diff2s, xt.size() * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
+					for (size_t k = 0; k < xt.size(); k++)
+					{
+						const double d = fabs((double) xt[k] - cached[c][k]);
+						max_abs = std::max(max_abs, d);
+						max_rel = std::max(max_rel, d / std::max(1.0, fabs((double) xt[k])));
+						sum_sq += d * d;
+						n_all++;
+					}
+				}
+				if (reported++ % 200 == 0)
+					fprintf(stderr, "COARSE_CACHE_CHECK call %d: %ld values, max |diff| %.4g, max relative %.3g, rms %.4g\n",
+							(int) reported, n_all, max_abs, max_rel, sqrt(sum_sq / std::max(1L, n_all)));
+			}
+			return true;
+		}
+	}
 #endif
 	// A deferred (particle group) launch always sums through the chunk buffer
 	const bool use_partial = n_chunks > 1 || use_xt || defer != NULL || coarseDeterministic();
@@ -2091,9 +2586,41 @@ bool runDiff2KernelCoarseBatched(
 		cuda_kernel_coarse_xt_prepare<<<(image_size + 127) / 128, 128, 0, stream>>>(
 				trans_x, trans_y, Fimg_real, Fimg_imag, corr_img, ~xt_a, ~xt_x2,
 				(int) translation_num, (int) xt_tpad, (int) image_size, projector.imgX, projector.imgY, projector.maxR);
-		cuda_kernel_diff2_coarse_xt<<<dim3(even[nc], n_chunks, ntt), XT_BLOCK, 0, stream>>>(
-				d_classes, d_even, (int) nc, ~xt_a, ~xt_x2, corr_img, (int) translation_num, (int) xt_tpad,
-				(int) image_size, ~partial, n_chunks, chunk_stride, xt_ablate);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		static const char *xt_env = getenv("RELION_GPU_XT_TILES");
+		static const bool xt_off = gpuswitch::isOffValue(xt_env);
+		static const bool xt_auto = !xt_off && (xt_env == NULL || std::string(xt_env) == "auto" || std::string(xt_env) == "check" || atoi(xt_env) <= 0);
+		static const int xt_fixed = (xt_env != NULL && !xt_auto && !xt_off) ? atoi(xt_env) : 1;
+		int device = 0;
+		int nt = std::max(1, std::min(xt_fixed, std::min(ntt, 8)));
+		int cand = 0;
+		std::pair<cudaEvent_t, cudaEvent_t> ev((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+		if (xt_auto && ntt > 1)
+		{
+			cudaGetDevice(&device);
+			nt = xtTileTuner().begin(device, ntt, stream, cand, ev);
+		}
+#define XT_LAUNCH(NT) cuda_kernel_diff2_coarse_xt<NT><<<dim3(even[nc], n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
+				d_classes, d_even, (int) nc, ~xt_a, ~xt_x2, corr_img, (int) translation_num, (int) xt_tpad, \
+				(int) image_size, ~partial, n_chunks, chunk_stride, xt_ablate)
+		auto launch = [&](int t)
+		{
+			if (t >= 8) XT_LAUNCH(8); else if (t >= 6) XT_LAUNCH(6); else if (t >= 4) XT_LAUNCH(4); else if (t == 3) XT_LAUNCH(3); else if (t == 2) XT_LAUNCH(2); else XT_LAUNCH(1);
+			return cudaGetLastError();
+		};
+#undef XT_LAUNCH
+		cudaError_t xt_err = launch(nt);
+		if (xt_err != cudaSuccess && nt > 1)
+		{
+			// Too many resources for this tile count: say so, never use it again, and run the plain one
+			fprintf(stderr, " GPU coarse_xt: %d tiles per block cannot be launched (%s), using 1\n", nt, cudaGetErrorString(xt_err));
+			if (xt_auto) { xtTileTuner().discard(ev); xtTileTuner().mark_dead(device, ntt, nt); }
+			ev = std::make_pair((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+			xt_err = launch(1);
+		}
+		LAUNCH_HANDLE_ERROR(xt_err);
+		if (ev.first != NULL)
+			xtTileTuner().finish(device, ntt, ev, cand, (double) even[nc] * (double) image_size * (double) ntt, stream);
 		const size_t n = max_orient * translation_num;
 		const unsigned sum_blocks = (unsigned) std::min<size_t>((n + 255) / 256, 1024);
 		cuda_kernel_diff2_coarse_sum_chunks<<<dim3(sum_blocks, (unsigned) nc), 256, 0, stream>>>(

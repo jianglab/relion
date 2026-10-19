@@ -20,6 +20,7 @@
 #include "src/acc/cuda/cuda_kernels/diff2.cuh"
 #include "src/acc/cuda/cuda_kernels/wavg.cuh"
 #include "src/acc/cuda/cuda_mem_utils.h"
+#include "src/acc/cuda/gpu_mem_trace.h"
 #include "src/acc/group_size_tuner.h"
 #include "src/acc/cuda/cuda_fft.h"
 #include "src/acc/data_types.h"
@@ -28,6 +29,8 @@
 #include "src/error.h"
 #include <fstream>
 #include "src/parallel.h"
+#include "src/tuning_cache.h"
+#include "src/acc/gpu_pool_plan.h"
 #include <signal.h>
 #include <map>
 #include <mutex>
@@ -89,6 +92,176 @@ namespace
 	}
 }
 
+
+// ---- Lean GPU memory pool -------------------------------------------------------------------------
+// Lean memory is the default; RELION_GPU_LEAN_MEMORY=0 restores the old pool, =2 also reports every iteration.
+// It makes the expectation step hold only the GPU
+// memory it uses instead of all that is free: a first chunk from the peak of the iteration before (or of
+// an earlier run, remembered in the tuning cache), and more chunks when something does not fit, up to
+// what the old pool would have taken. See gpu_pool_plan.h for the rules, documentation/gpu_lean_memory.md.
+// RELION_GPU_LEAN_FIRST_MB=n fixes the first chunk (experts).
+namespace
+{
+	int leanMode()
+	{
+		return gpupool::leanMemoryMode();
+	}
+	struct LeanRecord
+	{
+		size_t peak_last = 0, peak_prev = 0; // bytes in use at the top of the last two iterations
+		std::string last_key;                // problem description of the last iteration
+		std::string written_key;             // last row put into the tuning cache
+		size_t written = 0;
+		int iterations = 0;
+		bool announced = false;
+	};
+	std::map<int, LeanRecord> &leanRecords()
+	{
+		static std::map<int, LeanRecord> *m = new std::map<int, LeanRecord>();
+		return *m;
+	}
+	omp_lock_t *leanLock()
+	{
+		static omp_lock_t *l = [](){ omp_lock_t *x = new omp_lock_t; omp_init_lock(x); return x; }();
+		return l;
+	}
+	tuning::Context leanContext(int device)
+	{
+		cudaDeviceProp prop;
+		int drv = 0, rt = 0;
+		cudaGetDeviceProperties(&prop, device);
+		cudaDriverGetVersion(&drv);
+		cudaRuntimeGetVersion(&rt);
+		tuning::Context c;
+		c.device = prop.name;
+		c.sm_count = prop.multiProcessorCount;
+		c.driver = std::to_string(drv);
+		c.runtime = std::to_string(rt);
+		c.build = g_RELION_VERSION ? g_RELION_VERSION : "";
+		return c;
+	}
+}
+
+void MlDeviceBundle::setupLeanPool(size_t cap)
+{
+	MlOptimiser *m = baseMLO;
+	gpupool::Problem pr;
+	pr.ori_size = m->mymodel.ori_size;
+	pr.nr_classes = m->mymodel.nr_classes;
+	pr.ref_dim = m->mymodel.ref_dim;
+	double bytes = 0;
+	for (size_t i = 0; i < m->mymodel.PPref.size(); i++)
+		bytes += 2. * sizeof(XFLOAT) * (double) m->mymodel.PPref[i].data.nzyxdim;
+	for (size_t i = 0; i < m->wsum_model.BPref.size(); i++)
+		bytes += 4. * sizeof(XFLOAT) * (double) m->wsum_model.BPref[i].data.nzyxdim;
+	pr.model_bytes = (size_t) bytes;
+	pr.threads_on_device = std::max(1, (int) m->nr_threads);
+	pr.ranks_on_device = std::max(1, rank_shared_count);
+	pr.current_size = m->image_current_size.empty() ? 0 : m->image_current_size[0];
+	pr.coarse_size = m->image_coarse_size.empty() ? 0 : m->image_coarse_size[0];
+	{
+		std::vector<int> pdir, ppsi;
+		const long nr_dir = (long) m->sampling.NrDirections(0, &pdir);
+		const long nr_psi = (long) m->sampling.NrPsiSamplings(0, &ppsi);
+		pr.nr_orientations = nr_dir * nr_psi * (long) m->sampling.oversamplingFactorOrientations(m->adaptive_oversampling);
+	}
+	pr.nr_pool = m->nr_pool;
+	pr.cap_class = gpupool::capClass(cap);
+	lean_key = gpupool::problemKey(pr);
+
+	size_t peak_last = 0, peak_prev = 0;
+	bool same_key = false, announced = false;
+	omp_set_lock(leanLock());
+	{
+		LeanRecord &r = leanRecords()[device_id];
+		peak_last = r.peak_last;
+		peak_prev = r.peak_prev;
+		same_key = r.last_key == lean_key;
+		announced = r.announced;
+		r.announced = true;
+	}
+	omp_unset_lock(leanLock());
+
+	// Where the first chunk comes from: the previous iteration if it was the same problem, else a row of
+	// the tuning cache for exactly this problem on this GPU, else the previous iteration, else nothing
+	size_t cached = 0;
+	if (!(same_key && peak_last > 0))
+	{
+		tuning::Cache cache(leanContext(device_id));
+		tuning::Entry e;
+		if (cache.get("gpu_pool_peak", lean_key, e))
+			cached = (size_t) strtoull(e.value.c_str(), NULL, 10);
+	}
+	gpupool::Plan plan;
+	if (same_key && peak_last > 0)
+		plan = gpupool::plan(cap, peak_last, peak_prev, 0);
+	else if (cached > 0)
+		plan = gpupool::plan(cap, 0, 0, cached);
+	else
+		plan = gpupool::plan(cap, peak_last, peak_prev, 0);
+	std::string reason = plan.reason;
+	if (const char *f = getenv("RELION_GPU_LEAN_FIRST_MB"))
+		if (atol(f) > 0)
+		{
+			plan.first_chunk = std::min(cap, (size_t) atol(f) << 20);
+			reason = "RELION_GPU_LEAN_FIRST_MB";
+			plan.margin = 0.;
+		}
+
+	allocator->configureLean(cap, plan.first_chunk);
+
+	if (!announced || leanMode() > 1)
+	{
+		char mg[64] = "";
+		if (plan.margin > 0.)
+			snprintf(mg, sizeof(mg), ", margin %.0f%%", 100. * (plan.margin - 1.));
+		printf(" GPU memory, device %d (lean pool%s): first chunk %zu MB (%s%s); more is taken only when needed, up to %zu MB (the most the old pool would take)\n",
+		       device_id, gpupool::leanMemoryFromEnvironment() ? "" : ", the default; RELION_GPU_LEAN_MEMORY=0 restores the old pool",
+		       allocator->chunkSize() / (1000*1000), reason.c_str(), mg, cap / (1000*1000));
+		fflush(stdout);
+	}
+}
+
+void MlDeviceBundle::finishLeanIteration()
+{
+	if (allocator == NULL || !allocator->isLean())
+		return;
+	const size_t peak = allocator->peakUsedBytes(), held = allocator->peakHeldBytes();
+	const size_t grown = allocator->chunksGrown(), cap = allocator->capSize();
+	if (peak == 0)
+		return;
+	bool report, store;
+	omp_set_lock(leanLock());
+	{
+		LeanRecord &r = leanRecords()[device_id];
+		r.peak_prev = r.peak_last;
+		r.peak_last = peak;
+		r.last_key = lean_key;
+		r.iterations++;
+		report = leanMode() > 1 || r.iterations == 1 || grown > 0;
+		const double diff = r.written_key == lean_key
+			? std::fabs((double) peak - (double) r.written) / (double) peak : 1.;
+		store = diff > 0.1;
+		if (store)
+		{
+			r.written_key = lean_key;
+			r.written = peak;
+		}
+	}
+	omp_unset_lock(leanLock());
+	if (report)
+	{
+		printf(" GPU memory, device %d (lean pool): this iteration used at most %zu MB, held %zu MB (%zu chunk%s added while running; limit %zu MB)\n",
+		       device_id, peak / (1000*1000), held / (1000*1000), grown, grown == 1 ? "" : "s", cap / (1000*1000));
+		fflush(stdout);
+	}
+	if (store && !lean_key.empty())
+	{
+		tuning::Cache cache(leanContext(device_id));
+		cache.put("gpu_pool_peak", lean_key, std::to_string(peak));
+	}
+}
+
 bool MlDeviceBundle::retainAllocator(int device, CudaCustomAllocator *a)
 {
 	if (!keepAllocatorAllowed() || a->chunkSize() == 0 || a->getNumberOfAllocs() != 0)
@@ -108,6 +281,14 @@ bool MlDeviceBundle::retainAllocator(int device, CudaCustomAllocator *a)
 size_t MlDeviceBundle::retainedBytes() const
 {
 	return allocator == NULL ? 0 : allocator->chunkSize();
+}
+
+bool relionHasRetainedGpuMemory()
+{
+	omp_set_lock(retainedLock());
+	const bool has = !retainedAllocators().empty();
+	omp_unset_lock(retainedLock());
+	return has;
 }
 
 void relionReleaseRetainedGpuMemory()
@@ -161,6 +342,7 @@ size_t MlDeviceBundle::checkFixedSizedObjects(int shares)
 
 	HANDLE_ERROR(cudaSetDevice(device_id));
 
+	gpuMemTrace("first look at the card (checkFixedSizedObjects)");
 	size_t free(0), total(0);
 	DEBUG_HANDLE_ERROR(cudaMemGetInfo( &free, &total ));
 	float margin(1.05);
@@ -195,6 +377,7 @@ void MlDeviceBundle::setupFixedSizedObjects()
 
 	unsigned nr_proj = baseMLO->mymodel.PPref.size();
 	unsigned nr_bproj = baseMLO->wsum_model.BPref.size();
+	gpuMemTrace("iteration start, before the models");
 
 	// The allocator kept from the last iteration, if the models of this one still fit next to it
 	CudaCustomAllocator *kept = NULL;
@@ -246,6 +429,7 @@ void MlDeviceBundle::setupFixedSizedObjects()
 		projectors[imodel].initMdl(baseMLO->mymodel.PPref[imodel].data.data);
 
 	}
+	gpuMemTrace("projector models (textures)", [&]() { double b = 0; for (unsigned i = 0; i < nr_proj; i++) b += 2. * sizeof(XFLOAT) * (double) baseMLO->mymodel.PPref[i].data.nzyxdim; return b; }());
 
 	for (int imodel = 0; imodel < nr_bproj; imodel++)
 	{
@@ -260,6 +444,7 @@ void MlDeviceBundle::setupFixedSizedObjects()
 
 		backprojectors[imodel].initMdl();
 	}
+	gpuMemTrace("back-projector models", [&]() { double b = 0; for (unsigned i = 0; i < nr_bproj; i++) b += 3. * sizeof(XFLOAT) * (double) baseMLO->wsum_model.BPref[i].data.nzyxdim; return b; }());
 
 	/*======================================================
 	                    CUSTOM ALLOCATOR
@@ -268,6 +453,7 @@ void MlDeviceBundle::setupFixedSizedObjects()
 	int memAlignmentSize;
 	cudaDeviceGetAttribute ( &memAlignmentSize, cudaDevAttrTextureAlignment, device_id );
 	allocator = kept != NULL ? kept : new CudaCustomAllocator(0, memAlignmentSize);
+	gpuMemTrace(kept != NULL ? "end of fixed-size setup (old pool kept)" : "end of fixed-size setup (empty pool)");
 }
 
 void MlDeviceBundle::setupTunableSizedObjects(size_t allocationSize)
@@ -290,6 +476,20 @@ void MlDeviceBundle::setupTunableSizedObjects(size_t allocationSize)
 	printf("DEBUG: Total GPU allocation size set to %zu MB on device id %d.\n", allocationSize / (1000*1000), device_id);
 #endif
 #ifndef CUDA_NO_CUSTOM_ALLOCATION
+	if (leanMode() > 0)
+		setupLeanPool(allocationSize); // allocationSize is the most the pool may hold
+	else
+	{
+	{
+		static std::map<int, bool> told;
+		if (!told[device_id])
+		{
+			told[device_id] = true;
+			printf(" GPU memory, device %d (old pool, RELION_GPU_LEAN_MEMORY=0): all free memory, %zu MB, is taken for the expectation step\n",
+			       device_id, allocationSize / (1000*1000));
+			fflush(stdout);
+		}
+	}
 	// A chunk kept from the last iteration is used again when it is about the size that would be
 	// allocated now (the size given includes the chunk's own bytes)
 	const size_t have = allocator->chunkSize();
@@ -298,6 +498,7 @@ void MlDeviceBundle::setupTunableSizedObjects(size_t allocationSize)
 		;
 	else
 		allocator->resize(allocationSize);
+	}
 #endif
 
 
@@ -350,7 +551,9 @@ void MlDeviceBundle::setupTunableSizedObjects(size_t allocationSize)
 		}
 	}
 
+	gpuMemTrace("pool and projection plans ready", allocator->chunkSize());
 	setupBackprojectAccumulator();
+	gpuMemTrace("end of tunable-size setup");
 };
 
 // Whether this iteration's back-projections can be accumulated per orientation, and the room for
@@ -401,7 +604,7 @@ void MlDeviceBundle::setupBackprojectAccumulator()
 	if (slots == 0 || slots >= ((size_t) 1 << 31))
 		return;
 
-	const size_t chunk = allocator->chunkSize();
+	const size_t chunk = allocator->capSize(); // what the job may use, not what a lean pool holds now
 	size_t budget = std::min<size_t>((size_t) 4 << 30, chunk / 5);
 	if (atoi(env) > 1)
 		budget = (size_t) atoi(env) << 20;
@@ -495,6 +698,8 @@ void MlOptimiserCuda::resetData()
 	// waiting for "all class streams" is one wait instead of one per class (each a
 	// driver call under the driver's per-process lock)
 	classStreamsShared = gpuClassBatching();
+	// RELION_GPU_ALLOC_CACHE reuses a block on the stream it was freed on: only when all of a thread's work is on its own stream
+	CudaCustomAllocator::allowCache(classStreamsShared);
 	classStreams.resize(nr_classes, 0);
 	for (int i = 0; i < nr_classes; i++)
 		if (classStreamsShared)
@@ -546,7 +751,7 @@ void MlOptimiserCuda::doThreadExpectationSomeParticles(int thread_id)
 		{
 			// What a thread may take for its group: 70% of what the allocator has free now, shared by the
 			// threads (the allocator holds all the memory that the job uses; cudaMemGetInfo would say little)
-			const size_t budget = (size_t) (0.7 * allocator->getTotalFreeSpace() / std::max(1, (int) baseMLO->nr_threads));
+			const size_t budget = (size_t) (0.7 * allocator->getPotentialFreeSpace() / std::max(1, (int) baseMLO->nr_threads));
 			const int group_size = group_auto ? GroupSizeTuner::instance().next() : group_fixed;
 			std::vector<unsigned long> ids;
 			while ((int) ids.size() < group_size && (more = baseMLO->exp_ipart_ThreadTaskDistributor->getTasks(first_ipart, last_ipart)))

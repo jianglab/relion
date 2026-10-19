@@ -153,7 +153,7 @@ TEST_CASE("Class3D: align-classes checkbox emits a flag either way",
 	REQUIRE(command.find(" --dont_align_classes ") != std::string::npos);
 }
 
-TEST_CASE("Class3D: GPU with skipped alignment needs RELION_GPU_SKIP_ALIGN=1",
+TEST_CASE("Class3D: GPU with skipped alignment is on by default, RELION_GPU_SKIP_ALIGN=0 refuses it",
           "[pipeline][class3d]")
 {
 	RelionJob job;
@@ -172,17 +172,22 @@ TEST_CASE("Class3D: GPU with skipped alignment needs RELION_GPU_SKIP_ALIGN=1",
 	job.joboptions["use_gpu"].setString("Yes");
 	job.joboptions["gpu_ids"].setString("0");
 
+	const char *saved = getenv("RELION_GPU_SKIP_ALIGN");
+	const std::string saved_value = saved ? saved : "";
+
 	unsetenv("RELION_GPU_SKIP_ALIGN");
 	std::string command;
-	REQUIRE_FALSE(generateCommand(job, command));
-
-	setenv("RELION_GPU_SKIP_ALIGN", "1", 1);
-	command.clear();
-	const bool ok = generateCommand(job, command);
-	unsetenv("RELION_GPU_SKIP_ALIGN");
+	bool ok = generateCommand(job, command);
 	REQUIRE(ok);
 	REQUIRE(command.find(" --skip_align ") != std::string::npos);
 	REQUIRE(command.find(" --gpu \"0\"") != std::string::npos);
+
+	setenv("RELION_GPU_SKIP_ALIGN", "0", 1);
+	command.clear();
+	ok = generateCommand(job, command);
+	if (saved) setenv("RELION_GPU_SKIP_ALIGN", saved_value.c_str(), 1);
+	else unsetenv("RELION_GPU_SKIP_ALIGN");
+	REQUIRE_FALSE(ok);
 }
 
 TEST_CASE("Refine3D: align-halves checkbox emits a flag either way",
@@ -483,6 +488,64 @@ static RelionJob makeClass2DJob()
 // ---------------------------------------------------------------------------
 // Class2D parallel replicas
 // ---------------------------------------------------------------------------
+
+TEST_CASE("Class2D: filament context options reach the command line",
+          "[pipeline][class2d][filament_context]")
+{
+	RelionJob job = makeClass2DJob();
+	for (const char *name : {"filctx_mode", "filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
+		REQUIRE(job.joboptions.find(name) != job.joboptions.end());
+
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+
+	SECTION("not a helical job: nothing is emitted")
+	{
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find("--filament_") == std::string::npos);
+	}
+
+	job.joboptions["do_helix"].setString("Yes");
+
+	SECTION("helical, default: off is emitted explicitly")
+	{
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context off") != std::string::npos);
+		REQUIRE(commands[0].find("--filament_temper") == std::string::npos);
+	}
+
+	SECTION("chain mode with its settings")
+	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[1]);
+		job.joboptions["filctx_gap"].setString("3");
+		job.joboptions["filctx_floor"].setString("0.05");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context chain") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_temper -1") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_gap 3") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_floor 0.05") != std::string::npos);
+		REQUIRE(commands[0].find("--filament_alpha") == std::string::npos);
+	}
+
+	SECTION("filament mode also passes alpha")
+	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[2]);
+		job.joboptions["filctx_temper"].setString("0.25");
+		job.joboptions["filctx_alpha"].setString("2");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context filament") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_temper 0.25") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_alpha 2") != std::string::npos);
+	}
+
+	SECTION("a gap below 1 is refused")
+	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[1]);
+		job.joboptions["filctx_gap"].setString("0");
+		REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(error_message.find("gap") != std::string::npos);
+	}
+}
 
 TEST_CASE("Class2D: parallel replica options have backward-compatible defaults",
           "[pipeline][class2d]")
@@ -1361,8 +1424,8 @@ TEST_CASE("Queued jobs: only jobs that run on GPUs ask Slurm for them", "[pipeli
 	refine.joboptions["use_gpu"].setString("Yes");
 	CHECK(refine.slurmRequest().gpus == 2);
 
-	// Class3D without alignment: the GPU only with RELION_GPU_SKIP_ALIGN=1, and then the
-	// job carries the variable to the node
+	// Class3D without alignment: the GPU unless RELION_GPU_SKIP_ALIGN=0; the default needs no
+	// variable on the node
 	const char *saved_skip = getenv("RELION_GPU_SKIP_ALIGN");
 	const std::string saved_skip_value = saved_skip ? saved_skip : "";
 	RelionJob c3d;
@@ -1373,13 +1436,12 @@ TEST_CASE("Queued jobs: only jobs that run on GPUs ask Slurm for them", "[pipeli
 	CHECK(c3d.usesGpu());                       // with alignment
 	CHECK(c3d.slurmRequest().exports.empty());
 	c3d.joboptions["dont_skip_align"].setString("No");
+	CHECK(c3d.usesGpu());                       // without alignment: still on the GPU
+	CHECK(c3d.slurmRequest().gpus == 1);
+	CHECK(c3d.slurmRequest().exports.empty());
+	setenv("RELION_GPU_SKIP_ALIGN", "0", 1);
 	CHECK_FALSE(c3d.usesGpu());
 	CHECK(c3d.slurmRequest().gpus == 0);
-	setenv("RELION_GPU_SKIP_ALIGN", "1", 1);
-	CHECK(c3d.usesGpu());
-	CHECK(c3d.slurmRequest().gpus == 1);
-	REQUIRE(c3d.slurmRequest().exports.size() == 1);
-	CHECK(c3d.slurmRequest().exports[0] == "RELION_GPU_SKIP_ALIGN=1");
 	if (saved_skip) setenv("RELION_GPU_SKIP_ALIGN", saved_skip_value.c_str(), 1);
 	else unsetenv("RELION_GPU_SKIP_ALIGN");
 	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);

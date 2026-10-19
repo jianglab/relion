@@ -48,6 +48,7 @@
 #include "src/prefetch.h"
 #include "src/fftw_rect.h"
 #include "src/resource_report.h"
+#include "src/filament_context.h"
 
 #define ML_SIGNIFICANT_WEIGHT 1.e-8
 #define METADATA_LINE_LENGTH METADATA_LINE_LENGTH_ALL
@@ -828,6 +829,14 @@ public:
 	void stopResourceMonitor();
 	void reportResources(const std::vector<resrep::ProcessStats> &procs, bool mpi);
 
+	// Filament context (RELION_FILAMENT_CONTEXT, see filament_context.h): segments of a filament
+	// in track order, per-class log-likelihoods of this iteration's E-step, and the class
+	// log-priors computed from them for the next one (all nr_particles x nr_classes).
+	filctx::Options filctx_opt;
+	std::vector<std::vector<long int> > filctx_filaments;
+	std::vector<float> filctx_loglik, filctx_logprior;
+	std::vector<double> filctx_T;
+	double filctx_temper = 1.;
 	std::string exp_fn_img, exp_fn_ctf, exp_fn_recimg;
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;
@@ -855,6 +864,9 @@ public:
 	//Maximum number of significant weights in coarse pass of expectation used in refinement
 	// This can be set by user or automatically
 	int maximum_significants;
+
+	// Chooses maximum_significants for the current iteration (see ml_optimiser.cpp)
+	void selectMaximumSignificants(bool announce);
 
 	// Tabulated sine and cosine values (for 3D helical sub-tomogram averaging with on-the-fly shifts)
 	TabSine tab_sin;
@@ -1348,6 +1360,21 @@ public:
 	 */
 	void alignClasses();
 
+	/* Degrees of freedom of the class alignment: 6 (C1), 2 (Cn with n >= 2, or helical), 0 (Dn, T, O, I: nothing to align)
+	 */
+	int classAlignmentFreedom();
+
+	/* Apply the inverse of the transformation that was applied to the map of class iclass (0-based) to the orientations,
+	 * offsets and offset priors of all particles of that class in mydata.MDimg
+	 */
+	void applyMapAlignmentToParticle(long int part_id, int nr_freedom,
+			RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+			RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz);
+
+	void applyClassAlignmentToParticles(int iclass, int nr_freedom,
+			RFLOAT best_rot, RFLOAT best_tilt, RFLOAT best_psi,
+			RFLOAT best_dx, RFLOAT best_dy, RFLOAT best_dz);
+
 	/* Updates the current resolution (from data_vs_prior array) and keeps track of best resolution thus far
 	 *  and precalculates a 2D Fourier-space array with pointers to the resolution of each point in a FFTW-centered array
 	 */
@@ -1498,6 +1525,19 @@ public:
 
 	// Enforce that all particles from the same filament get the same class assignment
 	void enforceFilamentConsistency();
+
+	// Filament context: set up from the data, store one segment's per-class scores, turn
+	// them into class priors for the next iteration, and the factor applied in the E-step
+	// Command-line options (--filament_context etc.) over the RELION_FILAMENT_* environment defaults
+	void parseFilamentContext();
+	void initialiseFilamentContext();
+	void storeFilamentLoglik(long int part_id, const MultidimArray<RFLOAT> &Mdiff2, long int per_class, RFLOAT min_diff2);
+	void updateFilamentContext();
+	inline RFLOAT filamentClassFactor(long int part_id, int iclass) const
+	{
+		if (filctx_logprior.empty()) return 1.;
+		return mymodel.nr_classes * exp(filctx_logprior[(size_t)part_id * mymodel.nr_classes + iclass]);
+	}
 
 	// Get metadata array of a subset of particles from the experimental model
 	void getMetaAndImageDataSubset(long int my_first_part_id, long int my_last_part_id, bool do_also_imagedata = true);

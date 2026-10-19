@@ -85,6 +85,38 @@ Suggestion split(Kind kind, int gpus, int cpus);
 /// its "nr_cpus"; false otherwise.
 bool autoSplit(const JobView &job, Suggestion &split);
 
+// GPU memory one extra host thread costs (its workspaces and pool share): measured 0.34 GB on
+// the tutorial Class3D case; 0.5 GB leaves margin. Only 60% of the free GPU memory is
+// assumed usable by threads, the rest holds the maps and the pool's base.
+const double GPU_BYTES_PER_THREAD = 0.5e9;
+const double GPU_FREE_FRACTION_FOR_THREADS = 0.6;
+// Fewer particles than this per thread and the fixed costs of an iteration dominate:
+// a 300-particle Class2D case got slower with more than 2 threads per worker.
+const long MIN_PARTICLES_PER_THREAD = 128;
+
+/// Threads per process for a job started without --j. Three limits, the smallest wins:
+///  1. cores: the cores each process may use (`cores` / `sharing`, where `sharing` is the
+///     number of worker processes that share those cores);
+///  2. GPU jobs (`gpus` > 0, the GPUs visible to the job; `per_gpu_cap` <= 0 switches this
+///     limit off): at most `per_gpu_cap` per GPU the process feeds, because more threads do
+///     not shorten the E-step (measured on an RTX 3090: no gain beyond 6 to 8 per process);
+///  3. GPU memory (`free_gpu_bytes` > 0: free memory of all visible GPUs): the threads of
+///     all `sharing` workers together must fit in GPU_FREE_FRACTION_FOR_THREADS of it at
+///     GPU_BYTES_PER_THREAD each (a card of 8 GB ran out of memory with 8 threads in each of
+///     two workers);
+///  4. work (`particles_per_worker` > 0): at least MIN_PARTICLES_PER_THREAD per thread.
+/// Always >= 1.
+int autoThreads(int cores, int sharing, int gpus, int per_gpu_cap = THREADS_PER_GPU_CAP,
+                double free_gpu_bytes = 0, long particles_per_worker = 0);
+
+/// Number of particles in a particle STAR file (the data_particles block, or the unnamed block
+/// of old files), counted without parsing the values; 0 if the file has none or cannot be read.
+long countParticlesInStar(const std::string &fn);
+
+/// The cap from RELION_AUTO_THREADS_CAP ("off" or 0: none; a number: threads per GPU);
+/// THREADS_PER_GPU_CAP when unset or not a number.
+int autoThreadsCapFromEnv();
+
 enum class Field { Cpus, MpiOrThreads };
 
 /// The tooltip text for the "Number of CPUs" field or the MPI and threads fields of a job

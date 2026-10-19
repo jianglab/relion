@@ -25,6 +25,15 @@
 #include <list>
 #include <memory>
 #include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 // How many particle stacks the prefetcher keeps open. The soft limit on open files is
 // first raised towards the hard limit (at most 65536), as many programs do: it is
@@ -73,6 +82,208 @@ fImageHandler &OpenStacks::get(const FileName &fn_stack)
 	return *it->second.first;
 }
 
+// ------------------------------- StackWarmer -------------------------------
+
+static long int memAvailableBytes()
+{
+	FILE *f = fopen("/proc/meminfo", "r");
+	if (!f) return 0;
+	char line[256];
+	long int kb = 0;
+	while (fgets(line, sizeof(line), f))
+		if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1) break;
+	fclose(f);
+	return kb * 1024;
+}
+
+// fraction of the file that is in the page cache (-1 when it cannot be told)
+static double cachedFraction(int fd, size_t size)
+{
+	if (size == 0) return 1.;
+	void *m = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+	if (m == MAP_FAILED) return -1.;
+	const size_t page = sysconf(_SC_PAGESIZE), np = (size + page - 1) / page;
+	std::vector<unsigned char> v(np);
+	double r = (mincore(m, size, v.data()) == 0) ? (double) std::count_if(v.begin(), v.end(), [](unsigned char c) { return c & 1; }) / np : -1.;
+	munmap(m, size);
+	return r;
+}
+
+StackWarmer::StackWarmer(Experiment *mydata, int nr_threads) : mydata_(mydata), nr_threads_(std::max(1, nr_threads))
+{
+	thread_ = std::thread(&StackWarmer::run, this);
+}
+
+StackWarmer::~StackWarmer()
+{
+	{
+		std::lock_guard<std::mutex> lock(mtx_);
+		stop_ = true;
+		cv_.notify_one();
+	}
+	if (thread_.joinable())
+		thread_.join();
+}
+
+void StackWarmer::consumed(long int first, long int last, bool late)
+{
+	std::lock_guard<std::mutex> lock(mtx_);
+	if (first_ < 0)
+	{
+		first_ = first;
+		pos_ = first;
+	}
+	consumed_ = std::max(consumed_, last);
+	pool_size_ = std::max(pool_size_, last - first + 1);
+	if (lookahead_ == 0)
+		lookahead_ = 8 * pool_size_;
+	else if (late)
+		lookahead_ = std::min(2 * lookahead_, std::max(lookahead_max_, lookahead_));
+	cv_.notify_one();
+}
+
+std::string StackWarmer::report() const
+{
+	char buf[300];
+	snprintf(buf, sizeof(buf), "Stack warm-up: %ld stacks read ahead (%.2f GB, %.1f s of reading with up to %d threads); look-ahead %ld particles (RELION_PREFETCH_WARM=0 turns it off).",
+	         nr_warmed_.load(), bytes_.load() / 1e9, busy_us_.load() / 1e6, nr_threads_, lookahead_);
+	return buf;
+}
+
+void StackWarmer::run()
+{
+	// the stack of every particle in sorted order is found when needed; how many particles of the
+	// data set use each stack tells whether reading it whole is worth it
+	const long int nr_total = mydata_->numberOfParticles();
+	std::unordered_map<std::string, std::vector<long int> > needs;
+	auto stackOf = [&](long int pos, long int *imgno_out = NULL) -> std::string
+	{
+		long int part_id = mydata_->sorted_idx[pos];
+		FileName fn_img, fn_stack;
+		long int imgno;
+		if (!mydata_->getImageNameOnScratch(part_id, fn_img))
+			fn_img = mydata_->particles[part_id].name;
+		fn_img.decompose(imgno, fn_stack);
+		if (imgno_out) *imgno_out = imgno;
+		return fn_stack;
+	};
+	for (long int p = 0; p < nr_total; p++)
+	{
+		long int imgno;
+		std::string s = stackOf(p, &imgno);
+		needs[s].push_back(imgno);
+	}
+	for (auto &n : needs) std::sort(n.second.begin(), n.second.end());
+	std::unordered_map<std::string, long int> uses, sizes;
+	double img_bytes = 0.;
+	for (auto &n : needs)
+	{
+		uses[n.first] = n.second.size();
+		struct stat st;
+		if (stat(n.first.c_str(), &st) != 0) { sizes[n.first] = -1; continue; }
+		sizes[n.first] = st.st_size;
+		double per = (double) st.st_size / n.second.size();
+		if (img_bytes == 0. || per < img_bytes) img_bytes = per;
+	}
+	std::unordered_set<std::string> done;
+	double bytes_per_particle = 131072.;
+	long int scanned = 0;
+
+	while (true)
+	{
+		std::vector<std::string> batch;
+		long int batch_bytes = 0;
+		{
+			std::unique_lock<std::mutex> lock(mtx_);
+			cv_.wait(lock, [&]() { return stop_ || (first_ >= 0 && pos_ < nr_total && pos_ <= consumed_ + lookahead_); });
+			if (stop_) return;
+			// memory: what the look-ahead may hold is a quarter of the available memory, at most 16 GB
+			double budget = std::min(0.25 * memAvailableBytes(), 16e9);
+			lookahead_max_ = std::max<long int>(2 * pool_size_, (long int) (budget / bytes_per_particle));
+			lookahead_ = std::min(lookahead_, lookahead_max_);
+			while (pos_ < nr_total && pos_ <= consumed_ + lookahead_ && batch.size() < 4 * (size_t) nr_threads_)
+			{
+				std::string s = stackOf(pos_++);
+				scanned++;
+				if (!done.insert(s).second) continue;
+				long int sz = sizes[s];
+				if (sz <= 0) continue;
+				batch.push_back(s);
+				batch_bytes += sz;
+			}
+		}
+		if (batch.empty()) continue;
+		struct timeval t0, t1;
+		gettimeofday(&t0, NULL);
+		std::atomic<size_t> next(0);
+		auto work = [&]()
+		{
+			std::vector<char> buf(4 << 20);
+			size_t i;
+			while ((i = next++) < batch.size())
+			{
+				int fd = open(batch[i].c_str(), O_RDONLY);
+				if (fd < 0) continue;
+				struct stat st;
+				if (fstat(fd, &st) == 0)
+				{
+					// MRC layout: 1024-byte header, nsymbt bytes of extended header, then nz images; only the
+					// images that are needed are read, neighbours in one request. Other formats: the whole file.
+					long int img = 0, start = 0;
+					int hdr[256];
+					if (pread(fd, hdr, sizeof(hdr), 0) == (ssize_t) sizeof(hdr))
+					{
+						int bpp = 0;
+						switch (hdr[3]) { case 0: bpp = 1; break; case 1: case 6: case 12: bpp = 2; break; case 2: bpp = 4; break; default: bpp = 0; }
+						if (bpp > 0 && hdr[0] > 0 && hdr[1] > 0 && hdr[23] >= 0)
+						{
+							img = (long int) hdr[0] * hdr[1] * bpp;
+							start = 1024 + hdr[23];
+						}
+					}
+					long int got = 0;
+					if (img > 0)
+					{
+						const std::vector<long int> &v = needs.at(batch[i]);
+						size_t k = 0;
+						while (k < v.size())
+						{
+							size_t k2 = k;
+							while (k2 + 1 < v.size() && v[k2 + 1] - v[k2] <= 3 && (v[k2 + 1] - v[k]) * img < (4 << 20)) k2++;
+							off_t o0 = start + (v[k] - 1) * img;
+							size_t len = (size_t) ((v[k2] - v[k] + 1) * img);
+							if (o0 + (off_t) len <= st.st_size)
+							{
+								ssize_t n = pread(fd, buf.data(), std::min(len, buf.size()), o0);
+								if (n > 0) got += n;
+							}
+							k = k2 + 1;
+						}
+					}
+					else
+					{
+						posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+						ssize_t n;
+						off_t off = 0;
+						while ((n = pread(fd, buf.data(), buf.size(), off)) > 0) off += n;
+						got = off;
+					}
+					bytes_ += got;
+					nr_warmed_++;
+				}
+				close(fd);
+			}
+		};
+		std::vector<std::thread> helpers;
+		for (int r = 1; r < nr_threads_; r++) helpers.emplace_back(work);
+		work();
+		for (auto &h : helpers) h.join();
+		gettimeofday(&t1, NULL);
+		busy_us_ += (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_usec - t0.tv_usec);
+		if (scanned > 0 && bytes_ > 0) bytes_per_particle = std::max(65536., (double) bytes_ / scanned);
+	}
+}
+
 AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata, int max_readers)
 	: mydata_(mydata),
 	  max_readers_(std::max(1, max_readers)),
@@ -84,6 +295,13 @@ AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata, int max_readers)
 	  work_done_(false),
 	  shutdown_(false)
 {
+	// opt-in: RELION_PREFETCH_WARM=1 (or a thread count) reads whole stacks ahead (see StackWarmer)
+	if (const char *e = getenv("RELION_PREFETCH_WARM"))
+		if (strcmp(e, "0") != 0 && strcmp(e, "off") != 0 && mydata_->particles.size() > 0)
+		{
+			int nt = atoi(e);
+			warmer_.reset(new StackWarmer(mydata_, nt > 1 ? nt : 8));
+		}
 	worker_thread_ = std::thread(&AsyncImagePrefetcher::workerThread, this);
 }
 
@@ -101,6 +319,8 @@ void AsyncImagePrefetcher::startPrefetch(long int first_part_id, long int last_p
 	work_done_ = false;
 	pending_ = true;
 	cv_start_.notify_one();
+	if (warmer_)
+		warmer_->consumed(first_part_id, last_part_id, false);
 }
 
 bool AsyncImagePrefetcher::waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target, long int first_part_id, long int last_part_id, bool speculative)
@@ -120,6 +340,8 @@ bool AsyncImagePrefetcher::waitAndSwap(std::vector<MultidimArray<RFLOAT>>& targe
 		nr_late_pools_++;
 		last_pool_late_ = true;
 	}
+	if (warmer_)
+		warmer_->consumed(first_part_id, last_part_id, late);
 	if (shutdown_)
 		return false;
 	if (speculative && (ready_first_ != first_part_id || ready_last_ != last_part_id))

@@ -14,6 +14,7 @@
 #include "src/error.h"
 
 #include <cuda_runtime.h>
+#include "src/acc/cuda/gpu_mem_trace.h"
 #include <cufft.h>
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,7 @@
 #include <type_traits>
 
 void relionReleaseRetainedGpuMemory(); // cuda_ml_optimiser.cu
+bool relionHasRetainedGpuMemory();     // cuda_ml_optimiser.cu
 
 namespace gpurec
 {
@@ -319,6 +321,7 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 		return false;
 	};
 
+	gpuMemTrace("GPU reconstruction: start (cuFFT work area already planned)", (double)work);
 	DevBuf dFw, dFc, dIn, dWin, dRad, dSums, dCounts, dFlags, dShellInv, dShellPos, dStage;
 	cudaError_t e;
 	const int threads = 256;
@@ -350,6 +353,7 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 	dStage.release();
 	kDecenter<C><<<gridFor(n_vol), threads>>>(dIn.as<C>(), dFc.as<C>(), d, in.start_z, in.start_y, in.start_x, in.max_r2);
 	dIn.release();
+	gpuMemTrace("GPU reconstruction: weight and data decentred", (double)(bw + bc));
 
 	// 1/1000th of the radially averaged weight (sums in double)
 	std::vector<double> sums(in.r_max, 0.);
@@ -395,6 +399,7 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 	if ((e = dWin.alloc(bwin)) != cudaSuccess) return fail("GPU memory", e);
 	kWindowFourierCenter<C><<<gridFor(n_win), threads>>>(dFc.as<C>(), d, dWin.as<C>(), dw);
 	dFc.release();
+	gpuMemTrace("GPU reconstruction: padded window in the card", (double)bwin);
 	if (execC2R(plan, dWin.as<C>(), dWin.as<R>()) != CUFFT_SUCCESS)
 	{
 		cufftDestroy(plan);
@@ -402,6 +407,7 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 		return false;
 	}
 	cufftDestroy(plan);
+	gpuMemTrace("GPU reconstruction: inverse transform done");
 	DevBuf dOut;
 	if ((e = dOut.alloc(n_out * sizeof(RFLOAT))) != cudaSuccess) { reason = std::string("GPU memory: ") + cudaGetErrorString(e); return false; }
 	kWindowReal<R><<<gridFor(n_out), threads>>>(dWin.as<R>(), N, dOut.as<RFLOAT>(), in.ori_size, (R)in.normfft);
@@ -416,14 +422,36 @@ bool run(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool
 
 }
 
+bool keepPoolActive()
+{
+	// RELION_GPU_KEEP_POOL: on unless 0
+	static const bool on = [] { const char *e = getenv("RELION_GPU_KEEP_POOL"); return !(e && *e && atoi(e) <= 0); }();
+	return on;
+}
+
 bool reconstructSkipGridding(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason, bool &warned_zero_weight)
 {
-	relionReleaseRetainedGpuMemory(); // the chunk kept for the next expectation step
+	// The chunk kept for the next expectation step stays on the device and is given back only when the
+	// reconstruction does not fit next to it (RELION_GPU_KEEP_POOL=0 gives it back first, as before).
+	// Freeing and allocating again the ~20 GB chunk of the old pool takes 0.1 to 0.2 s per iteration, and
+	// the reconstruction of the usual box sizes fits next to it (the chunk is sized to leave room for the
+	// threads' own needs). The results do not change.
+	const bool keep_pool = keepPoolActive();
+	if (!keep_pool)
+		relionReleaseRetainedGpuMemory(); // the chunk kept for the next expectation step
 	int ndev = 0;
 	if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0) { cudaGetLastError(); reason = "no GPU"; return false; }
-	if (in.double_precision)
-		return run<double>(in, vol_out, reason, warned_zero_weight);
-	return run<float>(in, vol_out, reason, warned_zero_weight);
+	bool ok = in.double_precision ? run<double>(in, vol_out, reason, warned_zero_weight)
+	                              : run<float>(in, vol_out, reason, warned_zero_weight);
+	if (!ok && keep_pool && relionHasRetainedGpuMemory())
+	{
+		cudaGetLastError();
+		relionReleaseRetainedGpuMemory();
+		reason.clear();
+		ok = in.double_precision ? run<double>(in, vol_out, reason, warned_zero_weight)
+		                         : run<float>(in, vol_out, reason, warned_zero_weight);
+	}
+	return ok;
 }
 
 }

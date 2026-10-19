@@ -14,6 +14,9 @@
 #include "src/gpu_reconstruct.h"
 
 #include <cuda_runtime.h>
+#include "src/acc/cuda/gpu_mem_trace.h"
+#include "src/acc/gpu_pool_plan.h"
+#include "src/acc/cuda/cuda_mem_utils.h" // pinnedBigUpload, pinnedBigDownload
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -178,6 +181,7 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 	int ndev = 0;
 	if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0) { cudaGetLastError(); reason = "no GPU"; return false; }
 
+	gpuMemTrace("helical symmetrisation in Fourier space: start");
 	const size_t plane_vox = (size_t)in.ydim * in.xdim;
 	const size_t plane_bytes = plane_vox * 3 * sizeof(RFLOAT); // data (2) + weight (1)
 	const long int nm = kmax + 1;                              // values of |z|: 0 .. kmax
@@ -188,6 +192,15 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 	// a group of c values of |z| has 2c + 2 input planes and 2c output planes
 	long int c = free_b > reserve ? (long int)(((free_b - reserve) / plane_bytes - 2) / 4) : 0;
 	c = std::min(c, nm);
+	// RELION_GPU_LEAN_MEMORY: do not fill the card. The groups only cut the work into pieces (the result
+	// does not depend on them), and a piece of a quarter to one GB moves the data just as fast as a piece
+	// that takes everything that is free, which would be the whole volume, twice, on a large model.
+	long int c_free = c;
+	if (gpupool::leanMemoryMode() > 0)
+	{
+		const size_t budget = std::max((size_t)256 << 20, std::min((size_t)1 << 30, (size_t)(free_b / 8)));
+		c = std::min(c, std::max(1L, (long int)(((budget / plane_bytes) - 2) / 4)));
+	}
 	// Manual override for experts and for the tests: the most values of |z| in a group
 	if (const char *ep = getenv("RELION_GPU_SYMMETRISE_PLANES"))
 		if (atoi(ep) > 0) c = std::min(c, (long int)atoi(ep));
@@ -224,6 +237,7 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 		cudaGetLastError();
 		return false;
 	}
+	gpuMemTrace("helical symmetrisation in Fourier space: planes in the card", (double) ((size_t)(8 * c + 2) * plane_vox * 3 * sizeof(RFLOAT) / 2));
 	cudaMemcpy(dR, in.R.data(), in.R.size() * sizeof(RFLOAT), cudaMemcpyHostToDevice);
 	if (in.has_rise)
 	{
@@ -264,18 +278,18 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 		e = cudaSuccess;
 		if (g.single)
 		{
-			e = cudaMemcpy(din_d, data + host_plane(-b) * 2, (size_t)nneg_in * pb_d, cudaMemcpyHostToDevice);
-			if (e == cudaSuccess) e = cudaMemcpy(din_w, weight + host_plane(-b), (size_t)nneg_in * pb_w, cudaMemcpyHostToDevice);
+			e = pinnedBigUpload(din_d, data + host_plane(-b) * 2, (size_t)nneg_in * pb_d);
+			if (e == cudaSuccess) e = pinnedBigUpload(din_w, weight + host_plane(-b), (size_t)nneg_in * pb_w);
 		}
 		else
 		{
 			// negative block: planes -b .. -a from the arrays, then the original of -a+1 kept aside
-			e = cudaMemcpy(din_d, data + host_plane(-b) * 2, (size_t)(nneg_in - 1) * pb_d, cudaMemcpyHostToDevice);
-			if (e == cudaSuccess) e = cudaMemcpy(din_w, weight + host_plane(-b), (size_t)(nneg_in - 1) * pb_w, cudaMemcpyHostToDevice);
-			if (e == cudaSuccess) e = cudaMemcpy(din_d + (size_t)(nneg_in - 1) * plane_vox * 2, stash_d.data(), pb_d, cudaMemcpyHostToDevice);
-			if (e == cudaSuccess) e = cudaMemcpy(din_w + (size_t)(nneg_in - 1) * plane_vox, stash_w.data(), pb_w, cudaMemcpyHostToDevice);
-			if (e == cudaSuccess) e = cudaMemcpy(din_d + (size_t)nneg_in * plane_vox * 2, data + host_plane(a) * 2, (size_t)npos_in * pb_d, cudaMemcpyHostToDevice);
-			if (e == cudaSuccess) e = cudaMemcpy(din_w + (size_t)nneg_in * plane_vox, weight + host_plane(a), (size_t)npos_in * pb_w, cudaMemcpyHostToDevice);
+			e = pinnedBigUpload(din_d, data + host_plane(-b) * 2, (size_t)(nneg_in - 1) * pb_d);
+			if (e == cudaSuccess) e = pinnedBigUpload(din_w, weight + host_plane(-b), (size_t)(nneg_in - 1) * pb_w);
+			if (e == cudaSuccess) e = pinnedBigUpload(din_d + (size_t)(nneg_in - 1) * plane_vox * 2, stash_d.data(), pb_d);
+			if (e == cudaSuccess) e = pinnedBigUpload(din_w + (size_t)(nneg_in - 1) * plane_vox, stash_w.data(), pb_w);
+			if (e == cudaSuccess) e = pinnedBigUpload(din_d + (size_t)nneg_in * plane_vox * 2, data + host_plane(a) * 2, (size_t)npos_in * pb_d);
+			if (e == cudaSuccess) e = pinnedBigUpload(din_w + (size_t)nneg_in * plane_vox, weight + host_plane(a), (size_t)npos_in * pb_w);
 		}
 		if (e == cudaSuccess)
 		{
@@ -292,14 +306,14 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 			memcpy(stash_d.data(), data + host_plane(-b) * 2, pb_d);
 			memcpy(stash_w.data(), weight + host_plane(-b), pb_w);
 			written = true;
-			e = cudaMemcpy(data + host_plane(-b) * 2, dout_d, (size_t)nneg_out * pb_d, cudaMemcpyDeviceToHost);
-			if (e == cudaSuccess) e = cudaMemcpy(weight + host_plane(-b), dout_w, (size_t)nneg_out * pb_w, cudaMemcpyDeviceToHost);
+			e = pinnedBigDownload(data + host_plane(-b) * 2, dout_d, (size_t)nneg_out * pb_d);
+			if (e == cudaSuccess) e = pinnedBigDownload(weight + host_plane(-b), dout_w, (size_t)nneg_out * pb_w);
 			if (e == cudaSuccess && npos_out > 0)
 			{
 				const long int p0 = a > 0 ? a : 1;
-				e = cudaMemcpy(data + host_plane(p0) * 2, dout_d + (size_t)nneg_out * plane_vox * 2, (size_t)npos_out * pb_d, cudaMemcpyDeviceToHost);
+				e = pinnedBigDownload(data + host_plane(p0) * 2, dout_d + (size_t)nneg_out * plane_vox * 2, (size_t)npos_out * pb_d);
 				if (e == cudaSuccess)
-					e = cudaMemcpy(weight + host_plane(p0), dout_w + (size_t)nneg_out * plane_vox, (size_t)npos_out * pb_w, cudaMemcpyDeviceToHost);
+					e = pinnedBigDownload(weight + host_plane(p0), dout_w + (size_t)nneg_out * plane_vox, (size_t)npos_out * pb_w);
 			}
 		}
 		if (e != cudaSuccess)
@@ -317,6 +331,8 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 	std::ostringstream o;
 	o << c << " values of |z| per group, " << ngroups << " group" << (ngroups > 1 ? "s" : "") << ", "
 	  << (free_b >> 20) << " MB free at the start";
+	if (c < c_free)
+		o << " (lean memory: groups kept small, " << c_free << " would fit)";
 	choice = o.str();
 	return true;
 }

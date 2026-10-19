@@ -84,6 +84,10 @@ static const std::vector<std::string> job_consensus_method_options{
     "Categorical EM", "Sparse NMF (experimental)"
 };
 
+static const std::vector<std::string> job_filament_context_options{
+    "Off", "Markov chain", "Per filament"
+};
+
 static const std::vector<std::string> job_undefined_options{
 	"undefined"
 };
