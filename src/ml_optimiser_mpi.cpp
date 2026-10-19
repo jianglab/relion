@@ -2053,6 +2053,10 @@ void MlOptimiserMpi::expectation()
 #endif
 					MlDeviceBundle* b = ((MlDeviceBundle*)accDataBundles[i]);
 					b->syncAllBackprojects();
+#ifdef _CUDA_ENABLED
+					// Spread the per-orientation back-projection sums into the volumes before they are read back
+					b->flushBackprojectAccumulator();
+#endif
 
 					for (int j = 0; j < b->projectors.size(); j++)
 						b->projectors[j].clear();
