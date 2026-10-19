@@ -3442,9 +3442,9 @@ void RelionJob::initialiseSelectJob()
 	joboptions["fn_mic"] = JobOption("OR select from micrographs.star:", LABEL_MICS_CPIPE, 1, "", "STAR files (*.star)", "A micrographs.star file to select micrographs from.");
 	joboptions["fn_data"] = JobOption("OR select from particles.star:", LABEL_PARTS_CPIPE, 1, "", "STAR files (*.star)", "A particles.star file to select individual particles from.");
 
-	joboptions["do_recover_full_filaments"] = JobOption("Run recover full filaments after selection:", true, "If set to True, recover full filaments from helicon will be automatically run after selecting classes. To recover full filaments across multiple particle extraction jobs, run helicon images2star input.star output.star --selectCommonHelices target,star instead.");
-	joboptions["min_fraction_threshold"] = JobOption("Min. fractions: ", 0.5, 0, 1, 0.05, "Only filaments with more than this fraction of segments are preserved in the selection will be recovered. Set to 0 to recover segments of all the filaments.");
-	joboptions["full_particle_star_file_path"] = JobOption("Full star file path:", LABEL_PARTS_CPIPE, 1, "", "STAR files (*.star)", "A particles.star file as the full star file that contains the full filaments. If nothing is given, it will try to find the full star file automatically.");
+	joboptions["do_recover_full_filaments"] = JobOption("Run recover full filaments after selection:", true, "If set to True, then after selecting particles (interactively or with automated 2D class selection), all segments of the filaments that are well represented in the selection are written to particles_fullfilaments_<fraction>.star, using relion_star_handler --recover_full_filaments. In interactive selection, this is done each time the selected particles are saved. Nothing is done for particles that are not helical segments (without rlnHelicalTubeID). To recover full filaments across multiple particle extraction jobs, run helicon images2star input.star output.star --selectCommonHelices target,star instead.");
+	joboptions["min_fraction_threshold"] = JobOption("Min. fractions: ", 0.5, 0, 1, 0.05, "Only filaments with at least this fraction of their segments in the selection will be recovered. Set to 0 to recover all segments of every filament that has a selected segment.");
+	joboptions["full_particle_star_file_path"] = JobOption("Full star file path:", LABEL_PARTS_CPIPE, 1, "", "STAR files (*.star)", "A particles.star file with all segments of the filaments. If nothing is given, the particles STAR file of the job that wrote the selected particle images is used (e.g. Extract/jobNNN/particles.star or Polish/jobNNN/shiny.star).");
 
 	joboptions["do_class_ranker"] = JobOption("Automatically select 2D classes?", false, "If set to True, the class_ranker program will be used to make an automated class selection, based on the parameters below. This option only works when selecting classes from a relion_refine job (input optimiser.star on the I.O tab)");
 	joboptions["rank_threshold"] = JobOption("Minimum threshold for auto-selection: ", 0.5, 0, 1, 0.05, "Only classes with a pre dicted threshold above this value will be selected.");
@@ -3492,8 +3492,12 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 		error_message = "Please select an input file.";
 		return false;
 	}
-	
-	std::string ff_command = "";
+
+	// Selected particles from which the full filaments can be recovered
+	FileName fn_selected_parts = "";
+	// relion_display saves the selection whenever the user asks, from a window that runs in the background,
+	// so it recovers the full filaments itself after each save
+	bool do_recover_in_display = false;
 
 	int c = 0;
 	if (joboptions["do_select_values"].getBoolean()) c++;
@@ -3715,6 +3719,7 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 			FileName fn_parts = outputname+"particles.star";
 			Node node2(fn_parts, LABEL_SELECT_PARTS);
 			outputNodes.push_back(node2);
+			fn_selected_parts = fn_parts;
 
 			FileName fn_imgs = outputname+"class_averages.star";
 			Node node3(fn_imgs, LABEL_SELECT_CLAVS);
@@ -3740,6 +3745,7 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 			label += ".interactive";
 
 			command="`which relion_display`";
+			do_recover_in_display = true;
 
 			// I/O
 			if (joboptions["fn_model"].getString() != "")
@@ -3753,6 +3759,7 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 				command += " --allow_save --fn_parts " + fn_parts;
 				Node node2(fn_parts, LABEL_SELECT_PARTS);
 				outputNodes.push_back(node2);
+				fn_selected_parts = fn_parts;
 
 				// Only save the 2D class averages for 2D jobs (normal Class2D or from David's filament selection program)
 				FileName fnt = joboptions["fn_model"].getString();
@@ -3790,15 +3797,7 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 				command += " --allow_save --fn_imgs " + fn_parts;
 				Node node2(fn_parts, LABEL_SELECT_PARTS);
 				outputNodes.push_back(node2);
-			}
-			
-			if (joboptions["do_recover_full_filaments"].getBoolean())
-			{
-				ff_command = "/net/jiang/apps/miniconda3/envs/helicon/bin/helicon images2star " + outputname + "particles.star " + outputname +"particles_fullfilaments_" + joboptions["min_fraction_threshold"].getString() + ".star --recoverFullFilaments minFraction=" + joboptions["min_fraction_threshold"].getString();
-				if (joboptions["full_particle_star_file_path"].getString() != "")
-				{
-					ff_command += ":fullStarFile=" + joboptions["full_particle_star_file_path"].getString();
-				}
+				fn_selected_parts = fn_parts;
 			}
 		}
 	}
@@ -3817,10 +3816,45 @@ bool RelionJob::getCommandsSelectJob(std::string &outputname, std::vector<std::s
 	// Other arguments
 	command += " " + joboptions["other_args"].getString();
 
-	commands.push_back(command);
-	commands.push_back(ff_command);
+	// Recover the full filaments from the selected helical segments
+	std::string ff_command = "";
+	if (joboptions["do_recover_full_filaments"].getBoolean() && fn_selected_parts != "")
+	{
+		const std::string min_fraction = joboptions["min_fraction_threshold"].getString();
+		const FileName fn_full_star = joboptions["full_particle_star_file_path"].getString();
+		FileName fn_full_filaments = outputname + "particles_fullfilaments_" + min_fraction + ".star";
+		if (do_recover_in_display)
+		{
+			command += " --fn_full_filaments " + fn_full_filaments + " --full_filaments_min_fraction " + min_fraction;
+			if (fn_full_star != "")
+				command += " --full_filaments_star " + fn_full_star;
+		}
+		else
+		{
+			// The selection program has finished when this runs
+			ff_command = "`which relion_star_handler` --recover_full_filaments";
+			ff_command += " --i " + fn_selected_parts + " --o " + fn_full_filaments;
+			ff_command += " --min_fraction " + min_fraction;
+			if (fn_full_star != "")
+				ff_command += " --full_star " + fn_full_star;
+		}
 
-	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
+		if (fn_full_star != "")
+		{
+			Node node(fn_full_star, joboptions["full_particle_star_file_path"].node_type);
+			inputNodes.push_back(node);
+		}
+		Node node(fn_full_filaments, LABEL_SELECT_PARTS);
+		outputNodes.push_back(node);
+	}
+
+	commands.push_back(command);
+	if (ff_command != "")
+		commands.push_back(ff_command);
+
+	// With two commands, only the last one may mark the job as finished
+	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message,
+	                           false, 1, ff_command != "");
 }
 
 void RelionJob::initialiseClass2DConsensusJob()

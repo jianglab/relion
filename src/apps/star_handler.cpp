@@ -23,6 +23,7 @@
 #include <src/filename.h>
 #include <src/time.h>
 #include <src/jaz/single_particle/obs_model.h>
+#include <src/helix.h>
 #include <src/pipeline_jobs.h>
 #include <cmath>
 
@@ -33,13 +34,13 @@ class star_handler_parameters
 	FileName fn_in, tablename_in, fn_out, fn_compare, tablename_compare,
 	         fn_label1, fn_label2, fn_label3,
 	         select_label, select_str_label, discard_label,
-	         fn_check, fn_operate, fn_operate2, fn_operate3, fn_set;
+	         fn_check, fn_operate, fn_operate2, fn_operate3, fn_set, fn_full_star;
 
 	std::string remove_col_label, add_col_label, add_col_value, add_col_from, hist_col_label, select_include_str, select_exclude_str;
 	RFLOAT eps, select_minval, select_maxval, multiply_by, add_to, center_X, center_Y, center_Z, hist_min, hist_max;
-	bool do_ignore_optics, do_combine, do_combine_picks, do_split, do_center, do_random_order, show_frac, show_cumulative, do_discard;
+	bool do_ignore_optics, do_combine, do_combine_picks, do_split, do_center, do_random_order, show_frac, show_cumulative, do_discard, do_recover_full_filaments;
 	long int nr_split, size_split, nr_bin, random_seed;
-	RFLOAT discard_sigma, duplicate_threshold, extract_angpix, cl_angpix;
+	RFLOAT discard_sigma, duplicate_threshold, extract_angpix, cl_angpix, min_fraction;
 	ObservationModel obsModel;
 	// I/O Parser
 	IOParser parser;
@@ -123,6 +124,11 @@ class star_handler_parameters
 		duplicate_threshold = textToFloat(parser.getOption("--remove_duplicates","Remove duplicated particles within this distance [Angstrom]. Negative values disable this.", "-1"));
 		extract_angpix = textToFloat(parser.getOption("--image_angpix", "For down-sampled particles, specify the pixel size [A/pix] of the original images used in the Extract job", "-1"));
 
+		int filament_section = parser.addSection("Recover full filaments");
+		do_recover_full_filaments = parser.checkOption("--recover_full_filaments", "Write all segments of the filaments of which at least --min_fraction of the segments are in the input STAR file");
+		fn_full_star = parser.getOption("--full_star", "STAR file with all segments of the filaments. By default, the particles STAR file of the job that wrote the particle images (e.g. Extract/jobNNN/particles.star)", "");
+		min_fraction = textToFloat(parser.getOption("--min_fraction", "Recover a filament if at least this fraction of its segments is in the input STAR file (0: all filaments with a segment in the input)", "0.5"));
+
 		// Check for errors in the command-line option
 		if (parser.checkForErrors())
 			REPORT_ERROR("Errors encountered on the command line, exiting...");
@@ -144,6 +150,7 @@ class star_handler_parameters
 		if (add_col_label != "") c++;
 		if (hist_col_label != "") c++;
 		if (duplicate_threshold > 0) c++;
+		if (do_recover_full_filaments) c++;
 		if (c != 1)
 		{
 			MetaDataTable MD;
@@ -168,6 +175,7 @@ class star_handler_parameters
 		if (add_col_label!= "") add_column();
 		if (hist_col_label != "") hist_column();
 		if (duplicate_threshold > 0) remove_duplicate();
+		if (do_recover_full_filaments) recover_full_filaments();
 
 		std::cout << " Done!" << std::endl;
 	}
@@ -1199,6 +1207,40 @@ class star_handler_parameters
 		MetaDataTable MDout = removeDuplicatedParticles(MD, mic_label, duplicate_threshold, scale, fn_removed, true);
 
 		write_check_ignore_optics(MDout, fn_out, "particles");
+		std::cout << " Written: " << fn_out << std::endl;
+	}
+
+	void recover_full_filaments()
+	{
+		if (!exists(fn_in))
+			REPORT_ERROR("Cannot find the input STAR file " + fn_in + " (were the selected particles saved?)");
+
+		MetaDataTable MDselected, MDfull;
+		read_check_ignore_optics(MDselected, fn_in, tablename_in);
+
+		if (!MDselected.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID))
+		{
+			std::cout << " The input STAR file " << fn_in << " has no rlnHelicalTubeID: these are not helical segments, so there are no full filaments to recover." << std::endl;
+			std::cout << " Not writing " << fn_out << std::endl;
+			return;
+		}
+
+		FileName fn_full = (fn_full_star != "") ? fn_full_star : findFullFilamentsStarFile(MDselected);
+		std::cout << " Reading all segments of the filaments from " << fn_full << std::endl;
+		// The output has the rows, and so also the optics groups, of the full STAR file
+		read_check_ignore_optics(MDfull, fn_full, tablename_in);
+
+		FullFilamentRecoveryStats stats;
+		MetaDataTable MDout = recoverFullFilaments(MDselected, MDfull, min_fraction, &stats);
+		if (!do_ignore_optics)
+			obsModel.removeUnusedOpticsGroups(MDout);
+
+		std::cout << " Recovered " << stats.nr_recovered_filaments << " of " << stats.nr_selected_filaments
+		          << " filaments with at least " << min_fraction * 100. << "% of their segments selected: "
+		          << stats.nr_selected_segments << " selected -> " << stats.nr_recovered_segments << " segments (of "
+		          << stats.nr_full_segments << " in " << fn_full << ")" << std::endl;
+
+		write_check_ignore_optics(MDout, fn_out, MDfull.getName());
 		std::cout << " Written: " << fn_out << std::endl;
 	}
 };

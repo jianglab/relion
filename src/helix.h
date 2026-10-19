@@ -598,4 +598,29 @@ void averageAsymmetricUnits2D(
 		int nr_asu,
 		RFLOAT rise);
 
+struct FullFilamentRecoveryStats
+{
+	long int nr_selected_segments;   // after removing duplicated rlnImageName
+	long int nr_selected_filaments;
+	long int nr_recovered_filaments;
+	long int nr_recovered_segments;
+	long int nr_full_segments;       // after removing duplicated rlnImageName
+};
+
+// Recover all segments of the filaments that are well represented in a subset of segments.
+// A filament is the set of segments that share a particle stack (the part of rlnImageName
+// after '@') and rlnHelicalTubeID. A filament in MDselected is kept if at least min_fraction
+// of its segments in MDfull are in MDselected; all its segments are then copied from MDfull.
+// The output keeps the order of MDfull. Every segment in MDselected must be in MDfull.
+MetaDataTable recoverFullFilaments(
+		const MetaDataTable &MDselected,
+		const MetaDataTable &MDfull,
+		RFLOAT min_fraction,
+		FullFilamentRecoveryStats *stats = NULL);
+
+// Find the STAR file with all segments of the job that wrote the particle images in MDselected,
+// e.g. Extract/job012/particles.star or Polish/job020/shiny.star. The particles STAR files
+// among the output nodes of that job's job_pipeline.star are tried first.
+FileName findFullFilamentsStarFile(const MetaDataTable &MDselected);
+
 #endif /* HELIX_H_ */

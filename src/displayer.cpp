@@ -27,6 +27,41 @@
 #include <FL/x.H>
 #undef Complex
 #endif
+#include <cstdio>
+
+std::string FullFilamentRecovery::displayArguments() const
+{
+	if (!isActive())
+		return "";
+	std::string args = " --fn_full_filaments " + fn_out + " --full_filaments_min_fraction " + min_fraction;
+	if (fn_full_star != "")
+		args += " --full_filaments_star " + fn_full_star;
+	return args;
+}
+
+bool FullFilamentRecovery::run(const FileName &fn_selected) const
+{
+	if (!isActive())
+		return true;
+
+	// Never leave the full filaments of an earlier selection behind
+	std::remove(fn_out.c_str());
+
+	std::string command = "relion_star_handler --recover_full_filaments --i " + fn_selected + " --o " + fn_out +
+	                      " --min_fraction " + min_fraction;
+	if (fn_full_star != "")
+		command += " --full_star " + fn_full_star;
+	std::cout << " Recovering the full filaments: " << command << std::endl;
+
+	// Run in the foreground: the job may only be marked as finished once this has been written
+	if (system(command.c_str()) != 0)
+	{
+		fl_message("Recovering the full filaments into %s failed. See the error messages in the terminal (or in run.err of the job).",
+		           fn_out.c_str());
+		return false;
+	}
+	return true;
+}
 
 const Fl_Menu_Item color_choices[] =
 {
@@ -831,6 +866,7 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 		canvas.do_allow_save = do_allow_save;
 		canvas.fn_selected_imgs= fn_selected_imgs;
 		canvas.fn_selected_parts = fn_selected_parts;
+		canvas.full_filaments = full_filaments;
 		canvas.max_nr_parts_per_class = max_nr_parts_per_class;
 		canvas.central_z_thickness = _central_z_thickness;
 		canvas.show_z = _show_z;
@@ -2089,6 +2125,7 @@ void multiViewerCanvas::saveSelectedParticles(int save_selected)
 	{
 		obsModel->save(MDpart, fn_selected_parts, "particles");
 		std::cout << "Saved " << fn_selected_parts << " with " << nparts << " selected particles." << std::endl;
+		full_filaments.run(fn_selected_parts);
 	}
 	else
 		std::cout <<" No classes selected. Please select one or more classes..." << std::endl;
@@ -2363,6 +2400,7 @@ void multiViewerCanvas::saveSelected(int save_selected)
 			{
 				obsModel->save(MDout, fn_selected_imgs, "particles");
 				std::cout << "Saved "<< fn_selected_imgs << " with " << nsel << " selected particles." << std::endl;
+				full_filaments.run(fn_selected_imgs);
 			}
 		}
 		else
@@ -3709,6 +3747,8 @@ void displayerGuiWindow::cb_display_i()
 		cl += " --recenter";
 	}
 
+	cl += full_filaments.displayArguments();
+
 	if (pipeline_control != "")
 	{
 		cl += " --pipeline_control " + pipeline_control;
@@ -3828,6 +3868,9 @@ void Displayer::read(int argc, char **argv)
 	fn_selected_imgs = parser.getOption("--fn_imgs", "Name of the STAR file in which to save selected images.", "");
 	fn_selected_parts = parser.getOption("--fn_parts", "Name of the STAR file in which to save particles from selected classes.", "");
 	max_nr_parts_per_class  = textToInteger(parser.getOption("--max_nr_parts_per_class", "Select maximum this number of particles from each selected classes.", "-1"));
+	full_filaments.fn_out = parser.getOption("--fn_full_filaments", "After saving selected helical segments, also save all segments of the filaments that are well represented in the selection to this STAR file", "");
+	full_filaments.min_fraction = parser.getOption("--full_filaments_min_fraction", "Recover a filament if at least this fraction of its segments is selected", "0.5");
+	full_filaments.fn_full_star = parser.getOption("--full_filaments_star", "STAR file with all segments of the filaments (default: the particles STAR file of the job that wrote the particle images)", "");
 	do_recenter = parser.checkOption("--recenter", "Recenter the selected images to the center-of-mass of all positive pixel values. ");
 	central_z_thickness = textToFloat(parser.getOption("--central_z_thickness", "Central Z-section thickness in Angstrom for averaging (0=disable)", "0"));
 	show_z = !parser.checkOption("--hide_z", "Hide Z central section for 3D volumes");
@@ -4025,6 +4068,7 @@ int Displayer::runGui()
 	win.do_recenter = do_recenter;
 	win.fn_imgs = fn_selected_imgs;
 	win.fn_parts = fn_selected_parts;
+	win.full_filaments = full_filaments;
 	win.pipeline_control = pipeline_control_outputname;
 
 	// this GUI can never create the output itself, so disable pipeline_control
@@ -4235,6 +4279,7 @@ void Displayer::run()
 
 
 		basisViewerWindow win(MULTIVIEW_WINDOW_WIDTH, MULTIVIEW_WINDOW_HEIGHT, fn_in.c_str());
+		win.full_filaments = full_filaments;
 		win.fillCanvas(MULTIVIEWER, MDin, &obsModel, display_label, text_label, do_read_whole_stacks, do_apply_orient, minval, maxval, sigma_contrast, scale, ori_scale, ncol,
 				max_nr_images,  lowpass, highpass, do_class, &MDdata, nr_regroups, do_recenter, fn_in.contains("_data.star"), &MDgroups,
 				do_allow_save, fn_selected_imgs, fn_selected_parts, max_nr_parts_per_class, central_z_thickness,

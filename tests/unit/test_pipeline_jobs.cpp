@@ -1010,6 +1010,137 @@ TEST_CASE("Select2D: requires an optimiser input", "[pipeline][select2d]")
 	REQUIRE_FALSE(generateCommand(job, command));
 }
 
+// ---------------------------------------------------------------------------
+// Select: recover full filaments
+// ---------------------------------------------------------------------------
+
+static bool generateSelectCommands(RelionJob &job, std::vector<std::string> &commands)
+{
+	std::string outputname, final_command, error_message;
+	return job.getCommands(outputname, commands, final_command, false, 1, error_message);
+}
+
+static bool hasOutputNode(const RelionJob &job, const std::string &name)
+{
+	for (const auto &node : job.outputNodes)
+		if (node.name == name) return true;
+	return false;
+}
+
+static void setUpSelectJob(RelionJob &job)
+{
+	job.clear();
+	job.initialise(PROC_CLASSSELECT);
+	job.joboptions["min_fraction_threshold"].setString("0.6");
+}
+
+TEST_CASE("Select: interactive selection recovers full filaments in relion_display after each save",
+          "[pipeline][select][recover_filaments]")
+{
+	// The selection window runs in the background, so a second command could run before the selection is saved
+	RelionJob job;
+	setUpSelectJob(job);
+	job.joboptions["fn_model"].setString("Class2D/job010/run_it025_optimiser.star");
+
+	std::vector<std::string> commands;
+	REQUIRE(generateSelectCommands(job, commands));
+	REQUIRE(commands.size() == 1);
+	REQUIRE(commands[0].find("relion_display") != std::string::npos);
+	REQUIRE(commands[0].find("--fn_parts Select/job001/particles.star") != std::string::npos);
+	REQUIRE(commands[0].find("--fn_full_filaments Select/job001/particles_fullfilaments_0.6.star") != std::string::npos);
+	REQUIRE(commands[0].find("--full_filaments_min_fraction 0.6") != std::string::npos);
+	REQUIRE(commands[0].find("--full_filaments_star") == std::string::npos);
+	REQUIRE(commands[0].find("relion_star_handler") == std::string::npos);
+	REQUIRE(commands[0].find("helicon") == std::string::npos);
+	REQUIRE(commands[0].find("--pipeline_control Select/job001/") != std::string::npos);
+
+	REQUIRE(hasOutputNode(job, "Select/job001/particles.star"));
+	REQUIRE(hasOutputNode(job, "Select/job001/particles_fullfilaments_0.6.star"));
+}
+
+TEST_CASE("Select: passes the full STAR file and makes it an input node",
+          "[pipeline][select][recover_filaments]")
+{
+	RelionJob job;
+	setUpSelectJob(job);
+	job.joboptions["fn_data"].setString("Class3D/job020/run_it025_data.star");
+	job.joboptions["full_particle_star_file_path"].setString("Extract/job005/particles.star");
+
+	std::vector<std::string> commands;
+	REQUIRE(generateSelectCommands(job, commands));
+	REQUIRE(commands.size() == 1);
+	REQUIRE(commands[0].find("--fn_imgs Select/job001/particles.star") != std::string::npos);
+	REQUIRE(commands[0].find("--full_filaments_star Extract/job005/particles.star") != std::string::npos);
+	bool has_input = false;
+	for (const auto &node : job.inputNodes)
+		if (node.name == "Extract/job005/particles.star") has_input = true;
+	REQUIRE(has_input);
+}
+
+TEST_CASE("Select: recovers full filaments with relion_star_handler after automated 2D class selection",
+          "[pipeline][select][recover_filaments]")
+{
+	RelionJob job;
+	setUpSelectJob(job);
+	job.joboptions["fn_model"].setString("Class2D/job010/run_it025_optimiser.star");
+	job.joboptions["do_class_ranker"].setString("Yes");
+	job.joboptions["full_particle_star_file_path"].setString("Extract/job005/particles.star");
+
+	std::vector<std::string> commands;
+	REQUIRE(generateSelectCommands(job, commands));
+	REQUIRE(commands.size() == 2);
+	REQUIRE(commands[0].find("relion_class_ranker") != std::string::npos);
+	REQUIRE(commands[0].find("--fn_full_filaments") == std::string::npos);
+	REQUIRE(commands[1].find("`which relion_star_handler` --recover_full_filaments") != std::string::npos);
+	REQUIRE(commands[1].find("--i Select/job001/particles.star") != std::string::npos);
+	REQUIRE(commands[1].find("--o Select/job001/particles_fullfilaments_0.6.star") != std::string::npos);
+	REQUIRE(commands[1].find("--min_fraction 0.6") != std::string::npos);
+	REQUIRE(commands[1].find("--full_star Extract/job005/particles.star") != std::string::npos);
+
+	// Only the last command marks the job as finished
+	REQUIRE(commands[0].find("--pipeline_control") == std::string::npos);
+	REQUIRE(commands[1].find("--pipeline_control Select/job001/") != std::string::npos);
+	REQUIRE(hasOutputNode(job, "Select/job001/particles_fullfilaments_0.6.star"));
+}
+
+TEST_CASE("Select: no filament recovery when it is off or there are no particles",
+          "[pipeline][select][recover_filaments]")
+{
+	RelionJob job;
+	std::vector<std::string> commands;
+
+	SECTION("switched off")
+	{
+		setUpSelectJob(job);
+		job.joboptions["fn_model"].setString("Class2D/job010/run_it025_optimiser.star");
+		job.joboptions["do_recover_full_filaments"].setString("No");
+		REQUIRE(generateSelectCommands(job, commands));
+		REQUIRE(commands.size() == 1);
+		REQUIRE(commands[0].find("--fn_full_filaments") == std::string::npos);
+		REQUIRE(commands[0].find("--pipeline_control Select/job001/") != std::string::npos);
+		REQUIRE_FALSE(hasOutputNode(job, "Select/job001/particles_fullfilaments_0.6.star"));
+	}
+
+	SECTION("selecting micrographs")
+	{
+		setUpSelectJob(job);
+		job.joboptions["fn_mic"].setString("CtfFind/job003/micrographs_ctf.star");
+		REQUIRE(generateSelectCommands(job, commands));
+		REQUIRE(commands.size() == 1);
+		REQUIRE(commands[0].find("--fn_full_filaments") == std::string::npos);
+	}
+
+	SECTION("removing duplicates")
+	{
+		setUpSelectJob(job);
+		job.joboptions["fn_data"].setString("Refine3D/job030/run_data.star");
+		job.joboptions["do_remove_duplicates"].setString("Yes");
+		REQUIRE(generateSelectCommands(job, commands));
+		REQUIRE(commands.size() == 1);
+		REQUIRE(commands[0].find("--recover_full_filaments") == std::string::npos);
+	}
+}
+
 TEST_CASE("Class2DConsensus: rejects unknown assignment methods", "[pipeline][consensus]")
 {
     RelionJob job;

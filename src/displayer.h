@@ -174,6 +174,26 @@ public:
 	int unSelect();
 };
 
+// After saving selected helical segments, also write all segments of the filaments that are well
+// represented in the selection (relion_star_handler --recover_full_filaments). This runs in the
+// program that saves the selection, so that it always sees the file that was just saved.
+struct FullFilamentRecovery
+{
+	FileName fn_out;          // no recovery if empty
+	FileName fn_full_star;    // empty: the particles STAR file of the job that wrote the images
+	std::string min_fraction;
+
+	FullFilamentRecovery(): fn_out(""), fn_full_star(""), min_fraction("0.5") {}
+
+	bool isActive() const { return fn_out != ""; }
+
+	// relion_display arguments that pass these settings on
+	std::string displayArguments() const;
+
+	// Recover the full filaments of a saved STAR file; tells the user and returns false if it failed
+	bool run(const FileName &fn_selected) const;
+};
+
 // Forward declaration for dynamic reflow
 class multiViewerCanvas;
 
@@ -183,6 +203,9 @@ class basisViewerWindow : public Fl_Window
 public:
 	// Pointer to the multi-viewer canvas for dynamic reflow on resize
 	multiViewerCanvas *multi_canvas;
+
+	// Passed on to the multi-viewer canvas by fillCanvas
+	FullFilamentRecovery full_filaments;
 
 	// Constructor with w x h size of the window and a title
 	basisViewerWindow(int W, int H, const char* title=0): Fl_Window(W, H, title)
@@ -296,6 +319,9 @@ public:
 
 	// Filenames with the selected class averages and the particles from the selected classes
 	FileName fn_selected_imgs, fn_selected_parts;
+
+	// Recover the full filaments after saving selected particles
+	FullFilamentRecovery full_filaments;
 
 	// Maximum number of selected particles per class
 	int max_nr_parts_per_class;
@@ -624,6 +650,9 @@ public:
 	// FileName for selected class average images and particles
 	FileName fn_imgs, fn_parts;
 
+	// Recover the full filaments after saving selected particles
+	FullFilamentRecovery full_filaments;
+
 	// Label option to display or to sort on
 	std::vector<std::string> display_labels;
 	std::vector<std::string> sort_labels;
@@ -761,6 +790,9 @@ public:
 
 	// Filenames for selected particles and selected images
 	FileName fn_selected_imgs, fn_selected_parts;
+
+	// Recover the full filaments after saving selected particles
+	FullFilamentRecovery full_filaments;
 
 	// Select maximum this number of particles from each selected classes
 	int max_nr_parts_per_class;

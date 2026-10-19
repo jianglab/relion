@@ -23,6 +23,9 @@
 #include "src/gpu_reconstruct.h"
 #include "src/mask.h"
 #include <omp.h>
+#include <map>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Wider search ranges for helical twist and rise
@@ -5948,4 +5951,205 @@ void averageAsymmetricUnits2D(
 	}
 	progress_bar(MDimgs.numberOfObjects());
 
+}
+
+namespace
+{
+
+typedef std::pair<std::string, int> FilamentKey;
+
+// Image and filament keys of one segment. A leading "./" of the stack name is ignored and the
+// image number is written without leading zeros, so that "000012@./Extract/job012/Movies/a.mrcs"
+// and "12@Extract/job012/Movies/a.mrcs" are the same image. rlnHelicalTubeID is only read if
+// read_tube_id is true.
+void getHelicalSegmentKeys(const MetaDataTable &MD, long int i, const std::string &what, bool read_tube_id,
+		std::string &image_key, FilamentKey &filament_key)
+{
+	std::string fn_img;
+	int tube_id = 0;
+	if (!MD.getValue(EMDL_IMAGE_NAME, fn_img, i))
+		REPORT_ERROR("recoverFullFilaments: segment " + integerToString(i + 1) + " in the " + what + " has no rlnImageName");
+	if (read_tube_id && !MD.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube_id, i))
+		REPORT_ERROR("recoverFullFilaments: segment " + integerToString(i + 1) + " in the " + what + " has no rlnHelicalTubeID");
+
+	long int no;
+	std::string fn_stack;
+	FileName(fn_img).decompose(no, fn_stack);
+	while (fn_stack.compare(0, 2, "./") == 0)
+		fn_stack = fn_stack.substr(2);
+
+	image_key = std::to_string(no) + "@" + fn_stack;
+	filament_key = FilamentKey(fn_stack, tube_id);
+}
+
+} // namespace
+
+MetaDataTable recoverFullFilaments(
+		const MetaDataTable &MDselected,
+		const MetaDataTable &MDfull,
+		RFLOAT min_fraction,
+		FullFilamentRecoveryStats *stats)
+{
+	if (!(min_fraction >= 0. && min_fraction <= 1.))
+		REPORT_ERROR("recoverFullFilaments: the minimum fraction of selected segments should be between 0 and 1");
+	if (!MDselected.containsLabel(EMDL_IMAGE_NAME))
+		REPORT_ERROR("recoverFullFilaments: the selected segments have no rlnImageName");
+	if (!MDfull.containsLabel(EMDL_IMAGE_NAME) || !MDfull.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID))
+		REPORT_ERROR("recoverFullFilaments: the full STAR file should have rlnImageName and rlnHelicalTubeID");
+
+	// Segments of the full STAR file. For a duplicated image, only the last row is used.
+	const long int nr_full_rows = MDfull.numberOfObjects();
+	std::vector<std::string> full_images(nr_full_rows);
+	std::vector<FilamentKey> full_filaments(nr_full_rows);
+	std::unordered_map<std::string, long int> full_row_of_image;
+	full_row_of_image.reserve(nr_full_rows);
+	for (long int i = 0; i < nr_full_rows; i++)
+	{
+		getHelicalSegmentKeys(MDfull, i, "full STAR file", true, full_images[i], full_filaments[i]);
+		full_row_of_image[full_images[i]] = i;
+	}
+
+	std::map<FilamentKey, long int> nr_full_segments;
+	for (const auto &image_row : full_row_of_image)
+		nr_full_segments[full_filaments[image_row.second]]++;
+
+	// Count the selected segments of each filament. The filament of a segment is taken from the
+	// full STAR file, so the rlnHelicalTubeID of the selected segments is not needed.
+	std::unordered_set<std::string> selected_images;
+	std::map<FilamentKey, long int> nr_selected_segments;
+	std::vector<std::string> missing_images;
+	long int nr_missing = 0;
+	for (long int i = 0; i < MDselected.numberOfObjects(); i++)
+	{
+		std::string image_key;
+		FilamentKey filament_key;
+		getHelicalSegmentKeys(MDselected, i, "selected STAR file", false, image_key, filament_key);
+		if (!selected_images.insert(image_key).second)
+			continue;
+
+		const auto image_row = full_row_of_image.find(image_key);
+		if (image_row == full_row_of_image.end())
+		{
+			nr_missing++;
+			if (missing_images.size() < 5)
+				missing_images.push_back(image_key);
+			continue;
+		}
+		nr_selected_segments[full_filaments[image_row->second]]++;
+	}
+
+	if (nr_missing > 0)
+	{
+		std::string examples;
+		for (const auto &image : missing_images)
+			examples += "\n   " + image;
+		REPORT_ERROR("recoverFullFilaments: " + integerToString(nr_missing) + " of " + integerToString(selected_images.size()) +
+			" selected segments are not in the full STAR file, for example:" + examples +
+			"\n The full STAR file should come from the job that wrote these particle images (e.g. Extract/jobNNN/particles.star).");
+	}
+
+	std::set<FilamentKey> recovered_filaments;
+	for (const auto &filament : nr_selected_segments)
+	{
+		if ((RFLOAT)filament.second / (RFLOAT)nr_full_segments[filament.first] >= min_fraction)
+			recovered_filaments.insert(filament.first);
+	}
+
+	MetaDataTable MDout;
+	MDout.setName(MDfull.getName());
+	for (long int i = 0; i < nr_full_rows; i++)
+	{
+		if (full_row_of_image[full_images[i]] != i)
+			continue; // a duplicated image
+		if (recovered_filaments.count(full_filaments[i]))
+			MDout.addObject(MDfull.getObject(i));
+	}
+
+	if (stats != NULL)
+	{
+		stats->nr_selected_segments = selected_images.size();
+		stats->nr_selected_filaments = nr_selected_segments.size();
+		stats->nr_recovered_filaments = recovered_filaments.size();
+		stats->nr_recovered_segments = MDout.numberOfObjects();
+		stats->nr_full_segments = full_row_of_image.size();
+	}
+
+	return MDout;
+}
+
+FileName findFullFilamentsStarFile(const MetaDataTable &MDselected)
+{
+	if (!MDselected.containsLabel(EMDL_IMAGE_NAME))
+		REPORT_ERROR("findFullFilamentsStarFile: the selected segments have no rlnImageName");
+
+	// The job directories that hold the particle stacks, e.g. Extract/job012/
+	std::unordered_set<std::string> stacks;
+	std::set<std::string> job_dirs;
+	for (long int i = 0; i < MDselected.numberOfObjects(); i++)
+	{
+		std::string fn_img, fn_stack;
+		long int no;
+		MDselected.getValue(EMDL_IMAGE_NAME, fn_img, i);
+		FileName(fn_img).decompose(no, fn_stack);
+		if (!stacks.insert(fn_stack).second)
+			continue;
+
+		FileName fn_pre, fn_jobnr, fn_post;
+		if (!decomposePipelineFileName(fn_stack, fn_pre, fn_jobnr, fn_post))
+			REPORT_ERROR("findFullFilamentsStarFile: the particle images in " + fn_stack +
+				" were not written by a RELION job. Please give the STAR file with the full filaments.");
+		job_dirs.insert(fn_pre + fn_jobnr);
+	}
+
+	if (job_dirs.empty())
+		REPORT_ERROR("findFullFilamentsStarFile: there are no selected segments");
+	if (job_dirs.size() > 1)
+	{
+		std::string dirs;
+		for (const auto &dir : job_dirs)
+			dirs += "\n   " + dir;
+		REPORT_ERROR("findFullFilamentsStarFile: the selected segments have particle images from " +
+			integerToString(job_dirs.size()) + " jobs:" + dirs +
+			"\n Please give a STAR file with all segments of these jobs (e.g. from a Join star files job).");
+	}
+
+	const FileName job_dir = *job_dirs.begin();
+	FileName fn_pre, fn_jobnr, fn_post;
+	decomposePipelineFileName(job_dir, fn_pre, fn_jobnr, fn_post);
+
+	// Particle output nodes of that job, then the usual names of Extract and Polish outputs
+	std::vector<FileName> candidates;
+	const FileName fn_job_pipeline = job_dir + "job_pipeline.star";
+	if (exists(fn_job_pipeline))
+	{
+		MetaDataTable MDnodes;
+		MDnodes.read(fn_job_pipeline, "pipeline_nodes");
+		for (long int i = 0; i < MDnodes.numberOfObjects(); i++)
+		{
+			std::string name, type_label;
+			if (!MDnodes.getValue(EMDL_PIPELINE_NODE_NAME, name, i) ||
+			    !MDnodes.getValue(EMDL_PIPELINE_NODE_TYPE_LABEL, type_label, i))
+				continue;
+			if (type_label.find("ParticleGroupMetadata") != 0 && type_label.find("ParticlesData") != 0)
+				continue;
+
+			// Node names are relative to the project directory: keep the outputs of this job only
+			FileName node_pre, node_jobnr, node_post;
+			if (decomposePipelineFileName(name, node_pre, node_jobnr, node_post) && node_jobnr == fn_jobnr &&
+			    node_post != "")
+				candidates.push_back(job_dir + node_post);
+		}
+	}
+	candidates.push_back(job_dir + "particles.star");
+	candidates.push_back(job_dir + "shiny.star");
+
+	for (const auto &candidate : candidates)
+	{
+		if (exists(candidate))
+			return candidate;
+	}
+
+	REPORT_ERROR("findFullFilamentsStarFile: cannot find a particles STAR file in " + job_dir +
+		", the job that wrote the particle images. Please give the STAR file with the full filaments.");
+	return "";
 }
