@@ -73,7 +73,7 @@ set(RELION_UNIT_TEST_SOURCES
 )
 
 if (CUDA_FOUND)
-    list(APPEND RELION_UNIT_TEST_SOURCES test_gpu_signif_select.cpp)
+    list(APPEND RELION_UNIT_TEST_SOURCES test_gpu_signif_select.cpp test_gpu_alloc_cache.cpp)
 endif()
 
 add_executable(relion_unit_tests ${RELION_UNIT_TEST_SOURCES})

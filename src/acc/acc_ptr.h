@@ -416,7 +416,7 @@ public:
 	#endif
 				doFreeDevice = true;
 
-				alloc = allocator->alloc(size * sizeof(T));
+				alloc = allocator->alloc(size * sizeof(T), (cudaStream_t) stream);
 				dPtr = (T*) alloc->getPtr();
 		}
 #elif _HIP_ENABLED

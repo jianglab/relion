@@ -29,6 +29,14 @@ inline int mode(const char *name)
 
 inline bool on(const char *name) { return mode(name) != 0; }
 
+/// Opt-in switches: 0 off (unset, empty, "0", "off", ...), 1 on, 2 "check" (on, and compared with the older path)
+inline int optIn(const char *name)
+{
+	const char *e = getenv(name);
+	if (e == NULL || *e == 0 || isOffValue(e)) return 0;
+	return strcmp(e, "check") == 0 ? 2 : 1;
+}
+
 /// Switches that are on by default and are listed in the "GPU speed-ups" line at verbosity > 0
 /// (one entry per switch: add a new default-on switch here, and test/doc follow from this list).
 inline const char *const *defaultOnNames(size_t &count)
@@ -41,6 +49,7 @@ inline const char *const *defaultOnNames(size_t &count)
 		"RELION_GPU_WAVG_SUM",
 		"RELION_GPU_SELECT_FUSED",
 		"RELION_GPU_SKIPALIGN_BLOCK",
+		"RELION_GPU_ALLOC_CACHE",
 	};
 	count = sizeof(names) / sizeof(names[0]);
 	return names;

@@ -698,6 +698,8 @@ void MlOptimiserCuda::resetData()
 	// waiting for "all class streams" is one wait instead of one per class (each a
 	// driver call under the driver's per-process lock)
 	classStreamsShared = gpuClassBatching();
+	// RELION_GPU_ALLOC_CACHE reuses a block on the stream it was freed on: only when all of a thread's work is on its own stream
+	CudaCustomAllocator::allowCache(classStreamsShared);
 	classStreams.resize(nr_classes, 0);
 	for (int i = 0; i < nr_classes; i++)
 		if (classStreamsShared)
