@@ -506,10 +506,16 @@ void MlOptimiser::parseContinue(int argc, char **argv)
         sampling.perturbation_factor = textToFloat(fnt);
     }
 
-    if (parser.checkOption("--skip_align", "Skip orientational assignment (only classify)?"))
+    // A model refined with --skip_align has no orientational distributions, so it cannot
+    // be continued with alignment (it crashed in the weighted sums): keep skipping it
+    bool was_skip_align = do_skip_align;
+    do_skip_align = parser.checkOption("--skip_align", "Skip orientational assignment (only classify)?");
+    if (was_skip_align && !do_skip_align)
+    {
+        if (verb > 0)
+            std::cout << " WARNING: the run being continued used --skip_align; continuing with --skip_align" << std::endl;
         do_skip_align = true;
-    else
-        do_skip_align = false; // do_skip_align should normally be false...
+    }
 
 	if (parser.checkOption("--fix_classes", "Keep every particle in its input class while refining orientations and translations?"))
 		do_fix_classes = true;
