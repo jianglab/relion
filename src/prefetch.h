@@ -30,6 +30,7 @@
 #include <unordered_map>
 #include <list>
 #include <memory>
+#include <string>
 #include "src/filename.h"
 #include "src/image.h"
 #include "src/exp_model.h"
@@ -51,6 +52,32 @@ private:
 	size_t max_open_;
 	std::list<std::string> lru_; // most recently used first
 	std::unordered_map<std::string, std::pair<std::unique_ptr<fImageHandler>, std::list<std::string>::iterator> > open_;
+};
+
+/// Reads the needed images of whole particle stacks ahead (stack by stack, in order) of the E-step so that the per-particle reads of the prefetcher
+/// find them in the page cache (RELION_PREFETCH_WARM=1). Particles are read in random order in small
+/// pieces, which a network file system answers slowly; reading whole stacks in parallel is several times
+/// faster. Only reads data, so results are unchanged. The look-ahead starts at a few pools, doubles
+/// whenever the E-step had to wait for a pool, and is capped by a share of the free memory (the page
+/// cache gives way under memory pressure, so the worst case is lost speed).
+class StackWarmer
+{
+public:
+	StackWarmer(Experiment *mydata, int nr_threads);
+	~StackWarmer();
+	/// the pool [first,last] (positions in sorted order) is being handed to the E-step
+	void consumed(long int first, long int last, bool late);
+	std::string report() const;
+private:
+	void run();
+	Experiment *mydata_;
+	int nr_threads_;
+	std::mutex mtx_;
+	std::condition_variable cv_;
+	bool stop_ = false;
+	long int consumed_ = -1, pool_size_ = 0, lookahead_ = 0, lookahead_max_ = 0, pos_ = 0, first_ = -1;
+	std::atomic<long int> bytes_{0}, nr_warmed_{0}, nr_cached_{0}, nr_sparse_{0}, busy_us_{0};
+	std::thread thread_;
 };
 
 class AsyncImagePrefetcher
@@ -79,6 +106,8 @@ public:
 	/// Wall time the reader needed for each pool, summed
 	long int poolReadTimeUs() const { return pool_read_time_us_; }
 	int readers() const { return active_readers_; }
+	/// one line about the stack warm-up, empty when it is off
+	std::string warmReport() const { return warmer_ ? warmer_->report() : std::string(); }
 
 private:
 	void workerThread();
@@ -111,6 +140,7 @@ private:
 	std::atomic<int> active_readers_{1};
 	std::atomic<bool> last_pool_late_{false};
 	long int wait_time_us_ = 0, nr_pools_ = 0, nr_late_pools_ = 0;
+	std::unique_ptr<StackWarmer> warmer_;
 };
 
 class AsyncReconstructPrefetcher

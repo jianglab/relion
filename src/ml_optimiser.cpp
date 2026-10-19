@@ -4964,6 +4964,8 @@ void MlOptimiser::expectation()
                       << prefetcher_->poolReadTimeUs() / 1.e6 / np << " s each on average; the E-step waited "
                       << prefetcher_->waitTimeUs() / 1.e6 << " s in total, " << prefetcher_->nrLatePools()
                       << " pools were late; up to " << prefetcher_->readers() << " threads read a pool (--no_prefetch turns the prefetcher off)." << std::endl;
+            if (!prefetcher_->warmReport().empty())
+                std::cout << " " << prefetcher_->warmReport() << std::endl;
         }
         delete prefetcher_;
         prefetcher_ = NULL;
