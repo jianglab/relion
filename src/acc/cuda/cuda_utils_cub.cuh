@@ -759,6 +759,21 @@ __device__ __forceinline__ void rs_level(int level, int &top, int &sh, int &nb, 
 	off = level == 0 ? 0 : (level == 1 ? 2048 : 3072);
 }
 
+// atomicAdd(double *, double) is native only from sm_60; below that, the atomicCAS loop of helper.cuh
+static __device__ __forceinline__ void rs_atomic_add(double *address, double val)
+{
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 600
+	atomicAdd(address, val);
+#else
+	unsigned long long int *address_as_ull = (unsigned long long int *)address;
+	unsigned long long int old = *address_as_ull, assumed;
+	do {
+		assumed = old;
+		old = atomicCAS(address_as_ull, assumed, __double_as_longlong(val + __longlong_as_double(assumed)));
+	} while (assumed != old);
+#endif
+}
+
 // body of cuda_kernel_rs_hist (shared with cuda_kernel_rs_all): s_cnt / s_sum are 2048 shared bins each
 static __device__ __forceinline__ void rs_hist_body(const float *w, size_t n, const RadixSelState *st, unsigned *g_cnt, double *g_sum, int level,
 		unsigned *s_cnt, double *s_sum)
@@ -781,7 +796,7 @@ static __device__ __forceinline__ void rs_hist_body(const float *w, size_t n, co
 			const int d = (u >> sh) & (nb - 1);
 			atomicAdd(&s_cnt[d], 1u);
 			if (v != 0.f)
-				atomicAdd(&s_sum[d], (double) v);
+				rs_atomic_add(&s_sum[d], (double) v);
 		}
 	}
 	__syncthreads();
@@ -791,7 +806,7 @@ static __device__ __forceinline__ void rs_hist_body(const float *w, size_t n, co
 		{
 			atomicAdd(&g_cnt[off + i], s_cnt[i]);
 			if (s_sum[i] != 0.)
-				atomicAdd(&g_sum[off + i], s_sum[i]);
+				rs_atomic_add(&g_sum[off + i], s_sum[i]);
 		}
 	}
 }
