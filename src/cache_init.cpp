@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "src/cache_init.h"
+#include "src/lazy_cache.h"
 #include "src/cache_manager.h"
 #include "src/mpi.h"
 #include <unistd.h>
@@ -278,7 +279,7 @@ bool CacheInitializer::initializeCache(const FileName &fn_cache,
 		if (!popOK)
 			REPORT_ERROR("Cache population failed for " + srcDir + " — copy command returned an error.");
 		// Post-populate verification: all cached files must exist with correct sizes
-		if (!cm.isCached(cacheKey, relPaths))
+		if (!lazycache::enabled() && !cm.isCached(cacheKey, relPaths))
 		{
 			std::cerr << " Cache population reported success but verification failed for key="
 			          << cacheKey << " (" << (node_name.empty() ? "" : node_name + ":") << cm.getCacheDirForKey(cacheKey) << ")"

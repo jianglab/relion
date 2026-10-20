@@ -21,6 +21,7 @@
 #include "src/cache_manager.h"
 #include "src/exp_model.h"
 #include "src/funcs.h"
+#include "src/lazy_cache.h"
 #include <cstdlib>
 #include <sys/statvfs.h>
 #include <sys/types.h>
@@ -68,6 +69,7 @@ void CacheManager::setCacheDir(const FileName &dir)
     if (cacheDir.length() > 0 && cacheDir[cacheDir.length() - 1] != '/')
         cacheDir += '/';
     cacheDir = cacheDir + "relion_cache/";
+    lazycache::setRoot(cacheDir);
 }
 
 void CacheManager::setRegistryDir(const FileName &dir)
@@ -214,6 +216,18 @@ bool CacheManager::populateCache(const std::string &key,
     {
         if (verb > 0)
             std::cout << " All stacks already cached for this source job. Nothing to copy." << std::endl;
+        return true;
+    }
+
+    if (lazycache::enabled())
+    {
+        // RELION_CACHE_LAZY: copy in the background while the job runs, read the originals until then
+        for (size_t i = 0; i < toCopy.size(); i++)
+        {
+            FileName srcPath = (projectRoot != "" && toCopy[i][0] != '/') ? FileName(projectRoot + "/" + toCopy[i]) : toCopy[i];
+            lazycache::add(getCachePathForKey(key, toCopy[i]), srcPath);
+        }
+        lazycache::start(cacheCopyThreads, verb);
         return true;
     }
 

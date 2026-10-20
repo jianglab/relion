@@ -66,6 +66,7 @@
 #include "src/float16.h"
 #include "src/virtual_particles.h"
 #include "src/virtual_movie_averages.h"
+#include "src/lazy_cache.h"
 
 /// @defgroup Images Images
 //@{
@@ -268,6 +269,17 @@ public:
 		  fileName = fileName.substr(0, found) ;
 
 		exist = exists(fileName);
+
+		// A particle stack that the lazy cache has not copied yet is read from its original
+		if (!exist && mode == WRITE_READONLY)
+		{
+			std::string original = lazycache::resolve(fileName);
+			if (original != "")
+			{
+				fileName = original;
+				exist = true;
+			}
+		}
 
 		// A write would be taken for an MRC stack and overwrite the descriptor;
 		// refuse before fopen("w") truncates it
