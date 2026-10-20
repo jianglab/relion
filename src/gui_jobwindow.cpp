@@ -36,7 +36,7 @@ void JobWindow::clear()
 {
 	tabs = NULL;
 	tab1 = tab2 = tab3 = tab4 = tab5 = tab6 = tab7 = runtab = NULL;
-	group1 = group2 = group3 = group4 = group5 = group6 = group7 = group_ewald = queue_gpu_group = queue_group = NULL;
+	group1 = group2 = group3 = group4 = group5 = group6 = group7 = group_ewald = group_filctx = queue_gpu_group = queue_group = NULL;
 	current_y = start_y = 0;
 	is_continue = false;
 	is_tomo = false;
@@ -1755,16 +1755,16 @@ void JobWindow::initialiseClass2DWindow()
 	guientries["do_restrict_xoff"].cb_menu_i();
 
 	current_y += STEPY/2;
-	group8 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
-	group8->end();
-	place("filctx_mode", TOGGLE_LEAVE_ACTIVE, group8);
+	group_filctx = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_filctx->end();
+	place("filctx_mode", TOGGLE_LEAVE_ACTIVE, group_filctx);
 
-	group8->begin();
+	group_filctx->begin();
 	place("filctx_temper");
 	place("filctx_gap");
 	place("filctx_floor");
 	place("filctx_alpha");
-	group8->end();
+	group_filctx->end();
 
 	guientries["filctx_mode"].cb_menu_i(); // grey out the parameters while Off
 
@@ -2128,6 +2128,18 @@ void JobWindow::initialiseClass3DWindow()
 	place3("helical_rise_min", "helical_rise_max", "helical_rise_inistep", "Rise search - Min, Max, Step (A):", TOGGLE_DEACTIVATE);
 	group6->end();
 	guientries["do_local_search_helical_symmetry"].cb_menu_i(); // to make default effective
+
+	// Add a little spacer
+	current_y += STEPY/2;
+
+	group_filctx = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_filctx->end();
+	place("filctx_mode", TOGGLE_LEAVE_ACTIVE, group_filctx);
+	group_filctx->begin();
+	place2("filctx_temper", "filctx_gap", "Likelihood power, gap:");
+	place2("filctx_floor", "filctx_alpha", "Class floor, global weight:");
+	group_filctx->end();
+	guientries["filctx_mode"].cb_menu_i(); // grey out the parameters while Off
 
 	group5->end();
 	guientries["do_helix"].cb_menu_i(); // to make default effective

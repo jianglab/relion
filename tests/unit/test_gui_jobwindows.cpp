@@ -322,20 +322,88 @@ TEST_CASE("GUI: Class2D filament context parameters are greyed out while Off", "
 	JobWindow window;
 	window.initialise(PROC_2DCLASS, false);
 	REQUIRE(window.guientries.find("filctx_mode") != window.guientries.end());
-	REQUIRE(window.group8 != nullptr);
+	REQUIRE(window.group_filctx != nullptr);
 	for (const char *name : {"filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
 		REQUIRE(window.guientries.find(name) != window.guientries.end());
 
-	REQUIRE_FALSE(window.group8->active());
+	REQUIRE_FALSE(window.group_filctx->active());
 
 	SECTION("loading a job that uses a mode activates them")
 	{
 		window.guientries["filctx_mode"].setValue(job_filament_context_options[1]);
-		REQUIRE(window.group8->active());
+		REQUIRE(window.group_filctx->active());
 		window.guientries["filctx_mode"].setValue(job_filament_context_options[2]);
-		REQUIRE(window.group8->active());
+		REQUIRE(window.group_filctx->active());
 		window.guientries["filctx_mode"].setValue(job_filament_context_options[0]);
-		REQUIRE_FALSE(window.group8->active());
+		REQUIRE_FALSE(window.group_filctx->active());
+	}
+}
+
+TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while Off", "[gui][layout][filament_context]")
+{
+	JobWindow window;
+	window.initialise(PROC_3DCLASS, false);
+	for (const char *name : {"filctx_mode", "filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
+		REQUIRE(window.guientries.find(name) != window.guientries.end());
+	REQUIRE(window.group_filctx != nullptr);
+
+	auto tabWithLabel = [&](const std::string &label) -> Fl_Group * {
+		for (int k = 0; k < window.tabs->children(); k++)
+		{
+			Fl_Group *tab = window.tabs->child(k)->as_group();
+			if (tab && tab->label() && label == tab->label()) return tab;
+		}
+		return nullptr;
+	};
+	Fl_Group *helix = tabWithLabel("Helix");
+	REQUIRE(helix != nullptr);
+
+	// All five fields live on the Helix tab and nowhere else
+	for (const char *name : {"filctx_mode", "filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
+	{
+		const Fl_Widget *w = window.guientries[name].inp;
+		REQUIRE(w != nullptr);
+		REQUIRE(w->x() >= helix->x());
+		REQUIRE(w->x() + w->w() <= helix->x() + helix->w());
+		REQUIRE(w->y() >= helix->y());
+		REQUIRE(w->y() + w->h() <= helix->y() + helix->h());
+	}
+
+	REQUIRE_FALSE(window.group_filctx->active());
+
+	SECTION("loading a job that uses a mode activates the parameters")
+	{
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[1]);
+		REQUIRE(window.group_filctx->active());
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[2]);
+		REQUIRE(window.group_filctx->active());
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[0]);
+		REQUIRE_FALSE(window.group_filctx->active());
+	}
+
+	SECTION("the Helix tab has no overlaps or out-of-tab widgets in any state")
+	{
+		for (const char *helical : {"No", "Yes"})
+			for (const std::string &mode : job_filament_context_options)
+			{
+				window.guientries["do_helix"].setValue(helical);
+				window.guientries["filctx_mode"].setValue(mode);
+				const auto problems = layoutProblems(helix);
+				std::string all;
+				for (const auto &p : problems) all += "\n  " + p;
+				INFO("do_helix " << helical << ", mode " << mode << all);
+				REQUIRE(problems.empty());
+			}
+	}
+
+	SECTION("the parameters stay active in a mode when helical is toggled off and on")
+	{
+		window.guientries["do_helix"].setValue("Yes");
+		REQUIRE_FALSE(window.group_filctx->active());
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[2]);
+		window.guientries["do_helix"].setValue("No");
+		window.guientries["do_helix"].setValue("Yes");
+		REQUIRE(window.group_filctx->active());
 	}
 }
 

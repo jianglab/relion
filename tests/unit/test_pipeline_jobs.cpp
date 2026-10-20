@@ -590,6 +590,119 @@ TEST_CASE("Class2D: filament context options reach the command line",
 	}
 }
 
+static RelionJob makeClass3DJob()
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_3DCLASS);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["fn_ref"].setString("ref.mrc");
+	job.joboptions["do_em"].setString("Yes");
+	job.joboptions["do_grad"].setString("No");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+	return job;
+}
+
+TEST_CASE("Class3D: filament context options reach the command line",
+          "[pipeline][class3d][filament_context]")
+{
+	RelionJob job = makeClass3DJob();
+	for (const char *name : {"filctx_mode", "filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
+		REQUIRE(job.joboptions.find(name) != job.joboptions.end());
+	REQUIRE(job.joboptions["filctx_mode"].getString() == job_filament_context_options[0]);
+
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+
+	SECTION("not a helical job: nothing is emitted")
+	{
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find("--filament_") == std::string::npos);
+	}
+
+	job.joboptions["do_helix"].setString("Yes");
+	job.joboptions["helical_tube_outer_diameter"].setString("200");
+
+	SECTION("helical, default: off is emitted explicitly")
+	{
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context off") != std::string::npos);
+		REQUIRE(commands[0].find("--filament_temper") == std::string::npos);
+	}
+
+	SECTION("chain mode with its settings")
+	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[1]);
+		job.joboptions["filctx_gap"].setString("3");
+		job.joboptions["filctx_floor"].setString("0.05");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context chain") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_temper -1") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_gap 3") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_floor 0.05") != std::string::npos);
+		REQUIRE(commands[0].find("--filament_alpha") == std::string::npos);
+	}
+
+	SECTION("filament mode also passes alpha")
+	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[2]);
+		job.joboptions["filctx_temper"].setString("0.25");
+		job.joboptions["filctx_alpha"].setString("2");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context filament") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_temper 0.25") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_alpha 2") != std::string::npos);
+	}
+
+	SECTION("it is also emitted next to --keep_full_filaments")
+	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[1]);
+		REQUIRE(job.joboptions["do_keep_full_filaments"].getBoolean());
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --keep_full_filaments") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_context chain") != std::string::npos);
+	}
+
+	SECTION("a continued job emits it too, so that it can be changed or switched off")
+	{
+		job.is_continue = true;
+		job.joboptions["fn_cont"].setString("Class3D/job007/run_it025_optimiser.star");
+		SECTION("off")
+		{
+			REQUIRE(generateCommands(job, commands, final_command, error_message));
+			REQUIRE(commands[0].find(" --continue ") != std::string::npos);
+			REQUIRE(commands[0].find(" --filament_context off") != std::string::npos);
+		}
+		SECTION("per filament")
+		{
+			job.joboptions["filctx_mode"].setString(job_filament_context_options[2]);
+			REQUIRE(generateCommands(job, commands, final_command, error_message));
+			REQUIRE(commands[0].find(" --continue ") != std::string::npos);
+			REQUIRE(commands[0].find(" --filament_context filament") != std::string::npos);
+		}
+	}
+
+	SECTION("a gap below 1 is refused")
+	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[1]);
+		job.joboptions["filctx_gap"].setString("0");
+		REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(error_message.find("gap") != std::string::npos);
+	}
+
+	SECTION("a floor outside 0..1 is refused")
+	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[1]);
+		job.joboptions["filctx_floor"].setString("1.5");
+		REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(error_message.find("floor") != std::string::npos);
+	}
+}
+
 TEST_CASE("Class2D: parallel replica options have backward-compatible defaults",
           "[pipeline][class2d]")
 {
