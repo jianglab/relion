@@ -3,6 +3,7 @@
 
 #include "src/acc/acc_ptr.h"
 #include "src/acc/data_types.h"
+#include "src/gpu_switch.h"
 #include "src/error.h"
 #ifdef _CUDA_ENABLED
 #include "src/acc/cuda/cuda_kernels/helper.cuh"
@@ -1191,6 +1192,24 @@ void diff2_CC_coarse(
 		)
 {
 #ifdef _CUDA_ENABLED
+	// RELION_GPU_CC_COARSE (on by default, =0 turns it off): several translations per block, bit-identical
+	static const bool cc_trans = gpuswitch::on("RELION_GPU_CC_COARSE");
+	if (!DATA3D && cc_trans && translation_num > 1)
+	{
+		// 16 per block (15 coarse translations in a typical helical Class3D: one projection per orientation),
+		// 8 when there are few, so no block carries many idle accumulators
+		if (translation_num > 8)
+			cuda_kernel_diff2_CC_coarse_trans<REF3D,block_sz,16>
+				<<<dim3(grid_size, (translation_num + 15) / 16),block_size,0,stream>>>(
+					g_eulers, g_imgs_real, g_imgs_imag, g_trans_x, g_trans_y,
+					projector, g_corr_img, g_diff2s, translation_num, image_size);
+		else
+			cuda_kernel_diff2_CC_coarse_trans<REF3D,block_sz,8>
+				<<<dim3(grid_size, (translation_num + 7) / 8),block_size,0,stream>>>(
+					g_eulers, g_imgs_real, g_imgs_imag, g_trans_x, g_trans_y,
+					projector, g_corr_img, g_diff2s, translation_num, image_size);
+		return;
+	}
 	dim3 CCblocks(grid_size,translation_num);
 	cuda_kernel_diff2_CC_coarse<REF3D,DATA3D,block_sz>
 		<<<CCblocks,block_size,0,stream>>>(

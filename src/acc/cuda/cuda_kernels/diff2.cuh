@@ -744,6 +744,107 @@ __global__ void cuda_kernel_diff2_CC_coarse(
 #endif
 }
 
+// RELION_GPU_CC_COARSE: cuda_kernel_diff2_CC_coarse (2D data) for up to trans_sz translations per block (8 or 16), so the
+// reference is projected and its norm summed once per block instead of once per translation. Every sum is
+// formed in the same order as there, so the results are bit-identical.
+template<bool REF3D, int block_sz, int trans_sz>
+__global__ void cuda_kernel_diff2_CC_coarse_trans(
+		XFLOAT *g_eulers,
+		XFLOAT *g_imgs_real,
+		XFLOAT *g_imgs_imag,
+		XFLOAT *g_trans_x,
+		XFLOAT *g_trans_y,
+		AccProjectorKernel projector,
+		XFLOAT *g_corr_img,
+		XFLOAT *g_diff2s,
+		unsigned translation_num,
+		int image_size)
+{
+	int iorient = blockIdx.x;
+	int trans0 = blockIdx.y * trans_sz;
+	int tid = threadIdx.x;
+	int nt = min(trans_sz, (int) translation_num - trans0);
+
+	__shared__ XFLOAT s_weight[trans_sz * block_sz];
+	__shared__ XFLOAT s_norm[block_sz];
+	__shared__ XFLOAT s_tx[trans_sz], s_ty[trans_sz];
+	if (tid < nt)
+	{
+		s_tx[tid] = g_trans_x[trans0 + tid];
+		s_ty[tid] = g_trans_y[trans0 + tid];
+	}
+
+	XFLOAT weight[trans_sz];
+	#pragma unroll
+	for (int t = 0; t < trans_sz; t++)
+		weight[t] = (XFLOAT)0.0;
+	XFLOAT norm = (XFLOAT)0.0;
+
+	XFLOAT e0,e1,e3,e4,e6,e7;
+	e0 = __ldg(&g_eulers[iorient*9  ]);
+	e1 = __ldg(&g_eulers[iorient*9+1]);
+	e3 = __ldg(&g_eulers[iorient*9+3]);
+	e4 = __ldg(&g_eulers[iorient*9+4]);
+	e6 = __ldg(&g_eulers[iorient*9+6]);
+	e7 = __ldg(&g_eulers[iorient*9+7]);
+
+	__syncthreads();
+
+	for (unsigned pixel = tid; pixel < image_size; pixel += block_sz)
+	{
+		int x = pixel % projector.imgX;
+		int y = floorfracf( pixel , projector.imgX);
+		if (y > projector.maxR)
+		{
+			if (y >= projector.imgY - projector.maxR)
+				y = y - projector.imgY;
+			else
+				x = projector.maxR;
+		}
+
+		XFLOAT ref_real, ref_imag;
+		if(REF3D)
+			projector.project3Dmodel(x,y, e0,e1,e3,e4,e6,e7, ref_real, ref_imag);
+		else
+			projector.project2Dmodel(x,y, e0,e1,e3,e4, ref_real, ref_imag);
+
+		XFLOAT img_real = g_imgs_real[pixel], img_imag = g_imgs_imag[pixel];
+		XFLOAT corr = __ldg(&g_corr_img[pixel]);
+		#pragma unroll
+		for (int t = 0; t < trans_sz; t++)
+			if (t < nt)
+			{
+				XFLOAT real, imag;
+				translatePixel(x, y, s_tx[t], s_ty[t], img_real, img_imag, real, imag);
+				weight[t] += (ref_real * real     + ref_imag * imag)      * corr;
+			}
+		norm += (ref_real * ref_real + ref_imag * ref_imag ) * corr;
+	}
+
+	#pragma unroll
+	for (int t = 0; t < trans_sz; t++)
+		s_weight[t * block_sz + tid] = weight[t];
+	s_norm[tid] = norm;
+	__syncthreads();
+
+	for(int j=(block_sz/2); j>0; j/=2)
+	{
+		if(tid<j)
+		{
+			for (int t = 0; t < nt; t++)
+				s_weight[t * block_sz + tid] += s_weight[t * block_sz + tid + j];
+			s_norm[tid] += s_norm[tid+j];
+		}
+		__syncthreads();
+	}
+	if (tid < nt)
+#ifdef ACC_DOUBLE_PRECISION
+		cuda_atomic_add(&g_diff2s[iorient * translation_num + trans0 + tid], - ( s_weight[tid * block_sz] / (block_sz * sqrt(s_norm[0]))) );
+#else
+		cuda_atomic_add(&g_diff2s[iorient * translation_num + trans0 + tid], - ( s_weight[tid * block_sz] / (block_sz * sqrtf(s_norm[0]))) );
+#endif
+}
+
 template<bool REF3D, bool DATA3D, int block_sz,int chunk_sz>
 __global__ void cuda_kernel_diff2_CC_fine(
 		XFLOAT *g_eulers,
