@@ -268,7 +268,8 @@ void GuiEntry::setValue(std::string _value)
 			slider->value(fltkTextToFloat(inp->value()));
 	}
 	// A loaded job must show its own state: re-apply the greying of a choice's group
-	if (joboption.joboption_type == JOBOPTION_RADIO && my_deactivate_group != NULL)
+	if (joboption.joboption_type == JOBOPTION_RADIO &&
+	    (my_deactivate_group != NULL || !my_yes_groups.empty() || !my_no_groups.empty()))
 		cb_menu_i();
 	if (on_change)
 		on_change();

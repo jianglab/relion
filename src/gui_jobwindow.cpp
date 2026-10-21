@@ -1938,7 +1938,30 @@ void JobWindow::initialiseClass3DWindow()
 	guientries["do_local_ang_searches"].cb_menu_i(); // to make default effective
 
 	current_y += STEPY/2;
+	// The two ways of searching more coarsely in early iterations exclude each other (relion_refine ignores
+	// --coarse_early with --allow_coarser_sampling): each is greyed out while the other reads Yes
+	Fl_Group *group_allow_coarser = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_allow_coarser->begin();
 	place("allow_coarser");
+	group_allow_coarser->end();
+	Fl_Group *group_coarse_early = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_coarse_early->begin();
+	place("coarse_early");
+	group_coarse_early->end();
+	GuiEntry *allow_coarser = &guientries["allow_coarser"];
+	GuiEntry *coarse_early = &guientries["coarse_early"];
+	allow_coarser->my_no_groups.push_back(group_coarse_early);
+	coarse_early->my_no_groups.push_back(group_allow_coarser);
+	// A job saved before "Coarser sampling early?" existed loads it as Yes; if it allowed coarser sampling, that choice stands
+	auto resolve = [allow_coarser, coarse_early]()
+	{
+		if (strcmp(allow_coarser->inp->value(), "Yes") == 0 && strcmp(coarse_early->inp->value(), "Yes") == 0)
+			coarse_early->setValue("No");
+	};
+	allow_coarser->on_change = resolve;
+	coarse_early->on_change = resolve;
+	allow_coarser->cb_menu_i();
+	coarse_early->cb_menu_i();
 
     if (is_tomo)
     {

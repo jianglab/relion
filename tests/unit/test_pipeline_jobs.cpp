@@ -153,6 +153,34 @@ TEST_CASE("Class3D: align-classes checkbox emits a flag either way",
 	REQUIRE(command.find(" --dont_align_classes ") != std::string::npos);
 }
 
+TEST_CASE("Class3D: coarser-sampling-early checkbox is on by default and emits a flag either way",
+          "[pipeline][class3d]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_3DCLASS);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["fn_ref"].setString("ref.mrc");
+	job.joboptions["do_em"].setString("Yes");
+	job.joboptions["do_grad"].setString("No");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+	REQUIRE(job.joboptions["coarse_early"].getBoolean());
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --coarse_early") != std::string::npos);
+	REQUIRE(command.find(" --dont_coarse_early") == std::string::npos);
+
+	job.joboptions["coarse_early"].setString("No");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --dont_coarse_early") != std::string::npos);
+}
+
 TEST_CASE("Class3D: GPU with skipped alignment is on by default, RELION_GPU_SKIP_ALIGN=0 refuses it",
           "[pipeline][class3d]")
 {

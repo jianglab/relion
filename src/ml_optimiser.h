@@ -1507,6 +1507,14 @@ public:
 	// Adjust angular sampling based on the expected angular accuracies for auto-refine procedure
 	void updateAngularSampling(bool verb = true);
 
+	// One healpix order coarser until the last coarse_early_final_iters iterations of a 3D classification:
+	// --coarse_early / --dont_coarse_early and --coarse_early_final_iters, over the environment defaults
+	// RELION_COARSE_EARLY and RELION_COARSE_EARLY_FINAL_ITERS; parsed the same way in both parse paths
+	bool coarse_early = false;
+	int coarse_early_final_iters = 3;
+	void parseCoarseEarly();
+	void applyCoarseEarly(bool verb);
+
 	// Adjust subset size in fast_subsets or Gradient algorithms
 	void updateSubsetSize(bool verb = true);
 

@@ -1386,6 +1386,8 @@ void MlOptimiserMpi::expectation()
 		timer.toc(TIMING_EXP_2);
 		timer.tic(TIMING_EXP_3);
 #endif
+	applyCoarseEarly(node->rank == 1);
+
 	// D. Update the angular sampling (all nodes except leader)
 	if (!do_grad && !node->isLeader() && ( (do_auto_refine || do_auto_sampling) && iter > 1 || (mymodel.nr_classes > 1 && allow_coarser_samplings) ))
 		updateAngularSampling(node->rank == 1);

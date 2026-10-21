@@ -4946,6 +4946,7 @@ with a stddev of 1/3 of the range given below will be enforced.");
 within +/- the given amount (in degrees) from the optimal orientation in the previous iteration. \
 A Gaussian prior (also see previous option) will be applied, so that orientations closer to the optimal orientation \
 in the previous iteration will get higher weights than those further away.");
+	joboptions["coarse_early"] = JobOption("Coarser sampling early?", true, "If set to Yes (the default), the angular search uses one healpix order coarser than the sampling above (e.g. 1.8 instead of 0.9 degrees) until the last 3 iterations, which use the sampling above. In helical tests this took 2-3 times less time with the same resolution of the final classes, whereas the coarser sampling in all iterations lost resolution. Not used together with 'Allow coarser sampling', which then decides the sampling instead. The number of final iterations can be set with --coarse_early_final_iters (Additional arguments).");
 	joboptions["allow_coarser"] = JobOption("Allow coarser sampling?", false, "If set to Yes, the program will use coarser angular and translational samplings if the estimated accuracies of the assignments is still low in the earlier iterations. This may speed up the calculations.");
 	joboptions["relax_sym"] = JobOption("Relax symmetry:", std::string(""), "With this option, poses related to the standard local angular search range by the given point group will also be explored. For example, if you have a pseudo-symmetric dimer A-A', refinement or classification in C1 with symmetry relaxation by C2 might be able to improve distinction between A and A'. Note that the reference must be more-or-less aligned to the convention of (pseudo-)symmetry operators. For details, see Ilca et al 2019 and Abrishami et al 2020 cited in the About dialog.");
 
@@ -5295,6 +5296,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 		{
 			command += " --allow_coarser_sampling";
 		}
+		command += joboptions["coarse_early"].getBoolean() ? " --coarse_early" : " --dont_coarse_early";
 	}
 
 	// Provide symmetry, and always do norm and scale correction

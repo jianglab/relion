@@ -324,3 +324,36 @@ TEST_CASE("GUI: Class2D filament context parameters are greyed out while Off", "
 		REQUIRE_FALSE(window.group8->active());
 	}
 }
+
+TEST_CASE("GUI: Class3D coarser-sampling options grey each other out", "[gui][layout][coarse_early]")
+{
+	JobWindow window;
+	window.initialise(PROC_3DCLASS, false);
+	GuiEntry &allow = window.guientries["allow_coarser"];
+	GuiEntry &early = window.guientries["coarse_early"];
+	REQUIRE(allow.menu != nullptr);
+	REQUIRE(early.menu != nullptr);
+
+	// Default: coarser sampling early is on, so allowing coarser sampling is greyed out
+	REQUIRE(std::string(early.inp->value()) == "Yes");
+	REQUIRE(early.menu->active_r());
+	REQUIRE_FALSE(allow.menu->active_r());
+
+	SECTION("switching early off frees the other, and allowing coarser sampling greys early out")
+	{
+		early.setValue("No");
+		REQUIRE(allow.menu->active_r());
+		allow.setValue("Yes");
+		REQUIRE_FALSE(early.menu->active_r());
+		allow.setValue("No");
+		REQUIRE(early.menu->active_r());
+	}
+
+	SECTION("an older job that allowed coarser sampling (early missing, so Yes) keeps that choice")
+	{
+		allow.setValue("Yes");
+		REQUIRE(std::string(early.inp->value()) == "No");
+		REQUIRE(allow.menu->active_r());
+		REQUIRE_FALSE(early.menu->active_r());
+	}
+}

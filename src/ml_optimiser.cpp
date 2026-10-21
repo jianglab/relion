@@ -546,6 +546,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
+    parseCoarseEarly();
     parseFilamentContext();
 
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
@@ -806,6 +807,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
+    parseCoarseEarly();
     parseFilamentContext();
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
@@ -4669,6 +4671,8 @@ void MlOptimiser::expectation()
         getMetaAndImageDataSubset(0, n_trials_acc-1, false);
         calculateExpectedAngularErrors(0, n_trials_acc-1);
     }
+
+    applyCoarseEarly(verb > 0);
 
     // D. Update the angular sampling (all nodes except leader)
     if ( ( (do_auto_refine || do_auto_sampling) && iter > 1) ||
@@ -11771,6 +11775,48 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
     }
 
 
+}
+
+// --coarse_early (default from RELION_COARSE_EARLY): a 3D classification with alignment searches one healpix order
+// coarser than asked for, and the asked-for order in the last coarse_early_final_iters iterations. A function of the
+// iteration only, so every MPI rank (the leader too) makes the same choice and nothing needs to be sent.
+void MlOptimiser::parseCoarseEarly()
+{
+    const char *env = getenv("RELION_COARSE_EARLY");
+    std::string v = (env == NULL) ? "" : env;
+    for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+    coarse_early = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+    if (parser.checkOption("--coarse_early", "3D classification: search one healpix order coarser than --healpix_order, and that order in the last iterations (RELION_COARSE_EARLY=1 makes this the default)"))
+        coarse_early = true;
+    if (parser.checkOption("--dont_coarse_early", "3D classification: search at --healpix_order in every iteration (the default, unless RELION_COARSE_EARLY=1)"))
+        coarse_early = false;
+    const char *fenv = getenv("RELION_COARSE_EARLY_FINAL_ITERS");
+    coarse_early_final_iters = textToInteger(parser.getOption("--coarse_early_final_iters", "With --coarse_early: number of last iterations at the full --healpix_order (default from RELION_COARSE_EARLY_FINAL_ITERS, else 3)",
+                                                              (fenv && *fenv) ? fenv : "3"));
+    if (coarse_early_final_iters < 1)
+        REPORT_ERROR("--coarse_early_final_iters must be at least 1");
+}
+
+void MlOptimiser::applyCoarseEarly(bool myverb)
+{
+    if (!coarse_early || mymodel.ref_dim != 3 || do_auto_refine || do_auto_sampling || do_grad || allow_coarser_samplings ||
+        do_skip_align || do_skip_rotate || sampling.healpix_order_ori < 2)
+        return;
+    const int final_iters = coarse_early_final_iters;
+    const bool coarse = iter <= nr_iter - final_iters;
+    const int order = coarse ? sampling.healpix_order_ori - 1 : sampling.healpix_order_ori;
+    if (order == sampling.healpix_order)
+        return;
+    sampling.healpix_order = order;
+    sampling.setOrientations(sampling.healpix_order, sampling.getAngularSampling());
+    mymodel.initialisePdfDirection(sampling.NrDirections());
+    wsum_model.nr_directions = mymodel.nr_directions;
+    for (int iclass = 0; iclass < mymodel.nr_classes * mymodel.nr_bodies; iclass++)
+        wsum_model.pdf_direction[iclass].initZeros(mymodel.nr_directions);
+    if (myverb)
+        std::cout << " Coarse early (--coarse_early): healpix order " << order << " (angular step " << sampling.getAngularSampling(adaptive_oversampling)
+                  << " degrees) " << (coarse ? "until the last " + integerToString(final_iters) + " iterations"
+                                             : "(the requested order) for the last iterations") << std::endl;
 }
 
 void MlOptimiser::updateAngularSampling(bool myverb)
