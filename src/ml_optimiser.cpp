@@ -5550,7 +5550,15 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
     {
         // GPU and traditional CPU case - use RELION's built-in task manager to
         // process multiple particles at once
-        exp_ipart_ThreadTaskDistributor->resize(my_last_part_id - my_first_part_id + 1, 1);
+        // Particle groups on the GPU (RELION_GPU_PARTICLE_GROUP) in filament order: each thread takes a block of
+        // consecutive particles, so that a group holds neighbouring segments (not every nr_threads-th particle)
+        long int task_block = 1;
+        {
+            const char *g = getenv("RELION_GPU_PARTICLE_GROUP"), *o = getenv("RELION_PARTICLE_ORDER");
+            if (g != NULL && (!strcmp(g, "auto") || atoi(g) > 1) && o != NULL && !strcmp(o, "filament"))
+                task_block = XMIPP_MAX(1, XMIPP_MIN(16, (my_last_part_id - my_first_part_id + 1) / XMIPP_MAX(1, nr_threads)));
+        }
+        exp_ipart_ThreadTaskDistributor->resize(my_last_part_id - my_first_part_id + 1, task_block);
         exp_ipart_ThreadTaskDistributor->reset();
         #pragma omp parallel for num_threads(nr_threads)
         for (int thread_id = 0; thread_id < nr_threads; thread_id++)

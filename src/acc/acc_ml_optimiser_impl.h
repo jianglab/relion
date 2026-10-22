@@ -1579,6 +1579,12 @@ void getAllSquaredDifferencesCoarse(
 				hold->passInputs = std::move(passInputs_own);
 				hold->projectorPlans.swap(projectorPlans);
 				hold->planBatches.swap(planBatches);
+				if (hold->def.xt)
+				{
+					hold->def.iclass.assign(job_iclass.begin(), job_iclass.end());
+					hold->def.angles = hold->planBatches[img_id].angles.data();
+					hold->def.optics_group = optics_group;
+				}
 				return;
 			}
 			// On the same stream as the differences they read. Plans built together
@@ -1770,7 +1776,15 @@ template <class MlClass>
 bool coarsePassCanBeDeferred(MlOptimiser *baseMLO, MlClass *accMLO, const SamplingParameters &sp)
 {
 	const bool do_CC = (baseMLO->iter == 1 && baseMLO->do_firstiter_cc) || baseMLO->do_always_cc;
-	return gpuClassBatching() && !do_CC && sp.nr_images == 1 && baseMLO->mymodel.ref_dim == 2 && !accMLO->dataIs3D &&
+	// RELION_GPU_GROUP_SHARED=1: 3D references too, with the projections of the orientations that the particles
+	// of a group share made once (the cross-term kernel only; see runDiff2KernelCoarseGroup)
+#ifndef ACC_DOUBLE_PRECISION
+	static const bool shared3D = gpuswitch::optIn("RELION_GPU_GROUP_SHARED") && gpuswitch::mode("RELION_GPU_COARSE_XT") == 1;
+#else
+	const bool shared3D = false;
+#endif
+	const bool refs_ok = baseMLO->mymodel.ref_dim == 2 || (shared3D && baseMLO->mymodel.ref_dim == 3);
+	return gpuClassBatching() && !do_CC && sp.nr_images == 1 && refs_ok && !accMLO->dataIs3D &&
 			baseMLO->mymodel.nr_bodies == 1 && accMLO->generateProjectionPlanOnTheFly && !baseMLO->do_skip_align;
 }
 
@@ -5567,8 +5581,8 @@ void accDoExpectationParticleGroup(MlClass *myInstance, const std::vector<unsign
 				ops.push_back(&w->op);
 				mws.push_back(w->Mweight.get());
 			}
-			AccPtr<char> recs = ptrFactory.make<char>();
-			runDiff2KernelCoarseGroup(items, recs);
+			AccPtr<char> recs = ptrFactory.make<char>(), xt_tables = ptrFactory.make<char>(), xt_work = ptrFactory.make<char>();
+			runDiff2KernelCoarseGroup(items, recs, xt_tables, xt_work);
 			finishCoarseDeferred(holds, ops, mws, ptrFactory);
 			CTOC(timer,"getAllSquaredDifferencesCoarse");
 		}

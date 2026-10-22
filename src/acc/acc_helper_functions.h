@@ -390,6 +390,13 @@ struct CoarseDeferred
 	int n_blocks = 0, n_classes = 0, n_chunks = 1;
 	size_t chunk_stride = 0, max_orient = 0;
 	deviceStream_t stream;
+	// 3D references (cross-term form): the classes of the pass, and from the caller the class number and the
+	// host (rot, tilt, psi) of their orientations, end to end, for the orientations that the group shares
+	bool xt = false;
+	std::vector<CoarseClassJob> h_classes;
+	std::vector<int> iclass;
+	const XFLOAT *angles = NULL;
+	int optics_group = 0;
 };
 
 bool runDiff2KernelCoarseBatched(
@@ -409,7 +416,9 @@ bool runDiff2KernelCoarseBatched(
 		CoarseCacheCtx *cc = NULL);
 
 // The deferred coarse launches of several particles together; `recs` holds the uploaded records
-bool runDiff2KernelCoarseGroup(std::vector<CoarseDeferred *> &items, AccPtr<char> &recs);
+// (2D references), or `xt_tables` and `xt_work` (3D references, cross-term form: the projections of the
+// orientations that the particles share are made once, see cuda_kernel_diff2_coarse_xt_group)
+bool runDiff2KernelCoarseGroup(std::vector<CoarseDeferred *> &items, AccPtr<char> &recs, AccPtr<char> &xt_tables, AccPtr<char> &xt_work);
 
 // The minimum of each of several device arrays (one launch, one read-back); the arrays are
 // (pointer, size) pairs, all on `stream`

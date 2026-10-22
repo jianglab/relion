@@ -17,6 +17,9 @@ public:
 	AccPtr< long unsigned> iorientclasses;
 	AccPtr<XFLOAT> eulers;
 	long unsigned orientation_num;
+	// setupBatch: the (rot, tilt, psi) of every orientation on the host, end to end as eulers; equal
+	// angles of a group of particles mean equal matrices (projections shared, see runDiff2KernelCoarseGroup)
+	std::vector<XFLOAT> angles;
 #ifdef _SYCL_ENABLED
 	deviceStream_t devAcc;
 #endif
@@ -48,7 +51,8 @@ public:
 	AccProjectorPlan( const AccProjectorPlan& other ):
 		iorientclasses(other.iorientclasses),
 		eulers(other.eulers),
-		orientation_num(other.orientation_num)
+		orientation_num(other.orientation_num),
+		angles(other.angles)
 	{};
 
 	void setup(

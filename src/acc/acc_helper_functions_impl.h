@@ -2,6 +2,7 @@
 #include <atomic>
 #include <vector>
 #include <map>
+#include <array>
 #include <mutex>
 #include <string>
 #include "src/gpu_switch.h"
@@ -2594,7 +2595,7 @@ bool runDiff2KernelCoarseBatched(
 		defer->shift.reset(new AccPtr<float2>(table.make<float2>()));
 	AccPtr<float2> shift_local = table.make<float2>();
 	AccPtr<float2> &shift = defer != NULL ? *defer->shift : shift_local;
-	if (gpuShiftTable() && !data_is_3D && image_size * translation_num * sizeof(float2) <= ((size_t) 64 << 20))
+	if (gpuShiftTable() && !data_is_3D && !(use_xt && defer != NULL) && image_size * translation_num * sizeof(float2) <= ((size_t) 64 << 20))
 	{
 		shift.setSize(image_size * translation_num);
 		shift.deviceAlloc();
@@ -2609,7 +2610,12 @@ bool runDiff2KernelCoarseBatched(
 	if (defer != NULL)
 	{
 		// The launch is made later for the whole group (runDiff2KernelCoarseGroup)
-		if (ref3D || data_is_3D || use_xt)
+		if (use_xt)
+		{
+			defer->xt = true;
+			defer->h_classes = classes;
+		}
+		else if (ref3D || data_is_3D || use_xt)
 			REPORT_ERROR("BUG: runDiff2KernelCoarseBatched: a deferred launch is for 2D references and 2D data only");
 		defer->projector.reset(new AccProjectorKernel(projector));
 		defer->trans_x = trans_x; defer->trans_y = trans_y; defer->trans_z = trans_z;
@@ -2769,8 +2775,260 @@ bool runDiff2KernelCoarseBatched(
 // kernels as for one particle, so a particle gets exactly the sums it gets alone with
 // RELION_GPU_COARSE_DETERMINISTIC=1). Each item was prepared by runDiff2KernelCoarseBatched with `defer`.
 // Items with different translation numbers or image sizes go in separate launches.
-bool runDiff2KernelCoarseGroup(std::vector<CoarseDeferred *> &items, AccPtr<char> &recs)
+#ifndef ACC_DOUBLE_PRECISION
+// Deferred cross-term passes (3D references) of several particles: per set of particles with the same classes,
+// image and number of translations, at most XT_GMAX, the union of their orientations is projected once
+// (cuda_kernel_diff2_coarse_xt_group). `tables` and `work` must live until the launches have run.
+static void runDiff2KernelCoarseGroupXt(std::vector<CoarseDeferred *> &items, AccPtr<char> &tables, AccPtr<char> &work)
 {
+	// Sets of particles that can share: same classes, image and translations
+	std::map<std::vector<long>, std::vector<CoarseDeferred *> > by_key;
+	std::vector<std::vector<CoarseDeferred *> > sets;
+	for (CoarseDeferred *d : items)
+	{
+		const AccProjectorKernel &pk = d->h_classes[0].projector;
+		std::vector<long> key = {(long) d->image_size, (long) d->translation_num, pk.imgX, pk.imgY, pk.maxR, d->optics_group};
+		key.insert(key.end(), d->iclass.begin(), d->iclass.end());
+		std::vector<CoarseDeferred *> &v = by_key[key];
+		v.push_back(d);
+		if ((int) v.size() == XT_GMAX)
+		{
+			sets.push_back(v);
+			v.clear();
+		}
+	}
+	for (auto &kv : by_key)
+		if (!kv.second.empty())
+			sets.push_back(kv.second);
+
+	// Per set: the union of the orientations of each class (by their angles), and where each particle has them
+	struct Set
+	{
+		std::vector<CoarseClassJob> classes;
+		std::vector<XtGroupBlock> blocks;
+		std::vector<int> bcols;
+		int max_tiles = 1;
+		std::vector<const float *> eul;
+		std::vector<int> map;
+		std::vector<int2> cols;
+		int n_chunks;
+		size_t off_classes, off_blocks, off_bcols, off_eul, off_map, off_parts, off_cols; // in `tables`
+		size_t off_A, off_x2, off_x2sum;                                       // in `work`
+	};
+	std::vector<Set> plan(sets.size());
+	size_t tbytes = 0, wbytes = 0;
+	auto take = [](size_t &total, size_t bytes) { const size_t at = total; total += ((bytes + 255) / 256) * 256; return at; };
+	const int override_chunks = coarseChunkOverride();
+	const size_t target = coarseChunkTargetBlocks();
+	for (size_t si = 0; si < sets.size(); si++)
+	{
+		std::vector<CoarseDeferred *> &S = sets[si];
+		Set &P = plan[si];
+		const int G = (int) S.size(), nc = (int) S[0]->h_classes.size();
+		const int T = (int) S[0]->translation_num;
+		for (int j = 0; j < nc; j++)
+		{
+			std::map<std::array<XFLOAT, 3>, int> where;
+			const size_t u0 = P.eul.size();
+			for (int k = 0; k < G; k++)
+			{
+				const CoarseClassJob &cj = S[k]->h_classes[j];
+				for (int i = 0; i < cj.n_orient; i++)
+				{
+					const XFLOAT *a = S[k]->angles + 3 * (size_t) (cj.orient_offset + i);
+					auto ins = where.insert(std::make_pair(std::array<XFLOAT, 3>{a[0], a[1], a[2]}, (int) (P.eul.size() - u0)));
+					if (ins.second)
+					{
+						P.eul.push_back(cj.eulers + 9 * (size_t) i);
+						P.map.resize(P.map.size() + G, -1);
+					}
+					P.map[(u0 + ins.first->second) * G + k] = cj.orient_offset + i;
+				}
+			}
+			// Orientations searched by the same particles next to each other (stable: first seen first), so that
+			// a block of 16 holds the columns of few particles; then the blocks and their columns
+			const int U = (int) (P.eul.size() - u0);
+			std::vector<unsigned> mask(U, 0u);
+			for (int u = 0; u < U; u++)
+				for (int k = 0; k < G; k++)
+					if (P.map[(u0 + u) * G + k] >= 0)
+						mask[u] |= 1u << k;
+			std::vector<int> order(U);
+			for (int u = 0; u < U; u++)
+				order[u] = u;
+			std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return mask[a] < mask[b]; });
+			std::vector<const float *> eul_sorted(U);
+			std::vector<int> map_sorted((size_t) U * G);
+			for (int u = 0; u < U; u++)
+			{
+				eul_sorted[u] = P.eul[u0 + order[u]];
+				std::copy(P.map.begin() + (u0 + order[u]) * G, P.map.begin() + (u0 + order[u] + 1) * G, map_sorted.begin() + (size_t) u * G);
+			}
+			std::copy(eul_sorted.begin(), eul_sorted.end(), P.eul.begin() + u0);
+			std::copy(map_sorted.begin(), map_sorted.end(), P.map.begin() + u0 * G);
+			for (int b0 = 0; b0 < U; b0 += XT_ORIENT)
+			{
+				XtGroupBlock B = {j, b0, (int) P.bcols.size(), 0, 0u};
+				for (int u = b0; u < std::min(U, b0 + XT_ORIENT); u++)
+					B.mask |= mask[order[u]];
+				for (int k = 0; k < G; k++)
+					if ((B.mask >> k) & 1u)
+						for (int t = 0; t < T; t++)
+							P.bcols.push_back(k * T + t);
+				B.n_cols = (int) P.bcols.size() - B.col_off;
+				P.max_tiles = std::max(P.max_tiles, (B.n_cols + XT_TRANS - 1) / XT_TRANS);
+				P.blocks.push_back(B);
+			}
+			CoarseClassJob uc = S[0]->h_classes[j];
+			uc.eulers = NULL; uc.diff2s = NULL;
+			uc.n_orient = uc.n_even = U;
+			uc.orient_offset = (int) u0;
+			P.classes.push_back(uc);
+		}
+		for (int k = 0; k < G; k++)
+			for (int t = 0; t < T; t++)
+				P.cols.push_back(make_int2(k, t));
+		// Pixel chunks as the single passes choose them, for the union's blocks; never more than a particle's buffer holds
+		int nch = S[0]->n_chunks;
+		for (CoarseDeferred *d : S)
+			nch = std::min(nch, d->n_chunks);
+		if (override_chunks <= 0)
+			nch = std::max(1, std::min(nch, (int) ((target + P.blocks.size() - 1) / std::max(P.blocks.size(), (size_t) 1))));
+		P.n_chunks = nch;
+		P.off_classes = take(tbytes, nc * sizeof(CoarseClassJob));
+		P.off_blocks = take(tbytes, P.blocks.size() * sizeof(XtGroupBlock));
+		P.off_bcols = take(tbytes, P.bcols.size() * sizeof(int));
+		P.off_eul = take(tbytes, P.eul.size() * sizeof(float *));
+		P.off_map = take(tbytes, P.map.size() * sizeof(int));
+		P.off_parts = take(tbytes, G * sizeof(XtGroupParticle));
+		P.off_cols = take(tbytes, P.cols.size() * sizeof(int2));
+		P.off_A = take(wbytes, S[0]->image_size * P.cols.size() * sizeof(float2));
+		P.off_x2 = take(wbytes, (size_t) G * S[0]->image_size * sizeof(float));
+		P.off_x2sum = take(wbytes, (size_t) G * nch * sizeof(float));
+	}
+	{
+		// Said once, then every 5000 sets with RELION_GPU_COARSE_STATS: how much the particles share
+		static std::atomic<long> n_sets(0), n_parts(0), n_own(0), n_union(0), n_needed(0), n_scored(0);
+		static const bool stats = getenv("RELION_GPU_COARSE_STATS") != NULL;
+		long own = 0, uni = 0, parts = 0;
+		for (size_t si = 0; si < sets.size(); si++)
+		{
+			for (CoarseDeferred *d : sets[si])
+				for (const CoarseClassJob &cj : d->h_classes)
+					own += cj.n_orient;
+			uni += (long) plan[si].eul.size();
+			parts += (long) sets[si].size();
+			for (CoarseDeferred *d : sets[si])
+				for (const CoarseClassJob &cj : d->h_classes)
+					n_needed += (long) cj.n_orient * (long) d->translation_num;
+			for (const XtGroupBlock &B : plan[si].blocks)
+				n_scored += (long) std::min(XT_ORIENT, plan[si].classes[B.cls].n_orient - B.orient0) * B.n_cols;
+		}
+		const long k = n_sets.fetch_add((long) sets.size());
+		n_parts += parts; n_own += own; n_union += uni;
+		if (k == 0 || (stats && k / 5000 != (k + (long) sets.size()) / 5000))
+			printf(" GPU coarse pass: particle groups share their projections (RELION_GPU_GROUP_SHARED): %.1f particles per set, "
+			       "%.2fx fewer orientations projected, %.2fx the differences needed (%ld sets so far)\n",
+			       (double) n_parts / std::max(1L, (long) n_sets), (double) n_own / std::max(1L, (long) n_union),
+			       (double) n_scored / std::max(1L, (long) n_needed), (long) n_sets);
+	}
+	tables.setSize(tbytes);
+	tables.allAlloc();
+	work.setSize(wbytes);
+	work.deviceAlloc();
+	for (size_t si = 0; si < sets.size(); si++)
+	{
+		std::vector<CoarseDeferred *> &S = sets[si];
+		Set &P = plan[si];
+		const int G = (int) S.size(), nc = (int) P.classes.size();
+		memcpy(&tables[P.off_classes], P.classes.data(), nc * sizeof(CoarseClassJob));
+		memcpy(&tables[P.off_blocks], P.blocks.data(), P.blocks.size() * sizeof(XtGroupBlock));
+		memcpy(&tables[P.off_bcols], P.bcols.data(), P.bcols.size() * sizeof(int));
+		memcpy(&tables[P.off_eul], P.eul.data(), P.eul.size() * sizeof(float *));
+		memcpy(&tables[P.off_map], P.map.data(), P.map.size() * sizeof(int));
+		memcpy(&tables[P.off_cols], P.cols.data(), P.cols.size() * sizeof(int2));
+		XtGroupParticle *parts = (XtGroupParticle *) &tables[P.off_parts];
+		for (int k = 0; k < G; k++)
+		{
+			const CoarseDeferred &d = *S[k];
+			parts[k] = XtGroupParticle{d.trans_x, d.trans_y, d.Fimg_real, d.Fimg_imag, d.corr_img,
+					(float *) &(~work)[P.off_x2 + (size_t) k * d.image_size * sizeof(float)],
+					d.d_partial, d.chunk_stride, (int) d.translation_num, k * (int) d.translation_num};
+		}
+	}
+	tables.cpToDevice();
+
+	deviceStream_t stream = tables.getStream();
+	for (size_t si = 0; si < sets.size(); si++)
+	{
+		std::vector<CoarseDeferred *> &S = sets[si];
+		Set &P = plan[si];
+		const int G = (int) S.size(), nc = (int) P.classes.size(), n_cols = (int) P.cols.size();
+		const int image_size = (int) S[0]->image_size;
+		const AccProjectorKernel &pk = P.classes[0].projector;
+		const XtGroupParticle *d_parts = (const XtGroupParticle *) &(~tables)[P.off_parts];
+		float2 *d_A = (float2 *) &(~work)[P.off_A];
+		float *d_x2sum = (float *) &(~work)[P.off_x2sum];
+		cuda_kernel_coarse_xt_group_prepare<<<dim3((image_size + 127) / 128, G), 128, 0, stream>>>(
+				d_parts, d_A, n_cols, image_size, pk.imgX, pk.imgY, pk.maxR);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		cuda_kernel_coarse_xt_group_x2<<<dim3(P.n_chunks, G), XT_BLOCK, 0, stream>>>(d_parts, d_x2sum, image_size, P.n_chunks);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+
+		const int ntt = P.max_tiles;
+		int device = 0, cand = 0;
+		cudaGetDevice(&device);
+		std::pair<cudaEvent_t, cudaEvent_t> ev((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+		const int nt = ntt > 1 ? xtTileTuner().begin(device, ntt, stream, cand, ev) : 1;
+#define XT_GROUP_LAUNCH(NT) cuda_kernel_diff2_coarse_xt_group<NT><<<dim3((unsigned) P.blocks.size(), P.n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
+				(const CoarseClassJob *) &(~tables)[P.off_classes], (const XtGroupBlock *) &(~tables)[P.off_blocks], \
+				(const int *) &(~tables)[P.off_bcols], \
+				(const float *const *) &(~tables)[P.off_eul], (const int *) &(~tables)[P.off_map], d_parts, G, \
+				(const int2 *) &(~tables)[P.off_cols], n_cols, d_A, d_x2sum, image_size, P.n_chunks)
+		auto launch = [&](int t)
+		{
+			if (t >= 8) XT_GROUP_LAUNCH(8); else if (t >= 6) XT_GROUP_LAUNCH(6); else if (t >= 4) XT_GROUP_LAUNCH(4);
+			else if (t == 3) XT_GROUP_LAUNCH(3); else if (t == 2) XT_GROUP_LAUNCH(2); else XT_GROUP_LAUNCH(1);
+			return cudaGetLastError();
+		};
+#undef XT_GROUP_LAUNCH
+		cudaError_t err = launch(nt);
+		if (err != cudaSuccess && nt > 1)
+		{
+			fprintf(stderr, " GPU coarse_xt (particle group): %d tiles per block cannot be launched (%s), using 1\n", nt, cudaGetErrorString(err));
+			xtTileTuner().discard(ev);
+			xtTileTuner().mark_dead(device, ntt, nt);
+			ev = std::make_pair((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+			err = launch(1);
+		}
+		LAUNCH_HANDLE_ERROR(err);
+		if (ev.first != NULL)
+			xtTileTuner().finish(device, ntt, ev, cand, (double) P.blocks.size() * (double) image_size * (double) ntt, stream);
+
+		// Each particle's chunks into its differences (as cuda_kernel_diff2_coarse_sum_chunks)
+		for (int k = 0; k < G; k++)
+		{
+			const CoarseDeferred &d = *S[k];
+			const size_t n = d.max_orient * d.translation_num;
+			const unsigned sum_blocks = (unsigned) std::min<size_t>((n + 255) / 256, 1024);
+			cuda_kernel_diff2_coarse_sum_chunks<<<dim3(sum_blocks, (unsigned) d.n_classes), 256, 0, stream>>>(
+					d.d_classes, d.d_partial, P.n_chunks, d.chunk_stride, (int) d.translation_num);
+			LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		}
+	}
+}
+#endif
+
+bool runDiff2KernelCoarseGroup(std::vector<CoarseDeferred *> &items, AccPtr<char> &recs, AccPtr<char> &xt_tables, AccPtr<char> &xt_work)
+{
+#ifndef ACC_DOUBLE_PRECISION
+	std::vector<CoarseDeferred *> xt_items;
+	for (size_t i = 0; i < items.size(); )
+		if (items[i]->xt) { xt_items.push_back(items[i]); items.erase(items.begin() + i); }
+		else i++;
+	if (!xt_items.empty())
+		runDiff2KernelCoarseGroupXt(xt_items, xt_tables, xt_work);
+#endif
 	if (items.empty())
 		return true;
 	std::vector<size_t> order(items.size());

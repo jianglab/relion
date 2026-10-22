@@ -212,7 +212,8 @@ public:
 	std::vector<long int> sorted_idx;
 
 	// Shuffle whole micrographs in [first, last), keeping each one's particles together in file
-	// order (RELION_PARTICLE_ORDER=micrograph, see randomiseParticlesOrder)
+	// order (RELION_PARTICLE_ORDER=micrograph, see randomiseParticlesOrder); with
+	// RELION_PARTICLE_ORDER=filament, whole helical filaments in track order
 	void shuffleMicrographs(std::vector<long int>::iterator first, std::vector<long int>::iterator last, std::mt19937 &rng);
 
 	// Number of particles in random subsets 1 and 2;

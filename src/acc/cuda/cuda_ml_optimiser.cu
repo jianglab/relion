@@ -5,6 +5,7 @@
 #include <math.h>
 #include <ctime>
 #include <vector>
+#include <deque>
 #include <iostream>
 #include "src/ml_optimiser.h"
 #include <cuda_runtime.h>
@@ -747,16 +748,21 @@ void MlOptimiserCuda::doThreadExpectationSomeParticles(int thread_id)
 	if (group_auto || group_fixed > 1)
 	{
 		bool more = true;
-		while (more)
+		// Particles taken but not yet in a group: a task may be a block of several consecutive particles
+		// (see MlOptimiser::expectationSomeParticles), which then go into groups in their order
+		std::deque<unsigned long> taken;
+		while (more || !taken.empty())
 		{
 			// What a thread may take for its group: 70% of what the allocator has free now, shared by the
 			// threads (the allocator holds all the memory that the job uses; cudaMemGetInfo would say little)
 			const size_t budget = (size_t) (0.7 * allocator->getPotentialFreeSpace() / std::max(1, (int) baseMLO->nr_threads));
 			const int group_size = group_auto ? GroupSizeTuner::instance().next() : group_fixed;
-			std::vector<unsigned long> ids;
-			while ((int) ids.size() < group_size && (more = baseMLO->exp_ipart_ThreadTaskDistributor->getTasks(first_ipart, last_ipart)))
+			while ((int) taken.size() < group_size && more && (more = baseMLO->exp_ipart_ThreadTaskDistributor->getTasks(first_ipart, last_ipart)))
 				for (long unsigned ipart = first_ipart; ipart <= last_ipart; ipart++)
-					ids.push_back(baseMLO->exp_my_first_part_id + ipart);
+					taken.push_back(baseMLO->exp_my_first_part_id + ipart);
+			const size_t n = std::min(taken.size(), (size_t) group_size);
+			std::vector<unsigned long> ids(taken.begin(), taken.begin() + n);
+			taken.erase(taken.begin(), taken.begin() + n);
 			if (!ids.empty())
 			{
 				AccPtrFactory ptrFactory(allocator, cudaStreamPerThread);

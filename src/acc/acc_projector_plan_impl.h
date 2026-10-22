@@ -592,6 +592,13 @@ void AccProjectorPlan::setupBatch(
 		makePlanEulers(sampling, inverseMatrix, doL, doR, alphas, betas, gammas,
 				adjustL, adjustR, eulers, orientation_num);
 	}
+	angles.resize(orientation_num * 3);
+	for (size_t n = 0; n < orientation_num; n++)
+	{
+		angles[3 * n] = alphas[n];
+		angles[3 * n + 1] = sampling.is_3D ? betas[n] : 0;
+		angles[3 * n + 2] = sampling.is_3D ? gammas[n] : 0;
+	}
 
 	for (size_t k = 0; k < iclasses.size(); k++)
 	{

@@ -29,6 +29,7 @@
 #include <mutex>
 #include <atomic>
 #include "src/exp_model.h"
+#include "src/filament_context.h"
 #include <sys/statvfs.h>
 using namespace gravis;
 
@@ -432,19 +433,45 @@ void Experiment::divideParticlesInRandomHalves(int seed, bool do_helical_refine)
 // a few long stretches of few stack files instead of single images from many. The sums over particles
 // do not depend on the order (apart from rounding); runs with random subsets keep the particle-level
 // shuffle, since a subset should be a random sample.
-static bool particleOrderByMicrograph()
+// RELION_PARTICLE_ORDER=filament: the same with whole helical filaments (rlnMicrographName +
+// rlnHelicalTubeID, see filctx::groupFilaments), each in track order, so that consecutive particles
+// are neighbouring segments with similar orientations (particle groups share their projections);
+// particles without a tube ID go by micrograph.
+static int particleOrderMode() // 0 random, 1 micrograph, 2 filament
 {
-	static const bool by_micrograph = []()
+	static const int mode = []()
 	{
 		const char *e = getenv("RELION_PARTICLE_ORDER");
-		return e != NULL && std::string(e) == "micrograph";
+		if (e == NULL || *e == 0 || std::string(e) == "random")
+			return 0;
+		if (std::string(e) == "micrograph")
+			return 1;
+		if (std::string(e) == "filament")
+			return 2;
+		REPORT_ERROR("RELION_PARTICLE_ORDER must be random, micrograph or filament, not " + std::string(e));
+		return 0;
 	}();
-	return by_micrograph;
+	return mode;
+}
+
+static bool particleOrderByMicrograph()
+{
+	return particleOrderMode() != 0;
 }
 
 void Experiment::shuffleMicrographs(std::vector<long int>::iterator first, std::vector<long int>::iterator last, std::mt19937 &rng)
 {
-	// micrograph (or, without micrograph names, stack file) -> (stack, image number, particle)
+	// filament mode: particle -> (filament, place along it)
+	std::map<long int, std::pair<long int, long int> > on_filament;
+	if (particleOrderMode() == 2)
+	{
+		double step;
+		const std::vector<std::vector<long int> > filaments = filctx::groupFilaments(MDimg, step);
+		for (size_t f = 0; f < filaments.size(); f++)
+			for (size_t k = 0; k < filaments[f].size(); k++)
+				on_filament[filaments[f][k]] = std::make_pair((long int) f, (long int) k);
+	}
+	// micrograph (or, without micrograph names, stack file; or filament) -> (stack, image number, particle)
 	std::map<std::string, std::vector<std::pair<std::pair<std::string, long int>, long int> > > by_mic;
 	std::vector<std::string> order;
 	for (auto it = first; it != last; ++it)
@@ -455,6 +482,14 @@ void Experiment::shuffleMicrographs(std::vector<long int>::iterator first, std::
 		std::string key = getMicrographName(*it);
 		if (key.empty())
 			key = stack;
+		const auto fil = on_filament.find(*it);
+		if (fil != on_filament.end())
+		{
+			// "\n" cannot be in a file name: filament keys never equal a micrograph's
+			key = "\n" + std::to_string(fil->second.first);
+			stack = "";
+			imgno = fil->second.second;
+		}
 		auto &v = by_mic[key];
 		if (v.empty())
 			order.push_back(key);

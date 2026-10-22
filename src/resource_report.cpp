@@ -318,7 +318,8 @@ std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi
 				o << "The " << gpus << " busy only " << pct(busy) << " of the time" << where
 				  << ": the work per particle is small and the GPU waits for the CPU side. ";
 				const int suggest = std::max(2, ncores - 1);
-				if (threads < ncores)
+				// spare cores fewer than the workers: no whole thread more per worker to suggest
+				if ((ncores - threads) / workers > 0)
 					o << "Raise --j from " << per_worker << " to " << per_worker + (ncores - threads) / workers
 					  << " (a thread per allocated core): more threads keep more work on the GPU.";
 				else if (!mps)
@@ -350,10 +351,10 @@ std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi
 		{
 			std::ostringstream o;
 			o << use.str() << ". ";
-			if (threads < ncores)
+			if ((ncores - threads) / workers > 0)
 				o << "Raise --j from " << per_worker << " to " << per_worker + (ncores - threads) / workers << ", or request "
 				  << threads << " cores, to avoid wasting them.";
-			else
+			else if (threads >= ncores)
 				o << "The threads were mostly waiting, probably for images from disk: try --preread_images or --scratch_dir.";
 			out.push_back(o.str());
 		}

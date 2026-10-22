@@ -97,6 +97,19 @@ TEST_CASE("MPI: processes on a host share its cores, and low use is flagged", "[
 	CHECK(mentions(a, "on average only 2.8 of the 8 allocated cores were busy"));
 }
 
+TEST_CASE("MPI: one spare core for two workers is no reason to raise --j", "[resource_report]")
+{
+	// leader + 2 workers with --j 3 on 8 cores: 7 threads, a starved GPU (was "Raise --j from 3 to 3")
+	std::vector<resrep::ProcessStats> p;
+	p.push_back(proc("n1", 3, 8, 0, -3., "", 0.33));
+	p.push_back(proc("n1", 3, 8, 0, 0.5));
+	p.push_back(proc("n1", 3, 8, 0, 0.5));
+	for (size_t i = 1; i < p.size(); i++) p[i].mps = true;
+	auto a = resrep::advise(p, true);
+	CHECK(mentions(a, "busy only 50%"));
+	CHECK(!mentions(a, "Raise --j"));
+}
+
 TEST_CASE("several processes on one GPU without MPS are told to use it, whatever the busy figure", "[resource_report]")
 {
 	std::vector<resrep::ProcessStats> p;

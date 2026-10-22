@@ -318,6 +318,46 @@ system, warm caches) it made no difference: 924 s against 919 s. It is kept
 for large data sets of thousands of micrographs, where scattered reads may
 cost more than file caches hide. Tests: `[particle_order]`.
 
+## Shared projections for neighbouring helical segments (opt-in)
+
+Neighbouring segments of a helical filament search almost the same orientations: their tilt and
+psi priors are nearly equal and rot moves by the twist from segment to segment. In the coarse pass
+of Class3D (cross-term kernel), about 80% of the kernel time is the projection of the reference, so
+projecting each orientation once for a group of segments saves most of it.
+
+    RELION_PARTICLE_ORDER=filament RELION_GPU_PARTICLE_GROUP=8 RELION_GPU_GROUP_SHARED=1 relion_refine ...
+
+- `RELION_PARTICLE_ORDER=filament` shuffles whole filaments, each in track order
+  (`filctx::groupFilaments`, the filament map that the filament context uses too; segments without
+  a tube ID go by micrograph). With particle groups each thread then takes a block of consecutive
+  particles, so a group holds neighbouring segments rather than every n-th particle.
+- In a group, `runDiff2KernelCoarseGroupXt` forms the union of the particles' orientations per class
+  (equal angles mean equal matrices; particles with other classes, image size, translations or optics
+  group go into separate sets, at most 16 particles per set). The union is sorted by which particles
+  search each orientation, and every block of 16 orientations is scored only against the
+  translations of those particles: each segment still searches exactly its own window (a band along
+  the filament, not a rectangle), and no difference is computed for nothing.
+- `cuda_kernel_diff2_coarse_xt_group` keeps the arithmetic and summation order of
+  `cuda_kernel_diff2_coarse_xt`, so at the same number of pixel chunks every particle's coarse
+  differences are bit for bit those of its own pass (`RELION_GPU_GROUP_CHECK=1` with
+  `RELION_GPU_COARSE_SPLIT=N` compares them; 0 differences on 1000 real-like segments, 3 iterations).
+  Without a fixed split the group may use fewer chunks than a single pass, which changes rounding only.
+
+Measured on a public helical data set (EMPIAR-10940 subset, 5000 segments, box 256, K=3, healpix 5
+with `--coarse_early`, 6 iterations, RTX 4090): one process with `--j 6`, 410 s -> 359 s (iterations at
+healpix 5: 112 -> 97 s); two MPI workers with `--j 3`, 414 -> 397 s, because the GPU then waits for the
+CPU side (busy 82% -> 58%). A first version that scored every union orientation against every particle
+was 1.6-1.9x slower at healpix 5, where the windows overlap less. The automatic group size was slower
+than 8 in this test. A pool smaller than the threads times the group size leaves the groups small
+(the Class3D GUI default `--pool 3` gives no groups at all).
+
+Quality: over 4 seeds per order the best class's half-map FSC (mean over 10-6 A) was 0.217, 0.141,
+0.136, 0.138 in random order and 0.137, 0.190, 0.180, 0.195 in filament order with shared projections:
+the 3-class split depends on the seed, not on the order. Test: `tests/integration/test_group_shared.py`.
+
+The same filament map is meant for a later constrained assignment, in which a chunk of segments
+searches one starting rot and the helical step instead of a rot per segment.
+
 ## Automatic MPS
 
 Without MPS, GPU work from different processes is time-sliced: several MPI

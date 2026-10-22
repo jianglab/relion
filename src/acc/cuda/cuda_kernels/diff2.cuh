@@ -1300,6 +1300,256 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 		__syncthreads();
 	}
 }
+
+/*
+ * The coarse pass of a group of particles that share most of their orientations (neighbouring
+ * segments of a helical filament): each orientation of the union of the group's orientations is
+ * projected once for all of them. The translations of all particles are columns side by side
+ * (one A table, cuda_kernel_coarse_xt_group_prepare). A block takes 16 union orientations (XtGroupBlock,
+ * sorted so that a block's orientations are searched by the same particles) and NT tiles of 16 of
+ * the columns of the particles that search them. Every output keeps the arithmetic and order of
+ * cuda_kernel_diff2_coarse_xt (same A values, same per-thread sums, same reductions), so with the
+ * same number of pixel chunks a particle's differences are bit for bit those of its own pass. Outputs
+ * of orientations that a particle does not have (g_map -1) are not stored.
+ */
+#define XT_GMAX 16
+
+struct XtGroupParticle
+{
+	const XFLOAT *trans_x, *trans_y, *real, *imag, *corr;
+	float *x2;           // c_p |x_p|^2 / 2 per pixel (made here)
+	XFLOAT *partial;     // the particle's chunk buffer (as cuda_kernel_diff2_coarse_xt fills it)
+	size_t chunk_stride;
+	int translation_num;
+	int col0;            // its first column in the A table
+};
+
+// 16 union orientations and the columns of the particles that search any of them
+struct XtGroupBlock
+{
+	int cls;             // its class (g_classes)
+	int orient0;         // its first orientation within the class's union
+	int col_off;         // its columns: g_bcols[col_off .. col_off + n_cols)
+	int n_cols;
+	unsigned mask;       // the particles of those columns
+};
+
+// As cuda_kernel_coarse_xt_prepare, for particle blockIdx.y, into its columns of the group's table
+static __global__ void cuda_kernel_coarse_xt_group_prepare(
+		const XtGroupParticle *g_parts,
+		float2 *g_A,
+		int n_cols,
+		int image_size,
+		int img_x,
+		int img_y,
+		int max_r)
+{
+	const int p = blockIdx.x * blockDim.x + threadIdx.x;
+	if (p >= image_size)
+		return;
+	const XtGroupParticle &P = g_parts[blockIdx.y];
+	const int x = p % img_x;
+	int y = p / img_x;
+	if (y > max_r)
+		y -= img_y;
+	const float re = P.real[p], im = P.imag[p];
+	const float sc = P.corr[p] / 2;
+	P.x2[p] = sc * (re * re + im * im);
+	for (int t = 0; t < P.translation_num; t++)
+	{
+		float s, c;
+		sincosf(x * P.trans_x[t] + y * P.trans_y[t], &s, &c);
+		g_A[(size_t) p * n_cols + P.col0 + t] = make_float2(sc * (c * re - s * im), sc * (c * im + s * re));
+	}
+}
+
+// sum_p c_p |x_p|^2 / 2 over the pixels of chunk blockIdx.x for particle blockIdx.y, in the order of
+// cuda_kernel_diff2_coarse_xt (XT_BLOCK threads)
+static __global__ void cuda_kernel_coarse_xt_group_x2(
+		const XtGroupParticle *g_parts,
+		float *g_x2sum,
+		int image_size,
+		int n_chunks)
+{
+	const int tid = threadIdx.x;
+	const XtGroupParticle &P = g_parts[blockIdx.y];
+	const int n_pass = (image_size + XT_PIXELS - 1) / XT_PIXELS;
+	const int pass_begin = (int) (((long) blockIdx.x * n_pass) / n_chunks);
+	const int pass_end   = (int) (((long) (blockIdx.x + 1) * n_pass) / n_chunks);
+	__shared__ float s_x2[XT_BLOCK];
+	float x2 = 0.f;
+	for (int p = pass_begin * XT_PIXELS + tid; p < min(pass_end * XT_PIXELS, image_size); p += XT_BLOCK)
+		x2 += P.x2[p];
+	s_x2[tid] = x2;
+	__syncthreads();
+	if (tid == 0)
+	{
+		float x2_sum = 0.f;
+		for (int i = 0; i < XT_BLOCK; i++)
+			x2_sum += s_x2[i];
+		g_x2sum[blockIdx.y * n_chunks + blockIdx.x] = x2_sum;
+	}
+}
+
+template <int NT>
+static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt_group(
+		const CoarseClassJob *g_classes,   // per class: n_orient and orient_offset of the union
+		const XtGroupBlock *g_blocks,
+		const int *g_bcols,                // columns of the blocks (into g_col and the A table)
+		const float *const *g_eul,         // per union orientation: its 9 matrix values
+		const int *g_map,                  // [union orientation][particle]: its place in the particle's pass, or -1
+		const XtGroupParticle *g_parts,
+		int n_parts,
+		const int2 *g_col,                 // per column: (particle, translation)
+		int n_cols,
+		const float2 *g_A,
+		const float *g_x2sum,
+		int image_size,
+		int n_chunks)
+{
+	const int tid = threadIdx.x;
+	const XtGroupBlock B = g_blocks[blockIdx.x];
+	const int ttile0 = blockIdx.z * NT;
+	if (ttile0 * XT_TRANS >= B.n_cols)
+		return;
+	const CoarseClassJob &c = g_classes[B.cls];
+	AccProjectorKernel projector = c.projector;
+	const float inv_imgX = 1.f / (float) projector.imgX;
+	const int orient0 = B.orient0;
+	const int n_valid = min(XT_ORIENT, c.n_orient - orient0);
+	const int *const bcols = g_bcols + B.col_off;
+
+	const int o = tid & (XT_ORIENT - 1);
+	const int plane = tid >> 4;
+	float e0 = 0.f, e1 = 0.f, e3 = 0.f, e4 = 0.f, e6 = 0.f, e7 = 0.f;
+	if (o < n_valid)
+	{
+		const float *e = g_eul[c.orient_offset + orient0 + o];
+		e0 = e[0]; e1 = e[1]; e3 = e[3]; e4 = e[4]; e6 = e[6]; e7 = e[7];
+	}
+	const int lane16 = tid & 15;
+	const int po = lane16 & 3;
+	const int pt = lane16 >> 2;
+
+	__shared__ __align__(16) float2 s_buf[XT_PIXELS * XT_ORIENT + NT * XT_PIXELS * XT_TRANS];
+	float2 *const s_ref = s_buf;
+	float2 *const s_A = s_buf + XT_PIXELS * XT_ORIENT;
+	// sum_p c_p |ref|^2 / 2 of this thread's orientation and pixels, per particle
+	__shared__ float s_rn[XT_GMAX][XT_BLOCK];
+	__shared__ const XFLOAT *s_corr[XT_GMAX];
+	if (tid < n_parts)
+		s_corr[tid] = g_parts[tid].corr;
+	for (int g = 0; g < n_parts; g++)
+		s_rn[g][tid] = 0.f;
+
+	float acc[NT][4][4];
+	#pragma unroll
+	for (int tt = 0; tt < NT; tt++)
+		#pragma unroll
+		for (int i = 0; i < 4; i++)
+			#pragma unroll
+			for (int j = 0; j < 4; j++)
+				acc[tt][i][j] = 0.f;
+
+	const int n_pass = (image_size + XT_PIXELS - 1) / XT_PIXELS;
+	const int pass_begin = (int) (((long) blockIdx.y * n_pass) / n_chunks);
+	const int pass_end   = (int) (((long) (blockIdx.y + 1) * n_pass) / n_chunks);
+
+	for (int pass = pass_begin; pass < pass_end; pass++)
+	{
+		const int base = pass * XT_PIXELS;
+		__syncthreads();
+		#pragma unroll
+		for (int k = 0; k < XT_PIXELS / 8; k++)
+		{
+			const int row = plane + 8 * k;
+			const int p = base + row;
+			float re = 0.f, im = 0.f;
+			if (p < image_size)
+			{
+				int y = (int) (((float) p + 0.5f) * inv_imgX);
+				const int x = p - y * projector.imgX;
+				if (y > projector.maxR)
+					y -= projector.imgY;
+				projector.project3Dmodel(x, y, e0, e1, e3, e4, e6, e7, re, im);
+				for (int g = 0; g < n_parts; g++)
+					if ((B.mask >> g) & 1u)
+						s_rn[g][tid] += s_corr[g][p] * 0.5f * (re * re + im * im);
+			}
+			s_ref[row * XT_ORIENT + o] = make_float2(re, im);
+		}
+		for (int idx = tid; idx < NT * XT_PIXELS * XT_TRANS; idx += XT_BLOCK)
+		{
+			const int tt = idx / (XT_PIXELS * XT_TRANS);
+			const int row = (idx / XT_TRANS) % XT_PIXELS, t = idx % XT_TRANS;
+			const int p = base + row;
+			const int col = (ttile0 + tt) * XT_TRANS + t;
+			s_A[idx] = (p < image_size && col < B.n_cols) ? g_A[(size_t) p * n_cols + bcols[col]] : make_float2(0.f, 0.f);
+		}
+		__syncthreads();
+		#pragma unroll
+		for (int k = 0; k < XT_PIXELS / 8; k++)
+		{
+			const int row = plane + 8 * k;
+			float rr[4], ri[4];
+			const float4 r01 = *(const float4 *) &s_ref[row * XT_ORIENT + po * 4];
+			const float4 r23 = *(const float4 *) &s_ref[row * XT_ORIENT + po * 4 + 2];
+			rr[0] = r01.x; rr[1] = r01.z; rr[2] = r23.x; rr[3] = r23.z;
+			ri[0] = r01.y; ri[1] = r01.w; ri[2] = r23.y; ri[3] = r23.w;
+			#pragma unroll
+			for (int tt = 0; tt < NT; tt++)
+			{
+				const float4 a01 = *(const float4 *) &s_A[(tt * XT_PIXELS + row) * XT_TRANS + pt * 4];
+				const float4 a23 = *(const float4 *) &s_A[(tt * XT_PIXELS + row) * XT_TRANS + pt * 4 + 2];
+				const float ar[4] = {a01.x, a01.z, a23.x, a23.z}, ai[4] = {a01.y, a01.w, a23.y, a23.w};
+				#pragma unroll
+				for (int i = 0; i < 4; i++)
+					#pragma unroll
+					for (int j = 0; j < 4; j++)
+						acc[tt][i][j] += rr[i] * ar[j] + ri[i] * ai[j];
+			}
+		}
+	}
+
+	__syncthreads();
+	float (*const s_red)[XT_ORIENT * XT_TRANS] = (float (*)[XT_ORIENT * XT_TRANS]) s_buf;
+	#pragma unroll
+	for (int tt = 0; tt < NT; tt++)
+	{
+		const int ttile = ttile0 + tt;
+		if (ttile * XT_TRANS >= B.n_cols)
+			break;
+		#pragma unroll
+		for (int i = 0; i < 4; i++)
+			#pragma unroll
+			for (int j = 0; j < 4; j++)
+				s_red[plane][(po * 4 + i) * XT_TRANS + pt * 4 + j] = acc[tt][i][j];
+		__syncthreads();
+		for (int idx = tid; idx < XT_ORIENT * XT_TRANS; idx += XT_BLOCK)
+		{
+			const int oo = idx / XT_TRANS, t = idx % XT_TRANS;
+			const int col = ttile * XT_TRANS + t;
+			if (oo < n_valid && col < B.n_cols)
+			{
+				const int2 kt = g_col[bcols[col]];
+				const int m = g_map[(size_t) (c.orient_offset + orient0 + oo) * n_parts + kt.x];
+				if (m >= 0)
+				{
+					float cross = 0.f, norm = 0.f;
+					for (int pl = 0; pl < 8; pl++)
+					{
+						cross += s_red[pl][idx];
+						norm += s_rn[kt.x][pl * XT_ORIENT + oo];
+					}
+					const XtGroupParticle &P = g_parts[kt.x];
+					P.partial[(size_t) blockIdx.y * P.chunk_stride + (size_t) m * P.translation_num + kt.y] =
+							norm + g_x2sum[kt.x * n_chunks + blockIdx.y] - 2.f * cross;
+				}
+			}
+		}
+		__syncthreads();
+	}
+}
 #endif
 
 #endif /* CUDA_DIFF2_KERNELS_CUH_ */
