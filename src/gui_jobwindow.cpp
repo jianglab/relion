@@ -849,6 +849,7 @@ void JobWindow::initialiseManualpickWindow()
 
 	current_y += STEPY/2;
     place ("do_startend");
+    place ("startend_style");
     place ("do_lines");
 
 	current_y += STEPY/2;

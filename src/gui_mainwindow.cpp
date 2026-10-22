@@ -1591,7 +1591,7 @@ void GuiMainWindow::cb_display_io_node_i()
             }
 			else if (manualpickjob.joboptions["do_startend"].getBoolean())
 			{
-				command += " --pick_start_end ";
+				command += " --pick_start_end --startend_style " + manualpickjob.joboptions["startend_style"].getString();
 			}
 			std::string error_message = "";
 			float mylowpass = manualpickjob.joboptions["lowpass"].getNumber(error_message);

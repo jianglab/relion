@@ -203,6 +203,14 @@ static ScaleBarUnit stringToScaleBarUnit(const std::string &unit)
 	return SCALE_BAR_ANGSTROM;
 }
 
+StartEndStyle stringToStartEndStyle(const std::string &style)
+{
+	if (style == "box") return STARTEND_BOX;
+	if (style == "H-shape") return STARTEND_H;
+	if (style == "classic") return STARTEND_CLASSIC;
+	REPORT_ERROR("Invalid start-end display style: " + style + " (use box, H-shape or classic)");
+}
+
 static RFLOAT scaleBarUnitInAngstrom(ScaleBarUnit unit)
 {
 	if (unit == SCALE_BAR_NANOMETER) return 10.;
@@ -949,7 +957,8 @@ int basisViewerWindow::fillCanvas(int viewer_type, MetaDataTable &MDin, Observat
 int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
                                               RFLOAT _scale, RFLOAT _coord_scale, int _particle_radius, bool _do_startend, bool _do_lines, FileName _fn_coords,
                                               FileName _fn_color, FileName _fn_mic, FileName _color_label, RFLOAT _color_blue_value, RFLOAT _color_red_value,
-											  RFLOAT _minimum_pick_fom, RFLOAT _min_fom, RFLOAT _max_fom)
+											  RFLOAT _minimum_pick_fom, RFLOAT _min_fom, RFLOAT _max_fom,
+											  StartEndStyle _startend_style)
 {
 	current_selection_type = 2; // Green
 
@@ -960,6 +969,7 @@ int basisViewerWindow::fillPickerViewerCanvas(MultidimArray<RFLOAT> image, Multi
 	pickerViewerCanvas canvas(0, 0, xsize_canvas, ysize_canvas);
 	canvas.particle_radius = _particle_radius;
         canvas.do_startend = _do_startend;
+	canvas.startend_style = _startend_style;
         canvas.do_lines = _do_lines;
 	canvas.coord_scale = _coord_scale;
 	canvas.SetScroll(&scroll);
@@ -2690,6 +2700,8 @@ void pickerViewerCanvas::draw()
 	// For start-end picking: a start point still waiting for its end point is drawn as a circle
 	bool start_pending = false;
 	Fl_Color start_color = FL_GREEN;
+	// DisplayBox::draw leaves a 2-pixel line style behind; use thin lines for the picks
+	fl_line_style(FL_SOLID, 1);
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDcoords)
 	{
 		icoord++;
@@ -2777,6 +2789,19 @@ void pickerViewerCanvas::draw()
             xcoori_start = xcoori;
             ycoori_start = ycoori;
         }
+        else if (do_startend && startend_style == STARTEND_CLASSIC)
+        {
+            fl_circle(xcoori, ycoori, particle_radius);
+            if (icoord % 2 == 1)
+            {
+                xcoori_start = xcoori;
+                ycoori_start = ycoori;
+            }
+            else
+            {
+                fl_line(xcoori_start, ycoori_start, xcoori, ycoori);
+            }
+        }
         else if (do_startend)
         {
             if (icoord % 2 == 1)
@@ -2788,7 +2813,7 @@ void pickerViewerCanvas::draw()
             }
             else
             {
-                // Draw the filament as a box from start to end, one particle diameter wide
+                // Draw the filament from start to end, one particle diameter wide
                 start_pending = false;
                 RFLOAT dx = xcoori - xcoori_start;
                 RFLOAT dy = ycoori - ycoori_start;
@@ -2799,12 +2824,22 @@ void pickerViewerCanvas::draw()
                 }
                 else
                 {
+                    // Half-width vector, perpendicular to the filament
                     int nx = ROUND(-dy / len * particle_radius);
                     int ny = ROUND( dx / len * particle_radius);
-                    fl_loop(xcoori_start + nx, ycoori_start + ny,
-                            xcoori + nx, ycoori + ny,
-                            xcoori - nx, ycoori - ny,
-                            xcoori_start - nx, ycoori_start - ny);
+                    if (startend_style == STARTEND_H)
+                    {
+                        fl_line(xcoori_start, ycoori_start, xcoori, ycoori);
+                        fl_line(xcoori_start + nx, ycoori_start + ny, xcoori_start - nx, ycoori_start - ny);
+                        fl_line(xcoori + nx, ycoori + ny, xcoori - nx, ycoori - ny);
+                    }
+                    else
+                    {
+                        fl_loop(xcoori_start + nx, ycoori_start + ny,
+                                xcoori + nx, ycoori + ny,
+                                xcoori - nx, ycoori - ny,
+                                xcoori_start - nx, ycoori_start - ny);
+                    }
                 }
             }
         }
@@ -2820,6 +2855,7 @@ void pickerViewerCanvas::draw()
         fl_color(start_color);
         fl_circle(xcoori_start, ycoori_start, particle_radius);
     }
+    fl_line_style(0);
 }
 
 int pickerViewerCanvas::handle(int ev)
@@ -2889,6 +2925,10 @@ int pickerViewerCanvas::handle(int ev)
 			MDcoords.setValue(EMDL_ORIENT_PSI, aux);
 			MDcoords.setValue(EMDL_PARTICLE_AUTOPICK_FOM, zero);
 
+			// The canvas is drawn over the image: repaint the image so that the
+			// circle of a start point disappears once its end point is picked
+			if (do_startend)
+				boxes[0]->redraw();
 			redraw();
             return 1;
 		}
@@ -3908,6 +3948,7 @@ void Displayer::read(int argc, char **argv)
 	int pick_section  = parser.addSection("Picking options");
 	do_pick = parser.checkOption("--pick", "Pick coordinates in input image");
     do_pick_startend = parser.checkOption("--pick_start_end", "Pick start-end coordinates in input image");
+	startend_style = stringToStartEndStyle(parser.getOption("--startend_style", "How to draw start-end picks: box, H-shape or classic (circles joined by a line)", "box"));
     do_pick_lines = parser.checkOption("--pick_lines", "Pick lines in input image");
 	fn_coords = parser.getOption("--coords", "STAR file with picked particle coordinates", "");
 	coord_scale = textToFloat(parser.getOption("--coord_scale", "Scale particle coordinates before display", "1.0"));
@@ -4252,7 +4293,7 @@ void Displayer::run()
         else
         {
             win.fillPickerViewerCanvas(img(), fom_img(), minval, maxval, sigma_contrast, scale, coord_scale, ROUND(scale*particle_radius), do_pick_startend, do_pick_lines, fn_coords,
-                                       fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom, fom_min, fom_max);
+                                       fn_color, fn_in, color_label, color_blue_value, color_red_value, minimum_pick_fom, fom_min, fom_max, startend_style);
         }
 	}
 	else if (fn_in.isStarFile())

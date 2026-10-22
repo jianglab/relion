@@ -2370,6 +2370,11 @@ to the average PLUS this value times the standard deviation. Use zero to set the
 	joboptions["do_topaz_denoise"] = JobOption("OR: use Topaz denoising?", false, "If set to true, Topaz denoising will be performed instead of lowpass filtering.");
 
 	joboptions["do_startend"] = JobOption("Pick start-end coordinates helices?", false, "If set to true, start and end coordinates are picked subsequently and a line will be drawn between each pair");
+	std::vector<std::string> startend_style_opts = {"box", "H-shape", "classic"};
+	joboptions["startend_style"] = JobOption("Start-end display style:", startend_style_opts, 0, "How each start-end pair is drawn: \n \
+box: a rectangle from start to end, one particle diameter wide; \n \
+H-shape: the centre line from start to end, with a bar of one particle diameter across each end; \n \
+classic: a circle at the start and at the end, joined by a line.");
     joboptions["do_lines"] = JobOption("Pick helices as lines?", false, "If set to true, lines of coordinates are picked as one drags the mouse");
 
 	joboptions["do_fom_threshold"] = JobOption("Use autopick FOM threshold?", false, "If set to Yes, only particles with rlnAutopickFigureOfMerit values below the threshold below will be extracted.");
@@ -2460,7 +2465,7 @@ bool RelionJob::getCommandsManualpickJob(std::string &outputname, std::vector<st
 		label += ".helical";
 
 		if (joboptions["do_lines"].getBoolean()) command += " --pick_lines ";
-        else command += " --pick_start_end ";
+        else command += " --pick_start_end --startend_style " + joboptions["startend_style"].getString();
 
 		// new version: no longer save coords_suffix nodetype, but 2-column list of micrographs and coordinate files
 		Node node2(outputname + "manualpick.star", LABEL_MANPICK_COORDS_HELIX);
@@ -2629,7 +2634,7 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 
 			if (manualpickjob.joboptions["do_startend"].getBoolean())
 			{
-				command += " --pick_start_end ";
+				command += " --pick_start_end --startend_style " + manualpickjob.joboptions["startend_style"].getString();
 			}
 			if (manualpickjob.joboptions["do_topaz_denoise"].getBoolean())
 			{

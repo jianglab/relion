@@ -84,6 +84,17 @@ enum ScaleBarUnit
 	SCALE_BAR_MICROMETER
 };
 
+// How start-end filament picks are drawn
+enum StartEndStyle
+{
+	STARTEND_BOX = 0, // rectangle one particle diameter wide
+	STARTEND_H,       // centre line with a bar across each end
+	STARTEND_CLASSIC  // a circle at each end, joined by a line
+};
+
+// Parses "box", "H-shape" or "classic"
+StartEndStyle stringToStartEndStyle(const std::string &style);
+
 static bool has_dragged;
 static int predrag_xc;
 static int predrag_yc;
@@ -233,7 +244,8 @@ public:
 	int fillPickerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale, RFLOAT _coord_scale,
 	                           int _particle_radius, bool do_startend = false, bool do_lines = false, FileName _fn_coords = "",
 	                           FileName _fn_color = "", FileName _fn_mic= "", FileName _color_label = "", RFLOAT _color_blue_value = 0., RFLOAT _color_red_value = 1.,
-							   RFLOAT _minimum_pick_fom = -999., RFLOAT _min_fom = 0., RFLOAT _max_fom = 0.);
+							   RFLOAT _minimum_pick_fom = -999., RFLOAT _min_fom = 0., RFLOAT _max_fom = 0.,
+							   StartEndStyle _startend_style = STARTEND_BOX);
     int fillMaskerViewerCanvas(MultidimArray<RFLOAT> image, MultidimArray<RFLOAT> mask_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast,
                                RFLOAT _scale, int _pencil_radius, FileName _fn_mask, RFLOAT angpix);
 
@@ -544,6 +556,9 @@ public:
 	// Draw lines between start-end coordinates?
 	bool do_startend;
 
+	// How to draw the start-end pairs
+	StartEndStyle startend_style;
+
     // Draw lines for curvy filaments?
     bool do_lines;
 
@@ -551,7 +566,7 @@ public:
 	FileName fn_mic;
 
 	// Constructor with w x h size of the window and a title
-	pickerViewerCanvas(int X, int Y, int W, int H, const char* title=0): basisViewerCanvas(X,Y,W, H, title) { }
+	pickerViewerCanvas(int X, int Y, int W, int H, const char* title=0): basisViewerCanvas(X,Y,W, H, title), startend_style(STARTEND_BOX) { }
 
 	void loadCoordinates(bool ask_filename = false);
 
@@ -774,6 +789,9 @@ public:
 
 	// Flag to pick start-end
 	bool do_pick_startend;
+
+	// How to draw start-end picks
+	StartEndStyle startend_style;
 
     // Flag to pick lines
     bool do_pick_lines;

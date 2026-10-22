@@ -94,6 +94,7 @@ void highlight_active(int imic)
 
 bool   global_has_ctf;
 bool   global_pick_startend;
+StartEndStyle global_startend_style;
 bool   global_pick_lines;
 RFLOAT global_angpix;
 RFLOAT global_coord_scale;
@@ -315,6 +316,7 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			canvas->my_imic = mymic;
 			canvas->particle_radius = rad;
 			canvas->do_startend = global_pick_startend;
+			canvas->startend_style = global_startend_style;
 			canvas->do_lines = global_pick_lines;
 			canvas->coord_scale = global_coord_scale;
 			canvas->SetScroll(entry.scroll);
@@ -383,6 +385,7 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			canvas->my_imic = mymic;
 			canvas->particle_radius = rad;
 			canvas->do_startend = global_pick_startend;
+			canvas->startend_style = global_startend_style;
 			canvas->do_lines = global_pick_lines;
 			canvas->coord_scale = global_coord_scale;
 			canvas->SetScroll(scroll);
@@ -1029,6 +1032,7 @@ void ManualPicker::read(int argc, char **argv)
 	global_coord_scale = textToFloat(parser.getOption("--coord_scale", "Scale coordinates before display", "1.0"));
 	global_particle_diameter = textToFloat(parser.getOption("--particle_diameter", "Diameter of the circles that will be drawn around each picked particle (in Angstroms)"));
 	global_pick_startend = parser.checkOption("--pick_start_end", "Pick start-end coordinates of helices");
+	global_startend_style = stringToStartEndStyle(parser.getOption("--startend_style", "How to draw start-end picks: box, H-shape or classic (circles joined by a line)", "box"));
     global_pick_lines = parser.checkOption("--pick_lines", "Pick lines for curvy helices");
 	do_allow_save = parser.checkOption("--allow_save", "Allow saving of the selected micrographs");
 	do_fast_save = parser.checkOption("--fast_save", "Save a default selection of all micrographs immediately");
