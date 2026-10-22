@@ -310,7 +310,8 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			canvas->boxes.clear();
 
 			FileName fn_coord = global_fn_picks[mymic];
-			int rad = ROUND(global_particle_diameter/(2. * global_angpix));
+			// The canvas expects the radius in displayed (scaled) pixels
+			int rad = ROUND(global_micscale * global_particle_diameter/(2. * global_angpix));
 			canvas->my_imic = mymic;
 			canvas->particle_radius = rad;
 			canvas->do_startend = global_pick_startend;
@@ -377,7 +378,7 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			Fl_Double_Window *win = new Fl_Double_Window(xsize_canvas + 20, ysize_canvas + 20,
 								    global_fn_mics[mymic].c_str());
 			Fl_Scroll *scroll = new Fl_Scroll(0, 0, win->w(), win->h());
-			int rad = ROUND(global_particle_diameter/(2. * global_angpix));
+			int rad = ROUND(global_micscale * global_particle_diameter/(2. * global_angpix));
 			MyPickCanvas *canvas = new MyPickCanvas(0, 0, xsize_canvas, ysize_canvas);
 			canvas->my_imic = mymic;
 			canvas->particle_radius = rad;

@@ -2687,6 +2687,9 @@ void pickerViewerCanvas::draw()
 	long int icoord = 0;
     int my_prev_type = 0;
 	int xcoori_start, ycoori_start;
+	// For start-end picking: a start point still waiting for its end point is drawn as a circle
+	bool start_pending = false;
+	Fl_Color start_color = FL_GREEN;
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDcoords)
 	{
 		icoord++;
@@ -2774,24 +2777,48 @@ void pickerViewerCanvas::draw()
             xcoori_start = xcoori;
             ycoori_start = ycoori;
         }
-        else
+        else if (do_startend)
         {
-            fl_circle(xcoori, ycoori, particle_radius);
-
-            if (do_startend)
+            if (icoord % 2 == 1)
             {
-                if (icoord % 2 == 1)
+                xcoori_start = xcoori;
+                ycoori_start = ycoori;
+                start_pending = true;
+                start_color = fl_color();
+            }
+            else
+            {
+                // Draw the filament as a box from start to end, one particle diameter wide
+                start_pending = false;
+                RFLOAT dx = xcoori - xcoori_start;
+                RFLOAT dy = ycoori - ycoori_start;
+                RFLOAT len = sqrt(dx*dx + dy*dy);
+                if (len < 1.)
                 {
-                    xcoori_start = xcoori;
-                    ycoori_start = ycoori;
+                    fl_circle(xcoori, ycoori, particle_radius);
                 }
                 else
                 {
-                    fl_line(xcoori_start, ycoori_start, xcoori, ycoori);
+                    int nx = ROUND(-dy / len * particle_radius);
+                    int ny = ROUND( dx / len * particle_radius);
+                    fl_loop(xcoori_start + nx, ycoori_start + ny,
+                            xcoori + nx, ycoori + ny,
+                            xcoori - nx, ycoori - ny,
+                            xcoori_start - nx, ycoori_start - ny);
                 }
             }
         }
+        else
+        {
+            fl_circle(xcoori, ycoori, particle_radius);
+        }
         my_prev_type = mytype;
+    }
+
+    if (start_pending)
+    {
+        fl_color(start_color);
+        fl_circle(xcoori_start, ycoori_start, particle_radius);
     }
 }
 
