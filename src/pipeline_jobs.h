@@ -919,6 +919,9 @@ public:
 	// With "Choose MPI and threads automatically?", set nr_mpi and nr_threads from nr_cpus
 	void applyAutoParallel();
 
+	// Extract with virtual particles: run locally (no queue) on one CPU (nr_mpi, nr_threads and nr_cpus 1)
+	void applyVirtualSerial();
+
 	// Whether the job, as set up, runs on GPUs (for example MotionCor2, not RELION's own motion correction)
 	bool usesGpu();
 

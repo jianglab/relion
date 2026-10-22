@@ -1523,12 +1523,26 @@ void RelionJob::applyAutoParallel()
 	joboptions["nr_threads"].value = integerToString(s.threads);
 }
 
+void RelionJob::applyVirtualSerial()
+{
+	auto it = joboptions.find("do_virtual");
+	if (type != PROC_EXTRACT || it == joboptions.end() || it->second.value != "Yes")
+		return;
+	// Virtual particles only write small descriptors: run locally, on one CPU
+	for (const char *key : {"nr_mpi", "nr_threads", "nr_cpus"})
+		if (joboptions.find(key) != joboptions.end())
+			joboptions[key].value = "1";
+	if (joboptions.find("do_queue") != joboptions.end())
+		joboptions["do_queue"].value = "No";
+}
+
 bool RelionJob::getCommands(std::string &outputname, std::vector<std::string> &commands,
 		std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)
 {
 	bool result = false;
 
 	applyAutoParallel();
+	applyVirtualSerial();
 
 	if (type == PROC_IMPORT)
 	{
