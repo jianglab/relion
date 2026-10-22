@@ -5512,7 +5512,7 @@ This may yield higher-resolution maps, especially when the mask contains only a 
 	joboptions["do_ewald"] = JobOption("Use Ewald sphere correction?", false, "If set to Yes, correct for Ewald-sphere curvature (developmental).");
 	joboptions["reverse_curvature"] = JobOption("Reverse Ewald curvature?", false, "Try curvature the other way around.");
 
-	float default_T = (is_tomo) ? 1 : 4;
+	float default_T = (is_tomo) ? 1 : 1;
 	joboptions["tau_fudge"] = JobOption("Regularisation parameter T:", default_T , 0.1, 10, 0.1, "Bayes law strictly determines the relative weight between \
 the contribution of the experimental data and the prior. However, in practice one may need to adjust this weight to put slightly more weight on \
 the experimental data to allow optimal results. Values greater than 1 for this regularisation parameter (T in the JMB2011 paper) put more \
