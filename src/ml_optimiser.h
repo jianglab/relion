@@ -49,6 +49,7 @@
 #include "src/fftw_rect.h"
 #include "src/resource_report.h"
 #include "src/filament_context.h"
+#include "src/filament_groups.h"
 
 #define ML_SIGNIFICANT_WEIGHT 1.e-8
 #define METADATA_LINE_LENGTH METADATA_LINE_LENGTH_ALL

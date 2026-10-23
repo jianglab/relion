@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Integration test for RELION_GPU_GROUP_SHARED (particle groups on the GPU whose coarse pass projects
-each orientation that the particles share once) and RELION_PARTICLE_ORDER=filament.
+each orientation that the particles share once) and RELION_PARTICLE_ORDER=filament, both on by
+default for helical segments (rlnHelicalTubeID) with 3D references.
 
 The synthetic particles get helical tube IDs (10 filaments, interleaved in the STAR file) and every
 segment of a filament the angles of its first one, so with local searches the segments of a filament
@@ -74,9 +75,9 @@ def _run(relion_bin, star, ref, out, env_extra):
         "--j", "2", "--gpu", "0", "--dont_combine_weights_via_disc",
         "--random_seed", "1", "--pool", "30",
     ]
-    env = dict(os.environ)
-    env.update({"RELION_GPU_PARTICLE_GROUP": "6", "RELION_GPU_GROUP_SHARED": "1",
-                "RELION_GPU_GROUP_CHECK": "1", "RELION_GPU_COARSE_SPLIT": "2"})
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("RELION_GPU_PARTICLE_GROUP", "RELION_GPU_GROUP_SHARED", "RELION_PARTICLE_ORDER")}
+    env.update({"RELION_GPU_GROUP_CHECK": "1", "RELION_GPU_COARSE_SPLIT": "2"})
     env.update(env_extra)
     res = subprocess.run(cmd, text=True, capture_output=True, env=env, timeout=900)
     assert res.returncode == 0, f"relion_refine failed:\n{res.stderr[-3000:]}"
@@ -99,9 +100,13 @@ class TestGroupShared:
                                       num_particles=60, size=32, angpix=1.0)
         star = test_data_dir / "filaments.star"
         _make_filaments(paths["star_file"], star)
+        groups = {"RELION_GPU_PARTICLE_GROUP": "6", "RELION_GPU_GROUP_SHARED": "1"}
         interleaved = _run(relion_bin, star, paths["initial_model"], test_data_dir / "file_order",
-                           {"RELION_PARTICLE_ORDER": "micrograph"})
+                           dict(groups, RELION_PARTICLE_ORDER="micrograph"))
         by_filament = _run(relion_bin, star, paths["initial_model"], test_data_dir / "filament_order",
-                           {"RELION_PARTICLE_ORDER": "filament"})
+                           dict(groups, RELION_PARTICLE_ORDER="filament"))
+        # helical data with 3D references: on by default (filament order, groups of 8, shared pass)
+        by_default = _run(relion_bin, star, paths["initial_model"], test_data_dir / "default", {})
+        assert by_default > 1.2, by_default
         # neighbours in file order are other filaments; in filament order they share their orientations
         assert by_filament > 1.2 and by_filament > interleaved, (by_filament, interleaved)

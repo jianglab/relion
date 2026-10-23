@@ -2703,6 +2703,20 @@ void MlOptimiser::initialiseGeneral(int rank)
         sampling.offset_range *= mymodel.pixel_size;
         sampling.offset_step *= mymodel.pixel_size;
     }
+    // Neighbouring helical segments share their coarse projections on the GPU (see filament_groups.h)
+    // Decided by the data, not the hardware, so that CPU and GPU runs visit the particles in the same order
+    filgroup::defaultOn() = mymodel.ref_dim == 3 && mymodel.data_dim == 2 && !mydata.is_tomo &&
+            mydata.MDimg.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID);
+    if (filgroup::defaultOn() && do_gpu && verb > 0)
+    {
+        std::cout << " Helical segments on the GPU: neighbouring segments of a filament go through the coarse pass in groups"
+                  << " that share their reference projections (results unchanged; RELION_GPU_GROUP_SHARED=0 turns this off).";
+        // --pool counts particles per thread, and a thread takes --pool consecutive particles at a time
+        if (x_pool < 8)
+            std::cout << " --pool " << x_pool << " allows groups of only " << std::max(1, x_pool)
+                      << " segments: --pool 8 or more is faster.";
+        std::cout << std::endl;
+    }
     sampling.initialise(mymodel.ref_dim, (mymodel.data_dim == 3 || mydata.is_tomo), do_gpu || do_sycl || do_cpu, (verb>0),
             do_local_searches_helical, (do_helical_refine) && (!ignore_helical_symmetry),
             helical_rise_initial, helical_twist_initial);
@@ -5555,7 +5569,9 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
         long int task_block = 1;
         {
             const char *g = getenv("RELION_GPU_PARTICLE_GROUP"), *o = getenv("RELION_PARTICLE_ORDER");
-            if (g != NULL && (!strcmp(g, "auto") || atoi(g) > 1) && o != NULL && !strcmp(o, "filament"))
+            const bool groups = filgroup::envSet("RELION_GPU_PARTICLE_GROUP") ? (!strcmp(g, "auto") || atoi(g) > 1) : filgroup::defaultOn().load();
+            const bool by_filament = filgroup::envSet("RELION_PARTICLE_ORDER") ? !strcmp(o, "filament") : filgroup::defaultOn().load();
+            if (do_gpu && groups && by_filament)
                 task_block = XMIPP_MAX(1, XMIPP_MIN(16, (my_last_part_id - my_first_part_id + 1) / XMIPP_MAX(1, nr_threads)));
         }
         exp_ipart_ThreadTaskDistributor->resize(my_last_part_id - my_first_part_id + 1, task_block);

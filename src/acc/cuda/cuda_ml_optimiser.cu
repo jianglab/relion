@@ -741,9 +741,12 @@ void MlOptimiserCuda::doThreadExpectationSomeParticles(int thread_id)
 		const char *e = getenv("RELION_GPU_PARTICLE_GROUP");
 		return e && !strcmp(e, "auto");
 	}();
+	// unset: 8 for helical segments with 3D references (filament_groups.h), else 1
 	static const int group_fixed = []() {
 		const char *e = getenv("RELION_GPU_PARTICLE_GROUP");
-		return std::max(1, (e && strcmp(e, "auto")) ? atoi(e) : 1);
+		if (!filgroup::envSet("RELION_GPU_PARTICLE_GROUP"))
+			return filgroup::defaultOn() ? 8 : 1;
+		return std::max(1, strcmp(e, "auto") ? atoi(e) : 1);
 	}();
 	if (group_auto || group_fixed > 1)
 	{

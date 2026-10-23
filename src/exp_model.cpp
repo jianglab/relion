@@ -30,6 +30,7 @@
 #include <atomic>
 #include "src/exp_model.h"
 #include "src/filament_context.h"
+#include "src/filament_groups.h"
 #include <sys/statvfs.h>
 using namespace gravis;
 
@@ -442,7 +443,9 @@ static int particleOrderMode() // 0 random, 1 micrograph, 2 filament
 	static const int mode = []()
 	{
 		const char *e = getenv("RELION_PARTICLE_ORDER");
-		if (e == NULL || *e == 0 || std::string(e) == "random")
+		if (e == NULL || *e == 0)
+			return filgroup::defaultOn() ? 2 : 0; // helical segments on the GPU (filament_groups.h)
+		if (std::string(e) == "random")
 			return 0;
 		if (std::string(e) == "micrograph")
 			return 1;

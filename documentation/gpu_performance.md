@@ -318,7 +318,7 @@ system, warm caches) it made no difference: 924 s against 919 s. It is kept
 for large data sets of thousands of micrographs, where scattered reads may
 cost more than file caches hide. Tests: `[particle_order]`.
 
-## Shared projections for neighbouring helical segments (opt-in)
+## Shared projections for neighbouring helical segments (default for helical 3D)
 
 Neighbouring segments of a helical filament search almost the same orientations: their tilt and
 psi priors are nearly equal and rot moves by the twist from segment to segment. In the coarse pass
@@ -326,6 +326,13 @@ of Class3D (cross-term kernel), about 80% of the kernel time is the projection o
 projecting each orientation once for a group of segments saves most of it.
 
     RELION_PARTICLE_ORDER=filament RELION_GPU_PARTICLE_GROUP=8 RELION_GPU_GROUP_SHARED=1 relion_refine ...
+
+These three are the default for GPU runs with 3D references whose data have `rlnHelicalTubeID` (the filament order on the CPU too, so that CPU and GPU runs match)
+(`filament_groups.h`, decided in `MlOptimiser::initialiseGeneral` and said at the start of the run, with a
+note when `--pool` is below 8); `RELION_GPU_GROUP_SHARED=0` turns the shared pass off,
+`RELION_GPU_PARTICLE_GROUP=1` the groups and `RELION_PARTICLE_ORDER=random` the filament order. Filament
+order changes which random class each segment gets in the seeding iteration, so a run is not identical to
+one in random order (an equally valid start; see the seed comparison below).
 
 - `RELION_PARTICLE_ORDER=filament` shuffles whole filaments, each in track order
   (`filctx::groupFilaments`, the filament map that the filament context uses too; segments without

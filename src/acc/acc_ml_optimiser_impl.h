@@ -1776,10 +1776,12 @@ template <class MlClass>
 bool coarsePassCanBeDeferred(MlOptimiser *baseMLO, MlClass *accMLO, const SamplingParameters &sp)
 {
 	const bool do_CC = (baseMLO->iter == 1 && baseMLO->do_firstiter_cc) || baseMLO->do_always_cc;
-	// RELION_GPU_GROUP_SHARED=1: 3D references too, with the projections of the orientations that the particles
+	// RELION_GPU_GROUP_SHARED (default on for helical segments, see filament_groups.h): 3D references too, with the projections of the orientations that the particles
 	// of a group share made once (the cross-term kernel only; see runDiff2KernelCoarseGroup)
 #ifndef ACC_DOUBLE_PRECISION
-	static const bool shared3D = gpuswitch::optIn("RELION_GPU_GROUP_SHARED") && gpuswitch::mode("RELION_GPU_COARSE_XT") == 1;
+	// unset: on for helical segments (filament_groups.h)
+	static const bool shared3D = (filgroup::envSet("RELION_GPU_GROUP_SHARED") ? gpuswitch::optIn("RELION_GPU_GROUP_SHARED") != 0
+			: filgroup::defaultOn().load()) && gpuswitch::mode("RELION_GPU_COARSE_XT") == 1;
 #else
 	const bool shared3D = false;
 #endif
