@@ -406,21 +406,6 @@ struct BPClassJob
 };
 
 
-// One class of a shared-sums launch (cuda_kernel_shared_sums): the weighted sums and the
-// back-projection of the class's orientations
-struct SharedSumsClassJob
-{
-	AccProjectorKernel projector;
-	XFLOAT *eulers;      // 9 per orientation
-	XFLOAT *weights;     // orientation x translation
-	XFLOAT *wdiff2s_AA;
-	XFLOAT *wdiff2s_XA;
-	XFLOAT *model_real;
-	XFLOAT *model_imag;
-	XFLOAT *model_weight;
-	int n_orient;
-};
-
 // One class of a class-batched gradient (VDAM) 2D backprojection: as BPClassJob, plus
 // the class's projector, whose reference projection the kernel subtracts
 // (see cuda_kernel_backproject2D_SGD)

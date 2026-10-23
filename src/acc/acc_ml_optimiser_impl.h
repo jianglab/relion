@@ -4589,91 +4589,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			// All classes in one launch (see runWavgKernelBatched); the per-class
 			// pointers are those of the loop below
 			AccPtr<char> wavgTable = ptrFactory.make<char>();
-			// The weighted sums and the back-projection of 2D images against a 3D reference
-			// in one kernel (RELION_GPU_SHARED_SUMS=1, see cuda_kernel_shared_sums)
-			bool fusedSums = false;
-			AccPtr<char> sharedSumsTable = ptrFactory.make<char>();
-			const int sharedMode = gpuSharedSums(); // 1: both, 2: weighted sums only, 3: back-projection only
-			if (sharedMode && gpuClassBatching() && !baseMLO->do_grad && !baseMLO->is_som_iter &&
-					baseMLO->mymodel.nr_bodies == 1 && !accMLO->dataIs3D)
-			{
-				int iproj_offset = 0;
-				if (baseMLO->grad_pseudo_halfsets)
-					iproj_offset = (op.part_id % 2) * baseMLO->mymodel.nr_classes;
-				std::vector<SharedSumsClassJob> sjobs;
-				AccBackprojector *first = NULL;
-				bool ok = true;
-				unsigned long spos = classPos, saa = AAXA_pos;
-				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max && ok; iclass++)
-				{
-					if((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))
-						continue;
-					long unsigned orientation_num(ProjectionData.orientation_num[iclass]);
-					AccBackprojector &BP = accMLO->bundle->backprojectors[iclass + iproj_offset];
-					if (BP.mdlZ == 1)
-						ok = false; // a 3D reference only
-					if (first == NULL)
-						first = &BP;
-					else if (BP.mdlX != first->mdlX || BP.mdlY != first->mdlY || BP.mdlZ != first->mdlZ ||
-					         BP.mdlInitY != first->mdlInitY || BP.mdlInitZ != first->mdlInitZ ||
-					         BP.maxR != first->maxR || BP.padding_factor != first->padding_factor)
-						ok = false;
-					SharedSumsClassJob job = {
-						AccProjectorKernel::makeKernel(
-							accMLO->bundle->projectors[iclass],
-							op.local_Minvsigma2.xdim,
-							op.local_Minvsigma2.ydim,
-							op.local_Minvsigma2.zdim,
-							op.local_Minvsigma2.xdim-1),
-						~eulers[iclass],
-						&(~sorted_weights)[spos],
-						&(~wdiff2s)[AA_offset+saa],
-						&(~wdiff2s)[XA_offset+saa],
-						BP.d_mdlReal, BP.d_mdlImag, BP.d_mdlWeight,
-						(int) orientation_num };
-					if (job.projector.mdlZ == 0)
-						ok = false;
-					sjobs.push_back(job);
-					saa += image_size;
-					spos += orientation_num*translation_num;
-				}
-				if (ok && first != NULL &&
-						runSharedSumsKernelBatched(
-							sjobs, *first,
-							&(~Fimgs)[re_offset],
-							&(~Fimgs)[im_offset],
-							&(~Fimgs)[re_nomask_offset],
-							&(~Fimgs)[im_nomask_offset],
-							&(~trans_xyz)[trans_x_offset],
-							&(~trans_xyz)[trans_y_offset],
-							~ctfs,
-							~Minvsigma2s,
-							&(~wdiff2s)[sum_offset],
-							translation_num,
-							(XFLOAT) op.sum_weight,
-							(XFLOAT) op.significant_weight,
-							part_scale,
-							image_size,
-							op.local_Minvsigma2.xdim,
-							op.local_Minvsigma2.ydim,
-							baseMLO->refs_are_ctf_corrected,
-							ctf_premultiplied,
-							sharedMode == 1 ? 3 : (sharedMode == 2 ? 1 : 2),
-							sharedSumsTable))
-				{
-					fusedSums = true;
-					if (sharedMode != 3)
-					{
-						classPos = spos; // as the weighted sums leave them
-						AAXA_pos = saa;
-					}
-				}
-			}
-			if (fusedSums && sharedMode != 3)
-			{
-				// done above
-			}
-			else if (gpuClassBatching())
+			if (gpuClassBatching())
 			{
 				std::vector<WavgClassJob> jobs;
 				std::vector<size_t> nums;
@@ -4813,7 +4729,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			// gradient variant is needed or the class models differ in size. Not in SOM
 			// iterations: the loop below does not advance classPos past a class it skips
 			// there, which the batched version would not reproduce.
-			bool bpBatched = fusedSums && sharedMode != 2; // the back-projection is in the shared-sums kernel
+			bool bpBatched = false;
 			AccPtr<char> bpTable = ptrFactory.make<char>();
 			if (!bpBatched && gpuClassBatching() && !baseMLO->do_grad && !baseMLO->is_som_iter)
 			{

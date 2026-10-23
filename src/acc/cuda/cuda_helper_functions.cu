@@ -18,7 +18,7 @@
 #include "src/acc/utilities.h"
 #include "src/acc/acc_helper_functions.h"
 #include "src/acc/cuda/cuda_kernels/BP.cuh"
-#include "src/acc/cuda/cuda_kernels/shared_sums.cuh"
+#include "src/acc/cuda/cuda_kernels/shift_table.cuh"
 #include "src/macros.h"
 #include "src/error.h"
 

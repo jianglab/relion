@@ -374,22 +374,6 @@ inline bool gpuFusedPrep()
 	return on;
 }
 
-// RELION_GPU_SHARED_SUMS=1: the weighted sums and the 3D back-projection of 2D images in
-// one kernel (see cuda_kernel_shared_sums); off by default while it is validated
-// (2: only the weighted-sum outputs, 3: only the back-projection, from the shared-sums
-// kernel, the other half from its own kernel: for checking the two halves separately)
-inline int gpuSharedSums()
-{
-	static const int mode = []() {
-		const char *e = getenv("RELION_GPU_SHARED_SUMS");
-		if (!e || std::string(e) == "0" || std::string(e) == "off")
-			return 0;
-		const int m = atoi(e);
-		return (m == 2 || m == 3) ? m : 1;
-	}();
-	return mode;
-}
-
 // All classes of one coarse pass in one call (two launches); `table` is uploaded and
 // must outlive the launches (CUDA only, not for do_CC)
 //
@@ -508,32 +492,6 @@ void runCollect2jobsBatched(
 		XFLOAT * p_thr_wsum_prior_offsetz_class,
 		XFLOAT * p_thr_wsum_sigma2_offset,
 		bool data_is_3D,
-		AccPtr<char> &table);
-
-// Weighted sums and 3D back-projection of all classes in one launch (opt-in, see
-// cuda_kernel_shared_sums); false if the case is not covered (nothing launched)
-bool runSharedSumsKernelBatched(
-		std::vector<SharedSumsClassJob> &jobs,
-		AccBackprojector &BP,
-		XFLOAT *d_img_real,
-		XFLOAT *d_img_imag,
-		XFLOAT *d_img_real_nomask,
-		XFLOAT *d_img_imag_nomask,
-		XFLOAT *trans_x,
-		XFLOAT *trans_y,
-		XFLOAT *d_ctfs,
-		XFLOAT *d_Minvsigma2s,
-		XFLOAT *wdiff2s_parts,
-		unsigned long translation_num,
-		XFLOAT weight_norm,
-		XFLOAT significant_weight,
-		XFLOAT part_scale,
-		unsigned long image_size,
-		int imgX,
-		int imgY,
-		bool refs_are_ctf_corrected,
-		bool ctf_premultiplied,
-		int parts,
 		AccPtr<char> &table);
 
 void runBackProjectSgdKernelBatched(
