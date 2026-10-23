@@ -19,9 +19,7 @@ from fixtures import generate_test_dataset
 
 def refine(relion_bin, outdir: Path, args, cache_dir=None, lazy=False, mpi=2, cwd=None):
     env = dict(os.environ)
-    env.pop("RELION_CACHE_LAZY", None)
-    if lazy:
-        env["RELION_CACHE_LAZY"] = "1"
+    env["RELION_CACHE_LAZY"] = "1" if lazy else "0"
     outdir.mkdir(parents=True, exist_ok=True)
     if mpi:
         cmd = ["mpirun", "--oversubscribe", "-n", str(mpi), str(relion_bin / "relion_refine_mpi")]

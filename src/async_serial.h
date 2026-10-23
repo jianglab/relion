@@ -7,7 +7,7 @@
 
 /*
  * RELION_ASYNC_SERIAL: run host-side serial work of an iteration beside the E-step instead of
- * after it, so the GPU does not wait for it. Opt-in ("1"/"on"); "0"/"off"/unset keeps the
+ * after it, so the GPU does not wait for it. On by default; "0"/"off" keeps the
  * older sequential order. The work is the same code on the same inputs, so results are
  * bit-identical; only the time at which it runs changes.
  *

@@ -1,8 +1,8 @@
-# Lazy SSD cache fill - `RELION_CACHE_LAZY=1`
+# Lazy SSD cache fill - `RELION_CACHE_LAZY` (on by default)
 
 `--cache_dir` normally copies every particle stack to the local disc before the
 job starts. For a large data set that copy can take longer than several
-iterations. With `RELION_CACHE_LAZY=1` the job starts at once and the copy runs
+iterations. With `RELION_CACHE_LAZY` (on by default; `=0` restores the copy before the start) the job starts at once and the copy runs
 in the background.
 
 ## Behaviour
@@ -41,7 +41,7 @@ cache.
 
 ## Scope and limits
 
-- Opt-in and not on by default. Without the variable the code path is unchanged.
+- On by default since 2026-10-23. `RELION_CACHE_LAZY=0` restores the copy before the first iteration.
 - Only the MPI programs use `--cache_dir` (`relion_refine_mpi`, `relion_reconstruct_mpi`);
   `relion_refine` without MPI ignores it, as before.
 - With a node-local cache on several nodes, only one rank per cache queues the copy

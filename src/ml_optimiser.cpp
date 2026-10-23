@@ -2335,16 +2335,16 @@ void MlOptimiser::initialiseGeneral(int rank)
         for (size_t i = 0; i < n_names; i++)
             if (!gpuswitch::on(names[i]))
                 off += std::string(off.empty() ? "" : ", ") + names[i];
-        if (gpuswitch::optIn("RELION_PREP_AHEAD"))
-            std::cout << " RELION_PREP_AHEAD is on: the CTF images of the expectation step are memoised per distinct set of CTF values (exact copies, capped at RELION_PREP_AHEAD_CTF_MB, default 256 MB or 1/32 of the free memory)." << std::endl;
+        if (gpuswitch::on("RELION_PREP_AHEAD"))
+            std::cout << " RELION_PREP_AHEAD is on (=0 turns it off): the CTF images of the expectation step are memoised per distinct set of CTF values (exact copies, capped at RELION_PREP_AHEAD_CTF_MB, default 256 MB or 1/32 of the free memory)." << std::endl;
         std::cout << " GPU speed-ups (float2 projection texture, coarse cross-term pass, GPU reconstruction and helical symmetrisation, no send-back of back-projection sums at the join, pooled pinned copy buffers, weighted-average sums of 2D data, block-wise sort of the weights, one-pass significance selection of the weights, one-block significance pass of --skip_align, per-thread cache of small device blocks reused on the same stream) are on by default, each backing off to the older path when its conditions are not met; "
                   << (off.empty() ? "none is switched off" : "switched off: " + off) << " (VAR=0 turns one off)." << std::endl;
     }
     if (do_gpu && verb > 0)
     {
-        const int as = gpuswitch::optIn("RELION_GPU_ASYNC_STORE"), af = gpuswitch::optIn("RELION_GPU_ASYNC_FINE");
+        const int as = gpuswitch::mode("RELION_GPU_ASYNC_STORE"), af = gpuswitch::mode("RELION_GPU_ASYNC_FINE");
         if (as || af)
-            std::cout << " GPU host-wait reduction (opt-in): asynchronous store of the weighted sums "
+            std::cout << " GPU host-wait reduction (on by default, VAR=0 turns one off): asynchronous store of the weighted sums "
                       << (as == 2 ? "on, with check" : as ? "on" : "off") << " (RELION_GPU_ASYNC_STORE), fine-pass minimum kept on the device "
                       << (af == 2 ? "on, with check" : af ? "on" : "off") << " (RELION_GPU_ASYNC_FINE)." << std::endl;
     }
@@ -4662,7 +4662,7 @@ bool MlOptimiser::keepProjectorHostData()
 
 void MlOptimiser::setupPrepAhead()
 {
-    if (!(do_gpu || do_cpu || do_sycl) || !gpuswitch::optIn("RELION_PREP_AHEAD") || mydata.is_tomo || mymodel.data_dim != 2)
+    if (!(do_gpu || do_cpu || do_sycl) || !gpuswitch::on("RELION_PREP_AHEAD") || mydata.is_tomo || mymodel.data_dim != 2)
     {
         ctf_memo_.reset();
         return;

@@ -20,7 +20,7 @@ bool enabled()
 	static const bool on = []()
 	{
 		const char *e = getenv("RELION_ASYNC_SERIAL");
-		return e != NULL && e[0] != '\0' && !gpuswitch::isOffValue(e);
+		return e == NULL || e[0] == '\0' || !gpuswitch::isOffValue(e);
 	}();
 	return on;
 }

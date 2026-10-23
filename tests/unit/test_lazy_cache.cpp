@@ -87,12 +87,12 @@ struct LazyOn
 
 }
 
-TEST_CASE("lazy cache: disabled unless RELION_CACHE_LAZY is set", "[lazy_cache]")
+TEST_CASE("lazy cache: on unless RELION_CACHE_LAZY is 0", "[lazy_cache]")
 {
 	unsetenv("RELION_CACHE_LAZY");
-	REQUIRE_FALSE(lazycache::enabled());
-	REQUIRE(lazycache::resolve("/does/not/exist.mrcs") == "");
+	REQUIRE(lazycache::enabled());
 	setenv("RELION_CACHE_LAZY", "0", 1);
+	REQUIRE(lazycache::resolve("/does/not/exist.mrcs") == "");
 	REQUIRE_FALSE(lazycache::enabled());
 	setenv("RELION_CACHE_LAZY", "1", 1);
 	REQUIRE(lazycache::enabled());

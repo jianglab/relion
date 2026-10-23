@@ -314,7 +314,7 @@ bool enabled()
 {
 	// read each time: only called when a file is missing or a cache is set up
 	const char *e = getenv("RELION_CACHE_LAZY");
-	return e != NULL && atoi(e) != 0;
+	return e == NULL || *e == 0 || atoi(e) != 0;  // on by default, =0 turns it off
 }
 
 void setRoot(const std::string &cache_root)

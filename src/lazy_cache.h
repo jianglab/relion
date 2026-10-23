@@ -24,7 +24,7 @@
 #include <string>
 
 // Fills the particle-stack cache (--cache_dir) in the background while the job runs, instead of
-// copying everything before the first iteration (opt-in: RELION_CACHE_LAZY=1).
+// copying everything before the first iteration (on by default; RELION_CACHE_LAZY=0 copies everything first).
 //
 // The cache layout, the registry and the "is this stack cached" test (same size and modification
 // time as the source) are those of CacheManager, so a later job, lazy or not, reuses what was

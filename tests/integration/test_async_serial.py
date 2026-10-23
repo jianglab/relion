@@ -49,7 +49,7 @@ def _refine(relion_bin, relion_runner, data_dir, out_dir, extra_env, extra_args)
            "--sym", "c1", "--norm", "--scale", "--j", "1", "--random_seed", "11",
            "--spatial_frequency_mode", "s", "--pad", "1"] + extra_args
     env = dict(os.environ)
-    env.pop("RELION_ASYNC_SERIAL", None)
+    env["RELION_ASYNC_SERIAL"] = "0"  # on by default: the plain runs switch it off
     env.update(extra_env)
     r = relion_runner(cmd, timeout=1200, env=env)
     assert r.returncode == 0, f"run failed:\n{r.stdout[-2000:]}\n{r.stderr[-3000:]}"
@@ -93,7 +93,7 @@ def test_async_halves_alignment_is_bit_identical(test_data_dir, relion_bin, fixt
 
 @pytest.mark.integration
 def test_async_serial_off_value_keeps_the_sequential_order(test_data_dir, relion_bin, fixtures_module, relion_runner):
-    """RELION_ASYNC_SERIAL=0 is the same as unset."""
+    """RELION_ASYNC_SERIAL=0 keeps the sequential order (it is on by default)."""
     if not _have_mpi(relion_bin) or not _have_switch(relion_bin):
         pytest.skip("needs relion_refine_mpi, mpirun and a build with RELION_ASYNC_SERIAL")
     fixtures_module["generate_test_dataset"](str(test_data_dir), relion_bin, relion_runner,

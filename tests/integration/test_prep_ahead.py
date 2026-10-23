@@ -96,9 +96,9 @@ def test_prep_ahead_identical_results(test_data_dir, relion_bin, relion_runner):
         assert r.returncode == 0, f"{tag} failed:\n{r.stderr[-3000:]}"
         return r, out
 
-    r_off, d_off = run("off", None)
+    r_off, d_off = run("off", "0")
     r_off2, d_off2 = run("off2", "0")
-    r_on, d_on = run("on", "1")
+    r_on, d_on = run("on", None)  # on by default
     assert "RELION_PREP_AHEAD is on" in r_on.stdout
     assert "PREP_AHEAD CTF memo" in r_on.stderr, r_on.stderr[-1500:]
     assert "RELION_PREP_AHEAD is on" not in r_off.stdout
