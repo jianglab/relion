@@ -561,6 +561,16 @@ The default is chosen from the device (threads per multiprocessor / 128, so 12 o
 old 3 when the GPU has under 2 GiB free. Refining it from timings during the first iterations (try a few
 values, keep the fastest) is future work; the 12 was measured on sm_86 GPUs only.
 
+`RELION_GPU_XT_PIPE` (default 3, on) fetches the reference and correlation values of the next pass
+of the coarse kernel (and of the shared-group kernel) while the current pass is summed; `0` is the
+plain loop, and `RELION_GPU_XT_PIPE_GROUP` sets the group kernel alone, so the two can be checked
+against each other. Blocks with 6 or more tiles are limited by shared memory to 2 per multiprocessor
+and spill when pipelined, so they keep the plain loop unless `RELION_GPU_XT_PIPE_BIG` says otherwise.
+The summation order is unchanged: `RELION_GPU_GROUP_CHECK` reports 0 differing coarse weights.
+Real-like helical Class3D (B3), RTX 3090, three pairs: E-step 702/680/724 s off, 651/638/657 s on
+(about 7% faster), same final resolution; B5 auto-refine gains only 0.4% (its late iterations are
+bound by back-projection and the fine pass).
+
 ## Full B5 run, and things that did not work
 
 Helical auto-refine, 20k particles (RELION_GPU_COARSE_XT=1, RELION_GPU_BLOCKS_PER_SM=12): wall

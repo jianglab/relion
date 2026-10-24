@@ -2582,15 +2582,20 @@ bool runDiff2KernelCoarseBatched(
 			cudaGetDevice(&device);
 			nt = xtTileTuner().begin(device, ntt, stream, cand, ev);
 		}
-#define XT_LAUNCH(NT) cuda_kernel_diff2_coarse_xt<NT><<<dim3(even[nc], n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
+		// RELION_GPU_XT_PIPE (default 3): 0 the plain pass loop, 1 reference and correlation values of the next pass fetched ahead,
+		// 2 also the A values (up to 2 tiles per block), 3 also the A values of any tile count. Same sums in the same order.
+		static const int xt_pipe = getenv("RELION_GPU_XT_PIPE") ? atoi(getenv("RELION_GPU_XT_PIPE")) : 3;
+#define XT_LAUNCH_P(NT, PP) cuda_kernel_diff2_coarse_xt<NT, PP><<<dim3(even[nc], n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
 				d_classes, d_even, (int) nc, ~xt_a, ~xt_x2, corr_img, (int) translation_num, (int) xt_tpad, \
 				(int) image_size, ~partial, n_chunks, chunk_stride, xt_ablate)
+#define XT_LAUNCH(NT) do { if (xt_pipe >= 3) XT_LAUNCH_P(NT, 3); else if (xt_pipe == 2) XT_LAUNCH_P(NT, 2); else if (xt_pipe == 1) XT_LAUNCH_P(NT, 1); else XT_LAUNCH_P(NT, 0); } while (0)
 		auto launch = [&](int t)
 		{
 			if (t >= 8) XT_LAUNCH(8); else if (t >= 6) XT_LAUNCH(6); else if (t >= 4) XT_LAUNCH(4); else if (t == 3) XT_LAUNCH(3); else if (t == 2) XT_LAUNCH(2); else XT_LAUNCH(1);
 			return cudaGetLastError();
 		};
 #undef XT_LAUNCH
+#undef XT_LAUNCH_P
 		cudaError_t xt_err = launch(nt);
 		if (xt_err != cudaSuccess && nt > 1)
 		{
@@ -2905,11 +2910,17 @@ static void runDiff2KernelCoarseGroupXt(std::vector<CoarseDeferred *> &items, Ac
 		cudaGetDevice(&device);
 		std::pair<cudaEvent_t, cudaEvent_t> ev((cudaEvent_t) NULL, (cudaEvent_t) NULL);
 		const int nt = ntt > 1 ? xtTileTuner().begin(device, ntt, stream, cand, ev) : 1;
-#define XT_GROUP_LAUNCH(NT) cuda_kernel_diff2_coarse_xt_group<NT><<<dim3((unsigned) P.blocks.size(), P.n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
+		// RELION_GPU_XT_PIPE_GROUP sets it for the group kernel alone (to check it against the other kernel)
+		static const int xt_pipe = getenv("RELION_GPU_XT_PIPE_GROUP") ? atoi(getenv("RELION_GPU_XT_PIPE_GROUP"))
+				: getenv("RELION_GPU_XT_PIPE") ? atoi(getenv("RELION_GPU_XT_PIPE")) : 3;
+#define XT_GROUP_LAUNCH_P(NT, PP) cuda_kernel_diff2_coarse_xt_group<NT, PP><<<dim3((unsigned) P.blocks.size(), P.n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
 				(const CoarseClassJob *) &(~tables)[P.off_classes], (const XtGroupBlock *) &(~tables)[P.off_blocks], \
 				(const int *) &(~tables)[P.off_bcols], \
 				(const float *const *) &(~tables)[P.off_eul], (const int *) &(~tables)[P.off_map], d_parts, G, \
 				(const int2 *) &(~tables)[P.off_cols], n_cols, d_A, d_x2sum, image_size, P.n_chunks)
+		// RELION_GPU_XT_PIPE_BIG: level used with 6 or more tiles per block (default 0: those blocks are shared-memory limited to 2 per SM and spill)
+		static const int xt_pipe_big = getenv("RELION_GPU_XT_PIPE_BIG") ? atoi(getenv("RELION_GPU_XT_PIPE_BIG")) : 0;
+#define XT_GROUP_LAUNCH(NT) do { const int pp_ = (NT >= 6) ? xt_pipe_big : xt_pipe; if (pp_ >= 3) XT_GROUP_LAUNCH_P(NT, 3); else if (pp_ == 2) XT_GROUP_LAUNCH_P(NT, 2); else if (pp_ == 1) XT_GROUP_LAUNCH_P(NT, 1); else XT_GROUP_LAUNCH_P(NT, 0); } while (0)
 		auto launch = [&](int t)
 		{
 			if (t >= 8) XT_GROUP_LAUNCH(8); else if (t >= 6) XT_GROUP_LAUNCH(6); else if (t >= 4) XT_GROUP_LAUNCH(4);
@@ -2917,6 +2928,7 @@ static void runDiff2KernelCoarseGroupXt(std::vector<CoarseDeferred *> &items, Ac
 			return cudaGetLastError();
 		};
 #undef XT_GROUP_LAUNCH
+#undef XT_GROUP_LAUNCH_P
 		cudaError_t err = launch(nt);
 		if (err != cudaSuccess && nt > 1)
 		{

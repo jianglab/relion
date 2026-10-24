@@ -1064,7 +1064,7 @@ static __global__ void cuda_kernel_coarse_xt_prepare(
 // NT translation tiles per block (blockIdx.z covers tiles NT * z .. NT * z + NT - 1): the projections of a block are
 // made once for all of them. Every output keeps its own accumulator and the same order of additions, so the values are
 // the same for every NT; only the number of reference fetches (the texture and L2 traffic) falls with NT.
-template <int NT>
+template <int NT, int PIPE>
 static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 		const CoarseClassJob *g_classes,
 		const int *g_class_start,
@@ -1079,8 +1079,7 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 		int n_chunks,
 		size_t chunk_stride,
 		int ablate)
-{
-	const int tid = threadIdx.x;
+{	const int tid = threadIdx.x;
 	int local;
 	const CoarseClassJob &c = g_classes[findBatchClass(g_class_start, n_classes, blockIdx.x, local)];
 	AccProjectorKernel projector = c.projector;
@@ -1143,6 +1142,97 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 	const int pass_begin = (int) (((long) blockIdx.y * n_pass) / n_chunks);
 	const int pass_end   = (int) (((long) (blockIdx.y + 1) * n_pass) / n_chunks);
 
+	if (PIPE >= 1 && ablate == 0)
+	{
+		// Pipelined pass loop, see cuda_kernel_diff2_coarse_xt_group
+		constexpr bool PFA = (PIPE == 3) || (PIPE == 2 && NT <= 2);
+		constexpr int NA = NT * (XT_PIXELS * XT_TRANS / XT_BLOCK);
+		float2 nr[XT_PIXELS / 8];
+		float nc[XT_PIXELS / 8];
+		float2 na[PFA ? NA : 1];
+		auto gatherA = [&](int base, int i) -> float2
+		{
+			const int idx = tid + XT_BLOCK * i;
+			const int tt = idx / (XT_PIXELS * XT_TRANS);
+			const int row = (idx / XT_TRANS) % XT_PIXELS, t = idx % XT_TRANS;
+			const int p = base + row;
+			const int tg = (ttile0 + tt) * XT_TRANS + t;
+			return (p < image_size && tg < tpad) ? g_A[(size_t) p * tpad + tg] : make_float2(0.f, 0.f);
+		};
+		auto fetch = [&](int pass)
+		{
+			const int base = pass * XT_PIXELS;
+			#pragma unroll
+			for (int k = 0; k < XT_PIXELS / 8; k++)
+			{
+				const int p = base + plane + 8 * k;
+				float re = 0.f, im = 0.f, cw = 0.f;
+				if (p < image_size)
+				{
+					int y = (int) (((float) p + 0.5f) * inv_imgX);
+					const int x = p - y * projector.imgX;
+					if (y > projector.maxR)
+						y -= projector.imgY;
+					projector.project3Dmodel(x, y, e0, e1, e3, e4, e6, e7, re, im);
+					cw = g_corr[p];
+				}
+				nr[k] = make_float2(re, im);
+				nc[k] = cw;
+			}
+			if (PFA)
+				#pragma unroll
+				for (int i = 0; i < NA; i++)
+					na[PFA ? i : 0] = gatherA(base, i);
+		};
+		if (pass_begin < pass_end)
+			fetch(pass_begin);
+		for (int pass = pass_begin; pass < pass_end; pass++)
+		{
+			const int base = pass * XT_PIXELS;
+			__syncthreads();
+			#pragma unroll
+			for (int k = 0; k < XT_PIXELS / 8; k++)
+			{
+				if (base + plane + 8 * k < image_size)
+				{
+					const float re = nr[k].x, im = nr[k].y;
+					// explicit fused multiply-adds, as in the group kernel
+					rn = fmaf(nc[k] * 0.5f, fmaf(im, im, re * re), rn);
+				}
+				s_ref[(plane + 8 * k) * XT_ORIENT + o] = nr[k];
+			}
+			#pragma unroll
+			for (int i = 0; i < NA; i++)
+				s_A[tid + XT_BLOCK * i] = PFA ? na[PFA ? i : 0] : gatherA(base, i);
+			__syncthreads();
+			if (pass + 1 < pass_end)
+				fetch(pass + 1);
+			#pragma unroll
+			for (int k = 0; k < XT_PIXELS / 8; k++)
+			{
+				const int row = plane + 8 * k;
+				float rr[4], ri[4];
+				const float4 r01 = *(const float4 *) &s_ref[row * XT_ORIENT + po * 4];
+				const float4 r23 = *(const float4 *) &s_ref[row * XT_ORIENT + po * 4 + 2];
+				rr[0] = r01.x; rr[1] = r01.z; rr[2] = r23.x; rr[3] = r23.z;
+				ri[0] = r01.y; ri[1] = r01.w; ri[2] = r23.y; ri[3] = r23.w;
+				#pragma unroll
+				for (int tt = 0; tt < NT; tt++)
+				{
+					const float4 a01 = *(const float4 *) &s_A[(tt * XT_PIXELS + row) * XT_TRANS + pt * 4];
+					const float4 a23 = *(const float4 *) &s_A[(tt * XT_PIXELS + row) * XT_TRANS + pt * 4 + 2];
+					const float ar[4] = {a01.x, a01.z, a23.x, a23.z}, ai[4] = {a01.y, a01.w, a23.y, a23.w};
+					#pragma unroll
+					for (int i = 0; i < 4; i++)
+						#pragma unroll
+						for (int j = 0; j < 4; j++)
+							acc[tt][i][j] += rr[i] * ar[j] + ri[i] * ai[j];
+				}
+			}
+		}
+	}
+	else
+	{
 	for (int pass = pass_begin; pass < pass_end; pass++)
 	{
 		const int base = pass * XT_PIXELS;
@@ -1242,6 +1332,7 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 		}
 	}
 
+	}
 	// Sum over the 8 pixel planes in plane order, then store
 	__syncthreads();
 	float (*const s_red)[XT_ORIENT * XT_TRANS] = (float (*)[XT_ORIENT * XT_TRANS]) s_buf;
@@ -1391,7 +1482,7 @@ static __global__ void cuda_kernel_coarse_xt_group_x2(
 	}
 }
 
-template <int NT>
+template <int NT, int PIPE>
 static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt_group(
 		const CoarseClassJob *g_classes,   // per class: n_orient and orient_offset of the union
 		const XtGroupBlock *g_blocks,
@@ -1406,8 +1497,7 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt_group(
 		const float *g_x2sum,
 		int image_size,
 		int n_chunks)
-{
-	const int tid = threadIdx.x;
+{	const int tid = threadIdx.x;
 	const XtGroupBlock B = g_blocks[blockIdx.x];
 	const int ttile0 = blockIdx.z * NT;
 	if (ttile0 * XT_TRANS >= B.n_cols)
@@ -1455,6 +1545,129 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt_group(
 	const int pass_begin = (int) (((long) blockIdx.y * n_pass) / n_chunks);
 	const int pass_end   = (int) (((long) (blockIdx.y + 1) * n_pass) / n_chunks);
 
+	if (PIPE >= 1)
+	{
+		// Pipelined pass loop. The reference values (texture fetches), the correlation values and, for PIPE >= 2, the
+		// A values of the next pass are fetched into registers before the products of the current pass, so that their
+		// latency is hidden behind the multiply-adds. Every sum is made from the same terms in the same order.
+		constexpr bool PFA = (PIPE == 3) || (PIPE == 2 && NT <= 2);
+		constexpr int NA = NT * (XT_PIXELS * XT_TRANS / XT_BLOCK);
+		__shared__ int s_bcol[NT * XT_TRANS];
+		__shared__ float s_ct[XT_GMAX][XT_PIXELS];
+		for (int i = tid; i < NT * XT_TRANS; i += XT_BLOCK)
+		{
+			const int col = ttile0 * XT_TRANS + i;
+			s_bcol[i] = col < B.n_cols ? bcols[col] : 0;
+		}
+		__syncthreads();
+		float2 nr[XT_PIXELS / 8];
+		float nc[(XT_GMAX * XT_PIXELS + XT_BLOCK - 1) / XT_BLOCK];
+		float2 na[PFA ? NA : 1];
+		auto gatherA = [&](int base, int i) -> float2
+		{
+			const int idx = tid + XT_BLOCK * i;
+			const int tt = idx / (XT_PIXELS * XT_TRANS);
+			const int row = (idx / XT_TRANS) % XT_PIXELS, t = idx % XT_TRANS;
+			const int p = base + row;
+			const int col = (ttile0 + tt) * XT_TRANS + t;
+			return (p < image_size && col < B.n_cols) ? g_A[(size_t) p * n_cols + s_bcol[tt * XT_TRANS + t]] : make_float2(0.f, 0.f);
+		};
+		auto fetch = [&](int pass)
+		{
+			const int base = pass * XT_PIXELS;
+			#pragma unroll
+			for (int k = 0; k < XT_PIXELS / 8; k++)
+			{
+				const int p = base + plane + 8 * k;
+				float re = 0.f, im = 0.f;
+				if (p < image_size)
+				{
+					int y = (int) (((float) p + 0.5f) * inv_imgX);
+					const int x = p - y * projector.imgX;
+					if (y > projector.maxR)
+						y -= projector.imgY;
+					projector.project3Dmodel(x, y, e0, e1, e3, e4, e6, e7, re, im);
+				}
+				nr[k] = make_float2(re, im);
+			}
+			#pragma unroll
+			for (int i = 0; i < (XT_GMAX * XT_PIXELS + XT_BLOCK - 1) / XT_BLOCK; i++)
+			{
+				const int idx = tid + XT_BLOCK * i;
+				float v = 0.f;
+				if (idx < n_parts * XT_PIXELS && base + (idx & (XT_PIXELS - 1)) < image_size)
+					v = s_corr[idx / XT_PIXELS][base + (idx & (XT_PIXELS - 1))];
+				nc[i] = v;
+			}
+			if (PFA)
+				#pragma unroll
+				for (int i = 0; i < NA; i++)
+					na[PFA ? i : 0] = gatherA(base, i);
+		};
+		if (pass_begin < pass_end)
+			fetch(pass_begin);
+		for (int pass = pass_begin; pass < pass_end; pass++)
+		{
+			const int base = pass * XT_PIXELS;
+			__syncthreads();
+			#pragma unroll
+			for (int k = 0; k < XT_PIXELS / 8; k++)
+				s_ref[(plane + 8 * k) * XT_ORIENT + o] = nr[k];
+			#pragma unroll
+			for (int i = 0; i < (XT_GMAX * XT_PIXELS + XT_BLOCK - 1) / XT_BLOCK; i++)
+			{
+				const int idx = tid + XT_BLOCK * i;
+				if (idx < n_parts * XT_PIXELS)
+					s_ct[idx / XT_PIXELS][idx & (XT_PIXELS - 1)] = nc[i];
+			}
+			#pragma unroll
+			for (int i = 0; i < NA; i++)
+				s_A[tid + XT_BLOCK * i] = PFA ? na[PFA ? i : 0] : gatherA(base, i);
+			__syncthreads();
+			#pragma unroll
+			for (int k = 0; k < XT_PIXELS / 8; k++)
+			{
+				const int row = plane + 8 * k;
+				if (base + row < image_size)
+				{
+					const float re = nr[k].x, im = nr[k].y;
+					for (int g = 0; g < n_parts; g++)
+						if ((B.mask >> g) & 1u)
+						{
+							// written with explicit fused multiply-adds: the plain expression is contracted differently
+							// next to the projection, and the sums must stay those of the unpipelined loop
+							s_rn[g][tid] = fmaf(s_ct[g][row] * 0.5f, fmaf(im, im, re * re), s_rn[g][tid]);
+						}
+				}
+			}
+			if (pass + 1 < pass_end)
+				fetch(pass + 1);
+		#pragma unroll
+		for (int k = 0; k < XT_PIXELS / 8; k++)
+		{
+			const int row = plane + 8 * k;
+			float rr[4], ri[4];
+			const float4 r01 = *(const float4 *) &s_ref[row * XT_ORIENT + po * 4];
+			const float4 r23 = *(const float4 *) &s_ref[row * XT_ORIENT + po * 4 + 2];
+			rr[0] = r01.x; rr[1] = r01.z; rr[2] = r23.x; rr[3] = r23.z;
+			ri[0] = r01.y; ri[1] = r01.w; ri[2] = r23.y; ri[3] = r23.w;
+			#pragma unroll
+			for (int tt = 0; tt < NT; tt++)
+			{
+				const float4 a01 = *(const float4 *) &s_A[(tt * XT_PIXELS + row) * XT_TRANS + pt * 4];
+				const float4 a23 = *(const float4 *) &s_A[(tt * XT_PIXELS + row) * XT_TRANS + pt * 4 + 2];
+				const float ar[4] = {a01.x, a01.z, a23.x, a23.z}, ai[4] = {a01.y, a01.w, a23.y, a23.w};
+				#pragma unroll
+				for (int i = 0; i < 4; i++)
+					#pragma unroll
+					for (int j = 0; j < 4; j++)
+						acc[tt][i][j] += rr[i] * ar[j] + ri[i] * ai[j];
+			}
+		}
+		}
+	}
+	else
+	{
 	for (int pass = pass_begin; pass < pass_end; pass++)
 	{
 		const int base = pass * XT_PIXELS;
@@ -1511,6 +1724,7 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt_group(
 		}
 	}
 
+	}
 	__syncthreads();
 	float (*const s_red)[XT_ORIENT * XT_TRANS] = (float (*)[XT_ORIENT * XT_TRANS]) s_buf;
 	#pragma unroll
