@@ -99,6 +99,19 @@ our data sets; it grows with box size and classes). Memory is mostly per thread,
 this figure overestimates the cost of an extra worker: it only lowers the count when a run came close
 to filling the card. `RELION_GPU_GB_PER_RANK` still overrides both.
 
+MPS on or off. `relion_refine_mpi` starts NVIDIA MPS when several workers share a node (see "Automatic
+MPS" in gpu_performance.md), but MPS does not always help. Measured: helical Class2D with 8 single-thread
+workers on one GPU ran 7x faster with it (many processes with small launches); a helical Class3D with 2
+workers of 3 threads, whose long coarse kernels each fill the GPU, ran 6% slower (427 vs 452 s, three
+pairs, identical results). So `relion_launch` chooses: MPS on from 4 workers per GPU, off below (always
+off with one). Once the workers per GPU of a job have settled, its next run tries the other setting once;
+after that the faster one is kept (tuning cache `mps`, key = the job key plus the workers per GPU), and a
+job measured both ways also sets the start for other jobs of its kind. The time is filed under what the
+workers actually ran with, so a run where MPS could not start counts as one without it. The launcher line
+says the choice and why ("MPS off: fewer than 4 workers per GPU"); `RELION_AUTO_MPS=on` or `off` set by
+hand is obeyed and nothing is learned. `relion_refine_mpi` started without `relion_launch` keeps starting
+MPS whenever two or more workers share the node.
+
 GPU busy % is deliberately not the signal: measured on an RTX 3060 Ti without MPS, it reads 93-98% as
 soon as two processes share the GPU (context switching counts as busy) while the E-step got slower
 from 3 workers on; and `--skip_align` read 32% busy with one worker but gained nothing from a second,

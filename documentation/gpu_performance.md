@@ -381,14 +381,16 @@ when their CUDA context is created), when all of these hold:
 One process per node starts the daemon in a private directory
 (`/tmp/relion_mps_<Slurm job>_<pid>`; short, because MPS uses Unix sockets) and
 all processes of that node point `CUDA_MPS_PIPE_DIRECTORY` at it. The daemon is
-told to quit when the run ends; it does so once the last process has
-disconnected, and its directory is removed. The output says what was done:
+told to quit when the run ends, also when it is killed; it does so once the last
+process has disconnected, and its directory is removed. The output says what was done:
 
 ```
  Started NVIDIA MPS so that the 8 GPU workers on this node run on the GPU at the same time (RELION_AUTO_MPS=off to disable).
 ```
 
-If the daemon cannot be started, RELION says so and runs without MPS. Every
+`relion_launch` decides per job whether MPS is used: it does not always help (a
+Class3D with 2 workers of 3 threads ran 6% slower with it); see "MPS on or off" in
+ranks_per_gpu.md. If the daemon cannot be started, RELION says so and runs without MPS. Every
 worker keeps its own copy of the references on the GPU, so large 3D boxes with
 many workers can run out of GPU memory: use fewer workers then.
 

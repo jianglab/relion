@@ -67,6 +67,7 @@ int main(int argc, char **argv)
 
 	if (rlaunch::build(cmd, node, particles, learned, c, why_not))
 	{
+		rlaunch::applyMps(c, node, cmd, learned);
 		std::cout << c.report << std::endl;
 		for (const std::string &e : c.env)
 			putenv(strdup(e.c_str()));

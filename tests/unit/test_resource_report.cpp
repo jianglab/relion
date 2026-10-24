@@ -11,6 +11,8 @@
 
 #include "src/resource_report.h"
 
+#include <cstdlib>
+
 namespace
 {
 resrep::ProcessStats proc(const std::string &host, int threads, int ncores, int first_core,
@@ -117,7 +119,14 @@ TEST_CASE("several processes on one GPU without MPS are told to use it, whatever
 	for (int i = 0; i < 4; i++) p.push_back(proc("n1", 1, 8, 0, 0.98));
 	auto a = resrep::advise(p, true);
 	CHECK(mentions(a, "4 worker processes shared a GPU without NVIDIA MPS"));
+	CHECK(mentions(a, "often several times faster"));
 	CHECK(!mentions(a, "unlikely to make this faster"));
+	// relion_launch chose to run without MPS: said so, no advice against its choice
+	setenv("RELION_LAUNCH_MPS_KEY", "class3d:1:w4", 1);
+	a = resrep::advise(p, true);
+	unsetenv("RELION_LAUNCH_MPS_KEY");
+	CHECK(mentions(a, "relion_launch chose this"));
+	CHECK(!mentions(a, "often several times faster"));
 	for (size_t i = 1; i < p.size(); i++) p[i].mps = true;
 	CHECK(!mentions(resrep::advise(p, true), "without NVIDIA MPS"));
 }

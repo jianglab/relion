@@ -292,6 +292,71 @@ bool store(const std::string &gpu_name, const std::string &key, const Record &r)
 	return cache.put("ranks_per_gpu", key, encode(r));
 }
 
+std::string encodeMps(const MpsRecord &m)
+{
+	std::ostringstream o;
+	o << m.on << ':' << m.off;
+	return o.str();
+}
+
+bool decodeMps(const std::string &s, MpsRecord &m)
+{
+	const std::vector<std::string> f = split(s, ':');
+	if (f.size() != 2) return false;
+	m.on = atof(f[0].c_str());
+	m.off = atof(f[1].c_str());
+	return true;
+}
+
+bool loadMps(const std::string &gpu_name, const std::string &key, MpsRecord &m)
+{
+	if (gpu_name.empty() || key.empty()) return false;
+	tuning::Cache cache(contextOf(gpu_name));
+	tuning::Entry e;
+	return cache.get("mps", key, e) && decodeMps(e.value, m);
+}
+
+bool storeMps(const std::string &gpu_name, const std::string &key, const MpsRecord &m)
+{
+	if (gpu_name.empty() || key.empty()) return false;
+	tuning::Cache cache(contextOf(gpu_name));
+	return cache.put("mps", key, encodeMps(m));
+}
+
+bool chooseMps(const MpsRecord &job, const MpsRecord &kind, int workers_per_gpu, bool workers_settled, std::string &why)
+{
+	std::ostringstream o;
+	o.precision(3);
+	bool on;
+	if (workers_per_gpu < 2)
+	{
+		on = false;
+		o << "one worker per GPU";
+	}
+	else if (job.on > 0 && job.off > 0)
+	{
+		on = job.on < job.off;
+		o << "faster for this job (" << job.on * 1e3 << " ms of E-step per particle with it, " << job.off * 1e3 << " ms without)";
+	}
+	else if (workers_settled && (job.on > 0) != (job.off > 0))
+	{
+		on = job.off > 0;
+		o << "trying it " << (on ? "on" : "off") << " once, since this job was measured only " << (on ? "without" : "with") << " it";
+	}
+	else if (kind.on > 0 && kind.off > 0)
+	{
+		on = kind.on < kind.off;
+		o << "faster for other jobs of this kind with " << workers_per_gpu << " workers per GPU";
+	}
+	else
+	{
+		on = workers_per_gpu >= 4;
+		o << (on ? "4 or more" : "fewer than 4") << " workers per GPU";
+	}
+	why = o.str();
+	return on;
+}
+
 std::string learnFromRun(const std::vector<resrep::ProcessStats> &procs, bool mpi, long particles, int steps)
 {
 	const char *gpu = getenv("RELION_LAUNCH_GPU_NAME"), *key = getenv("RELION_LAUNCH_KEY"),
@@ -303,9 +368,11 @@ std::string learnFromRun(const std::vector<resrep::ProcessStats> &procs, bool mp
 	std::set<int> cores;
 	std::set<std::string> hosts;
 	double mem_peak = 0.;   // the fullest card (every worker on a card sees the same device total)
+	bool mps = false;       // what the workers ran with, not what was asked for (MPS may have failed to start)
 	for (size_t i = (mpi && procs.size() > 1) ? 1 : 0; i < procs.size(); i++)
 	{
 		const resrep::ProcessStats &p = procs[i];
+		mps = mps || p.mps;
 		wall = std::max(wall, p.wall);
 		cpu += p.cpu;
 		threads = p.threads;
@@ -335,6 +402,17 @@ std::string learnFromRun(const std::vector<resrep::ProcessStats> &procs, bool mp
 	  << " ms of E-step per particle with " << (int)(cores_busy * 100 + 0.5) << "% of the cores busy";
 	if (r.prev > 0 && used != r.prev) o << " (" << r.prev << " per GPU took " << r.prev_time * 1e3 << " ms)";
 	o << "; the next run of this job on " << gpu << " starts " << n.next << " per GPU.";
+	const char *mps_key = getenv("RELION_LAUNCH_MPS_KEY"), *mps_kind_key = getenv("RELION_LAUNCH_MPS_KIND_KEY");
+	if (mps_key && *mps_key)
+	{
+		MpsRecord m;
+		loadMps(gpu, mps_key, m);
+		(mps ? m.on : m.off) = time;
+		storeMps(gpu, mps_key, m);
+		if (m.on > 0 && m.off > 0 && mps_kind_key && *mps_kind_key)
+			storeMps(gpu, mps_kind_key, m);   // shortcut: the latest job measured both ways speaks for its kind
+		o << " This run was " << (mps ? "with" : "without") << " MPS.";
+	}
 	return o.str();
 }
 
@@ -435,6 +513,29 @@ bool build(const std::vector<std::string> &cmd, const Node &node, long particles
 	  << ". " << a.reason;
 	out.report = r.str();
 	return true;
+}
+
+void applyMps(Command &c, const Node &node, const std::vector<std::string> &cmd, const Record &learned)
+{
+	const char *set = getenv("RELION_AUTO_MPS");
+	if (set && *set)
+	{
+		c.report += std::string(" MPS: as set by RELION_AUTO_MPS=") + set + ".";
+		return;
+	}
+	if (c.advice.mpi < 2) return;   // relion_refine (one process) does not start MPS
+	const int w = c.advice.workers_per_gpu;
+	const std::string wk = ":w" + std::to_string(w);
+	const std::string key = keyOf(cmd) + wk, kind_key = kindKeyOf(cmd, node.cores / std::max(1, node.gpus)) + wk;
+	MpsRecord job, kind;
+	loadMps(node.gpu_name, key, job);
+	loadMps(node.gpu_name, kind_key, kind);
+	std::string why;
+	const bool on = chooseMps(job, kind, w, learned.settled && !learned.from_other_jobs && learned.next == w, why);
+	c.env.push_back(std::string("RELION_AUTO_MPS=") + (on ? "on" : "off"));
+	c.env.push_back("RELION_LAUNCH_MPS_KEY=" + key);
+	c.env.push_back("RELION_LAUNCH_MPS_KIND_KEY=" + kind_key);
+	c.report += std::string(" MPS ") + (on ? "on" : "off") + ": " + why + " (RELION_AUTO_MPS=on/off to choose).";
 }
 
 } // namespace rlaunch

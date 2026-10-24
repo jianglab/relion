@@ -27,7 +27,11 @@
  * With cores to spare, the next run of that job starts one more worker per GPU, and goes back
  * (and stays) if that was not faster. Other jobs start from the measured rule.
  *
- * Overrides: RELION_RANKS_PER_GPU (workers per GPU); RELION_MPIRUN (the MPI launcher).
+ * NVIDIA MPS (started by relion_refine_mpi, src/mps_auto.h) is chosen the same way, per job and
+ * workers per GPU (tunable "mps", see chooseMps).
+ *
+ * Overrides: RELION_RANKS_PER_GPU (workers per GPU); RELION_AUTO_MPS (on/off, nothing learned);
+ * RELION_MPIRUN (the MPI launcher).
  */
 
 #include <string>
@@ -94,6 +98,24 @@ Record next(const Record &r, int used, double time, double cores_busy, int threa
 bool load(const std::string &gpu_name, const std::string &key, Record &r);
 bool store(const std::string &gpu_name, const std::string &key, const Record &r);
 
+/// E-step seconds per particle of one job at one worker count with and without MPS (0: not measured).
+struct MpsRecord
+{
+	double on = 0, off = 0;
+};
+std::string encodeMps(const MpsRecord &m);
+bool decodeMps(const std::string &s, MpsRecord &m);
+bool loadMps(const std::string &gpu_name, const std::string &key, MpsRecord &m);
+bool storeMps(const std::string &gpu_name, const std::string &key, const MpsRecord &m);
+
+/// Whether the next run uses MPS, and why. Measured: with 8 single-thread workers on one GPU MPS was
+/// 7x faster (small launches from many processes); with 2 workers of 3 threads, each filling the
+/// GPU with long coarse kernels, it was 6% slower. So the rule starts it at 4 or more workers per GPU.
+/// Once the workers per GPU are settled, the setting not yet measured is tried once; when both are
+/// measured, the faster is kept. `kind` (the job's kind of work, both measured) stands in for a job
+/// without a record of its own.
+bool chooseMps(const MpsRecord &job, const MpsRecord &kind, int workers_per_gpu, bool workers_settled, std::string &why);
+
 /// Called at the end of a run that relion_launch started (it exports RELION_LAUNCH_*), with the
 /// resource report of the run (the MPI leader first when `mpi`), its particles and E-steps: records
 /// the run and returns one line for the output ("" when not started by relion_launch, shorter than
@@ -112,6 +134,10 @@ struct Command
 /// false (and why) when the command is not a GPU refinement: it is then run as given.
 bool build(const std::vector<std::string> &cmd, const Node &node, long particles, const Record &learned,
 		Command &out, std::string &why_not);
+
+/// Adds to `c` (built for the run) the MPS choice: RELION_AUTO_MPS for the run and the keys under which
+/// learnFromRun records its time. A RELION_AUTO_MPS already set is obeyed, and nothing is learned.
+void applyMps(Command &c, const Node &node, const std::vector<std::string> &cmd, const Record &learned);
 
 } // namespace rlaunch
 

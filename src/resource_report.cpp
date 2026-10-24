@@ -315,9 +315,13 @@ std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi
 			if (most >= 2 && !mps)
 			{
 				o << most << " worker processes shared a GPU" << where << " without NVIDIA MPS, so they took turns on it"
-				  << " (the " << pct(busy) << " busy includes switching between them). With MPS their work runs at the same time,"
-				  << " often several times faster: relion_refine_mpi starts it by itself unless RELION_AUTO_MPS=off or"
-				  << " nvidia-cuda-mps-control is missing.";
+				  << " (the " << pct(busy) << " busy includes switching between them).";
+				const char *chosen = getenv("RELION_LAUNCH_MPS_KEY");
+				if (chosen && *chosen)
+					o << " relion_launch chose this for the job and learns which is faster (see its line at the start).";
+				else
+					o << " With MPS their work runs at the same time, often several times faster: relion_refine_mpi"
+					  << " starts it by itself unless RELION_AUTO_MPS=off or nvidia-cuda-mps-control is missing.";
 				out.push_back(o.str());
 				continue;
 			}

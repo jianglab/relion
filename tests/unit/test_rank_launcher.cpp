@@ -10,6 +10,7 @@
 #include "src/rank_launcher.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -335,4 +336,93 @@ TEST_CASE("relion_launch: records of the kind of work, and GPU memory measured p
 	REQUIRE(rlaunch::build(cmd, node(1, 23, 16, 100), 50000, own, c, why));
 	CHECK(c.advice.workers_per_gpu == 4);
 	unsetenv("RELION_GPU_GB_PER_RANK");
+}
+
+TEST_CASE("relion_launch: MPS on or off, learned per job and workers per GPU", "[rank_launcher]")
+{
+	rlaunch::MpsRecord none, job, kind;
+	std::string why;
+	// the rule: on from 4 workers per GPU, never with one
+	CHECK(rlaunch::chooseMps(none, none, 8, false, why));
+	CHECK_FALSE(rlaunch::chooseMps(none, none, 2, false, why));
+	CHECK_FALSE(rlaunch::chooseMps(none, none, 1, true, why));
+	// measured one way: the other is tried once the workers per GPU are settled, not before
+	job.off = 0.010;
+	CHECK_FALSE(rlaunch::chooseMps(job, none, 2, false, why));
+	CHECK(rlaunch::chooseMps(job, none, 2, true, why));
+	CHECK(why.find("trying it on once") != std::string::npos);
+	// measured both ways: the faster
+	job.on = 0.0106;
+	CHECK_FALSE(rlaunch::chooseMps(job, none, 2, true, why));
+	job.on = 0.004;
+	CHECK(rlaunch::chooseMps(job, none, 2, false, why));
+	// a job without its own record follows its kind, measured both ways
+	kind.on = 0.02;
+	kind.off = 0.01;
+	CHECK_FALSE(rlaunch::chooseMps(none, kind, 8, false, why));
+	rlaunch::MpsRecord back;
+	REQUIRE(rlaunch::decodeMps(rlaunch::encodeMps(job), back));
+	CHECK(back.on == Approx(job.on));
+	CHECK(back.off == Approx(job.off));
+
+	char dir[] = "/tmp/rank_launcher_XXXXXX";
+	REQUIRE(mkdtemp(dir));
+	const std::string file = std::string(dir) + "/tuning.csv";
+	setenv("RELION_TUNING_FILE", file.c_str(), 1);
+	unsetenv("RELION_TUNING_CACHE");
+	unsetenv("RELION_AUTO_MPS");
+	unsetenv("RELION_RANKS_PER_GPU");
+
+	// the command: Class3D on one 24 GB card gets 2 workers, so MPS starts off
+	const std::vector<std::string> cmd = {"relion_refine_mpi", "--i", "a.star", "--ref", "r.mrc", "--K", "3", "--gpu", ""};
+	const rlaunch::Node n = node(1, 23, 16, 100);
+	rlaunch::Command c;
+	rlaunch::Record settled;
+	settled.next = 2;
+	settled.settled = true;
+	REQUIRE(rlaunch::build(cmd, n, 50000, settled, c, why));
+	rlaunch::applyMps(c, n, cmd, settled);
+	CHECK(joined(c.env).find("RELION_AUTO_MPS=off") != std::string::npos);
+	CHECK(c.report.find("MPS off: fewer than 4 workers per GPU") != std::string::npos);
+
+	// the end of that run, without MPS: recorded, and the next run tries it on
+	for (const std::string &e : c.env) putenv(strdup(e.c_str()));
+	resrep::ProcessStats leader, worker;
+	leader.wall = worker.wall = 600;
+	worker.cpu = 600;
+	worker.threads = 4;
+	worker.host = leader.host = "n1";
+	worker.cores = {0, 1, 2, 3, 4, 5, 6, 7};
+	CHECK(rlaunch::learnFromRun({leader, worker, worker}, true, 10000, 6).find("without MPS") != std::string::npos);
+	unsetenv("RELION_AUTO_MPS");
+	REQUIRE(rlaunch::build(cmd, n, 50000, settled, c, why));
+	rlaunch::applyMps(c, n, cmd, settled);
+	CHECK(joined(c.env).find("RELION_AUTO_MPS=on") != std::string::npos);
+	// with MPS it was slower: recorded for the job and its kind, and the next run goes without
+	for (const std::string &e : c.env) putenv(strdup(e.c_str()));
+	worker.mps = true;
+	worker.wall = 640;
+	CHECK(rlaunch::learnFromRun({leader, worker, worker}, true, 10000, 6).find("with MPS") != std::string::npos);
+	REQUIRE(rlaunch::loadMps("NVIDIA RTX A5000", "class3d:any:cores16:w2", back));
+	CHECK(back.on > back.off);
+	unsetenv("RELION_AUTO_MPS");
+	REQUIRE(rlaunch::build(cmd, n, 50000, settled, c, why));
+	rlaunch::applyMps(c, n, cmd, settled);
+	CHECK(joined(c.env).find("RELION_AUTO_MPS=off") != std::string::npos);
+	CHECK(c.report.find("faster for this job") != std::string::npos);
+
+	// an expert's setting is obeyed and nothing is learned
+	setenv("RELION_AUTO_MPS", "on", 1);
+	rlaunch::Command e;
+	REQUIRE(rlaunch::build(cmd, n, 50000, settled, e, why));
+	rlaunch::applyMps(e, n, cmd, settled);
+	CHECK(joined(e.env).find("RELION_LAUNCH_MPS_KEY") == std::string::npos);
+	CHECK(e.report.find("as set by RELION_AUTO_MPS=on") != std::string::npos);
+
+	for (const char *v : {"RELION_AUTO_MPS", "RELION_LAUNCH_MPS_KEY", "RELION_LAUNCH_MPS_KIND_KEY", "RELION_LAUNCH_GPU_NAME",
+	                      "RELION_LAUNCH_KEY", "RELION_LAUNCH_KIND_KEY", "RELION_LAUNCH_WORKERS_PER_GPU", "RELION_TUNING_FILE"})
+		unsetenv(v);
+	unlink(file.c_str());
+	unlink((file + ".lock").c_str());
+	rmdir(dir);
 }

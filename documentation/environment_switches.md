@@ -100,7 +100,7 @@ column. Details and measurements are in `gpu_performance.md` and
 | `RELION_GPU_SYMMETRISE=0` | Helical Fourier-space symmetrisation on the GPU. `=check` runs both and compares. `RELION_GPU_SYMMETRISE_PLANES=N` limits the planes per group (default: from free memory). | Comparison. |
 | `RELION_GPU_SKIP_ALIGN=0` | GPU for `--skip_align` / `--skip_rotate`. `=0` switches the GPU off for them as upstream does (the job window then refuses the GPU). | Comparison. |
 | `RELION_JOIN_SKIP_BPREF=0` | At the final join of a converged 3-rank auto-refine, the summed back-projection arrays are not sent back. `=0` sends them as upstream. | Comparison. |
-| `RELION_AUTO_MPS=off` | Starts NVIDIA MPS when two or more GPU workers share a node and none is running. | MPS is managed by your site. |
+| `RELION_AUTO_MPS=off` (or `on`) | Starts NVIDIA MPS when two or more GPU workers share a node and none is running; under `relion_launch`, only where it was faster for the job (or from 4 workers per GPU until measured). | MPS is managed by your site, or to force one setting. |
 | `RELION_AUTO_PARALLEL=No` | GUI default of "Choose MPI and threads automatically?". | You always give MPI and threads by hand. |
 | `RELION_CPUS_PER_GPU=n` | CPU cores per GPU that the GUI's suggestions assume. Default: from the Slurm partition or at most 8. | Site-specific sizing. |
 
