@@ -212,8 +212,11 @@ std::string templateText(const Request &r, const Layout &l, const std::string &p
 	  << "#SBATCH --error=XXXerrfileXXX\n";
 	if (l.one_node)
 		t << "#SBATCH --nodes=1\n";
-	t << "#SBATCH --ntasks=" << l.tasks << "\n"
-	  << "#SBATCH --cpus-per-task=XXXthreadsXXX\n";
+	t << "#SBATCH --ntasks=" << l.tasks << "\n";
+	if (r.launch)
+		t << "#SBATCH --cpus-per-task=" << std::max(1, r.threads) << "\n";
+	else
+		t << "#SBATCH --cpus-per-task=XXXthreadsXXX\n";
 	if (r.gpus > 0)
 		t << "#SBATCH --gpus=" << r.gpus << "\n";
 	if (l.mem_mb > 0)
@@ -232,7 +235,9 @@ std::string templateText(const Request &r, const Layout &l, const std::string &p
 	}
 	for (const std::string &e : r.exports)
 		t << "export " << e << "\n";
-	if (r.mpi > 1)
+	if (r.launch)
+		t << "relion_launch XXXcommandXXX\n";
+	else if (r.mpi > 1)
 	{
 		const char *mpirun = getenv("RELION_MPIRUN");
 		t << ((mpirun && *mpirun) ? mpirun : "mpirun")

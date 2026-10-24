@@ -988,6 +988,13 @@ slurmscript::Request RelionJob::slurmRequest()
 		else
 			r.gpus = std::max(1, parhint::countGpuIds(value("gpu_ids", "")));
 	}
+	// auto parallel: the processes and threads are chosen on the node the job lands on
+	if (r.leader_idle && r.gpus > 0 && value("auto_parallel", "No") == "Yes")
+	{
+		r.launch = true;
+		r.mpi = 1;
+		r.threads = std::max(1, (int)textToInteger(value("nr_cpus", "1")));
+	}
 	r.mem = value("slurm_mem", "auto");
 	r.time = value("slurm_time", "");
 	r.args = value("slurm_args", "");
@@ -1095,10 +1102,14 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 		// Also add mpirun in front of those commands that have relion_ and _mpi` in it (if no submission via the queue is done)
 		std::string one_command;
 		final_command = "";
+		// auto parallel GPU refinement: relion_launch chooses processes and threads here, as on a queue node
+		const bool launch = slurmRequest().launch;
 		for (size_t icom = 0; icom < commands.size(); icom++)
 		{
+			if (launch && commands[icom].find("relion_refine") != std::string::npos)
+				one_command = "`which relion_launch` " + commands[icom];
 			// Is this a relion mpi program?
-			if (nr_mpi > 1 &&
+			else if (nr_mpi > 1 &&
 					(commands[icom]).find("_mpi`") != std::string::npos &&
 					(commands[icom]).find("relion_") != std::string::npos)
 			{
@@ -1375,7 +1386,9 @@ When set to 1, no multi-threading will be used. The maximum can be set through t
 		joboptions["auto_parallel"] = JobOption("Choose MPI and threads automatically?", auto_default, "If set to Yes, you only give the number of CPUs, \
 and RELION chooses the number of MPI processes and threads from it, the number of GPUs and the kind of job: one process for one GPU, \
 a leader plus one worker per GPU for several GPUs, one process for VDAM (which does not support MPI), and an odd number of at least 3 processes for auto-refine. \
-Rest the mouse on the fields to see the numbers it chooses and why. Set to No to give the numbers of MPI processes and threads yourself. \
+Rest the mouse on the fields to see the numbers it chooses and why. \
+GPU refinements submitted to a queue with RELION's own Slurm script choose again on the node they land on (relion_launch): \
+more worker processes per GPU when its GPUs have the memory for them, learned per GPU model from how busy earlier runs kept the GPUs. Set to No to give the numbers of MPI processes and threads yourself. \
 The default can be set through the environment variable RELION_AUTO_PARALLEL.");
 		joboptions["nr_cpus"] = JobOption("Number of CPUs:", parhint::THREADS_PER_GPU_CAP, 1, thread_max, 1, "The number of CPU cores for this job, \
 split into MPI processes and threads by RELION when it chooses them automatically. Rest the mouse on the field for a suggestion based on the number of GPUs.");

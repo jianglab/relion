@@ -144,3 +144,16 @@ TEST_CASE("Slurm script: text", "[slurm]")
 	CHECK(t.find("#SBATCH --mem-per-cpu=1700M\n") != std::string::npos);
 	CHECK(t.find("--oversubscribe") == std::string::npos);
 }
+
+TEST_CASE("Slurm script: auto parallel GPU refinements run through relion_launch", "[slurm]")
+{
+	auto nodes = slurmscript::parseSinfo(NODES);
+	Request r = request(1, 24, 1, true);
+	r.launch = true;
+	const std::string t = slurmscript::templateText(r, slurmscript::plan(r, nodes), "");
+	CHECK(t.find("#SBATCH --ntasks=1\n") != std::string::npos);
+	CHECK(t.find("#SBATCH --cpus-per-task=24\n") != std::string::npos);   // all the job's cores, not XXXthreadsXXX
+	CHECK(t.find("#SBATCH --gpus=1\n") != std::string::npos);
+	CHECK(t.find("relion_launch XXXcommandXXX\n") != std::string::npos);
+	CHECK(t.find("mpirun") == std::string::npos);
+}

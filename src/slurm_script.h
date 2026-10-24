@@ -58,6 +58,9 @@ struct Request
 	std::string time;          // empty: the queue's default
 	std::string args;          // more sbatch options, as typed
 	std::vector<std::string> exports;  // NAME=VALUE, exported before the command
+	// relion_launch chooses the processes and threads on the node the job lands on (rank_launcher.h):
+	// one task with all `threads` cores, and the command is run through relion_launch
+	bool launch = false;
 };
 
 /// A kind of node of the queue, from `sinfo -h -o "%D %c %m %G"`.

@@ -17,6 +17,7 @@
  * source code. Additional authorship citations may be added, but existing
  * author citations must be preserved.
  ***************************************************************************/
+#include "src/rank_launcher.h"
 #include "src/ml_optimiser_mpi.h"
 #include "src/parallel_hint.h"
 #include <chrono>
@@ -4773,6 +4774,9 @@ void MlOptimiserMpi::gatherResourceReport(const resrep::ProcessStats &mine)
 		for (int r = 0; r < node->size; r++)
 			procs.push_back(resrep::deserialise(std::string(&all[offs[r]], lens[r])));
 		reportResources(procs, true);
+		const std::string learned = rlaunch::learnFromRun(procs, true, mydata.numberOfParticles(), resource_nr_steps_);
+		if (!learned.empty() && verb > 0)
+			std::cout << learned << std::endl;
 	}
 }
 

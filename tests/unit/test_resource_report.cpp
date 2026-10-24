@@ -157,7 +157,18 @@ TEST_CASE("stats survive the MPI serialisation", "[resource_report]")
 {
 	resrep::ProcessStats p = proc("node-7", 3, 4, 2, 0.42, "0000:3B:00.0");
 	p.mps = true;
+	p.gpu_mem_peak = {7.5e9};
 	resrep::ProcessStats q = resrep::deserialise(resrep::serialise(p));
+	REQUIRE(q.gpu_mem_peak.size() == 1);
+	CHECK(q.gpu_mem_peak[0] == Approx(7.5e9));
+	// the peak of a phase total is the largest of its phases
+	resrep::ProcessStats t;
+	resrep::accumulate(t, p);
+	p.gpu_mem_peak = {9e9};
+	resrep::accumulate(t, p);
+	p.gpu_mem_peak = {2e9};
+	resrep::accumulate(t, p);
+	CHECK(t.gpu_mem_peak[0] == Approx(9e9));
 	CHECK(q.host == "node-7");
 	CHECK(q.threads == 3);
 	CHECK(q.cores == p.cores);

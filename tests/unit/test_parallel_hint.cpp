@@ -130,7 +130,7 @@ TEST_CASE("parallel hint: tooltip from the current job settings", "[parhint]")
 	view.job_type = PROC_2DCLASS;
 	values["do_grad"] = "No";
 	t = parhint::tooltip(view, parhint::Field::MpiOrThreads);
-	CHECK(t.find("MPI processes: 25    Threads: 1") != std::string::npos);   // 6 workers per GPU, 32 cores
+	CHECK(t.find("MPI processes: 17    Threads: 2") != std::string::npos);   // 4 workers per GPU, 32 cores
 	values["do_grad"] = "Yes";
 	t = parhint::tooltip(view, parhint::Field::MpiOrThreads);
 	CHECK(t.find("MPI processes: 1    Threads: 32") != std::string::npos);
@@ -190,6 +190,7 @@ TEST_CASE("parallel hint: splitting a number of CPUs", "[parhint]")
 TEST_CASE("parallel hint: a job that chooses MPI processes and threads itself", "[parhint]")
 {
 	setenv("RELION_CPUS_PER_GPU", "8", 1);
+	setenv("RELION_GPU_MEMORY_GB", "24", 1); // independent of the GPU of the test computer
 	std::map<std::string, std::string> values, labels;
 	parhint::JobView view;
 	view.job_type = PROC_3DAUTO;
@@ -207,11 +208,12 @@ TEST_CASE("parallel hint: a job that chooses MPI processes and threads itself", 
 
 	values["auto_parallel"] = "Yes";
 	REQUIRE(parhint::autoSplit(view, s));
-	CHECK(s.mpi == 3);
-	CHECK(s.threads == 8);
+	// the measured rule (auto-refine: 2 workers per GPU), as in the hover hint and relion_launch
+	CHECK(s.mpi == 5);
+	CHECK(s.threads == 4);
 	std::string t = parhint::tooltip(view, parhint::Field::MpiOrThreads);
 	CHECK(t.find("RELION splits the 16 CPUs into") != std::string::npos);
-	CHECK(t.find("MPI processes: 3    Threads: 8") != std::string::npos);
+	CHECK(t.find("MPI processes: 5    Threads: 4") != std::string::npos);
 	CHECK(parhint::tooltip(view, parhint::Field::Cpus).find("Suggested number of CPUs for 2 GPUs: 16") != std::string::npos);
 
 	// Class2D replicas: the GPUs of one replica
@@ -220,9 +222,10 @@ TEST_CASE("parallel hint: a job that chooses MPI processes and threads itself", 
 	values["gpu_ids"] = "0;1;2";
 	values["nr_cpus"] = "8";
 	REQUIRE(parhint::autoSplit(view, s));
-	CHECK(s.mpi == 1);
-	CHECK(s.threads == 8);
+	CHECK(s.mpi == 5);  // EM Class2D: 4 workers on the replica's GPU
+	CHECK(s.threads == 2);
 	unsetenv("RELION_CPUS_PER_GPU");
+	unsetenv("RELION_GPU_MEMORY_GB");
 }
 
 TEST_CASE("auto threads: cores per worker, capped per GPU", "[parhint]")
@@ -325,10 +328,10 @@ TEST_CASE("ranks per GPU: workers by kind of work, limited by memory, cores and 
 	SECTION("nothing known: the measured target, a leader plus the workers")
 	{
 		auto a = ask(Work::Class2D, 1, 0, 0, 0);
-		CHECK(a.workers_per_gpu == 6);
-		CHECK(a.mpi == 7);
-		CHECK(a.threads == 2);          // 12 threads per GPU shared by 6 workers
-		CHECK(ask(Work::Class3D, 1, 0, 0, 0).workers_per_gpu == 4);
+		CHECK(a.workers_per_gpu == 4);
+		CHECK(a.mpi == 5);
+		CHECK(a.threads == 3);          // 12 threads per GPU shared by 4 workers
+		CHECK(ask(Work::Class3D, 1, 0, 0, 0).workers_per_gpu == 2);
 		CHECK(ask(Work::SkipAlign, 1, 0, 0, 0).workers_per_gpu == 4);
 		CHECK_FALSE(a.reason.empty());
 	}
@@ -339,10 +342,10 @@ TEST_CASE("ranks per GPU: workers by kind of work, limited by memory, cores and 
 		CHECK(ask(Work::AutoRefine, 2, 0, 0, 0).mpi == 5);
 		CHECK(ask(Work::AutoRefine, 1, 1, 0, 0).mpi == 3);   // one core: still 2 workers
 	}
-	SECTION("GPU memory: a 24 GB card holds 3 auto-refine workers, but 6 would not fit")
+	SECTION("GPU memory: a 24 GB card holds 2 auto-refine workers, not 4")
 	{
 		CHECK(ask(Work::AutoRefine, 1, 64, 24, 0).mpi == 3);
-		CHECK(ask(Work::Class3D, 1, 64, 6, 0).workers_per_gpu == 2);   // 6 GB card, 2 GB each, 75%
+		CHECK(ask(Work::SkipAlign, 1, 64, 12, 0).workers_per_gpu == 3);   // 12 GB card, 2.5 GB each, 75%
 		auto a = ask(Work::Class3D, 1, 64, 3, 0);
 		CHECK(a.workers_per_gpu == 1);
 		CHECK(a.mpi == 1);                                                  // one worker: no leader
@@ -352,13 +355,18 @@ TEST_CASE("ranks per GPU: workers by kind of work, limited by memory, cores and 
 	{
 		CHECK(ask(Work::Class3D, 1, 64, 0, 0, 2.0).workers_per_gpu == 1);
 		CHECK(ask(Work::Class2D, 1, 3, 0, 0).workers_per_gpu == 3);
-		CHECK(ask(Work::Class2D, 2, 16, 0, 0).workers_per_gpu == 6);
+		CHECK(ask(Work::Class2D, 2, 16, 0, 0).workers_per_gpu == 4);
+		CHECK(ask(Work::Class2D, 1, 4, 0, 0).workers_per_gpu == 4);      // one thread each is still fastest
+		auto s = ask(Work::SkipAlign, 1, 4, 0, 0);                       // skip-align wants 2 threads per worker
+		CHECK(s.workers_per_gpu == 2);
+		CHECK(s.threads == 2);
+		CHECK(ask(Work::SkipAlign, 1, 8, 0, 0).workers_per_gpu == 4);
 	}
 	SECTION("particles: at least 300 per worker")
 	{
 		CHECK(ask(Work::Class2D, 1, 64, 0, 1000).workers_per_gpu == 3);
 		CHECK(ask(Work::Class2D, 1, 64, 0, 50).workers_per_gpu == 1);
-		CHECK(ask(Work::Class2D, 1, 64, 0, 37000).workers_per_gpu == 6);
+		CHECK(ask(Work::Class2D, 1, 64, 0, 37000).workers_per_gpu == 4);
 	}
 	SECTION("environment overrides")
 	{

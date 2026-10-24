@@ -394,7 +394,16 @@ bool autoSplit(const JobView &job, Suggestion &out)
 	const Kind kind = kindOf(job.job_type, job.value("do_grad") == "Yes");
 	const int cpus = leadingInt(job.value("nr_cpus"));
 	if (kind == Kind::Other || cpus < 1) return false;
-	out = split(kind, resourcesOf(job).gpus, cpus);
+	const Resources r = resourcesOf(job);
+	out = split(kind, r.gpus, cpus);
+	if (out.valid && r.gpus > 0 && (kind == Kind::Classify || kind == Kind::AutoRefine))
+	{
+		// the measured rule, as in the hover hint and in relion_launch
+		std::string note;
+		const RankAdvice a = adviseRanksForJob(job, r.gpus, std::max(1, cpus / r.gpus), r.queue, note);
+		out.mpi = a.mpi;
+		out.threads = a.threads;
+	}
 	return out.valid;
 }
 
@@ -403,7 +412,8 @@ namespace
 
 // Measured on an RTX 3090 (see documentation/ranks_per_gpu.md): where the E-step stops getting
 // faster with more worker processes on one GPU, and what a worker costs on the GPU and the host.
-struct WorkProfile { int workers; double gpu_gb; double host_gb; const char *name; };
+// min_threads: below it a worker is slower than fewer workers with more threads (all six cluster GPU models).
+struct WorkProfile { int workers; double gpu_gb; double host_gb; const char *name; int min_threads; };
 std::string gbText(double bytes)
 {
 	char buf[32];
@@ -415,12 +425,12 @@ WorkProfile profileOf(Work w)
 {
 	switch (w)
 	{
-	case Work::Class2D:    return {6, 0.4, 0.4, "EM Class2D"};
-	case Work::Class3D:    return {4, 2.0, 0.7, "3D classification with alignment"};
-	case Work::SkipAlign:  return {4, 2.5, 1.8, "3D classification without alignment"};
-	case Work::AutoRefine: return {2, 5.0, 14.0, "auto-refine"};
+	case Work::Class2D:    return {4, 0.4, 0.4, "EM Class2D", 1};
+	case Work::Class3D:    return {2, 2.5, 0.7, "3D classification with alignment", 1};
+	case Work::SkipAlign:  return {4, 2.5, 1.8, "3D classification without alignment", 2};
+	case Work::AutoRefine: return {2, 7.8, 14.0, "auto-refine", 1};
 	}
-	return {1, 1.0, 1.0, ""};
+	return {1, 1.0, 1.0, "", 1};
 }
 
 }
@@ -454,19 +464,31 @@ RankAdvice adviseRanks(const RankQuery &q)
 	}
 	else
 	{
+		if (q.learned > 0)
+		{
+			w = q.learned;
+			if (q.learned_from_other_jobs)
+				why << " Other jobs of this kind on this GPU model, with as many cores per GPU, settled on " << w << ".";
+			else
+				why << " Earlier runs of this job on this GPU model " << (q.learned_settled ? "settled on " : "are trying ") << w << ".";
+		}
 		auto limit = [&](int cap, const std::string &what)
 		{
 			cap = std::max(1, cap);
 			if (cap < w) { w = cap; why << " Limited to " << cap << " by " << what << "."; }
 		};
+		// a measurement of this job beats the rule's figure, but not an expert's RELION_GPU_GB_PER_RANK
+		const bool measured = q.gpu_bytes_per_worker > 0 && getenv("RELION_GPU_GB_PER_RANK") == NULL;
+		const double per_worker = measured ? q.gpu_bytes_per_worker : gpuBytesPerWorker(q.work);
 		if (q.gpu_bytes > 0)
-			limit((int)(q.gpu_bytes * GPU_FREE_FRACTION_FOR_RANKS / gpuBytesPerWorker(q.work)),
-			      "GPU memory (about " + gbText(gpuBytesPerWorker(q.work)) + " per worker)");
+			limit((int)(q.gpu_bytes * GPU_FREE_FRACTION_FOR_RANKS / per_worker),
+			      "GPU memory (about " + gbText(per_worker) + " per worker" + (measured ? ", as measured in an earlier run of this job" : "") + ")");
 		if (q.host_bytes > 0)
 			limit((int)(q.host_bytes * HOST_FREE_FRACTION_FOR_RANKS / (p.host_gb * 1e9)) / gpus,
 			      "the computer's memory (about " + gbText(p.host_gb * 1e9) + " per worker)");
 		if (q.cores > 0)
-			limit(q.cores / gpus, "the CPU cores (one per worker at least)");
+			limit(q.cores / (gpus * p.min_threads), p.min_threads == 1 ? std::string("the CPU cores (one per worker at least)")
+			      : "the CPU cores (" + std::to_string(p.min_threads) + " per worker at least)");
 		if (q.particles > 0)
 			limit((int)std::min<long>(1000, q.particles / (gpus * MIN_PARTICLES_PER_WORKER)), "the number of particles");
 	}
@@ -570,7 +592,15 @@ std::string tooltip(const JobView &job, Field field)
 		{
 			t << "RELION splits the " << plural(cpus, "CPU") << " into\n"
 			  << "    MPI processes: " << s.mpi << "    Threads: " << s.threads << "\n\n";
-			explain(t, kind, s, r.gpus);
+			if (r.gpus > 0 && (kind == Kind::Classify || kind == Kind::AutoRefine))
+			{
+				std::string note;
+				t << adviseRanksForJob(job, r.gpus, std::max(1, cpus / r.gpus), r.queue, note).reason
+				  << "\nrelion_launch makes the final choice on the computer the job runs on, from its\n"
+				     "GPUs, cores and memory and from the speed of earlier runs of the same job.";
+			}
+			else
+				explain(t, kind, s, r.gpus);
 		}
 		else if (!automatic)
 			t << "Used only when MPI processes and threads are chosen automatically.";

@@ -42,6 +42,7 @@
 #include <fstream>
 #include <unistd.h>
 #include <omp.h>
+#include "src/rank_launcher.h"
 #include "src/macros.h"
 #include "src/error.h"
 #include <dirent.h>
@@ -4626,6 +4627,10 @@ void MlOptimiser::iterate()
     {
         resrep::finish(resource_total_);
         reportResources(std::vector<resrep::ProcessStats>(1, resource_total_), false);
+        const std::string learned = rlaunch::learnFromRun(std::vector<resrep::ProcessStats>(1, resource_total_), false,
+                mydata.numberOfParticles(), resource_nr_steps_);
+        if (!learned.empty() && verb > 0)
+            std::cout << learned << std::endl;
     }
 
     // delete threads etc

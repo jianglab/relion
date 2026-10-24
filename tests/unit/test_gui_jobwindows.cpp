@@ -105,6 +105,7 @@ TEST_CASE("GUI: Reconstruct3D window has the fused-extraction controls", "[gui][
 TEST_CASE("GUI: MPI and thread fields suggest numbers when the mouse enters them", "[gui][jobwindow]")
 {
 	setenv("RELION_CPUS_PER_GPU", "8", 1);
+	setenv("RELION_GPU_MEMORY_GB", "24", 1); // the suggestion must not depend on the GPU of the test computer
 	JobWindow window;
 	window.initialise(PROC_2DCLASS, false);
 	window.guientries["use_gpu"].inp->value("Yes");
@@ -118,7 +119,9 @@ TEST_CASE("GUI: MPI and thread fields suggest numbers when the mouse enters them
 		Fl_Input *inp = window.guientries[name].inp;
 		inp->handle(FL_ENTER);
 		REQUIRE(inp->tooltip() != NULL);
-		CHECK(std::string(inp->tooltip()).find("MPI processes: 3    Threads: 8") != std::string::npos);
+		INFO(inp->tooltip());
+		// the measured rule: EM Class2D stops getting faster at 4 workers per GPU
+		CHECK(std::string(inp->tooltip()).find("MPI processes: 9    Threads: 2") != std::string::npos);
 	}
 	// chosen by RELION: the greyed-out fields show the numbers it will use
 	window.guientries["auto_parallel"].inp->value("Yes");
@@ -127,8 +130,9 @@ TEST_CASE("GUI: MPI and thread fields suggest numbers when the mouse enters them
 	cpus->handle(FL_ENTER);
 	REQUIRE(cpus->tooltip() != NULL);
 	CHECK(std::string(cpus->tooltip()).find("RELION splits the 16 CPUs") != std::string::npos);
-	CHECK(std::string(window.guientries["nr_mpi"].inp->value()) == "3");
-	CHECK(std::string(window.guientries["nr_threads"].inp->value()) == "8");
+	// the same measured rule as the hover hint above
+	CHECK(std::string(window.guientries["nr_mpi"].inp->value()) == "9");
+	CHECK(std::string(window.guientries["nr_threads"].inp->value()) == "2");
 	// other jobs keep fields without a tooltip
 	JobWindow extract;
 	extract.initialise(PROC_EXTRACT, false);
@@ -137,6 +141,7 @@ TEST_CASE("GUI: MPI and thread fields suggest numbers when the mouse enters them
 	inp->handle(FL_ENTER);
 	CHECK(inp->tooltip() == NULL);
 	unsetenv("RELION_CPUS_PER_GPU");
+	unsetenv("RELION_GPU_MEMORY_GB");
 }
 
 TEST_CASE("GUI: without a site template the Running tab has the built-in Slurm fields", "[gui][jobwindow]")

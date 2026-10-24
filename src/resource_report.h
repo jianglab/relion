@@ -46,6 +46,7 @@ struct ProcessStats
 	std::vector<int> cores;         ///< CPU cores this process may run on
 	std::vector<std::string> gpus;  ///< PCI bus IDs of its GPUs
 	std::vector<double> gpu_busy;   ///< per GPU: fraction of the time a kernel ran (-1: unknown)
+	std::vector<double> gpu_mem_peak; ///< per GPU: most memory in use on the card, by any process (bytes, 0: unknown)
 	bool   mps = false;             ///< an NVIDIA MPS daemon was running (processes share the GPU concurrently)
 };
 
@@ -83,6 +84,7 @@ private:
 	std::vector<void*> handles_;
 	std::vector<double> sum_;
 	std::vector<long> n_;
+	std::vector<double> mem_peak_;
 	void requestStop();
 	std::atomic<bool> running_{false};
 	std::mutex mtx_;

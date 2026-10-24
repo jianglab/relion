@@ -1251,6 +1251,7 @@ TEST_CASE("Class2DConsensus: rejects unknown assignment methods", "[pipeline][co
 TEST_CASE("Refinement jobs: MPI processes and threads chosen from the number of CPUs", "[pipeline]")
 {
 	setenv("RELION_CPUS_PER_GPU", "8", 1);
+	setenv("RELION_GPU_MEMORY_GB", "24", 1); // independent of the GPU of the test computer
 	RelionJob job = makeClass2DJob();
 	REQUIRE(job.joboptions.find("auto_parallel") != job.joboptions.end());
 	REQUIRE(job.joboptions.find("nr_cpus") != job.joboptions.end());
@@ -1263,10 +1264,14 @@ TEST_CASE("Refinement jobs: MPI processes and threads chosen from the number of 
 	std::string final_command, error_message;
 	REQUIRE(generateCommands(job, commands, final_command, error_message));
 	REQUIRE(commands.size() == 1);
-	CHECK(job.joboptions["nr_mpi"].getString() == "3");
-	CHECK(job.joboptions["nr_threads"].getString() == "8");
+	// the measured rule (EM Class2D: 4 workers per GPU), as in the hover hint and relion_launch
+	CHECK(job.joboptions["nr_mpi"].getString() == "9");
+	CHECK(job.joboptions["nr_threads"].getString() == "2");
 	CHECK(commands[0].find("relion_refine_mpi") != std::string::npos);
-	CHECK(commands[0].find("--j 8") != std::string::npos);
+	CHECK(commands[0].find("--j 2") != std::string::npos);
+	// run here, relion_launch makes the final choice on this computer, as on a queue node
+	CHECK(final_command.find("`which relion_launch` `which relion_refine_mpi`") != std::string::npos);
+	CHECK(final_command.find("mpirun") == std::string::npos);
 
 	// chosen by hand: the numbers given are used
 	job.joboptions["auto_parallel"].setString("No");
@@ -1276,6 +1281,7 @@ TEST_CASE("Refinement jobs: MPI processes and threads chosen from the number of 
 	CHECK(commands[0].find("relion_refine_mpi") == std::string::npos);
 	CHECK(commands[0].find("--j 2") != std::string::npos);
 	unsetenv("RELION_CPUS_PER_GPU");
+	unsetenv("RELION_GPU_MEMORY_GB");
 }
 
 TEST_CASE("Refinement jobs: jobs saved before the automatic choice keep their numbers", "[pipeline]")
@@ -1354,16 +1360,32 @@ TEST_CASE("Queued jobs: an empty submission-script field means RELION's own Slur
 	std::ifstream fs((outputname + "run_submit.script").c_str());
 	std::string script((std::istreambuf_iterator<char>(fs)), std::istreambuf_iterator<char>());
 	INFO(script);
-	// auto-refine on 1 GPU with 8 CPUs: a leader and 2 workers with 4 threads each
-	CHECK(script.find("#SBATCH --ntasks=2\n") != std::string::npos);
-	CHECK(script.find("#SBATCH --cpus-per-task=4\n") != std::string::npos);
+	// auto parallel: one task with the job's 8 CPUs; relion_launch chooses the processes on the node
+	CHECK(script.find("#SBATCH --ntasks=1\n") != std::string::npos);
+	CHECK(script.find("#SBATCH --cpus-per-task=8\n") != std::string::npos);
 	CHECK(script.find("#SBATCH --gpus=1\n") != std::string::npos);
 	CHECK(script.find("#SBATCH --mem=12G\n") != std::string::npos);
 	CHECK(script.find("#SBATCH --time=1-00:00:00\n") != std::string::npos);
 	CHECK(script.find("#SBATCH --output=" + outputname + "run.out") != std::string::npos);
-	CHECK(script.find("mpirun --oversubscribe --bind-to none -n 3 ") != std::string::npos);
-	CHECK(script.find("relion_refine_mpi") != std::string::npos);
+	CHECK(script.find("relion_launch `which relion_refine_mpi`") != std::string::npos);
+	CHECK(script.find("mpirun") == std::string::npos);
 	CHECK(script.find("XXX") == std::string::npos);
+
+	// numbers given by hand: auto-refine on 1 GPU, a leader and 2 workers with 4 threads each
+	job.joboptions["auto_parallel"].setString("No");
+	job.joboptions["nr_mpi"].setString("3");
+	job.joboptions["nr_threads"].setString("4");
+	REQUIRE(generateCommands(job, commands, final_command, error_message, true, outputname));
+	{
+		std::ifstream fh((outputname + "run_submit.script").c_str());
+		const std::string hand((std::istreambuf_iterator<char>(fh)), std::istreambuf_iterator<char>());
+		INFO(hand);
+		CHECK(hand.find("#SBATCH --ntasks=2\n") != std::string::npos);
+		CHECK(hand.find("#SBATCH --cpus-per-task=4\n") != std::string::npos);
+		CHECK(hand.find("mpirun --oversubscribe --bind-to none -n 3 ") != std::string::npos);
+		CHECK(hand.find("relion_launch") == std::string::npos);
+	}
+	job.joboptions["auto_parallel"].setString("Yes");
 
 	// no GPUs asked for when the job does not use them; a bad memory value is refused
 	job.joboptions["use_gpu"].setString("No");
@@ -1451,6 +1473,20 @@ TEST_CASE("Queued jobs: only jobs that run on GPUs ask Slurm for them", "[pipeli
 	CHECK(refine.slurmRequest().gpus == 0);
 	refine.joboptions["use_gpu"].setString("Yes");
 	CHECK(refine.slurmRequest().gpus == 2);
+	// auto parallel: one task with all the CPUs, the processes chosen by relion_launch on the node
+	REQUIRE(refine.joboptions.find("auto_parallel") != refine.joboptions.end());
+	refine.joboptions["auto_parallel"].setString("No");
+	CHECK_FALSE(refine.slurmRequest().launch);
+	{
+		refine.joboptions["auto_parallel"].setString("Yes");
+		refine.joboptions["nr_cpus"].setString("24");
+		const slurmscript::Request lr = refine.slurmRequest();
+		CHECK(lr.launch);
+		CHECK(lr.mpi == 1);
+		CHECK(lr.threads == 24);
+		CHECK(lr.gpus == 2);
+		refine.joboptions["auto_parallel"].setString("No");
+	}
 
 	// Class3D without alignment: the GPU unless RELION_GPU_SKIP_ALIGN=0; the default needs no
 	// variable on the node

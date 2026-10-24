@@ -35,9 +35,12 @@ struct Nvml
 	typedef int (*HandleFn)(const char *, void **);
 	struct Util { unsigned int gpu, memory; };
 	typedef int (*UtilFn)(void *, Util *);
+	struct Mem { unsigned long long total, free, used; };
+	typedef int (*MemFn)(void *, Mem *);
 	InitFn init = NULL;
 	HandleFn by_pci = NULL;
 	UtilFn util = NULL;
+	MemFn mem = NULL;               // optional
 	bool ok = false;
 
 	Nvml()
@@ -48,6 +51,7 @@ struct Nvml
 		init = (InitFn)dlsym(lib, "nvmlInit_v2");
 		by_pci = (HandleFn)dlsym(lib, "nvmlDeviceGetHandleByPciBusId_v2");
 		util = (UtilFn)dlsym(lib, "nvmlDeviceGetUtilizationRates");
+		mem = (MemFn)dlsym(lib, "nvmlDeviceGetMemoryInfo");
 		ok = init && by_pci && util && init() == 0;
 	}
 };
@@ -131,6 +135,7 @@ void Monitor::start(const std::vector<std::string> &gpu_pci_ids)
 	handles_.assign(pci_.size(), NULL);
 	sum_.assign(pci_.size(), 0.);
 	n_.assign(pci_.size(), 0);
+	mem_peak_.assign(pci_.size(), 0.);
 	if (!pci_.empty() && nvml().ok)
 		for (size_t i = 0; i < pci_.size(); i++)
 			if (nvml().by_pci(pci_[i].c_str(), &handles_[i]) != 0) handles_[i] = NULL;
@@ -157,6 +162,9 @@ void Monitor::sample()
 				sum_[i] += u.gpu / 100.;
 				n_[i]++;
 			}
+			Nvml::Mem m;
+			if (handles_[i] != NULL && nvml().mem && nvml().mem(handles_[i], &m) == 0)
+				mem_peak_[i] = std::max(mem_peak_[i], (double)m.used);
 		}
 		std::unique_lock<std::mutex> lk(mtx_);
 		cv_.wait_for(lk, std::chrono::milliseconds(500), [this] { return !running_; });
@@ -180,6 +188,7 @@ ProcessStats Monitor::stop(int threads)
 	s.mps = s.uses_gpu && mpsRunning();
 	for (size_t i = 0; i < pci_.size(); i++)
 		s.gpu_busy.push_back(n_[i] > 0 ? sum_[i] / n_[i] : -1.);
+	s.gpu_mem_peak = mem_peak_;
 	return s;
 }
 
@@ -191,6 +200,7 @@ std::string serialise(const ProcessStats &s)
 	for (int c : s.cores) o << ' ' << c;
 	o << ' ' << s.gpus.size();
 	for (size_t i = 0; i < s.gpus.size(); i++) o << ' ' << s.gpus[i] << ' ' << s.gpu_busy[i];
+	for (size_t i = 0; i < s.gpus.size(); i++) o << ' ' << (i < s.gpu_mem_peak.size() ? s.gpu_mem_peak[i] : 0.);
 	return o.str();
 }
 
@@ -206,6 +216,8 @@ ProcessStats deserialise(const std::string &str)
 	s.gpus.resize(n);
 	s.gpu_busy.resize(n);
 	for (size_t i = 0; i < n; i++) in >> s.gpus[i] >> s.gpu_busy[i];
+	s.gpu_mem_peak.assign(n, 0.);
+	for (size_t i = 0; i < n && (in >> s.gpu_mem_peak[i]); i++) {}
 	return s;
 }
 
@@ -219,6 +231,8 @@ void accumulate(ProcessStats &total, const ProcessStats &s)
 	}
 	for (size_t i = 0; i < total.gpu_busy.size() && i < s.gpu_busy.size(); i++)
 		total.gpu_busy[i] = (total.gpu_busy[i] >= 0. && s.gpu_busy[i] >= 0.) ? total.gpu_busy[i] + s.gpu_busy[i] * s.wall : -1.;
+	for (size_t i = 0; i < total.gpu_mem_peak.size() && i < s.gpu_mem_peak.size(); i++)
+		total.gpu_mem_peak[i] = std::max(total.gpu_mem_peak[i], s.gpu_mem_peak[i]);
 	total.wall += s.wall;
 	total.cpu += s.cpu;
 }

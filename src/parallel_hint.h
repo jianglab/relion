@@ -154,6 +154,11 @@ struct RankQuery
 	double gpu_bytes = 0;        // memory of one GPU (0: unknown, no limit)
 	double host_bytes = 0;       // memory of the computer for the job (0: unknown, no limit)
 	long particles = 0;          // particles of the data set (0: unknown, no limit)
+	int learned = 0;             // workers per GPU that earlier runs on this GPU model chose (0: none;
+	                             // the limits of memory, cores and particles still apply)
+	bool learned_settled = false; // false: earlier runs are still trying neighbouring counts
+	bool learned_from_other_jobs = false; // `learned` comes from other jobs of the same kind (none of this one)
+	double gpu_bytes_per_worker = 0; // measured in an earlier run of this job (0: the measured rule's)
 };
 
 struct RankAdvice
