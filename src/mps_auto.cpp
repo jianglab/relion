@@ -23,22 +23,21 @@ namespace mpsauto
 namespace
 {
 
-std::string g_dir;       // pipe/log directory of the daemon this rank started
-bool g_started = false;  // this rank started it (and stops it at exit)
-
 bool exists(const std::string &p)
 {
 	return access(p.c_str(), F_OK) == 0;
 }
 
-// Stop in the background: "quit" waits until all clients have disconnected,
-// which includes this process, so waiting for it here would never return
-void stopAtExit()
+// Stop the daemon once this process is gone, from a detached watcher rather than atexit:
+// a killed run (timeout, kill, GUI abort) never runs atexit handlers, and outside Slurm its
+// daemon then kept its GPU memory until the node rebooted. "quit" also waits until all
+// clients have disconnected, so this process could not wait for it itself.
+void stopWhenGone(const std::string &dir)
 {
-	if (!g_started)
-		return;
-	const std::string cmd = "( CUDA_MPS_PIPE_DIRECTORY='" + g_dir + "' CUDA_MPS_LOG_DIRECTORY='" + g_dir +
-	                        "' sh -c 'echo quit | nvidia-cuda-mps-control' >/dev/null 2>&1; rm -rf '" + g_dir + "' ) &";
+	const std::string cmd = "setsid sh -c 'while kill -0 " + std::to_string(getpid()) +
+	                        " 2>/dev/null; do sleep 2; done; echo quit | CUDA_MPS_PIPE_DIRECTORY=" + dir +
+	                        " CUDA_MPS_LOG_DIRECTORY=" + dir + " nvidia-cuda-mps-control; rm -rf " + dir +
+	                        "' </dev/null >/dev/null 2>&1 &";
 	if (system(cmd.c_str())) {}
 }
 
@@ -85,9 +84,7 @@ std::string start(MPI_Comm world, bool uses_gpu, int world_rank)
 				if (exists(d + "/control"))
 				{
 					ok = 1;
-					g_dir = d;
-					g_started = true;
-					std::atexit(stopAtExit);
+					stopWhenGone(d);
 					strncpy(dir, d.c_str(), sizeof(dir) - 1);
 					note = "Started NVIDIA MPS so that the " + std::to_string(workers) +
 					       " GPU workers on this node run on the GPU at the same time (RELION_AUTO_MPS=off to disable).";

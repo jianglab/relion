@@ -24,7 +24,7 @@
  *   and nvidia-cuda-mps-control is available.
  * It must run before any process creates a CUDA context, since processes
  * join MPS when their context is created. The daemon is stopped when the run
- * ends. RELION_AUTO_MPS=off disables it; any failure falls back to no MPS.
+ * ends, also when it is killed. RELION_AUTO_MPS=off disables it; any failure falls back to no MPS.
  */
 
 #include <mpi.h>
