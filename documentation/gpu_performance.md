@@ -573,6 +573,14 @@ Real-like helical Class3D (B3), RTX 3090, three pairs: E-step 702/680/724 s off,
 (about 7% faster), same final resolution; B5 auto-refine gains only 0.4% (its late iterations are
 bound by back-projection and the fine pass).
 
+In the shared-group kernel, each particle's sum of the CTF-weighted reference norm is read and written
+once per pass instead of once per pixel row, with the rows added in the same order (GROUP_CHECK 0
+differences). The reordered loop needs more registers, so blocks with 3 tiles are held to 3 per
+multiprocessor (`__launch_bounds__`), as before. Kernel time over 12 launches: 3 tiles 199 -> 176 ms,
+4 tiles 220 -> 178 ms. B3 iteration 2 on an RTX 3090, three pairs: 436/445/454 s before, 400/414/413 s
+after (about 8% faster), identical log-likelihood. Changing how the texture reads of the reference are
+laid out over the threads, or allowing more blocks per multiprocessor, only made the kernel slower.
+
 ## Full B5 run, and things that did not work
 
 Helical auto-refine, 20k particles (RELION_GPU_COARSE_XT=1, RELION_GPU_BLOCKS_PER_SM=12): wall

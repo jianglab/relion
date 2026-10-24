@@ -1482,8 +1482,15 @@ static __global__ void cuda_kernel_coarse_xt_group_x2(
 	}
 }
 
+// Group kernel: with 3 tiles per block the registers are held to 168 (3 resident blocks per SM; 188 registers would leave 2).
+// Other tile counts keep the compiler's choice. XT_GMINB=n sets the minimum number of blocks per SM for all tile counts.
+#ifdef XT_GMINB
+#define XT_GBOUNDS __launch_bounds__(XT_BLOCK, XT_GMINB)
+#else
+#define XT_GBOUNDS __launch_bounds__(XT_BLOCK, (NT == 3 ? 3 : 0))
+#endif
 template <int NT, int PIPE>
-static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt_group(
+static __global__ void XT_GBOUNDS cuda_kernel_diff2_coarse_xt_group(
 		const CoarseClassJob *g_classes,   // per class: n_orient and orient_offset of the union
 		const XtGroupBlock *g_blocks,
 		const int *g_bcols,                // columns of the blocks (into g_col and the A table)
@@ -1618,27 +1625,30 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt_group(
 			{
 				const int idx = tid + XT_BLOCK * i;
 				if (idx < n_parts * XT_PIXELS)
-					s_ct[idx / XT_PIXELS][idx & (XT_PIXELS - 1)] = nc[i];
+					s_ct[idx / XT_PIXELS][idx & (XT_PIXELS - 1)] = nc[i] * 0.5f;  // c * 0.5f is exact: the same value as below
 			}
 			#pragma unroll
 			for (int i = 0; i < NA; i++)
 				s_A[tid + XT_BLOCK * i] = PFA ? na[PFA ? i : 0] : gatherA(base, i);
 			__syncthreads();
-			#pragma unroll
-			for (int k = 0; k < XT_PIXELS / 8; k++)
+			// sum_p c_p |ref|^2 / 2 per particle: each particle's sum is loaded and stored once per pass and takes this
+			// pass's rows in the same order as before. Written with explicit fused multiply-adds: the plain expression is
+			// contracted differently next to the projection, and the sums must stay those of the unpipelined loop
 			{
-				const int row = plane + 8 * k;
-				if (base + row < image_size)
-				{
-					const float re = nr[k].x, im = nr[k].y;
-					for (int g = 0; g < n_parts; g++)
-						if ((B.mask >> g) & 1u)
-						{
-							// written with explicit fused multiply-adds: the plain expression is contracted differently
-							// next to the projection, and the sums must stay those of the unpipelined loop
-							s_rn[g][tid] = fmaf(s_ct[g][row] * 0.5f, fmaf(im, im, re * re), s_rn[g][tid]);
-						}
-				}
+				float sq[XT_PIXELS / 8];
+				#pragma unroll
+				for (int k = 0; k < XT_PIXELS / 8; k++)
+					sq[k] = base + plane + 8 * k < image_size ? fmaf(nr[k].y, nr[k].y, nr[k].x * nr[k].x) : -1.f;
+				for (int g = 0; g < n_parts; g++)
+					if ((B.mask >> g) & 1u)
+					{
+						float s = s_rn[g][tid];
+						#pragma unroll
+						for (int k = 0; k < XT_PIXELS / 8; k++)
+							if (base + plane + 8 * k < image_size)
+								s = fmaf(s_ct[g][plane + 8 * k], sq[k], s);
+						s_rn[g][tid] = s;
+					}
 			}
 			if (pass + 1 < pass_end)
 				fetch(pass + 1);
