@@ -293,50 +293,50 @@ void EERRenderer::readLegacy(FILE *fh)
 
 void EERRenderer::lazyReadFrames()
 {
-	#pragma omp critical(EERRenderer_lazyReadFrames)
+	// One lock per movie: a process-wide omp critical let only one movie be read at a time
+	std::lock_guard<std::mutex> guard(read_mutex);
+	if (read_data)
+		return;
+
+	TIFF *ftiff = TIFFOpen(fn_movie.c_str(), "r");
+
+	frame_starts.resize(nframes, 0);
+	frame_sizes.resize(nframes, 0);
+	buf = (unsigned char*)malloc(file_size); // This is big enough
+	if (buf == NULL)
+		REPORT_ERROR("Failed to allocate the buffer for " + fn_movie);
+	long long pos = 0;
+
+	// Read everything
+	const int first = (preread_start > 0) ? preread_start : 0;
+	const int last = (preread_end > 0) ? std::min(preread_end, nframes - 1) : nframes - 1;
+	for (int frame = first; frame <= last; frame++)
 	{
-		if (!read_data) // cannot return from within omp critical
-		{	
-			TIFF *ftiff = TIFFOpen(fn_movie.c_str(), "r");
+		// Step to the next directory: TIFFSetDirectory(frame) walks the chain from the first one in
+		// older libtiff, which is quadratic in the number of frames, in small reads
+		if (!(frame == first ? TIFFSetDirectory(ftiff, frame) : TIFFReadDirectory(ftiff)))
+			REPORT_ERROR("EER: cannot read the directory of frame " + integerToString(frame + 1) + " in " + fn_movie);
+		const int nstrips = TIFFNumberOfStrips(ftiff);
+		frame_starts[frame] = pos;
 
-			frame_starts.resize(nframes, 0);
-			frame_sizes.resize(nframes, 0);
-			buf = (unsigned char*)malloc(file_size); // This is big enough
-			if (buf == NULL)
-				REPORT_ERROR("Failed to allocate the buffer for " + fn_movie);
-			long long pos = 0;
+		for (int strip = 0; strip < nstrips; strip++)
+		{
+			const int strip_size = TIFFRawStripSize(ftiff, strip);
+			if (pos + strip_size >= file_size)
+				REPORT_ERROR("EER: buffer overflow when reading raw strips.");
 
-			// Read everything
-			for (int frame = 0; frame < nframes; frame++)
-			{
-				if ((preread_start > 0 && frame < preread_start) ||
-				    (preread_end > 0 && frame > preread_end))
-					continue;
-
-				TIFFSetDirectory(ftiff, frame);
-				const int nstrips = TIFFNumberOfStrips(ftiff);
-				frame_starts[frame] = pos;
-
-				for (int strip = 0; strip < nstrips; strip++)
-				{
-					const int strip_size = TIFFRawStripSize(ftiff, strip);
-					if (pos + strip_size >= file_size)
-						REPORT_ERROR("EER: buffer overflow when reading raw strips.");
-
-					TIFFReadRawStrip(ftiff, strip, buf + pos, strip_size);
-					pos += strip_size;
-					frame_sizes[frame] += strip_size;
-				}
-	#ifdef DEBUG_EER
-				printf("EER in TIFF: Read frame %d from %s, nstrips = %d, current pos in buffer = %lld / %lld\n", frame, fn_movie.c_str(), nstrips, pos, file_size);
-	#endif
-			}
-
-			TIFFClose(ftiff);
-
-			read_data = true;
+			TIFFReadRawStrip(ftiff, strip, buf + pos, strip_size);
+			pos += strip_size;
+			frame_sizes[frame] += strip_size;
 		}
+#ifdef DEBUG_EER
+		printf("EER in TIFF: Read frame %d from %s, nstrips = %d, current pos in buffer = %lld / %lld\n", frame, fn_movie.c_str(), nstrips, pos, file_size);
+#endif
 	}
+
+	TIFFClose(ftiff);
+
+	read_data = true;
 }
 
 EERRenderer::~EERRenderer()

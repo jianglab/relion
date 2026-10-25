@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <omp.h>
+#include <mutex>
 
 #include <src/image.h>
 
@@ -25,6 +26,7 @@ class EERRenderer {
 	bool ready;
 	bool is_legacy; // legacy, non-TIFF container
 	bool read_data;
+	std::mutex read_mutex;   // guards the lazy read of the frames
 
 	std::vector<long long> frame_starts, frame_sizes;
 	unsigned char* buf;
