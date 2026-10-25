@@ -46,6 +46,7 @@
 #include "src/acc/settings.h"
 #include <src/jaz/tomography/optimisation_set.h>
 #include "src/prefetch.h"
+#include <chrono>
 #include "src/ctf_memo.h"
 #include "src/fftw_rect.h"
 #include "src/resource_report.h"
@@ -843,6 +844,9 @@ public:
 	std::vector<MultidimArray<RFLOAT> > exp_imgs;
 	std::vector<int> exp_random_class_some_particles;
 	AsyncImagePrefetcher *prefetcher_ = nullptr;
+	std::chrono::steady_clock::time_point prefetch_start_;   // start of the E-step's reading, for the advice below
+	/// one line of advice when the E-step mostly waited for its images
+	std::string readingAdvice(double wait_percent);
 	// RELION_PREP_AHEAD: exact memo of the host-built CTF images of the accelerated expectation (null when off)
 	std::shared_ptr<CtfMemo> ctf_memo_;
 	// RELION_ASYNC_SERIAL: zero-fill of the weighted sums runs here while the E-step does its work (see async_serial.h)
@@ -850,6 +854,8 @@ public:
 	bool wsum_zero_reported_ = false;
 	bool prefetch_speculative_ = false; // MPI follower: the next pool is a guess (the one after this), checked on arrival
 	int prefetch_hits_ = 0, prefetch_misses_ = 0;
+	long int prefetch_next_first_ = -1, prefetch_next_last_ = -1; // MPI: the pool the leader reserved for this follower next
+	double image_wait_s_ = 0.; // time expectationSomeParticles spent reading particle images or waiting for them
 	double exp_time_serial_s = 0., exp_time_par_s = 0.; // RELION_ITER_TIMING: pool set-up/reading vs. threaded part of expectationSomeParticles
 	// Stacks kept open between pools when images are read without the prefetcher
 	// (e.g. by MPI workers, which get their particles a pool at a time)

@@ -96,6 +96,7 @@
 
 // RELION_ITER_TIMING=1 prints the wall time of each stage of every iteration to stderr
 #include <chrono>
+#include "src/virtual_particles.h"
 static double itNow() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 static double itMarks[12];
 static bool itTimingOn() { static const bool on = getenv("RELION_ITER_TIMING") != NULL; return on; }
@@ -4699,6 +4700,24 @@ void MlOptimiser::setupPrepAhead()
     ctf_memo_->beginIteration(sig.str());
 }
 
+std::string MlOptimiser::readingAdvice(double wait_percent)
+{
+    std::ostringstream o;
+    o << " The E-step waited for particle images " << (int) (wait_percent + 0.5) << "% of the time, so reading them, not computing, sets the pace."
+      << " More processes read in parallel (relion_launch chooses them for the node), --preread_images reads them into memory once"
+      << " if they fit, and --scratch_dir copies them to a local disk.";
+    if (mydata.particles.size() > 0)
+    {
+        long int imgno;
+        FileName fn_stack;
+        mydata.particles[0].name.decompose(imgno, fn_stack);
+        if (vparticles::isVirtualStackFile(fn_stack))
+            o << " These are virtual particles: they are computed from their micrographs unless their cache (RELION_VPARTICLE_CACHE,"
+              << " by default Cache/virtual_particles in the project) has them, so check that it can be written (a warning says so if not).";
+    }
+    return o.str();
+}
+
 void MlOptimiser::expectation()
 {
 
@@ -4953,10 +4972,13 @@ void MlOptimiser::expectation()
     if (use_prefetch)
     {
         prefetch_global_last_ = my_last_part_id;
-        int max_readers = XMIPP_MIN(nr_threads, 8);
+        // readers mostly wait on the disk, so up to 4 per thread (at most 32); each doubling is kept only if it helps
+        int max_readers = XMIPP_MAX(nr_threads, XMIPP_MIN(32, 4 * nr_threads));
         if (const char *e = getenv("RELION_PREFETCH_THREADS")) // most reader threads per pool (1 = the old single reader)
             max_readers = XMIPP_MAX(1, atoi(e));
         prefetcher_ = new AsyncImagePrefetcher(&mydata, max_readers);
+        prefetcher_->setReadAhead(my_last_part_id);   // this process takes its pools in order
+        prefetch_start_ = std::chrono::steady_clock::now();
         long int first = my_first_part_id + nr_particles_done;
         long int last = XMIPP_MIN(my_last_part_id, first + nr_pool - 1);
         getMetaAndImageDataSubset(first, last, false);
@@ -5038,9 +5060,13 @@ void MlOptimiser::expectation()
             std::cout << " Image prefetch: " << np << " pools of " << nr_pool << " images, read in "
                       << prefetcher_->poolReadTimeUs() / 1.e6 / np << " s each on average; the E-step waited "
                       << prefetcher_->waitTimeUs() / 1.e6 << " s in total, " << prefetcher_->nrLatePools()
-                      << " pools were late; up to " << prefetcher_->readers() << " threads read a pool (--no_prefetch turns the prefetcher off)." << std::endl;
+                      << " pools were late; " << prefetcher_->readers() << " threads read a pool (RELION_PREFETCH_THREADS caps them), up to "
+                      << prefetcher_->depth() << " pools were read ahead (RELION_PREFETCH_DEPTH fixes it; --no_prefetch turns the prefetcher off)." << std::endl;
             if (!prefetcher_->warmReport().empty())
                 std::cout << " " << prefetcher_->warmReport() << std::endl;
+            const double estep = std::chrono::duration<double>(std::chrono::steady_clock::now() - prefetch_start_).count();
+            if (estep > 60. && prefetcher_->waitTimeUs() / 1.e6 > 0.3 * estep)
+                std::cout << readingAdvice(100. * prefetcher_->waitTimeUs() / 1.e6 / estep) << std::endl;
         }
         delete prefetcher_;
         prefetcher_ = NULL;
@@ -5490,7 +5516,9 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
     if (prefetch_active && prefetch_speculative_)
     {
         // the images of this pool were read while the previous one was being processed, if the guess was right
+        const double w0 = itNow();
         imgs_prefetched = prefetcher_->waitAndSwap(exp_imgs, my_first_part_id, my_last_part_id, true);
+        image_wait_s_ += itNow() - w0;
         if (imgs_prefetched)
             prefetch_hits_++;
         else if (++prefetch_misses_ >= 3 && prefetch_hits_ == 0)
@@ -5501,9 +5529,15 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
         }
         if (prefetcher_ != NULL)
         {
-            long int next_first = my_last_part_id + 1;
-            if (next_first <= prefetch_global_last_)
-                prefetcher_->startPrefetch(next_first, XMIPP_MIN(prefetch_global_last_, next_first + nr_pool - 1));
+            // the pool the leader reserved for this follower's next request, else a guess: the pool after this one
+            if (prefetch_next_first_ >= 0)
+                prefetcher_->startPrefetch(prefetch_next_first_, prefetch_next_last_);
+            else
+            {
+                long int next_first = my_last_part_id + 1;
+                if (next_first <= prefetch_global_last_)
+                    prefetcher_->startPrefetch(next_first, XMIPP_MIN(prefetch_global_last_, next_first + nr_pool - 1));
+            }
         }
     }
     if (!imgs_prefetched && (prefetcher_ == NULL || prefetch_speculative_))
@@ -5607,7 +5641,9 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
                 read_timer = TIMING_ESP_READ_SCRATCH;
             timer.tic(read_timer);
 #endif
+            const double r0 = itNow();
             img.readFromOpenFile(fn_img, hFile, -1, false);
+            image_wait_s_ += itNow() - r0;
 #ifdef TIMING
             timer.toc(read_timer);
 #endif
@@ -5625,7 +5661,9 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
 #ifdef TIMING
         timer.tic(TIMING_ESP_PREFETCH_WAIT);
 #endif
+        const double w0 = itNow();
         prefetcher_->waitAndSwap(exp_imgs, my_first_part_id, my_last_part_id);
+        image_wait_s_ += itNow() - w0;
 #ifdef TIMING
         timer.toc(TIMING_ESP_PREFETCH_WAIT);
 #endif

@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <queue>
+#include <deque>
 #include <vector>
 #include <unordered_map>
 #include <list>
@@ -83,11 +84,18 @@ private:
 class AsyncImagePrefetcher
 {
 public:
-	/// max_readers: the most threads that may read one pool; starts with one and adds readers while the
-	/// E-step has to wait for pools (a network file system answers many requests at once)
+	/// max_readers: the most threads that may read one pool. Reading starts with one thread; while the E-step
+	/// has to wait for pools the threads are doubled, and a doubling is kept only if it made reading faster
+	/// (a network file system, or virtual particles cut from their micrographs, keep threads waiting on the
+	/// disk rather than the processor, so more threads than cores can help). When more threads no longer
+	/// help, more pools are read ahead (see setReadAhead), within a share of the available memory.
 	AsyncImagePrefetcher(Experiment *mydata, int max_readers = 1);
 	~AsyncImagePrefetcher();
 
+	/// Pools after the requested one may be read ahead, in steps of the requested pool's size, up to
+	/// particle last_part_id (in sorted order); only for runs that take their pools in that order.
+	/// RELION_PREFETCH_DEPTH=n fixes the number of pools held ahead.
+	void setReadAhead(long int last_part_id);
 	void startPrefetch(long int first_part_id, long int last_part_id);
 	/// Wait for the images of particles [first_part_id, last_part_id] (the range passed to
 	/// the last startPrefetch) and swap them into `target`. Any other range is an error, unless
@@ -106,30 +114,38 @@ public:
 	/// Wall time the reader needed for each pool, summed
 	long int poolReadTimeUs() const { return pool_read_time_us_; }
 	int readers() const { return active_readers_; }
+	/// the most pools held read ahead
+	int depth() const { return depth_; }
 	/// one line about the stack warm-up, empty when it is off
 	std::string warmReport() const { return warmer_ ? warmer_->report() : std::string(); }
 
 private:
+	struct Pool
+	{
+		long int first, last;
+		std::vector<MultidimArray<RFLOAT>> imgs;
+	};
 	void workerThread();
+	bool nextPool(long int &first, long int &last);   // with mtx_ held
+	bool inReady(long int first) const;               // with mtx_ held
+	void adaptReaders();
+	void readPool(Pool &p, std::vector<std::unique_ptr<OpenStacks> > &readers);
 
 	Experiment *mydata_;
 
-	std::vector<MultidimArray<RFLOAT>> buffers_[2];
-	int fill_idx_;
-	int ready_idx_;
-
-	long int first_part_id_;
-	long int last_part_id_;
-	long int ready_first_ = -1, ready_last_ = -1; // range held by buffers_[ready_idx_]
-	bool has_work_;
-	bool work_done_;
-	bool pending_ = false; // a pool was started and not yet taken
+	std::deque<Pool> ready_;            // pools read and not yet taken, in order
+	long int want_first_ = -1, want_last_ = -1; // the pool asked for (startPrefetch) and not yet taken
+	long int taken_last_ = -1;          // last particle of the pool taken last
+	long int reading_first_ = -1;       // the pool being read
+	long int pool_size_ = 0;            // particles per requested pool
+	long int ahead_last_ = -1;          // pools may be read ahead up to this particle (-1: none)
+	bool pending_ = false;              // a pool was started and not yet taken
 
 	std::mutex mtx_;
 	std::condition_variable cv_start_;
 	std::condition_variable cv_done_;
 
-	bool shutdown_;
+	bool shutdown_ = false;
 	std::thread worker_thread_;
 
 	std::atomic<long int> read_time_original_us_{0};
@@ -139,6 +155,16 @@ private:
 	int max_readers_ = 1;
 	std::atomic<int> active_readers_{1};
 	std::atomic<bool> last_pool_late_{false};
+	// reader growth (worker thread only): time per image of the pools read with the current readers, and
+	// the readers before the last doubling with their time per image (0: not measured)
+	double level_us_ = 0.;
+	long int level_imgs_ = 0;
+	int prev_readers_ = 0;
+	double prev_us_per_img_ = 0.;
+	bool readers_settled_ = false;
+	std::atomic<int> depth_{1};
+	int max_depth_ = 1;
+	bool fixed_depth_ = false;
 	long int wait_time_us_ = 0, nr_pools_ = 0, nr_late_pools_ = 0;
 	std::unique_ptr<StackWarmer> warmer_;
 };

@@ -286,14 +286,7 @@ void StackWarmer::run()
 
 AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata, int max_readers)
 	: mydata_(mydata),
-	  max_readers_(std::max(1, max_readers)),
-	  fill_idx_(0),
-	  ready_idx_(-1),
-	  first_part_id_(0),
-	  last_part_id_(0),
-	  has_work_(false),
-	  work_done_(false),
-	  shutdown_(false)
+	  max_readers_(std::max(1, max_readers))
 {
 	// opt-in: RELION_PREFETCH_WARM=1 (or a thread count) reads whole stacks ahead (see StackWarmer)
 	if (const char *e = getenv("RELION_PREFETCH_WARM"))
@@ -301,6 +294,12 @@ AsyncImagePrefetcher::AsyncImagePrefetcher(Experiment *mydata, int max_readers)
 		{
 			int nt = atoi(e);
 			warmer_.reset(new StackWarmer(mydata_, nt > 1 ? nt : 8));
+		}
+	if (const char *e = getenv("RELION_PREFETCH_DEPTH"))
+		if (atoi(e) > 0)
+		{
+			depth_ = max_depth_ = atoi(e);
+			fixed_depth_ = true;
 		}
 	worker_thread_ = std::thread(&AsyncImagePrefetcher::workerThread, this);
 }
@@ -310,28 +309,64 @@ AsyncImagePrefetcher::~AsyncImagePrefetcher()
 	stop();
 }
 
+void AsyncImagePrefetcher::setReadAhead(long int last_part_id)
+{
+	std::lock_guard<std::mutex> lock(mtx_);
+	ahead_last_ = last_part_id;
+	cv_start_.notify_one();
+}
+
 void AsyncImagePrefetcher::startPrefetch(long int first_part_id, long int last_part_id)
 {
 	std::lock_guard<std::mutex> lock(mtx_);
-	first_part_id_ = first_part_id;
-	last_part_id_ = last_part_id;
-	has_work_ = true;
-	work_done_ = false;
+	want_first_ = first_part_id;
+	want_last_ = last_part_id;
+	pool_size_ = last_part_id - first_part_id + 1;
 	pending_ = true;
 	cv_start_.notify_one();
 	if (warmer_)
 		warmer_->consumed(first_part_id, last_part_id, false);
 }
 
+bool AsyncImagePrefetcher::inReady(long int first) const
+{
+	for (const Pool &q : ready_)
+		if (q.first == first) return true;
+	return false;
+}
+
+bool AsyncImagePrefetcher::nextPool(long int &first, long int &last)
+{
+	// the pool asked for, unless it is read or being read; pools read ahead on another guess are of no use
+	if (want_first_ >= 0 && reading_first_ != want_first_ && !inReady(want_first_))
+	{
+		ready_.clear();
+		first = want_first_;
+		last = want_last_;
+		return true;
+	}
+	// read ahead: the pool after the last one read (or taken)
+	if (ahead_last_ < 0 || pool_size_ <= 0 || reading_first_ >= 0 || (long int) ready_.size() >= depth_)
+		return false;
+	const long int tail = !ready_.empty() ? ready_.back().last : (want_first_ >= 0 ? want_last_ : taken_last_);
+	if (tail < 0 || tail + 1 > ahead_last_)
+		return false;
+	first = tail + 1;
+	last = std::min(ahead_last_, tail + pool_size_);
+	return true;
+}
+
 bool AsyncImagePrefetcher::waitAndSwap(std::vector<MultidimArray<RFLOAT>>& target, long int first_part_id, long int last_part_id, bool speculative)
 {
 	std::unique_lock<std::mutex> lock(mtx_);
-	if (speculative && !pending_)
+	if (speculative && !pending_ && !inReady(first_part_id))
 		return false;
 	struct timeval w0, w1;
 	gettimeofday(&w0, NULL);
-	bool late = (ready_idx_ == -1);
-	cv_done_.wait(lock, [this]() { return ready_idx_ != -1 || shutdown_; });
+	bool late = !inReady(first_part_id);
+	// until the pool is there, or will not come: neither asked for nor being read
+	cv_done_.wait(lock, [&]() { return shutdown_ || inReady(first_part_id) ||
+	                                   (want_first_ != first_part_id && reading_first_ != first_part_id); });
 	gettimeofday(&w1, NULL);
 	wait_time_us_ += (w1.tv_sec - w0.tv_sec) * 1000000 + (w1.tv_usec - w0.tv_usec);
 	nr_pools_++;
@@ -344,24 +379,31 @@ bool AsyncImagePrefetcher::waitAndSwap(std::vector<MultidimArray<RFLOAT>>& targe
 		warmer_->consumed(first_part_id, last_part_id, late);
 	if (shutdown_)
 		return false;
-	if (speculative && (ready_first_ != first_part_id || ready_last_ != last_part_id))
+
+	// pools before it are stale guesses
+	while (!ready_.empty() && ready_.front().first != first_part_id && inReady(first_part_id))
+		ready_.pop_front();
+	if (ready_.empty() || ready_.front().first != first_part_id || ready_.front().last != last_part_id)
 	{
-		ready_idx_ = -1;
-		work_done_ = false;
-		has_work_ = false;
-		pending_ = false;
-		return false;
+		if (speculative)
+		{
+			ready_.clear();
+			want_first_ = -1;
+			pending_ = false;
+			cv_start_.notify_one();
+			return false;
+		}
+		REPORT_ERROR("AsyncImagePrefetcher: no prefetched images for particles " + integerToString(first_part_id) + "-" +
+		             integerToString(last_part_id) + (want_first_ >= 0 ? ", the pool asked for was " + integerToString(want_first_) + "-" +
+		             integerToString(want_last_) : std::string("")));
 	}
-	if (ready_first_ != first_part_id || ready_last_ != last_part_id)
-		REPORT_ERROR("AsyncImagePrefetcher: the prefetched images are for particles " + integerToString(ready_first_) + "-" +
-		             integerToString(ready_last_) + ", not the requested " + integerToString(first_part_id) + "-" + integerToString(last_part_id));
 
-	target.swap(buffers_[ready_idx_]);
-	ready_idx_ = -1;
+	target.swap(ready_.front().imgs);
+	ready_.pop_front();
+	want_first_ = -1;
+	taken_last_ = last_part_id;
 	pending_ = false;
-	work_done_ = false;
-	has_work_ = false;
-
+	cv_start_.notify_one();   // room to read ahead
 	return true;
 }
 
@@ -371,9 +413,109 @@ void AsyncImagePrefetcher::stop()
 		std::lock_guard<std::mutex> lock(mtx_);
 		shutdown_ = true;
 		cv_start_.notify_one();
+		cv_done_.notify_all();
 	}
 	if (worker_thread_.joinable())
 		worker_thread_.join();
+}
+
+void AsyncImagePrefetcher::adaptReaders()
+{
+	if (!last_pool_late_.exchange(false))
+		return;
+	const double us_per_img = level_imgs_ > 0 ? level_us_ / level_imgs_ : 0.;
+	if (!readers_settled_ && prev_readers_ > 0 && prev_us_per_img_ > 0.)
+	{
+		if (us_per_img <= 0.)
+			return;   // the last doubling is not measured yet
+		if (us_per_img > 0.9 * prev_us_per_img_)
+		{
+			// it did not make reading faster: back to the readers before it
+			active_readers_ = prev_readers_;
+			readers_settled_ = true;
+		}
+		prev_readers_ = 0;
+	}
+	if (!readers_settled_)
+	{
+		if (active_readers_ < max_readers_)
+		{
+			prev_readers_ = active_readers_;
+			prev_us_per_img_ = us_per_img;
+			active_readers_ = std::min(max_readers_, 2 * active_readers_);
+			level_us_ = 0.;
+			level_imgs_ = 0;
+			return;
+		}
+		readers_settled_ = true;
+	}
+	// more threads do not help: hold more pools ahead
+	if (!fixed_depth_ && depth_ < max_depth_)
+		depth_++;
+}
+
+void AsyncImagePrefetcher::readPool(Pool &p, std::vector<std::unique_ptr<OpenStacks> > &readers)
+{
+	struct timeval p0, p1;
+	gettimeofday(&p0, NULL);
+	const long int n_img = p.last - p.first + 1;
+	p.imgs.resize(n_img);
+	const int nr = std::min<long int>(active_readers_, n_img);
+
+	std::atomic<long int> next(0);
+	auto read_some = [&](int rid)
+	{
+		long int i;
+		while ((i = next++) < n_img)
+		{
+			long int part_id = mydata_->sorted_idx[p.first + i];
+
+			FileName fn_img;
+			bool on_scratch = mydata_->getImageNameOnScratch(part_id, fn_img);
+			if (!on_scratch)
+				fn_img = mydata_->particles[part_id].name;
+
+			long int imgno;
+			FileName fn_stack;
+			fn_img.decompose(imgno, fn_stack);
+			fImageHandler &hFile = readers[rid]->get(fn_stack);
+
+			Image<RFLOAT> img;
+			struct timeval t0, t1;
+			gettimeofday(&t0, NULL);
+			img.readFromOpenFile(fn_img, hFile, -1, false);
+			gettimeofday(&t1, NULL);
+			long int dt = (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_usec - t0.tv_usec);
+			if (mydata_->cacheMode)
+				read_time_cache_us_ += dt;
+			else if (!on_scratch)
+				read_time_original_us_ += dt;
+			else
+				read_time_scratch_us_ += dt;
+
+			img().setXmippOrigin();
+			p.imgs[i] = img();
+		}
+	};
+	std::vector<std::thread> helpers;
+	for (int r = 1; r < nr; r++)
+		helpers.emplace_back(read_some, r);
+	read_some(0);
+	for (auto &h : helpers) h.join();
+
+	gettimeofday(&p1, NULL);
+	const long int us = (p1.tv_sec - p0.tv_sec) * 1000000 + (p1.tv_usec - p0.tv_usec);
+	pool_read_time_us_ += us;
+	level_us_ += us;
+	level_imgs_ += n_img;
+
+	// what the pools held ahead may take: a quarter of the available memory, at most 8 pools
+	if (!fixed_depth_ && n_img > 0)
+	{
+		const double pool_bytes = (double) n_img * p.imgs[0].nzyxdim * sizeof(RFLOAT);
+		max_depth_ = std::max(1, std::min(8, (int) (0.25 * memAvailableBytes() / std::max(1., pool_bytes))));
+		if (depth_ > max_depth_) depth_ = max_depth_;
+	}
 }
 
 void AsyncImagePrefetcher::workerThread()
@@ -385,82 +527,23 @@ void AsyncImagePrefetcher::workerThread()
 
 	while (true)
 	{
-		long int my_first, my_last;
+		Pool p;
 		{
 			std::unique_lock<std::mutex> lock(mtx_);
-			cv_start_.wait(lock, [this]() { return has_work_ || shutdown_; });
+			cv_start_.wait(lock, [&]() { return shutdown_ || nextPool(p.first, p.last); });
 			if (shutdown_)
 				return;
-			my_first = first_part_id_;
-			my_last = last_part_id_;
-			// Take the job: left set, the loop came straight back and read the same range
-			// again into the other buffer, and that stale copy could be handed out for the
-			// next range when the main thread was fast (particles got the wrong images)
-			has_work_ = false;
+			reading_first_ = p.first;
 		}
-
-		struct timeval p0, p1;
-		gettimeofday(&p0, NULL);
-		std::vector<MultidimArray<RFLOAT>>& buffer = buffers_[fill_idx_];
-		buffer.clear();
-		const long int n_img = my_last - my_first + 1;
-		buffer.resize(n_img);
-
-		// more readers while the E-step had to wait for the last pool
-		if (last_pool_late_.exchange(false) && active_readers_ < max_readers_)
-			active_readers_ = std::min(max_readers_, active_readers_ * 2);
-		const int nr = std::min<long int>(active_readers_, n_img);
-
-		std::atomic<long int> next(0);
-		auto read_some = [&](int rid)
-		{
-			long int i;
-			while ((i = next++) < n_img)
-			{
-				long int part_id = mydata_->sorted_idx[my_first + i];
-
-				FileName fn_img;
-				bool on_scratch = mydata_->getImageNameOnScratch(part_id, fn_img);
-				if (!on_scratch)
-					fn_img = mydata_->particles[part_id].name;
-
-				long int imgno;
-				FileName fn_stack;
-				fn_img.decompose(imgno, fn_stack);
-				fImageHandler &hFile = readers[rid]->get(fn_stack);
-
-				Image<RFLOAT> img;
-				struct timeval t0, t1;
-				gettimeofday(&t0, NULL);
-				img.readFromOpenFile(fn_img, hFile, -1, false);
-				gettimeofday(&t1, NULL);
-				long int dt = (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_usec - t0.tv_usec);
-				if (mydata_->cacheMode)
-					read_time_cache_us_ += dt;
-				else if (!on_scratch)
-					read_time_original_us_ += dt;
-				else
-					read_time_scratch_us_ += dt;
-
-				img().setXmippOrigin();
-				buffer[i] = img();
-			}
-		};
-		std::vector<std::thread> helpers;
-		for (int r = 1; r < nr; r++)
-			helpers.emplace_back(read_some, r);
-		read_some(0);
-		for (auto &h : helpers) h.join();
-
-		gettimeofday(&p1, NULL);
-		pool_read_time_us_ += (p1.tv_sec - p0.tv_sec) * 1000000 + (p1.tv_usec - p0.tv_usec);
+		adaptReaders();
+		readPool(p, readers);
 		{
 			std::lock_guard<std::mutex> lock(mtx_);
-			ready_idx_ = fill_idx_;
-			ready_first_ = my_first;
-			ready_last_ = my_last;
-			fill_idx_ = 1 - fill_idx_;
-			cv_done_.notify_one();
+			reading_first_ = -1;
+			// a pool asked for meanwhile on another guess has made this one stale
+			if (want_first_ < 0 || want_first_ <= p.first)
+				ready_.push_back(std::move(p));
+			cv_done_.notify_all();
 		}
 	}
 }

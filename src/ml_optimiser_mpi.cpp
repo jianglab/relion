@@ -1279,7 +1279,7 @@ void MlOptimiserMpi::expectation()
 	std::cerr << "MlOptimiserMpi::expectation: Entering " << std::endl;
 #endif
 
-	MultidimArray<long int> first_last_nr_images(6);
+	MultidimArray<long int> first_last_nr_images(8);
 	int first_follower = 1;
 	// Use maximum of 100 particles for 3D and 10 particles for 2D estimations
 	int n_trials_acc = (mymodel.ref_dim==3 && (mymodel.data_dim != 3|| mydata.is_tomo) ) ? 100 : 10;
@@ -1467,6 +1467,8 @@ void MlOptimiserMpi::expectation()
 #define JOB_LEN_FN_IMG  (first_last_nr_images(3))
 #define JOB_LEN_FN_CTF  (first_last_nr_images(4))
 #define JOB_LEN_FN_RECIMG  (first_last_nr_images(5))
+#define JOB_NEXT_FIRST  (first_last_nr_images(6)) // the pool reserved for the follower's next request (-1: none)
+#define JOB_NEXT_LAST   (first_last_nr_images(7))
 #define JOB_NPAR  (JOB_LAST - JOB_FIRST + 1)
 
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
@@ -1700,10 +1702,17 @@ void MlOptimiserMpi::expectation()
 			// Leader distributes all packages of SomeParticles
 			int nr_followers_done = 0;
 			int random_halfset = 0;
-			long int nr_particles_todo, nr_particles_done = 0;
+			long int nr_particles_done = 0;
+			std::vector<long int> reserved_first, reserved_last;   // per follower: the pool reserved for its next request
+			const bool mpi_reserve = !(getenv("RELION_MPI_RESERVE") != NULL && atoi(getenv("RELION_MPI_RESERVE")) == 0);
+			// An idle follower may take a pool reserved for a busy one (RELION_MPI_STEAL=0: never)
+			const bool mpi_steal = !(getenv("RELION_MPI_STEAL") != NULL && atoi(getenv("RELION_MPI_STEAL")) == 0);
+			auto leader_now = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+			std::vector<double> job_start(node->size, 0.);   // per follower: when it was handed its current job
+			double job_time_sum = 0.;
+			long int nr_jobs_timed = 0, nr_steals = 0;
 			long int nr_particles_done_halfset1 = 0;
 			long int nr_particles_done_halfset2 = 0;
-			long int my_nr_particles_done = 0;
 
 
 			// SHWS10052021: reduce frequency of abort check 10-fold
@@ -1731,6 +1740,8 @@ void MlOptimiserMpi::expectation()
 				// Otherwise, the leader needs to receive and handle the updated metadata from the followers
 				if (JOB_NIMG > 0)
 				{
+					job_time_sum += leader_now() - job_start[this_follower];
+					nr_jobs_timed++;
 					int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
 					exp_metadata.resize(JOB_NIMG, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 					node->relion_MPI_Recv(MULTIDIM_ARRAY(exp_metadata), MULTIDIM_SIZE(exp_metadata), MY_MPI_DOUBLE, this_follower, MPITAG_METADATA, MPI_COMM_WORLD, status);
@@ -1750,37 +1761,68 @@ void MlOptimiserMpi::expectation()
 					}
 				}
 
-				// See which random_halfset this follower belongs to, and keep track of the number of particles that have been processed already
-				if (do_split_random_halves)
+				// The job: the pool reserved for this follower with its last job, else the next free pool of its half set.
+				// Then the next free pool is reserved for it, so that it can read those images while it works on this
+				// one (RELION_MPI_RESERVE=0: no reservations). Pools still go to whichever follower asks first.
+				random_halfset = do_split_random_halves ? ((this_follower % 2 == 1) ? 1 : 2) : 0;
+				auto takeFree = [&](long int &f, long int &l)
 				{
-					random_halfset = (this_follower % 2 == 1) ? 1 : 2;
-					if (random_halfset == 1)
+					long int &done = (random_halfset == 1) ? nr_particles_done_halfset1 : (random_halfset == 2) ? nr_particles_done_halfset2 : nr_particles_done;
+					const long int todo = (random_halfset == 1) ? my_last_particle_halfset1 - my_first_particle_halfset1 + 1 :
+					                      (random_halfset == 2) ? my_last_particle_halfset2 - my_first_particle_halfset2 + 1 : my_last_particle - my_first_particle + 1;
+					if (done >= todo) return false;
+					f = (random_halfset == 2) ? mydata.numberOfParticles(1) + done : done;
+					l = XMIPP_MIN((random_halfset == 1) ? my_last_particle_halfset1 : (random_halfset == 2) ? my_last_particle_halfset2 : my_last_particle,
+					              f + nr_pool - 1);
+					done += l - f + 1;
+					if (random_halfset != 0) nr_particles_done += l - f + 1;
+					return true;
+				};
+				if ((long int) reserved_first.size() < node->size)
+				{
+					reserved_first.assign(node->size, -1);
+					reserved_last.assign(node->size, -1);
+				}
+				long int job_first = -1, job_last = -1;
+				if (reserved_first[this_follower] >= 0)
+				{
+					job_first = reserved_first[this_follower];
+					job_last = reserved_last[this_follower];
+				}
+				else if (!takeFree(job_first, job_last))
+				{
+					job_first = -1;
+					// No free pool left: take the reserved pool of the follower of this half set that started its
+					// current job last, if it is less than half way through it (an average job). Its owner has not
+					// started that pool (it gets it only with its next request), so each pool is still done once;
+					// this follower reads it without read-ahead, which pays only while the owner has a lot left.
+					int owner = -1;
+					for (int f = 1; mpi_steal && f < node->size; f++)
+						if (f != this_follower && reserved_first[f] >= 0 &&
+						    (!do_split_random_halves || f % 2 == this_follower % 2) &&
+						    (owner < 0 || job_start[f] > job_start[owner]))
+							owner = f;
+					if (owner > 0 && nr_jobs_timed > 0 &&
+					    leader_now() - job_start[owner] < 0.5 * job_time_sum / nr_jobs_timed)
 					{
-						my_nr_particles_done = nr_particles_done_halfset1;
-						nr_particles_todo = my_last_particle_halfset1 - my_first_particle_halfset1 + 1;
-						JOB_FIRST = nr_particles_done_halfset1;
-						JOB_LAST  = XMIPP_MIN(my_last_particle_halfset1, JOB_FIRST + nr_pool - 1);
-					}
-					else
-					{
-						my_nr_particles_done = nr_particles_done_halfset2;
-						nr_particles_todo = my_last_particle_halfset2 - my_first_particle_halfset2 + 1;
-						JOB_FIRST = mydata.numberOfParticles(1) + nr_particles_done_halfset2;
-						JOB_LAST  = XMIPP_MIN(my_last_particle_halfset2, JOB_FIRST + nr_pool - 1);
+						job_first = reserved_first[owner];
+						job_last = reserved_last[owner];
+						reserved_first[owner] = reserved_last[owner] = -1;
+						nr_steals++;
 					}
 				}
-				else
-				{
-					random_halfset = 0;
-					my_nr_particles_done = nr_particles_done;
-					nr_particles_todo =  my_last_particle - my_first_particle + 1;
-					JOB_FIRST = nr_particles_done;
-					JOB_LAST  = XMIPP_MIN(my_last_particle, JOB_FIRST + nr_pool - 1);
-				}
+				reserved_first[this_follower] = reserved_last[this_follower] = -1;
+				if (job_first >= 0 && mpi_reserve)
+					takeFree(reserved_first[this_follower], reserved_last[this_follower]);
+				JOB_FIRST = job_first;
+				JOB_LAST = job_last;
+				JOB_NEXT_FIRST = reserved_first[this_follower];
+				JOB_NEXT_LAST = reserved_last[this_follower];
 
 				// Now send out a new job
-				if (my_nr_particles_done < nr_particles_todo)
+				if (job_first >= 0)
 				{
+					job_start[this_follower] = leader_now();
 					MlOptimiser::getMetaAndImageDataSubset(JOB_FIRST, JOB_LAST, !do_parallel_disc_io);
 					JOB_NIMG = YSIZE(exp_metadata);
 					JOB_LEN_FN_IMG = exp_fn_img.length() + 1; // +1 to include \0 at the end of the string
@@ -1796,6 +1838,7 @@ void MlOptimiserMpi::expectation()
 					JOB_LEN_FN_IMG = 0;
 					JOB_LEN_FN_CTF = 0;
 					JOB_LEN_FN_RECIMG = 0;
+					JOB_NEXT_FIRST = JOB_NEXT_LAST = -1;
 					exp_metadata.clear();
 					exp_imagedata.clear();
 
@@ -1837,24 +1880,10 @@ void MlOptimiserMpi::expectation()
 					}
 				}
 
-				// Update the total number of particles that has been done already
-				if (JOB_NIMG > 0)
-				{
-					nr_particles_done += JOB_NPAR;
-					if (do_split_random_halves)
-					{
-						// Also update the number of particles that has been done for each subset
-						if (random_halfset == 1)
-						{
-							nr_particles_done_halfset1 += JOB_NPAR;
-						}
-						else
-						{
-							nr_particles_done_halfset2 += JOB_NPAR;
-						}
-					}
-				}
+				// (the counts of particles handed out were updated by takeFree)
 			}
+			if (getenv("RELION_ITER_TIMING") != NULL)
+				std::cerr << " MPI: " << nr_steals << " reserved pool(s) handed to an idle follower" << std::endl;
 		}
 		catch (RelionError XE)
 		{
@@ -1893,7 +1922,10 @@ void MlOptimiserMpi::expectation()
 			const bool fw_timing = getenv("RELION_ITER_TIMING") != NULL;
 			double fw_wait_job = 0., fw_recv = 0., fw_work = 0., fw_report = 0.;
 			exp_time_serial_s = exp_time_par_s = 0.;
+			image_wait_s_ = 0.;
+			prefetch_next_first_ = prefetch_next_last_ = -1;
 			auto fw_now = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+			const double estep_t0 = fw_now();
 			// Read the next pool's images in the background while this pool is processed. The leader hands a
 			// follower consecutive pools of its half set, so the pool after JOB_LAST is guessed; a wrong guess
 			// costs only the wasted read (expectationSomeParticles checks it and gives up on repeated misses)
@@ -1904,7 +1936,7 @@ void MlOptimiserMpi::expectation()
 			}
 			if (prefetch_speculative_)
 			{
-				int max_readers = XMIPP_MIN(nr_threads, 8);
+				int max_readers = XMIPP_MAX(nr_threads, XMIPP_MIN(32, 4 * nr_threads));   // as in MlOptimiser::expectation
 				if (const char *e = getenv("RELION_PREFETCH_THREADS"))
 					max_readers = XMIPP_MAX(1, atoi(e));
 				prefetch_global_last_ = mydata.numberOfParticles() - 1;
@@ -1932,6 +1964,12 @@ void MlOptimiserMpi::expectation()
 #endif
 					exp_imagedata.clear();
 					exp_metadata.clear();
+					{
+						// the first follower speaks for the others (they read the same way)
+						const double estep = fw_now() - estep_t0;
+						if (node->rank == 1 && estep > 60. && image_wait_s_ > 0.3 * estep)
+							std::cout << readingAdvice(100. * image_wait_s_ / estep) << std::endl;
+					}
 					if (prefetcher_ != NULL)
 					{
 						if (fw_timing)
@@ -2027,6 +2065,8 @@ void MlOptimiserMpi::expectation()
 					timer.tic(TIMING_MPISLAVEWORK);
 #endif
 					if (fw_timing) { double t = fw_now(); fw_recv += t - fw_t; fw_t = t; }
+					prefetch_next_first_ = JOB_NEXT_FIRST;
+					prefetch_next_last_ = JOB_NEXT_LAST;
 					expectationSomeParticles(JOB_FIRST, JOB_LAST);
 					if (fw_timing) { double t = fw_now(); fw_work += t - fw_t; fw_t = t; }
 #ifdef TIMING
