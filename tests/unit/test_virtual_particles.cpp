@@ -16,10 +16,14 @@
 #include "src/image.h"
 #include "src/error.h"
 #include "src/float16.h"
+#include "src/fftw.h"
 
 #include <cstdio>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -116,6 +120,7 @@ std::vector<MultidimArray<RFLOAT> > readAll(const std::string& fn_vstack, size_t
 {
 	std::vector<MultidimArray<RFLOAT> > out(n);
 	for (size_t i = 0; i < n; i++) vparticles::readParticle(fn_vstack, i, out[i]);
+	vparticles::finishCacheBuilds();   // the entries are written in the background
 	return out;
 }
 
@@ -139,6 +144,7 @@ bool identical(const std::vector<MultidimArray<RFLOAT> >& a, const std::vector<M
 
 std::string findEntry(const std::string& dir)
 {
+	vparticles::finishCacheBuilds();
 	const std::string cmd = "find '" + dir + "' -name '*.vpc' | head -1";
 	FILE* p = popen(cmd.c_str(), "r");
 	char buf[4096] = {0};
@@ -365,13 +371,24 @@ TEST_CASE("parallel reads match serial reads", "[vparticles]")
 		serial = readAll(vs, many.size());
 	}
 
-	// Many threads racing to build the same entry, as CtfRefine's loader does
-	CacheSetting on(tmp.path() + "/cache");
-	std::vector<MultidimArray<RFLOAT> > parallel(many.size());
-	#pragma omp parallel for num_threads(8)
-	for (long i = 0; i < (long)many.size(); i++)
-		vparticles::readParticle(vs, i, parallel[i]);
-	CHECK(identical(serial, parallel));
+	// Many threads racing for one entry, as CtfRefine's loader does: written by background threads
+	// (the default), or by the readers themselves, who share its building (RELION_VPARTICLE_BUILDERS=0)
+	for (const char* builders : {"", "0"})
+	{
+		setenv("RELION_VPARTICLE_BUILDERS", builders, 1);
+		CacheSetting on(tmp.path() + "/cache" + builders);
+		std::vector<MultidimArray<RFLOAT> > parallel(many.size());
+		#pragma omp parallel for num_threads(8)
+		for (long i = 0; i < (long)many.size(); i++)
+			vparticles::readParticle(vs, i, parallel[i]);
+		CHECK(identical(serial, parallel));
+
+		// the entry holds every particle
+		CHECK(findEntry(tmp.path() + "/cache" + builders) != "");
+		vparticles::clearProcessState();
+		CHECK(identical(serial, readAll(vs, many.size())));
+	}
+	unsetenv("RELION_VPARTICLE_BUILDERS");
 }
 
 TEST_CASE("an unwritable cache falls back to direct extraction", "[vparticles]")
@@ -697,4 +714,126 @@ TEST_CASE("more ranks than particles leaves some ranks empty", "[vparticles][ord
 	CHECK(cut.back() == 2);
 	for (size_t r = 1; r < cut.size(); r++)
 		CHECK(cut[r] >= cut[r - 1]);
+}
+
+// ---------------------------------------------------------------------------
+// Background builders and FFTW's cleanup
+
+TEST_CASE("FFTW cleanup waits for a background scope", "[vparticles][fftw]")
+{
+	// FourierTransformer::cleanup() invalidates every plan in existence, so it must not run while a background
+	// thread is between making and destroying its plans
+	std::atomic<bool> in_scope(false), scope_released(false);
+	std::thread holder([&]() {
+		FftwBackgroundScope scope;
+		in_scope = true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		scope_released = true;
+	});
+	while (!in_scope) std::this_thread::yield();
+
+	FourierTransformer transformer;
+	transformer.cleanup();
+	CHECK(scope_released.load());   // it came back only after the holder let go
+	holder.join();
+
+	// Scopes nest in one thread, and a cleanup with none held does not wait
+	{
+		FftwBackgroundScope a;
+		FftwBackgroundScope b;
+	}
+	transformer.cleanup();
+}
+
+TEST_CASE("FFTW cleanup goes before new background scopes", "[vparticles][fftw]")
+{
+	// A queue of background builds must not hold the cleanup off: holders arriving while it waits wait for it
+	std::atomic<bool> first_in(false), cleanup_done(false), second_entered_after_cleanup(false);
+	std::thread first([&]() {
+		FftwBackgroundScope scope;
+		first_in = true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+	});
+	while (!first_in) std::this_thread::yield();
+	std::thread cleaner([&]() { FourierTransformer t; t.cleanup(); cleanup_done = true; });
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));   // the cleanup is waiting for `first`
+	std::thread second([&]() {
+		FftwBackgroundScope scope;
+		second_entered_after_cleanup = cleanup_done.load();
+	});
+	first.join();
+	cleaner.join();
+	second.join();
+	CHECK(second_entered_after_cleanup.load());
+}
+
+TEST_CASE("background cache builds survive FFTW cleanup", "[vparticles][fftw]")
+{
+	// The crash of Maximization: a builder destroyed a plan made before FFTW's cleanup. The builders make and destroy
+	// FFTW plans for every particle (rescaling), so run them against a thread that cleans up all the time.
+	TempDir tmp;
+	const std::string mic = tmp.path() + "/mic.mrc", vs = tmp.path() + "/mic.vstack";
+	writeMicrograph(mic, Float16);
+	std::vector<std::pair<long, long> > many;
+	for (long k = 0; k < 150; k++) many.push_back(std::make_pair(20 + (k * 37) % 260, 15 + (k * 53) % 230));
+	vparticles::writeDescriptor(vs, mic, binnedRecipe(), many);
+
+	std::vector<MultidimArray<RFLOAT> > serial;
+	{
+		CacheSetting off("off");
+		serial = readAll(vs, many.size());
+	}
+
+	setenv("RELION_VPARTICLE_BUILDERS", "4", 1);
+	{
+		CacheSetting on(tmp.path() + "/cache");
+		std::atomic<bool> stop(false);
+		std::atomic<long> cleanups(0);
+		std::thread cleaner([&]() {
+			FourierTransformer t;
+			while (!stop) { t.cleanup(); cleanups++; }
+		});
+		std::vector<MultidimArray<RFLOAT> > got(many.size());
+		for (size_t i = 0; i < many.size(); i++)
+			vparticles::readParticle(vs, i, got[i]);   // queues the entry; each reader cuts only its own particle
+		vparticles::finishCacheBuilds();
+		stop = true;
+		cleaner.join();
+		CHECK(cleanups.load() > 0);
+		CHECK(identical(serial, got));
+		CHECK(findEntry(tmp.path() + "/cache") != "");
+		vparticles::clearProcessState();
+		CHECK(identical(serial, readAll(vs, many.size())));   // from the entry the builders wrote
+	}
+	unsetenv("RELION_VPARTICLE_BUILDERS");
+}
+
+TEST_CASE("an entry whose particle cannot be cut does not hang its readers", "[vparticles]")
+{
+	// An error while cutting (a micrograph that changed under the descriptor) must reach every waiting reader as a
+	// failure, in both modes, instead of leaving them waiting for particles nobody cuts
+	TempDir tmp;
+	const std::string mic = tmp.path() + "/mic.mrc", vs = tmp.path() + "/mic.vstack";
+	writeMicrograph(mic, Float16);
+	std::vector<std::pair<long, long> > many;
+	for (long k = 0; k < 30; k++) many.push_back(std::make_pair(20 + (k * 37) % 260, 15 + (k * 53) % 230));
+	vparticles::writeDescriptor(vs, mic, binnedRecipe(), many);
+	for (const char* builders : {"", "0"})
+	{
+		setenv("RELION_VPARTICLE_BUILDERS", builders, 1);
+		CacheSetting on(tmp.path() + "/cache_err" + builders);
+		writeMicrograph(mic, Float16, 2);   // another micrograph than the descriptor was made for
+		std::atomic<int> failed(0);
+		#pragma omp parallel for num_threads(6)
+		for (long i = 0; i < (long)many.size(); i++)
+		{
+			MultidimArray<RFLOAT> out;
+			try { vparticles::readParticle(vs, i, out); }
+			catch (RelionError&) { failed++; }
+		}
+		vparticles::finishCacheBuilds();
+		CHECK(failed.load() == (int)many.size());   // every reader got the error, none hung
+		writeMicrograph(mic, Float16, 1);
+	}
+	unsetenv("RELION_VPARTICLE_BUILDERS");
 }

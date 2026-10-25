@@ -158,6 +158,19 @@ void relionFftwPlanThreads(int nr_threads);
 // For a background thread that must plan as the foreground code would, while the foreground changes the count.
 void relionFftwSetThreadPlanThreads(int nr_threads);
 void relionFftwCleanupThreads();
+// Held by a thread that makes and destroys its own plans while the main thread goes on (a background
+// reader): FourierTransformer::cleanup() and relionFftwCleanupThreads() wait for it, because FFTW's
+// cleanup invalidates every plan in existence. Its plans must be gone when it is released. The cleanup goes before
+// new holders (they wait while it waits), and a thread that holds the scope must not itself run the cleanup
+// (it would not be waited for). Holding it again inside the scope is fine.
+class FftwBackgroundScope
+{
+public:
+	FftwBackgroundScope();
+	~FftwBackgroundScope();
+	FftwBackgroundScope(const FftwBackgroundScope&) = delete;
+	FftwBackgroundScope& operator=(const FftwBackgroundScope&) = delete;
+};
 // Threads for RELION's own loops over an array of n elements: as many as FFTW plans with (one inside
 // the particle loop, all outside), and one for small arrays
 int relionBulkThreads(size_t n);

@@ -43,6 +43,8 @@
  *	e-mail address 'xmipp@cnb.csic.es'
  ***************************************************************************/
 
+#include <condition_variable>
+#include <mutex>
 #include "src/macros.h"
 #include "src/fftw.h"
 #include "src/rect_refusal.h"
@@ -102,6 +104,44 @@ enum PlanKind { PLAN_R2C, PLAN_C2R, PLAN_C2C };
 
 // Set once relionFftwInitThreads() has switched on FFTW's threads (see FourierTransformer::cleanup)
 bool g_fftw_threads_inited = false;
+// FftwBackgroundScope holders (readers) and FFTW's cleanup (a writer, which waits for them and goes first: with a
+// plain reader-preferring lock a queue of background builds would hold the cleanup off until it was empty)
+static struct FftwBackgroundGate
+{
+	std::mutex m;
+	std::condition_variable cv;
+	int holders = 0, writers_waiting = 0;
+	bool writer = false;
+} g_fftw_background;
+// Nesting: a thread that holds the scope (or the exclusive access) takes it again without waiting for itself
+static thread_local int t_fftw_scope_depth = 0;
+static thread_local int t_fftw_exclusive_depth = 0;
+
+namespace {
+struct FftwExclusive
+{
+	bool taken;
+	FftwExclusive() : taken(false)
+	{
+		if (t_fftw_scope_depth > 0 || t_fftw_exclusive_depth++ > 0) return;   // this thread's own scope cannot be waited for
+		std::unique_lock<std::mutex> l(g_fftw_background.m);
+		g_fftw_background.writers_waiting++;
+		g_fftw_background.cv.wait(l, [] { return !g_fftw_background.writer && g_fftw_background.holders == 0; });
+		g_fftw_background.writers_waiting--;
+		g_fftw_background.writer = true;
+		taken = true;
+	}
+	~FftwExclusive()
+	{
+		if (t_fftw_scope_depth == 0) t_fftw_exclusive_depth--;
+		if (!taken) return;
+		std::lock_guard<std::mutex> l(g_fftw_background.m);
+		g_fftw_background.writer = false;
+		g_fftw_background.cv.notify_all();
+	}
+};
+}
+
 
 struct PlanSettings
 {
@@ -324,6 +364,22 @@ static bool relionFftwDebug()
 	return d;
 }
 
+FftwBackgroundScope::FftwBackgroundScope()
+{
+	if (t_fftw_scope_depth++ > 0 || t_fftw_exclusive_depth > 0) return;
+	std::unique_lock<std::mutex> l(g_fftw_background.m);
+	g_fftw_background.cv.wait(l, [] { return !g_fftw_background.writer && g_fftw_background.writers_waiting == 0; });
+	g_fftw_background.holders++;
+}
+
+FftwBackgroundScope::~FftwBackgroundScope()
+{
+	if (--t_fftw_scope_depth > 0 || t_fftw_exclusive_depth > 0) return;
+	std::lock_guard<std::mutex> l(g_fftw_background.m);
+	g_fftw_background.holders--;
+	g_fftw_background.cv.notify_all();
+}
+
 void relionFftwSetPlanMode(bool measure, const std::string &wisdom_file, double timelimit_s)
 {
 	#pragma omp critical(FourierTransformer_fftw_plan)
@@ -395,6 +451,7 @@ void FourierTransformer::cleanup()
 	// the wisdom and, worse, lacks FFTW's threaded algorithms, which fftw_init_threads() registers on
 	// the planner of the moment: every later transform then ran mostly on one core, whatever the number
 	// of threads. With threads on, clean up through FFTW's thread layer and switch it on again.
+	FftwExclusive no_background;
 	#pragma omp critical(FourierTransformer_fftw_plan)
 	{
 #if defined(MKLFFT) || defined(RELION_HAVE_FFTW_THREADS)
@@ -2146,6 +2203,7 @@ void relionFftwSetThreadPlanThreads(int nr_threads)
 
 void relionFftwCleanupThreads()
 {
+	FftwExclusive no_background;
 	if (relionFftwThreadsAllowed())
 		RELION_FFTW_THREADS_API(cleanup_threads)();
 	g_fftw_threads_inited = false;

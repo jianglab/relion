@@ -15,8 +15,10 @@
 #include "src/float16.h"
 #include "src/extract_rect.h"
 #include "src/fftw_rect.h"
+#include "src/fftw.h"
 #include "src/cache_manager.h"
 #include "src/fused_extract.h"
+#include "src/resource_report.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -38,6 +40,9 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -186,6 +191,26 @@ using vcache::makeDirs;
 // Descriptors
 // ---------------------------------------------------------------------------
 
+struct Micrograph;
+
+/// Set when the background builders are to stop (the program is ending): entries still being written are given up
+std::atomic<bool> g_builds_stopping(false);
+
+/// A cache entry being written. The thread that starts it and every thread that needs one of its particles
+/// meanwhile take particles from the same list and cut them, so the work is shared instead of waited for.
+struct EntryBuild {
+	std::mutex m;
+	std::condition_variable cv;
+	bool prepared = false, finished = false;
+	std::atomic<bool> failed{false};
+	std::shared_ptr<Micrograph> mic;
+	int fd = -1;
+	std::string path, tmp;
+	std::vector<size_t> order;   // particles sorted by (y, x), so the micrograph's pages are read in file order
+	size_t one = 0;              // bytes per particle
+	std::atomic<size_t> next{0}, done{0};
+};
+
 struct VStack {
 	std::string path;
 	std::string mic;
@@ -197,7 +222,8 @@ struct VStack {
 	int version;                 // descriptor version as read
 	std::string key;             // cache key: everything that determines the pixels
 
-	std::mutex build;            // one thread builds the cache entry
+	std::mutex build;            // guards `building`
+	std::shared_ptr<EntryBuild> building;   // the cache entry being written, if any
 	std::atomic<bool> entry_ok;  // the cache entry was seen complete
 
 	VStack() : version(DESCRIPTOR_VERSION_SQUARE), entry_ok(false) {}
@@ -719,35 +745,31 @@ bool cacheUnwritable(const std::string& dir)
 	return it != g_unwritable.end() && time(NULL) < it->second;
 }
 
-/* Extract every particle of the descriptor into a new cache entry, visiting
- * them sorted by (y, x) so the micrograph's pages are read in file order, and
- * keep particle `idx` for the caller. Returns false if the entry could not be
- * written; `out` is filled either way. */
-bool buildEntry(const std::string& dir, VStack& v, long idx, MultidimArray<RFLOAT>& out)
+/* Set up the cache entry of `v`: the micrograph, the temporary file and its header. False if the file cannot
+ * be written. */
+bool prepareBuild(const std::string& dir, VStack& v, EntryBuild& b)
 {
 	verifyMicrograph(v);
-	std::shared_ptr<Micrograph> m = openMicrograph(v.mic);
-
-	const std::string path = entryPath(dir, v.key);
-	makeDirs(path.substr(0, path.find_last_of('/')));
+	b.mic = openMicrograph(v.mic);
+	b.path = entryPath(dir, v.key);
+	makeDirs(b.path.substr(0, b.path.find_last_of('/')));
 
 	static std::atomic<long> counter(0);
 	char host[256] = "host";
 	gethostname(host, sizeof(host) - 1);
 	std::ostringstream tmp;
-	tmp << path << ".tmp." << host << "." << getpid() << "." << counter++;
+	tmp << b.path << ".tmp." << host << "." << getpid() << "." << counter++;
+	b.tmp = tmp.str();
 
-	int fd = open(tmp.str().c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0664);
-	if (fd < 0)
+	b.fd = open(b.tmp.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0664);
+	if (b.fd < 0)
 	{
 		warnUnwritable(dir, strerror(errno));
-		extractIndex(*m, v, idx, out);
 		return false;
 	}
-
 	const int box = v.recipe.outputSize();
 	const int box_y = v.recipe.outputSizeY();
-	const size_t one = (size_t)box * box_y * bytesPerValue(v.recipe);
+	b.one = (size_t)box * box_y * bytesPerValue(v.recipe);
 
 	EntryHeader h;
 	memset(&h, 0, sizeof(h));
@@ -758,40 +780,285 @@ bool buildEntry(const std::string& dir, VStack& v, long idx, MultidimArray<RFLOA
 	h.box = box;
 	h.reserved = v.recipe.rectangular() ? (uint32_t)box_y : 0u;
 	strncpy(h.key, v.key.c_str(), sizeof(h.key) - 1);
-	bool ok = pwrite(fd, &h, sizeof(h), 0) == (ssize_t)sizeof(h);
+	if (pwrite(b.fd, &h, sizeof(h), 0) != (ssize_t)sizeof(h))
+	{
+		const int e = errno;
+		close(b.fd);
+		b.fd = -1;
+		unlink(b.tmp.c_str());
+		warnUnwritable(dir, strerror(e));
+		return false;
+	}
 
-	std::vector<size_t> order(v.x.size());
-	for (size_t i = 0; i < order.size(); i++) order[i] = i;
-	std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-		return (v.y[a] != v.y[b]) ? v.y[a] < v.y[b] : v.x[a] < v.x[b];
+	b.order.resize(v.x.size());
+	for (size_t i = 0; i < b.order.size(); i++) b.order[i] = i;
+	std::stable_sort(b.order.begin(), b.order.end(), [&](size_t p, size_t q) {
+		return (v.y[p] != v.y[q]) ? v.y[p] < v.y[q] : v.x[p] < v.x[q];
 	});
+	return true;
+}
 
+/* Cut particles of the entry until none are left; particle `idx` is kept in `out`. */
+bool helpBuild(VStack& v, EntryBuild& b, long idx, MultidimArray<RFLOAT>& out)
+{
 	bool have_idx = false;
 	MultidimArray<RFLOAT> img;
 	std::vector<unsigned char> buf;
-	for (size_t k = 0; k < order.size() && ok; k++)
+	size_t k;
+	auto account = [&b]() { if (++b.done == b.order.size()) { std::lock_guard<std::mutex> l(b.m); b.cv.notify_all(); } };
+	while ((k = b.next++) < b.order.size())
 	{
-		const size_t i = order[k];
-		extractIndex(*m, v, i, img);
-		encode(img, v.recipe, buf);
-		ok = pwrite(fd, buf.data(), one, sizeof(h) + one * i) == (ssize_t)one;
-		if ((long)i == idx) { out = img; have_idx = true; }
+		if (g_builds_stopping) { b.failed = true; account(); continue; }   // ending: give the entry up
+		const size_t i = b.order[k];
+		try
+		{
+			extractIndex(*b.mic, v, i, img);
+			encode(img, v.recipe, buf);
+			if (pwrite(b.fd, buf.data(), b.one, sizeof(EntryHeader) + b.one * i) != (ssize_t)b.one)
+				b.failed = true;
+			if ((long)i == idx) { out = img; have_idx = true; }
+		}
+		catch (...)
+		{
+			// The entry is lost, and so is whatever this thread would have cut: count the particle and every one still
+			// unclaimed as done, or the thread that finishes the entry would wait for them for ever
+			b.failed = true;
+			account();
+			while (b.next++ < b.order.size()) account();
+			throw;
+		}
+		account();
 	}
-	const int saved_errno = errno;
-	ok = (close(fd) == 0) && ok;
-
-	if (ok && rename(tmp.str().c_str(), path.c_str()) == 0)
-	{
-		v.entry_ok = true;
-		enforceCacheLimit(dir, (long long)(sizeof(h) + one * v.x.size()));
-		return true;
-	}
-
-	unlink(tmp.str().c_str());
-	warnUnwritable(dir, strerror(saved_errno ? saved_errno : errno));
-	if (!have_idx) extractIndex(*m, v, idx, out);
-	return false;
+	return have_idx;
 }
+
+/* Starter of an entry: once every particle is written, close and publish it (or drop it), and let the
+ * threads waiting for it go. */
+void finishBuild(const std::string& dir, VStack& v, EntryBuild& b)
+{
+	{
+		std::unique_lock<std::mutex> l(b.m);
+		b.cv.wait(l, [&]() { return b.done >= b.order.size(); });
+	}
+	if (b.fd >= 0)
+	{
+		const int saved_errno = errno;
+		const bool closed = close(b.fd) == 0;
+		b.fd = -1;
+		if (!b.failed && closed && rename(b.tmp.c_str(), b.path.c_str()) == 0)
+		{
+			v.entry_ok = true;
+			enforceCacheLimit(dir, (long long)(sizeof(EntryHeader) + b.one * v.x.size()));
+		}
+		else
+		{
+			unlink(b.tmp.c_str());
+			warnUnwritable(dir, strerror(saved_errno ? saved_errno : errno));
+			b.failed = true;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> g(v.build);
+		v.building.reset();
+	}
+	std::lock_guard<std::mutex> l(b.m);
+	b.finished = true;
+	b.cv.notify_all();
+}
+
+/* Read particle `idx` through the cache entry of `v`, building the entry if needed: the first thread to need
+ * it starts it, and threads that need it meanwhile help cut its particles. False if the entry could not be
+ * written; `out` is then not filled. */
+bool readThroughEntry(const std::string& dir, VStack& v, long idx, MultidimArray<RFLOAT>& out)
+{
+	const std::string path = entryPath(dir, v.key);
+	std::shared_ptr<EntryBuild> b;
+	bool starter = false;
+	{
+		std::lock_guard<std::mutex> g(v.build);
+		if (v.building)
+			b = v.building;
+		else
+		{
+			if (readFromEntry(path, v, idx, out)) return true;   // written meanwhile
+			b = std::make_shared<EntryBuild>();
+			v.building = b;
+			starter = true;
+		}
+	}
+	if (starter)
+	{
+		bool ok = false;
+		try { ok = prepareBuild(dir, v, *b); }
+		catch (...)
+		{
+			b->failed = true;
+			{ std::lock_guard<std::mutex> l(b->m); b->prepared = true; }
+			finishBuild(dir, v, *b);
+			throw;
+		}
+		if (!ok) b->failed = true;
+		{
+			std::lock_guard<std::mutex> l(b->m);
+			b->prepared = true;
+			b->cv.notify_all();
+		}
+	}
+	else
+	{
+		std::unique_lock<std::mutex> l(b->m);
+		b->cv.wait(l, [&]() { return b->prepared; });
+	}
+
+	bool have = false;
+	if (!b->failed)
+	{
+		try { have = helpBuild(v, *b, idx, out); }
+		catch (...)
+		{
+			if (starter) finishBuild(dir, v, *b);
+			throw;
+		}
+	}
+	if (starter)
+		finishBuild(dir, v, *b);
+	else
+	{
+		std::unique_lock<std::mutex> l(b->m);
+		b->cv.wait(l, [&]() { return b->finished; });
+	}
+	if (b->failed) return false;
+	return have || readFromEntry(path, v, idx, out);
+}
+
+/* Cache entries built by background threads, so that a reader cuts only the particle it needs now (as without
+ * a cache) instead of waiting while the whole micrograph's entry is written. */
+class BackgroundBuilds
+{
+public:
+	~BackgroundBuilds() { shutdown(); }
+
+	/// Stop the threads: what is queued is dropped, the entry each is writing is given up (its temporary file removed,
+	/// never left half-written), and they are joined. Safe to call again. Registered with atexit() at the first use, so
+	/// it runs before the destructors of the statics that were built before then (the builders use them).
+	void shutdown()
+	{
+		std::vector<std::thread> threads;
+		{
+			std::lock_guard<std::mutex> l(m_);
+			stop_ = true;
+			g_builds_stopping = true;
+			queue_.clear();
+			threads.swap(threads_);
+		}
+		cv_.notify_all();
+		for (std::thread& t : threads) t.join();
+	}
+
+	static BackgroundBuilds*& self() { static BackgroundBuilds* p = NULL; return p; }
+
+	/// Number of builder threads: RELION_VPARTICLE_BUILDERS, else half the cores this process may use.
+	/// 0 means none: readers build entries themselves.
+	int builders()
+	{
+		std::lock_guard<std::mutex> l(m_);
+		if (n_ < 0)
+		{
+			// Ranks of one node share its cores, and each sees them all unless the launcher binds them
+			int local_ranks = 1;
+			for (const char* var : {"OMPI_COMM_WORLD_LOCAL_SIZE", "SLURM_NTASKS_PER_NODE", "MPI_LOCALNRANKS"})
+			{
+				const char* r = getenv(var);
+				if (r != NULL && atoi(r) > 0) { local_ranks = atoi(r); break; }
+			}
+			const int cores = std::max<int>(1, resrep::allowedCores().size());
+			const char* e = getenv("RELION_VPARTICLE_BUILDERS");
+			n_ = (e != NULL && e[0] != '\0') ? std::max(0, atoi(e)) : std::max(1, cores / (2 * local_ranks));
+			if (n_ > 0 && !atexit_registered_)
+			{
+				atexit_registered_ = true;
+				self() = this;
+				std::atexit([]() { if (self() != NULL) self()->shutdown(); });
+			}
+			if (n_ > 0)
+				std::cout << " Virtual particles: " << n_ << " background thread(s) write the cache entries ("
+				          << ((e != NULL && e[0] != '\0') ? std::string("RELION_VPARTICLE_BUILDERS")
+				              : "half of the " + integerToString(cores) + " cores"
+				                + (local_ranks > 1 ? " shared by " + integerToString(local_ranks) + " processes on this node" : std::string()))
+				          << "; RELION_VPARTICLE_BUILDERS=0 makes readers write them)" << std::endl;
+		}
+		return n_;
+	}
+
+	/// Queue the entry of `v` unless it is queued or being built already.
+	void add(const std::string& dir, const std::shared_ptr<VStack>& v)
+	{
+		{
+			std::lock_guard<std::mutex> l(m_);
+			if (stop_ || !queued_.insert(v->key).second) return;
+			queue_.push_back(std::make_pair(dir, v));
+			while ((int)threads_.size() < n_) threads_.emplace_back(&BackgroundBuilds::run, this);
+		}
+		cv_.notify_one();
+	}
+
+	/// Wait until every queued entry is written (or given up).
+	void wait()
+	{
+		std::unique_lock<std::mutex> l(m_);
+		cv_idle_.wait(l, [this]() { return queue_.empty() && busy_ == 0; });
+	}
+
+	/// Wait, then read RELION_VPARTICLE_BUILDERS again at the next miss.
+	void reset()
+	{
+		wait();
+		std::lock_guard<std::mutex> l(m_);
+		n_ = -1;
+	}
+
+private:
+	void run()
+	{
+		MultidimArray<RFLOAT> scratch;
+		for (;;)
+		{
+			std::pair<std::string, std::shared_ptr<VStack> > job;
+			{
+				std::unique_lock<std::mutex> l(m_);
+				cv_.wait(l, [this]() { return stop_ || !queue_.empty(); });
+				if (stop_) return;
+				job = queue_.front();
+				queue_.pop_front();
+				busy_++;
+			}
+			try
+			{
+				VStack& v = *job.second;
+				FftwBackgroundScope fftw_in_use;   // the main thread's FFTW cleanup waits for this entry
+				if (!cacheUnwritable(job.first) && !readFromEntry(entryPath(job.first, v.key), v, 0, scratch))
+					readThroughEntry(job.first, v, 0, scratch);
+			}
+			catch (...) {}   // a reader that needs these particles cuts them itself and reports real errors
+			{
+				std::lock_guard<std::mutex> l(m_);
+				queued_.erase(job.second->key);   // a later miss (a deleted or damaged entry) queues it again
+				busy_--;
+				if (queue_.empty() && busy_ == 0) cv_idle_.notify_all();
+			}
+		}
+	}
+
+	std::mutex m_;
+	std::condition_variable cv_, cv_idle_;
+	std::deque<std::pair<std::string, std::shared_ptr<VStack> > > queue_;
+	std::set<std::string> queued_;
+	std::vector<std::thread> threads_;
+	int n_ = -1, busy_ = 0;
+	bool stop_ = false, atexit_registered_ = false;
+};
+
+BackgroundBuilds g_builds;
 
 } // anonymous namespace
 
@@ -1057,11 +1324,12 @@ void readParticle(const std::string& fn_vstack, long index, MultidimArray<RFLOAT
 		if (readFromEntry(path, *v, index, out)) return;
 		if (!cacheUnwritable(dir))
 		{
-			// Build it once: other threads wanting this micrograph wait, then read
-			std::lock_guard<std::mutex> guard(v->build);
-			if (readFromEntry(path, *v, index, out)) return;
-			buildEntry(dir, *v, index, out);
-			return;
+			if (g_builds.builders() == 0)
+			{
+				if (readThroughEntry(dir, *v, index, out)) return;
+			}
+			else
+				g_builds.add(dir, v);   // and cut this particle now, below
 		}
 	}
 
@@ -1196,8 +1464,14 @@ bool removeProjectCache(const std::string& project_dir)
 	return ok;
 }
 
+void finishCacheBuilds()
+{
+	g_builds.wait();
+}
+
 void clearProcessState()
 {
+	g_builds.reset();
 	std::lock_guard<std::mutex> guard(g_mutex);
 	g_vstacks.clear();
 	g_verified.clear();

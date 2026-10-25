@@ -194,6 +194,9 @@ std::string cacheDirectory();
 /// projects and is left alone. Returns true if there was one to remove.
 bool removeProjectCache(const std::string& project_dir);
 
+/// Wait until the cache entries queued for the background builders are written.
+void finishCacheBuilds();
+
 /// Forget memoised descriptors, mappings and cache state (for tests).
 void clearProcessState();
 
