@@ -179,13 +179,18 @@ type, key). Reading an entry is sequential; reading one particle is one `pread`.
   an unlink, and a missing entry is just a miss. RELION's clean-up removes it
   too: "Clean all jobs" (`cleanupAllJobs`) and "Remove intermediate files"
   (counted in its plan and in the GUI's confirmation).
-- **Capacity:** `RELION_VPARTICLE_CACHE_MAX_GB` (default 100; 0 = unlimited).
-  Without a limit a converted project would regrow all its particles in the
-  cache on first use and give back the space it was converted to save. When the
-  limit is exceeded the least recently used entries are removed down to 90% of
+- **Capacity:** `RELION_VPARTICLE_CACHE_MAX_GB` (default 0 = no limit). Without
+  a limit the cache holds at most what the real particle stacks would, which is
+  no worse than upstream, and unlike stacks it can be deleted at any time to
+  free the space (the particles are rebuilt when next used). A cap smaller than
+  the particles of one run is worse, because every iteration then evicts them
+  and rebuilds them from the micrographs. When a limit is set and exceeded the least recently used entries are removed down to 90% of
   it; recency is refreshed once per process per entry, and the directory is only
   rescanned after every ~5% of the limit written. Dead writers' temporary files
   older than a day are removed on the way.
+- **Write failures:** a failed write (full or briefly failing file system) is
+  reported once and pauses writing for a minute; entries already written are
+  still read meanwhile, and writing is then tried again.
 - **Data type:** float16 when the recipe says so (the default for Extract),
   float32 otherwise — the same bytes a stack would hold.
 

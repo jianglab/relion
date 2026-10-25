@@ -185,7 +185,7 @@ const char PROJECT_CACHE_DIR[] = "Cache/virtual_particles";
 
 /// Cache directory in use, or "" when caching is off: RELION_VPARTICLE_CACHE
 /// (a directory, or "off"), else PROJECT_CACHE_DIR in the project. Its size is
-/// capped by RELION_VPARTICLE_CACHE_MAX_GB (default 100, 0 for no limit),
+/// capped by RELION_VPARTICLE_CACHE_MAX_GB (default 0, no limit),
 /// evicting the least recently used entries.
 std::string cacheDirectory();
 

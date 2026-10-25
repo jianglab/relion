@@ -396,6 +396,42 @@ TEST_CASE("an unwritable cache falls back to direct extraction", "[vparticles]")
 	CHECK(findEntry(locked) == "");
 }
 
+TEST_CASE("after a failed cache write, entries already written are still read", "[vparticles]")
+{
+	if (geteuid() == 0) return;   // permissions do not stop root
+
+	TempDir tmp;
+	const std::string mic = tmp.path() + "/mic.mrc", a = tmp.path() + "/a.vstack", b = tmp.path() + "/b.vstack";
+	writeMicrograph(mic, Float);
+	vparticles::writeDescriptor(a, mic, binnedRecipe(), centres());
+	std::vector<std::pair<long, long> > c = centres();
+	for (size_t i = 0; i < c.size(); i++) c[i].first += 1;   // another entry
+	vparticles::writeDescriptor(b, mic, binnedRecipe(), c);
+
+	const std::string cache = tmp.path() + "/cache";
+	CacheSetting on(cache);
+	const std::vector<MultidimArray<RFLOAT> > first = readAll(a, centres().size());
+	REQUIRE(findEntry(cache) != "");
+
+	// The cache stops taking writes: b falls back to the micrograph and pauses writing
+	REQUIRE(system(("chmod -R a-w '" + cache + "'").c_str()) == 0);
+	readAll(b, c.size());
+
+	// a still comes from its entry: zeroing the micrograph's pixels (past the 1024-byte header) does not reach it
+	{
+		struct stat st;
+		REQUIRE(stat(mic.c_str(), &st) == 0);
+		std::vector<char> zeros(st.st_size - 1024, 0);
+		FILE* f = fopen(mic.c_str(), "r+b");
+		REQUIRE(f != NULL);
+		fseek(f, 1024, SEEK_SET);
+		REQUIRE(fwrite(zeros.data(), 1, zeros.size(), f) == zeros.size());
+		fclose(f);
+	}
+	CHECK(identical(first, readAll(a, centres().size())));
+	REQUIRE(system(("chmod -R u+w '" + cache + "'").c_str()) == 0);
+}
+
 TEST_CASE("a descriptor under a .mrcs name is read as a virtual stack", "[vparticles]")
 {
 	// What relion_stacks_to_virtual leaves behind: the stack's own name, so no

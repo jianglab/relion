@@ -25,7 +25,7 @@
  *
  * Cache: RELION_VMOVIE_AVERAGE_CACHE (a directory, or "off"), else
  * Cache/virtual_movie_averages/ in the project; capped by
- * RELION_VMOVIE_AVERAGE_CACHE_MAX_GB (default 100, 0 for no limit), least
+ * RELION_VMOVIE_AVERAGE_CACHE_MAX_GB (default 0, no limit), least
  * recently used entries first. See documentation/virtual_movie_averages.md.
  */
 

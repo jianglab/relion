@@ -27,6 +27,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -46,7 +47,8 @@ const size_t MAGIC_LEN = sizeof(DESCRIPTOR_MAGIC) - 1;
 std::mutex g_mutex;
 std::map<std::string, std::pair<std::string, Header> > g_headers;   // path -> (file stamp, header)
 std::map<std::string, std::shared_ptr<std::mutex> > g_building;     // cache key -> builder lock
-std::set<std::string> g_touched, g_unwritable;
+std::set<std::string> g_touched;
+std::map<std::string, time_t> g_unwritable;   // cache directory whose write failed -> when to try again; warned once
 std::atomic<long long> g_written_since_scan(-1);
 
 uint64_t fnv1a(const unsigned char* p, size_t n, uint64_t h = 1469598103934665603ULL)
@@ -91,7 +93,7 @@ std::string cacheKey(const std::string& fn)
 long long cacheLimitBytes()
 {
 	const char* v = getenv("RELION_VMOVIE_AVERAGE_CACHE_MAX_GB");
-	const double gb = (v != NULL && v[0] != '\0') ? atof(v) : 100.;
+	const double gb = (v != NULL && v[0] != '\0') ? atof(v) : 0.;   // default: no limit
 	return (gb <= 0) ? 0 : (long long)(gb * 1024. * 1024. * 1024.);
 }
 
@@ -107,12 +109,18 @@ void enforceCacheLimit(const std::string& dir, long long just_written)
 	vcache::prune(dir, limit, ".mrc");
 }
 
+// A failed write (a full or briefly failing file system) pauses writing for a minute, not for the whole run
+const time_t CACHE_RETRY_SECONDS = 60;
+
 void warnUnwritable(const std::string& dir, const std::string& why)
 {
 	std::lock_guard<std::mutex> guard(g_mutex);
-	if (g_unwritable.insert(dir).second)
+	const bool first = g_unwritable.count(dir) == 0;
+	g_unwritable[dir] = time(NULL) + CACHE_RETRY_SECONDS;
+	if (first)
 		std::cerr << " WARNING: cannot write the virtual movie average cache in " << dir << " (" << why
-		          << "); computing micrographs from their movies on every read instead, which is slower."
+		          << "); micrographs not yet cached are computed from their movies, which is slower,"
+		          << " and writing is tried again after a minute."
 		          << " Set RELION_VMOVIE_AVERAGE_CACHE to a writable directory, or to 'off' to silence this."
 		          << std::endl;
 }
@@ -215,10 +223,6 @@ std::string materialise(const std::string& fn)
 {
 	const std::string dir = cacheDirectory();
 	if (dir.empty()) return "";
-	{
-		std::lock_guard<std::mutex> guard(g_mutex);
-		if (g_unwritable.count(dir)) return "";
-	}
 	const std::string key = cacheKey(fn);
 	const std::string shard = dir + "/" + key.substr(0, 2);
 	const std::string entry = shard + "/" + key + ".mrc";
@@ -245,6 +249,12 @@ std::string materialise(const std::string& fn)
 		return entry;
 	}
 
+	{
+		// writing paused after a failure: the caller computes this one
+		std::lock_guard<std::mutex> guard(g_mutex);
+		const auto it = g_unwritable.find(dir);
+		if (it != g_unwritable.end() && time(NULL) < it->second) return "";
+	}
 	Image<float> I;
 	regenerate(fn, I);
 

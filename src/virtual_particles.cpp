@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <ctime>
+#include <map>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -205,7 +206,7 @@ struct VStack {
 std::mutex g_mutex;
 std::unordered_map<std::string, std::shared_ptr<VStack> > g_vstacks;
 std::set<std::string> g_verified;       // "mic|checksum" pairs checked in this process
-std::set<std::string> g_unwritable;     // cache directories that failed; warned once
+std::map<std::string, time_t> g_unwritable;   // cache directory whose write failed -> when to try again; warned once
 
 std::string recipeKeyString(const VStack& v)
 {
@@ -667,13 +668,14 @@ bool readFromEntry(const std::string& path, VStack& v, long idx, MultidimArray<R
 
 /* Cache capacity. Without a limit a converted project regrows all of its
  * particles in the cache on first use, and the disk space it was converted to
- * save comes straight back. RELION_VPARTICLE_CACHE_MAX_GB (default 100; 0 = no
- * limit) caps it; the least recently used entries are removed first, and a
+ * save comes straight back. RELION_VPARTICLE_CACHE_MAX_GB caps it (default 0:
+ * no limit, so a data set larger than a fixed cap is not evicted and rebuilt
+ * every iteration); the least recently used entries are removed first, and a
  * removed entry is simply rebuilt from its micrograph when next needed. */
 long long cacheLimitBytes()
 {
 	const char* v = getenv("RELION_VPARTICLE_CACHE_MAX_GB");
-	const double gb = (v != NULL && v[0] != '\0') ? atof(v) : 100.;
+	const double gb = (v != NULL && v[0] != '\0') ? atof(v) : 0.;
 	return (gb <= 0) ? 0 : (long long)(gb * 1024. * 1024. * 1024.);
 }
 
@@ -694,12 +696,18 @@ void enforceCacheLimit(const std::string& dir, long long just_written)
 	vcache::prune(dir, limit, ".vpc");
 }
 
+// A failed write (a full or briefly failing file system) pauses writing for a minute, not for the whole run
+const time_t CACHE_RETRY_SECONDS = 60;
+
 void warnUnwritable(const std::string& dir, const std::string& why)
 {
 	std::lock_guard<std::mutex> guard(g_mutex);
-	if (g_unwritable.insert(dir).second)
+	const bool first = g_unwritable.count(dir) == 0;
+	g_unwritable[dir] = time(NULL) + CACHE_RETRY_SECONDS;
+	if (first)
 		std::cerr << " WARNING: cannot write the virtual particle cache in " << dir << " (" << why
-		          << "); reading particles straight from the micrographs instead, which is slower."
+		          << "); particles not yet cached are read straight from the micrographs, which is slower,"
+		          << " and writing is tried again after a minute."
 		          << " Set RELION_VPARTICLE_CACHE to a writable directory, or to 'off' to silence this."
 		          << std::endl;
 }
@@ -707,7 +715,8 @@ void warnUnwritable(const std::string& dir, const std::string& why)
 bool cacheUnwritable(const std::string& dir)
 {
 	std::lock_guard<std::mutex> guard(g_mutex);
-	return g_unwritable.count(dir) > 0;
+	const auto it = g_unwritable.find(dir);
+	return it != g_unwritable.end() && time(NULL) < it->second;
 }
 
 /* Extract every particle of the descriptor into a new cache entry, visiting
@@ -1041,16 +1050,19 @@ void readParticle(const std::string& fn_vstack, long index, MultidimArray<RFLOAT
 		             + fn_vstack + ", which holds " + integerToString(v->x.size()) + ".");
 
 	const std::string dir = cacheDirectory();
-	if (!dir.empty() && !cacheUnwritable(dir))
+	if (!dir.empty())
 	{
+		// Entries already written are read even while writing is paused after a failure
 		const std::string path = entryPath(dir, v->key);
 		if (readFromEntry(path, *v, index, out)) return;
-
-		// Build it once: other threads wanting this micrograph wait, then read
-		std::lock_guard<std::mutex> guard(v->build);
-		if (readFromEntry(path, *v, index, out)) return;
-		buildEntry(dir, *v, index, out);
-		return;
+		if (!cacheUnwritable(dir))
+		{
+			// Build it once: other threads wanting this micrograph wait, then read
+			std::lock_guard<std::mutex> guard(v->build);
+			if (readFromEntry(path, *v, index, out)) return;
+			buildEntry(dir, *v, index, out);
+			return;
+		}
 	}
 
 	// No cache: cut just this particle; only the pages under its box are read

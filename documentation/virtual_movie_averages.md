@@ -80,7 +80,7 @@ Cache, named and placed like the particle cache:
 | switch | `RELION_VIRTUAL_PARTICLES` | `RELION_VIRTUAL_MOVIE_AVERAGES` |
 | cache location override (or `off`) | `RELION_VPARTICLE_CACHE` | `RELION_VMOVIE_AVERAGE_CACHE` |
 | default location | `Cache/virtual_particles/` | `Cache/virtual_movie_averages/` |
-| size limit, LRU | `RELION_VPARTICLE_CACHE_MAX_GB` (100) | `RELION_VMOVIE_AVERAGE_CACHE_MAX_GB` (100) |
+| size limit, LRU | `RELION_VPARTICLE_CACHE_MAX_GB` (0, no limit) | `RELION_VMOVIE_AVERAGE_CACHE_MAX_GB` (0, no limit) |
 
 "Clean all jobs" and "Remove intermediate files" delete both caches. With the
 cache off, micrographs are computed in memory on every read.
