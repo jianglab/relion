@@ -16,7 +16,7 @@ message(STATUS "  Run with: pytest tests/integration/ -v")
 message(STATUS "  See tests/integration/README.md for documentation")
 
 # Per-category test groups (only tags with existing test_${tag}.py files)
-foreach(tag reconstruction ewald reconstruct_crash cryosparc_import cryosparc_project_import mpi_prefetch filament_class3d class2d_consensus virtual_particles virtual_movie_averages keep_iterations fused_reconstruct rect_program_audit bp_pack gpu_keep_pool gpu_small_speedups coarse_cache skipalign_block cc_coarse coarse_early group_shared mpi_align_classes mpi_align_halves async_serial async_write)
+foreach(tag reconstruction ewald reconstruct_crash cryosparc_import cryosparc_project_import mpi_prefetch filament_class3d class2d_consensus virtual_particles virtual_movie_averages keep_iterations fused_reconstruct rect_program_audit bp_pack gpu_keep_pool gpu_small_speedups coarse_cache skipalign_block cc_coarse coarse_early group_shared mpi_align_classes mpi_align_halves async_serial async_write auto_threads async_star_write bp_accum_mpi continue_skip_align gpu_select_fused ini_high_reference_free lazy_cache map_fsc prep_ahead rectangular_reconstruct)
     add_test(
         NAME integration_${tag}
         COMMAND ${Python3_EXECUTABLE} -m pytest -v ${CMAKE_SOURCE_DIR}/tests/integration/test_${tag}.py

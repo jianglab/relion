@@ -35,7 +35,9 @@ def refine(relion_bin, outdir: Path, paths, core_list, mpi=0, extra=()):
             "--tau2_fudge", "2", "--particle_diameter", "25", "--oversampling", "1",
             "--psi_step", "12", "--offset_range", "3", "--offset_step", "2",
             "--random_seed", "7", "--dont_combine_weights_via_disc", "--pool", "10", *extra]
-    r = subprocess.run(cmd, cwd=outdir, capture_output=True, text=True, timeout=900)
+    # the 40-particle data set would cap the threads by the number of particles; this test is about the cores
+    env = dict(os.environ, RELION_AUTO_THREADS_CAP="off")
+    r = subprocess.run(cmd, cwd=outdir, capture_output=True, text=True, timeout=900, env=env)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
     return r.stdout
 
