@@ -71,6 +71,8 @@ int main(int argc, char *argv[])
 	catch (RelionError XE)
 	{
 		std::cerr << XE;
+		// the other ranks would wait at the next barrier for ever
+		MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_FAILURE);
 		return RELION_EXIT_FAILURE;
 	}
 

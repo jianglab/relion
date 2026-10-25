@@ -37,6 +37,8 @@
 #include <src/fftw.h>
 #include <src/time.h>
 
+class AsyncMrcStack;
+
 class Preprocessing
 {
 public:
@@ -268,6 +270,9 @@ public:
 			FileName fn_mic, int ipos, FileName fn_output_img_root, FileName fn_oristack,
 			long int &my_current_nr_images, long int my_total_nr_images,
 			RFLOAT &all_avg, RFLOAT &all_stddev, RFLOAT &all_minval, RFLOAT &all_maxval);
+
+	// While a micrograph's particles are extracted, the stack they go to (written by the background writer); NULL otherwise
+	AsyncMrcStack *stack_out = NULL;
 
 	// Perform per-image operations (e.g. normalise, rescaling, rewindowing and inverting contrast) on an input stack (or STAR file)
 	void runOperateOnInputFile();

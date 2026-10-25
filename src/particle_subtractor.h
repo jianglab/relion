@@ -26,6 +26,9 @@
 #include "src/time.h"
 #include "src/mask.h"
 #include "src/funcs.h"
+#include <memory>
+
+class AsyncMrcStack;
 
 
 class ParticleSubtractor
@@ -121,6 +124,9 @@ private:
 	// image to particle mapping
 	std::vector<long int> nr_particles_in_optics_group;
 	std::map<long int, FileName> imgno_to_filename;
+
+	// The 2D stacks being written (by file name), each by the background writer; saveStarFile completes them
+	std::map<std::string, std::shared_ptr<AsyncMrcStack> > stacks;
 };
 
 #endif /* PARTICLE_SUBTRACTOR_H_ */

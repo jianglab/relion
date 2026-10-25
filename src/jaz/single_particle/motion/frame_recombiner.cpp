@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "frame_recombiner.h"
+#include <src/async_file_writer.h>
 #include "motion_refiner.h"
 #include "motion_helper.h"
 
@@ -377,7 +378,9 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 			}
 		}
 
-		Image<RFLOAT> outStack_xmipp(out_size, out_size, 1, pc);
+		// The stack goes to disc on the background writer, which then owns it
+		std::shared_ptr<Image<RFLOAT> > outStack_ptr(new Image<RFLOAT>(out_size, out_size, 1, pc));
+		Image<RFLOAT> &outStack_xmipp = *outStack_ptr;
 		RawImage<RFLOAT> outStack(outStack_xmipp);
 
 		#pragma omp parallel for num_threads(nr_omp_threads)
@@ -420,14 +423,25 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 		std::string stackFn = fn_root + "_shiny" + suffix + ".mrcs";
 		
 		outStack_xmipp.setSamplingRateInHeader(angpix_out[ogmg]);
-		outStack_xmipp.write(stackFn, -1, true, WRITE_OVERWRITE, write_float16 ? Float16: Float);
+		{
+			const DataType datatype = write_float16 ? Float16: Float;
+			AsyncFileWriter::putFile(stackFn, MULTIDIM_SIZE(outStack_xmipp()) * sizeof(RFLOAT), [outStack_ptr, datatype](const std::string &tmp)
+			{
+				outStack_ptr->write(tmp, -1, true, WRITE_OVERWRITE, datatype);
+			});
+		}
 
 		for (int p = 0; p < pc; p++)
 		{
 			mdtOut.setValue(EMDL_IMAGE_NAME, ZIO::itoa(p+1) + "@" + stackFn, p);
 		}
 
-		mdtOut.write(fn_root + "_shiny" + suffix + ".star");
+		// Queued after the stack, so the STAR file (with the stack, what isJobFinished looks for) appears last
+		{
+			std::shared_ptr<MetaDataTable> mdtOut_copy(new MetaDataTable(mdtOut));
+			const std::string fn_star = fn_root + "_shiny" + suffix + ".star";
+			AsyncFileWriter::instance().submit([mdtOut_copy, fn_star] { mdtOut_copy->write(fn_star); });
+		}
 
 		nr_done++;
 
@@ -441,6 +455,9 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 	{
 		progress_bar(my_nr_micrographs);
 	}
+
+	// All stacks and STAR files must be on disc (an error stops the job) before anything is combined or reported done
+	AsyncFileWriter::instance().waitOrThrow();
 }
 
 void FrameRecombiner::recenterParticles(

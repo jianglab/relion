@@ -23,6 +23,7 @@
 #include <sstream>
 
 #include "src/motioncorr_runner.h"
+#include "src/async_file_writer.h"
 #ifdef _CUDA_ENABLED
 #include "src/acc/cuda/cuda_mem_utils.h"
 #elif _HIP_ENABLED
@@ -510,6 +511,17 @@ FileName MotioncorrRunner::getOutputFileNames(FileName fn_mic, bool continue_eve
 	}
 }
 
+// Writes a copy of the image (one image, own thread of the background writer; the file appears when complete)
+template <typename T>
+static void writeImageAsync(const Image<T> &img, const FileName &fn, DataType datatype)
+{
+	std::shared_ptr<Image<T> > mine(new Image<T>(img));
+	AsyncFileWriter::putFile(fn, MULTIDIM_SIZE(img()) * sizeof(T), [mine, datatype](const std::string &tmp)
+	{
+		mine->write(tmp, -1, false, WRITE_OVERWRITE, datatype);
+	});
+}
+
 void MotioncorrRunner::run()
 {
 	prepareGainReference(true);
@@ -565,6 +577,9 @@ void MotioncorrRunner::run()
 
 	if (verb > 0)
 		progress_bar(fn_micrographs.size());
+
+	// The averages and power spectra must be on disc (an error stops the job) before the files that list them are made
+	AsyncFileWriter::instance().waitOrThrow();
 
 	// Make a logfile with the shifts in pdf format and write output STAR files
 	generateLogFilePDFAndWriteStarFiles();
@@ -1545,7 +1560,7 @@ bool MotioncorrRunner::executeOwnMotionCorrection(Micrograph &mic) {
 
 		// 4. Write
 		PS_sum.setSamplingRateInHeader(ps_angpix, ps_angpix);
-		PS_sum.write(fn_ps);
+		writeImageAsync(PS_sum, fn_ps, Unknown_Type);
 		logfile << "Written the power spectrum for CTF estimation: " << fn_ps << std::endl;
 		logfile << "The pixel size for CTF estimation: " << ps_angpix << std::endl;
 	}
@@ -1866,7 +1881,7 @@ skip_fitting:
 
 		// Final output
                 Iref.setSamplingRateInHeader(output_angpix, output_angpix);
-		Iref.write(!do_dose_weighting ? fn_avg : fn_avg_noDW, -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
+		writeImageAsync(Iref, !do_dose_weighting ? fn_avg : fn_avg_noDW, write_float16 ? Float16: Float);
 		logfile << "Written aligned but non-dose weighted sum to " << (!do_dose_weighting ? fn_avg : fn_avg_noDW) << std::endl;
 		// ODD-EVEN Output
 		if (even_odd_split)
@@ -1874,8 +1889,8 @@ skip_fitting:
 		Iref_odd.setSamplingRateInHeader(output_angpix, output_angpix);
 		Iref_even.setSamplingRateInHeader(output_angpix, output_angpix);
 
-		Iref_odd.write(fn_avg.withoutExtension() + "_ODD.mrc", -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
-		Iref_even.write(fn_avg.withoutExtension() + "_EVN.mrc", -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
+		writeImageAsync(Iref_odd, fn_avg.withoutExtension() + "_ODD.mrc", write_float16 ? Float16: Float);
+		writeImageAsync(Iref_even, fn_avg.withoutExtension() + "_EVN.mrc", write_float16 ? Float16: Float);
 		logfile << "Written aligned but non-dose weighted sum of odd frames to " << (fn_avg.withoutExtension() + "_ODD.mrc") << std::endl;
 		logfile << "Written aligned but non-dose weighted sum of even frames to " << (fn_avg.withoutExtension() + "_EVN.mrc") << std::endl;
 		}
@@ -1938,7 +1953,7 @@ skip_fitting:
 
 		// Final output
                 Iref.setSamplingRateInHeader(output_angpix, output_angpix);
-		Iref.write(fn_avg, -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
+		writeImageAsync(Iref, fn_avg, write_float16 ? Float16: Float);
 		logfile << "Written aligned and dose-weighted sum to " << fn_avg << std::endl;
 	}
 
@@ -1982,7 +1997,7 @@ skip_fitting:
 			logfile << "Summing frames from the recorded motion (reproducible): ";
 			sumFromRecord(mic, recipe, Iref);
 			logfile << " done" << std::endl;
-			Iref.write(fn_avg, -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
+			writeImageAsync(Iref, fn_avg, write_float16 ? Float16: Float);
 			logfile << "Written " << (do_dose_weighting ? "aligned and dose-weighted" : "aligned") << " sum to " << fn_avg
 			        << "; it can be regenerated from the movie and " << fn_avg.withoutExtension() + ".star" << std::endl;
 		}

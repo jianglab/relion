@@ -20,6 +20,7 @@
 
 #include <src/rect_refusal.h>
 #include "src/particle_subtractor.h"
+#include "src/async_mrc_stack.h"
 
 void ParticleSubtractor::read(int argc, char **argv)
 {
@@ -347,6 +348,10 @@ void ParticleSubtractor::run()
 
 void ParticleSubtractor::saveStarFile(int myrank)
 {
+	// All images must be on disc (an error stops the job) before the STAR files that list them are written
+	for (auto &s : stacks) s.second->finish();
+	stacks.clear();
+	AsyncFileWriter::instance().waitOrThrow();
 
 	if (do_ssnr)
 	{
@@ -833,16 +838,24 @@ void ParticleSubtractor::subtractOneParticle(long int part_id, long int imgno, l
 
 		//printf("Writing: fn_orig = %s counter = %ld rank = %d optics_group = %d fn_img = %s SIZE = %d nr_particles_in_optics_group[optics_group] = %d\n", fn_orig.c_str(), counter, rank, optics_group+1, fn_img.c_str(), XSIZE(img()), nr_particles_in_optics_group[optics_group]);
 		img.setSamplingRateInHeader(my_pixel_size);
+		const DataType datatype = write_float16 ? Float16: Float;
 		if (opt.mymodel.data_dim == 3)
 		{
-			img.write(fn_img, -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
+			std::shared_ptr<Image<RFLOAT> > mine(new Image<RFLOAT>(img));
+			AsyncFileWriter::putFile(fn_img, MULTIDIM_SIZE(img()) * sizeof(RFLOAT), [mine, datatype](const std::string &tmp)
+			{
+				mine->write(tmp, -1, false, WRITE_OVERWRITE, datatype);
+			});
 		}
 		else
 		{
-			if (nr_particles_in_optics_group[optics_group] == 0)
-				img.write(fn_img, -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
-			else
-				img.write(fn_img, -1, false, WRITE_APPEND, write_float16 ? Float16: Float);
+			// The particles of a stack go through the background writer, which writes it in one pass
+			long int dummy;
+			FileName fn_stack;
+			fn_img.decompose(dummy, fn_stack);
+			std::shared_ptr<AsyncMrcStack> &stack = stacks[fn_stack];
+			if (!stack) stack.reset(new AsyncMrcStack(fn_stack, datatype));
+			stack->add(img);
 		}
 	}
 }

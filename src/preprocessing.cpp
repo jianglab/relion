@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/preprocessing.h"
+#include "src/async_mrc_stack.h"
 #include "src/extract_rect.h"
 #include "src/rect_downscale.h"
 #include "src/fftw_rect.h"
@@ -733,6 +734,9 @@ void Preprocessing::runExtractParticles()
 		imic++;
 	}
 
+	// The stacks must be complete before the STAR files that list them are joined
+	AsyncFileWriter::instance().waitOrThrow();
+
 	MDmics = MDoutMics;
 	if (verb > 0)
 		progress_bar(fn_coords.size());
@@ -1193,6 +1197,16 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	std::vector<std::pair<long, long> > virtual_centres;
 	std::vector<double> virtual_psi;   // helical segments only: orients the tube mask
 	std::vector<double> virtual_cx, virtual_cy, virtual_angle;   // turned boxes only
+	// The particles of this micrograph go to its stack through the background writer (the stack is complete, or absent, under its name)
+	std::unique_ptr<AsyncMrcStack> stack;
+	if (!do_virtual)
+		stack.reset(new AsyncMrcStack(fn_output_img_root + ".mrcs", write_float16 ? Float16: Float));
+	struct StackScope
+	{
+		Preprocessing *p;
+		StackScope(Preprocessing *p, AsyncMrcStack *s) : p(p) { p->stack_out = s; }
+		~StackScope() { p->stack_out = NULL; }
+	} stack_scope(this, stack.get());
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
 	{
 		RFLOAT dxpos, dypos, dzpos;
@@ -1476,6 +1490,8 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		ipos++;
 	}
 
+	if (stack) stack->finish();
+
 	if (do_virtual)
 	{
 		vparticles::Recipe recipe;
@@ -1613,7 +1629,17 @@ void Preprocessing::performPerImageOperations(
 		// Write one mrc file for every subtomogram
 		FileName fn_img;
 		fn_img.compose(fn_output_img_root, image_nr + 1, "mrc");
-		Ipart.write(fn_img, -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
+		if (stack_out)
+		{
+			std::shared_ptr<Image<RFLOAT> > mine(new Image<RFLOAT>(Ipart));
+			const DataType dt = write_float16 ? Float16: Float;
+			AsyncFileWriter::putFile(fn_img, MULTIDIM_SIZE(Ipart()) * sizeof(RFLOAT), [mine, fn_img, dt](const std::string &tmp)
+			{
+				mine->write(tmp, -1, false, WRITE_OVERWRITE, dt);
+			});
+		}
+		else
+			Ipart.write(fn_img, -1, false, WRITE_OVERWRITE, write_float16 ? Float16: Float);
 		TIMING_TOC(TIMING_PER_IMG_OP_WRITE);
 	}
 	else
@@ -1639,7 +1665,9 @@ void Preprocessing::performPerImageOperations(
 		TIMING_TIC(TIMING_PER_IMG_OP_WRITE);
 		// Write this particle to the stack on disc
 		// First particle: write stack in overwrite mode, from then on just append to it
-		if (image_nr == 0)
+		if (stack_out)
+			stack_out->add(Ipart);
+		else if (image_nr == 0)
 			Ipart.write(fn_output_img_root+".mrcs", -1, (nr_of_images > 1), WRITE_OVERWRITE, write_float16 ? Float16: Float);
 		else
 			Ipart.write(fn_output_img_root+".mrcs", -1, false, WRITE_APPEND, write_float16 ? Float16: Float);

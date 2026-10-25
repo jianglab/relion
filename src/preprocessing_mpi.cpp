@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/preprocessing_mpi.h"
+#include "src/async_file_writer.h"
 
 void PreprocessingMpi::read(int argc, char **argv)
 {
@@ -102,6 +103,9 @@ void PreprocessingMpi::runExtractParticles()
 			imic++;
 		}
 	}
+
+	// Every rank's stacks must be complete (an error ends the job) before the final star file lists them
+	AsyncFileWriter::instance().waitOrThrow();
 
 	// Wait until all nodes have finished to make final star file
 	MPI_Barrier(MPI_COMM_WORLD);

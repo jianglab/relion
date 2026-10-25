@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/motioncorr_runner_mpi.h"
+#include "src/async_file_writer.h"
 
 void MotioncorrRunnerMpi::read(int argc, char **argv)
 {
@@ -89,6 +90,9 @@ void MotioncorrRunnerMpi::run()
 	}
 	if (verb > 0)
 		progress_bar(my_nr_micrographs);
+
+	// The averages and power spectra must be on disc (an error stops the job) before the barrier that lets the leader list them
+	AsyncFileWriter::instance().waitOrThrow();
 
 	MPI_Barrier(MPI_COMM_WORLD);
 
