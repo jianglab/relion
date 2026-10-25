@@ -25,6 +25,7 @@
 
 #include <src/jaz/optimization/nelder_mead.h>
 #include <src/jaz/single_particle/index_sort.h>
+#include <src/jaz/single_particle/micrograph_handler.h>
 #include <src/jaz/single_particle/img_proc/filter_helper.h>
 #include <src/jaz/single_particle/vtk_helper.h>
 
@@ -534,6 +535,10 @@ void MotionParamEstimator::prepAlignment()
                 alignmentSet.positions[g],
                 alignmentSet.initialTracks[g],
                 alignmentSet.globComp[g]);
+        }
+        catch (const GainReferenceError &)
+        {
+            throw;   // the same gain is used by other movies: stop instead of skipping them all
         }
         catch (RelionError XE)
         {

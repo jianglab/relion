@@ -577,6 +577,10 @@ std::vector<Image<RFLOAT>> FrameRecombiner::weightsFromFCC(
 		}
 	}
 
+	if (first)
+		REPORT_ERROR("FrameRecombiner: no micrograph has FCC files (" + outPath + "..._FCC_cc.mrc) to compute the B-factors from: "
+		             "motion estimation skipped every micrograph (see the warnings above: movies, their metadata STAR files or the gain reference)");
+
 	Image<RFLOAT> fcc(sh_ref,fc);
 
 	for (int y = 0; y < fc; y++)

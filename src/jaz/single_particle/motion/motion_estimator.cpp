@@ -298,6 +298,10 @@ void MotionEstimator::process(
 				mdts[g], fts, damageWeights[ogmg], ogmg,
 				movie, movieCC, positions, initialTracks, globComp);
 		}
+		catch (const GainReferenceError &)
+		{
+			throw;   // the same gain is used by other movies: stop instead of skipping them all
+		}
 		catch (RelionError e)
 		{
 			std::string mgName;

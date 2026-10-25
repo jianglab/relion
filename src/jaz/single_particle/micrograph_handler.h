@@ -30,6 +30,14 @@
 #include <src/micrograph_model.h>
 #include <src/image.h>
 
+// A gain reference that cannot be read: fatal, unlike a single unreadable movie, which callers skip
+class GainReferenceError : public RelionError
+{
+	public:
+		GainReferenceError(const std::string& what, const std::string& file, long line)
+		: RelionError(what, file, line) {}
+};
+
 class MicrographHandler
 {
 	public:

@@ -410,17 +410,25 @@ std::vector<std::vector<Image<Complex>>> MicrographHandler::loadMovie(
 		{
 			last_gainFn = gainFn;
 			
+			// (e.msg starts with "ERROR: \n")
+			auto gainError = [&](const RelionError &e)
+			{
+				return GainReferenceError("cannot read the gain reference " + gainFn + ": " + e.msg.substr(e.msg.find('\n') + 1), __FILE__, __LINE__);
+			};
+
 			if (isEER) // TODO: Takanori: Remove this once we updated RelionCor
 			{
 				if (eer_upsampling < 0)
 					eer_upsampling = micrograph.getEERUpsampling();
 				EERRenderer renderer;
 				renderer.read(movieFn, eer_upsampling);
-				renderer.loadEERGain(gainFn, lastGainRef());
+				try { renderer.loadEERGain(gainFn, lastGainRef()); }
+				catch (RelionError &e) { throw gainError(e); }
 			}
 			else
 			{
-				lastGainRef.read(gainFn);
+				try { lastGainRef.read(gainFn); }
+				catch (RelionError &e) { throw gainError(e); }
 			}
 		}
 
