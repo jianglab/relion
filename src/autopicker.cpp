@@ -20,6 +20,7 @@
  ***************************************************************************/
 #include <src/rect_refusal.h>
 #include "src/autopicker.h"
+#include "src/virtual_movie_averages.h"
 #include <src/jaz/single_particle/new_ft.h>
 
 //#define DEBUG
@@ -1005,12 +1006,24 @@ void AutoPicker::run()
 	}
 
 	FileName fn_olddir="";
+	// Virtual movie averages that will be read next are built in the background while this one is picked
+	// (Topaz reads the files itself)
+	vmovies::ReadAhead read_ahead(do_topaz_extract ? 0 : -1);
+	read_ahead.expectMicrographs((long) fn_micrographs.size());
 	for (long int imic = 0; imic < fn_micrographs.size(); imic++)
 	{
 
 		// Abort through the pipeline_control system
 		if (pipeline_control_check_abort_job())
 			exit(RELION_EXIT_ABORTED);
+
+		if (read_ahead.enabled())
+		{
+			std::vector<std::string> next;
+			for (long int k = imic + 1; k < fn_micrographs.size() && (int) next.size() < vmovies::ReadAhead::WINDOW; k++)
+				next.push_back(fn_micrographs[k]);
+			read_ahead.upcoming(next);
+		}
 
 		if (verb > 0 && imic % barstep == 0)
 			progress_bar(imic);

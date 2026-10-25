@@ -20,6 +20,7 @@
 
 #include "src/manualpicker.h"
 #include "src/displayer.h"
+#include "src/virtual_movie_averages.h"
 #include "src/fftw.h"
 #include <signal.h>
 #include <cstdio>
@@ -268,8 +269,19 @@ void cb_viewmic(Fl_Widget* w, void* data)
 	// Helper: read, filter and return the image for a given micrograph index
 	auto readMicrograph = [](int idx) -> Image<RFLOAT>
 	{
+		// Virtual movie averages after the one viewed are built in the background (the destructor waits for the one in progress)
+		static vmovies::ReadAhead read_ahead;
+		static const bool read_ahead_limited = (read_ahead.limitBuilders(2), true);   // interactive: leave the CPUs to the viewer
+		(void) read_ahead_limited;
 		Image<RFLOAT> img;
 		img.read(global_fn_mics[idx]);
+		if (read_ahead.enabled())
+		{
+			std::vector<std::string> next;
+			for (int k = idx + 1; k < (int) global_fn_mics.size() && (int) next.size() < vmovies::ReadAhead::WINDOW; k++)
+				next.push_back(global_fn_mics[k]);
+			read_ahead.upcoming(next);
+		}
 		if (global_lowpass > 0.)
 			lowPassFilterMap(img(), global_lowpass, global_angpix);
 		if (global_highpass > 0.)

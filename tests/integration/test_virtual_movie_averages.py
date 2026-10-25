@@ -272,6 +272,74 @@ class TestVirtualMovieAverages:
             assert np.array_equal(got, ref), f"{out}: max |diff| {np.abs(got - ref).max()}"
 
 
+@pytest.mark.integration
+class TestReadAhead:
+    """RELION_VMOVIE_READ_AHEAD: the next virtual micrographs are built in the background while
+    relion_preprocess works on the current one. Only the order of the work changes."""
+
+    def test_extraction_is_identical_with_and_without(self, test_data_dir, relion_bin):
+        d = test_data_dir
+        names = _write_movies(d, n_movies=3)
+        _motioncorr(relion_bin, d, "MCV", CASES["dose_weighted_float16"], mode="1")
+        (d / "Coords").mkdir()
+        rows = []
+        for n in names:
+            stem = Path(n).stem
+            cf = d / "Coords" / f"{stem}.star"
+            cf.write_text("\ndata_\n\nloop_\n_rlnCoordinateX #1\n_rlnCoordinateY #2\n"
+                          + "".join(f"{x} {y}\n" for x, y in [(100, 100), (250, 240), (400, 300)]))
+            rows.append(f"MCV/Movies/{stem}.mrc Coords/{cf.name}\n")
+        (d / "coords.star").write_text(
+            "\ndata_coordinate_files\n\nloop_\n_rlnMicrographName #1\n_rlnMicrographCoordinates #2\n" + "".join(rows))
+        opts = ["--extract", "--extract_size", "64", "--scale", "48", "--norm", "--bg_radius", "18",
+                "--invert_contrast", "--float16", "--no_virtual"]
+
+        def extract(out, read_ahead, cache):
+            env = _env(cache=cache)
+            env["RELION_VMOVIE_READ_AHEAD"] = read_ahead
+            env["RELION_VMOVIE_READ_AHEAD_STATS"] = "1"
+            (d / out).mkdir(parents=True)
+            r = _run(relion_bin, d, ["relion_preprocess", "--i", "MCV/corrected_micrographs.star",
+                                     "--coord_list", "coords.star", "--part_star", f"{out}/particles.star",
+                                     "--part_dir", f"{out}/"] + opts, env)
+            _run(relion_bin, d, ["relion_stack_create", "--i", f"{out}/particles.star", "--o", f"{out}/all"], env)
+            return _read_mrc(d / out / "all.mrcs"), r
+
+        ref, r0 = extract("Extract/no_ahead", "0", str(d / "cache0"))
+        assert "read-ahead" not in (r0.stderr or "")
+        got, r1 = extract("Extract/ahead", "1", str(d / "cache1"))
+        assert np.array_equal(got, ref), f"max |diff| {np.abs(got - ref).max()}"
+        assert len(_cache_entries(d / "cache1")) == len(names)
+        # With 3 micrographs and depth 1 the background built the 2nd and 3rd ahead of the loop (or the loop
+        # had begun on them, then it waited for the build in progress)
+        m = re.search(r"(\d+) micrographs built ahead of (\d+) asked for", r1.stderr or "")
+        assert m, r1.stderr[-1500:]
+        assert int(m.group(1)) >= 1
+
+    def test_cache_off_does_nothing(self, test_data_dir, relion_bin):
+        d = test_data_dir
+        names = _write_movies(d, n_movies=2)
+        _motioncorr(relion_bin, d, "MCV", CASES["dose_weighted_float16"], mode="1")
+        (d / "Coords").mkdir()
+        rows = []
+        for n in names:
+            stem = Path(n).stem
+            cf = d / "Coords" / f"{stem}.star"
+            cf.write_text("\ndata_\n\nloop_\n_rlnCoordinateX #1\n_rlnCoordinateY #2\n100 100\n")
+            rows.append(f"MCV/Movies/{stem}.mrc Coords/{cf.name}\n")
+        (d / "coords.star").write_text(
+            "\ndata_coordinate_files\n\nloop_\n_rlnMicrographName #1\n_rlnMicrographCoordinates #2\n" + "".join(rows))
+        env = _env(cache="off")
+        env["RELION_VMOVIE_READ_AHEAD"] = "2"
+        env["RELION_VMOVIE_READ_AHEAD_STATS"] = "1"
+        (d / "Extract/x").mkdir(parents=True)
+        r = _run(relion_bin, d, ["relion_preprocess", "--i", "MCV/corrected_micrographs.star",
+                                 "--coord_list", "coords.star", "--part_star", "Extract/x/particles.star",
+                                 "--part_dir", "Extract/x/", "--extract", "--extract_size", "64", "--no_virtual"], env)
+        assert "read-ahead" not in (r.stderr or "")
+        assert not (d / "Cache").exists()
+
+
 # ---------------------------------------------------------------------------
 # relion_movie_averages_to_virtual: real (=real) micrographs -> descriptors, in place
 

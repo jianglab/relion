@@ -75,6 +75,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_gpu_pool_plan.cpp
     test_pair_list.cpp
     test_lazy_cache.cpp
+    test_vmovie_read_ahead.cpp
 )
 
 if (CUDA_FOUND)

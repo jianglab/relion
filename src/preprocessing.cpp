@@ -22,6 +22,7 @@
 #include "src/rect_downscale.h"
 #include "src/fftw_rect.h"
 #include "src/virtual_particles.h"
+#include "src/virtual_movie_averages.h"
 
 //#define PREP_TIMING
 #ifdef PREP_TIMING
@@ -673,6 +674,10 @@ void Preprocessing::runExtractParticles()
 	FileName fn_mic, fn_olddir = "";
 	long int imic = 0;
 	bool micIsUsed;
+	// Virtual movie averages that will be read next are built in the background while this one is extracted
+	// (not for virtual particles, which need no pixels now)
+	vmovies::ReadAhead read_ahead(do_virtual ? 0 : -1);
+	read_ahead.expectMicrographs(MDmics.numberOfObjects());
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDmics)
 	{
 		// Abort through the pipeline_control system
@@ -680,6 +685,20 @@ void Preprocessing::runExtractParticles()
 			exit(RELION_EXIT_ABORTED);
 
 		MDmics.getValue(EMDL_MICROGRAPH_NAME, fn_mic);
+		if (read_ahead.enabled())
+		{
+			std::vector<std::string> next;
+			for (long int k = imic + 1; k < MDmics.numberOfObjects() && (int) next.size() < vmovies::ReadAhead::WINDOW; k++)
+			{
+				FileName fn_next;
+				MDmics.getValue(EMDL_MICROGRAPH_NAME, fn_next, k);
+				// the micrographs extractParticlesFromFieldOfView() will skip are not worth building
+				if (fn_data == "" && !exists(micname2coordname[fn_next]))
+					continue;
+				next.push_back(fn_next);
+			}
+			read_ahead.upcoming(next);
+		}
 		int optics_group = obsModelMic.getOpticsGroup(MDmics);
 
 		// Set the pixel size for this micrograph
