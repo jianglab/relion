@@ -946,6 +946,19 @@ static __global__ void cuda_kernel_scatter_weights_idx(const size_t *rot_idx, co
 		dense[base + rot_idx[i] * translation_num + trans_idx[i]] = w[i];
 }
 
+// --helical_tilt_weight_sigma: the significant weights of orientation o times factor[o], the
+// others "no weight" (none), over the first n entries of the dense (orientation, translation) map
+static __global__ void cuda_kernel_scale_orientation_weights(const XFLOAT *factor, size_t n, size_t translation_num,
+		XFLOAT significant_weight, XFLOAT none, XFLOAT *dense)
+{
+	const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+	if (i < n)
+	{
+		const XFLOAT w = dense[i];
+		dense[i] = (w >= significant_weight) ? w * factor[i / translation_num] : none;
+	}
+}
+
 #define WEIGHT_MAP_BLOCK_SIZE 512
 // One launch for all classes of a particle (blockIdx.y = class): the same copy as
 // cuda_kernel_allweights_to_mweights for each class

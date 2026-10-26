@@ -4723,6 +4723,77 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 								BACKPROJECTION
 			======================================================*/
 
+			// --helical_tilt_weight_sigma: down-weight each orientation in the reconstruction only. The
+			// weighted sums above have used the unscaled map; the significant weights are scaled here
+			// and the others dropped, so the kernels below take all positive weights
+			XFLOAT bp_significant_weight = (XFLOAT) op.significant_weight;
+			if (baseMLO->doHelicalTiltWeight())
+			{
+		#ifdef _HIP_ENABLED
+				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+					DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[iclass]));
+				DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
+		#elif _CUDA_ENABLED
+				accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+		#elif _SYCL_ENABLED
+				if (accMLO->useStream())
+					for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+						(accMLO->classStreams[iclass])->waitAll();
+				devAcc->waitAll();
+		#endif
+				const XFLOAT none = std::numeric_limits<XFLOAT>::lowest();
+#ifdef _CUDA_ENABLED
+				// The map stays on the device: only one factor per orientation goes up, in the order of the map
+				size_t nr_orient = 0;
+				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+					if((baseMLO->mymodel.pdf_class[iclass] != 0.) && (ProjectionData.class_entries[iclass] != 0))
+						nr_orient += ProjectionData.orientation_num[iclass];
+				if (nr_orient > 0)
+				{
+					AccPtr<XFLOAT> tilt_factors = ptrFactory.make<XFLOAT>(nr_orient);
+					tilt_factors.allAlloc();
+					size_t o = 0;
+					for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+					{
+						if((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))
+							continue;
+						const size_t from = ProjectionData.class_idx[iclass];
+						for (size_t i = from; i < from + ProjectionData.orientation_num[iclass]; i++)
+							tilt_factors[o++] = (XFLOAT) baseMLO->helicalTiltWeight(ProjectionData.tilts[i]);
+					}
+					tilt_factors.cpToDevice();
+					tilt_factors.streamSync();
+					const size_t n = nr_orient * translation_num;
+					cuda_kernel_scale_orientation_weights<<<(unsigned) ((n + 255) / 256), 256, 0, sorted_weights.getStream()>>>(
+							~tilt_factors, n, translation_num, bp_significant_weight, none, ~sorted_weights);
+					LAUNCH_HANDLE_ERROR(cudaGetLastError());
+					sorted_weights.streamSync();
+				}
+#else
+				if (sorted_weights.getHostPtr() == NULL)
+					sorted_weights.hostAlloc();
+				sorted_weights.cpToHost();
+				sorted_weights.streamSync();
+				size_t pos = 0;
+				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+				{
+					if((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))
+						continue;
+					const size_t from = ProjectionData.class_idx[iclass];
+					for (size_t i = from; i < from + ProjectionData.orientation_num[iclass]; i++)
+					{
+						const XFLOAT f = (XFLOAT) baseMLO->helicalTiltWeight(ProjectionData.tilts[i]);
+						for (size_t t = 0; t < translation_num; t++, pos++)
+							sorted_weights[pos] = (sorted_weights[pos] >= bp_significant_weight) ? sorted_weights[pos] * f : none;
+					}
+				}
+				sorted_weights.cpToDevice();
+				sorted_weights.streamSync();
+#endif
+				bp_significant_weight = std::numeric_limits<XFLOAT>::min();
+			}
+
 			classPos = 0;
 #ifdef _CUDA_ENABLED
 			// All classes in one launch (see runBackProjectKernelBatched), unless the
@@ -4807,7 +4878,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 							~Minvsigma2s,
 							~ctfs,
 							translation_num,
-							(XFLOAT) op.significant_weight,
+							bp_significant_weight,
 							op.local_Minvsigma2.xdim,
 							op.local_Minvsigma2.ydim,
 							op.local_Minvsigma2.zdim,
@@ -4873,7 +4944,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 						~Minvsigma2s,
 						~ctfs,
 						translation_num,
-						(XFLOAT) op.significant_weight,
+						bp_significant_weight,
 						op.local_Minvsigma2.xdim,
 						op.local_Minvsigma2.ydim,
 						ctf_premultiplied,
@@ -4929,7 +5000,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					~Minvsigma2s,
 					~ctfs,
 					translation_num,
-					(XFLOAT) op.significant_weight,
+					bp_significant_weight,
 					(XFLOAT) (baseMLO->is_som_iter ? class_sum_weight[iclass] : op.sum_weight),
 					~eulers[iclass],
 					op.local_Minvsigma2.xdim,

@@ -729,6 +729,11 @@ public:
 	// Keep helical tilt priors fixed (at 90 degrees) in global angular searches?
 	bool helical_keep_tilt_prior_fixed;
 
+	// Down-weight orientations with a tilt away from 90 degrees in the reconstruction only:
+	// each orientation's contribution to the back-projection is multiplied by
+	// exp(-(tilt-90)^2 / (2 sigma^2)). Sigma in degrees; <= 0 switches it off
+	RFLOAT helical_tilt_weight_sigma;
+
 	// Apply fourier_mask for helical refinements
 	std::string helical_fourier_mask_resols;
 	FileName fn_fourier_mask;
@@ -1067,6 +1072,7 @@ public:
             do_helical_symmetry_local_refinement(0),
             helical_sigma_distance(0),
             helical_keep_tilt_prior_fixed(0),
+            helical_tilt_weight_sigma(-1.),
             ctf3d_squared(0),
             do_skip_subtomo_correction(0),
             normalised_subtomos(0),
@@ -1555,6 +1561,22 @@ public:
 	// them into class priors for the next iteration, and the factor applied in the E-step
 	// Command-line options (--filament_context etc.) over the RELION_FILAMENT_* environment defaults
 	void parseFilamentContext();
+	// --helical_tilt_weight_sigma, parsed the same in both parse paths so that --continue can switch it
+	void parseHelicalTiltWeight();
+	// Whether it applies: 3D references only (the tilt is 0 in 2D), and not to the residual
+	// orientations of multi-body refinement
+	bool doHelicalTiltWeight() const
+	{
+		return helical_tilt_weight_sigma > 0. && mymodel.ref_dim == 3 && mymodel.nr_bodies == 1;
+	}
+	// The factor on the back-projection of an orientation with this tilt (1 when switched off)
+	RFLOAT helicalTiltWeight(RFLOAT tilt_deg) const
+	{
+		if (!doHelicalTiltWeight())
+			return 1.;
+		const RFLOAT d = (tilt_deg - 90.) / helical_tilt_weight_sigma;
+		return exp(-0.5 * d * d);
+	}
 	void initialiseFilamentContext();
 	void storeFilamentLoglik(long int part_id, const MultidimArray<RFLOAT> &Mdiff2, long int per_class, RFLOAT min_diff2);
 	void updateFilamentContext();

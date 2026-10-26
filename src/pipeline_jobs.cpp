@@ -5049,6 +5049,7 @@ Values of ~ 100 Angstroms are recommended for the range. Set the range to negati
     joboptions["helical_nstart"] = JobOption("Local averaging - N-start symmetry", std::string("1"), "Local averaging of orientations and translations will be performed within a range of +/- this value (in Angstroms). This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
 Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
     joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
+	joboptions["helical_tilt_weight_sigma"] = JobOption("Tilt down-weighting sigma (deg):", std::string("-1"), "If positive, the contribution of each orientation to the reconstruction (not to the alignment) is multiplied by a Gaussian of this width (in degrees) centred at a tilt of 90 degrees. This counteracts the build-up of out-of-plane tilts at the edges of the tilt search range from one iteration to the next. Set to a negative value to switch it off. Can be changed when continuing a run.");
 
 	joboptions["do_keep_full_filaments"] = JobOption("Keep full filaments during classification?", true, "If set to Yes, then all segments from the same filament (i.e. same micrograph and same helical tube ID) will be assigned to the same 3D class at each iteration during classification. This helps ensure that entire filaments are classified consistently.");
 
@@ -5435,6 +5436,14 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 		}
 	}
 
+	if (joboptions["do_helix"].getBoolean())
+	{
+		float tilt_weight_sigma = joboptions["helical_tilt_weight_sigma"].getNumber(error_message);
+		if (error_message != "") return false;
+		if (tilt_weight_sigma > 0.)
+			command += " --helical_tilt_weight_sigma " + joboptions["helical_tilt_weight_sigma"].getString();
+	}
+
 	if ( (joboptions["do_helix"].getBoolean()) && (joboptions["do_keep_full_filaments"].getBoolean()) )
 		command += " --keep_full_filaments";
 
@@ -5641,6 +5650,7 @@ Values of ~ 100 Angstroms are recommended for the range. Set the range to negati
     joboptions["helical_nstart"] = JobOption("Local averaging - N-start symmetry", std::string("1"), "Local averaging of orientations and translations will be performed within a range of +/- this value (in Angstroms). This also requires providing the N-start number of the helical symmetry (e.g. 2 for tau PHFs and 1 for tau SFs). Polarities are also set to be the same for segments coming from the same tube during local refinement. \
 Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
 	joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
+	joboptions["helical_tilt_weight_sigma"] = JobOption("Tilt down-weighting sigma (deg):", std::string("-1"), "If positive, the contribution of each orientation to the reconstruction (not to the alignment) is multiplied by a Gaussian of this width (in degrees) centred at a tilt of 90 degrees. This counteracts the build-up of out-of-plane tilts at the edges of the tilt search range from one iteration to the next. Set to a negative value to switch it off. Can be changed when continuing a run.");
 
 	joboptions["do_parallel_discio"] = JobOption("Use parallel disc I/O?", true, "If set to Yes, all MPI followers will read their own images from disc. \
 Otherwise, only the leader will read images and send them through the network to the followers. Parallel file systems like gluster of fhgfs are good at parallel disc I/O. NFS may break with many followers reading in parallel. If your datasets contain particles with different box sizes, you have to say Yes.");
@@ -5990,6 +6000,14 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 			if (joboptions["keep_tilt_prior_fixed"].getBoolean())
 				command += " --helical_keep_tilt_prior_fixed";
 		}
+	}
+
+	if (joboptions["do_helix"].getBoolean())
+	{
+		float tilt_weight_sigma = joboptions["helical_tilt_weight_sigma"].getNumber(error_message);
+		if (error_message != "") return false;
+		if (tilt_weight_sigma > 0.)
+			command += " --helical_tilt_weight_sigma " + joboptions["helical_tilt_weight_sigma"].getString();
 	}
 
 	if (joboptions["relax_sym"].getString().length() > 0)

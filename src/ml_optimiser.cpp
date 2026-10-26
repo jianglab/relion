@@ -551,6 +551,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     parseKeepAllIterations();
     parseCoarseEarly();
     parseFilamentContext();
+    parseHelicalTiltWeight();
 
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
@@ -812,6 +813,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     parseKeepAllIterations();
     parseCoarseEarly();
     parseFilamentContext();
+    parseHelicalTiltWeight();
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
     // so existing job.star files and scripts keep working; --dont_align_halves is
@@ -11035,6 +11037,15 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
                                     // Backproject every other particle into separate volumes
                                     iproj_offset = (part_id % 2) * mymodel.nr_classes;
 
+                                // --helical_tilt_weight_sigma: down-weight this orientation in the reconstruction only
+                                // (the sums for sigma2_noise, pdf_direction etc. above keep the full weight)
+                                if (doHelicalTiltWeight())
+                                {
+                                    const RFLOAT tilt_weight = helicalTiltWeight(tilt);
+                                    Fimg *= tilt_weight;
+                                    Fweight *= tilt_weight;
+                                }
+
                                 // Perform this inside a mutex
                                 {
                                     int my_mutex = exp_iclass % NR_CLASS_MUTEXES;
@@ -12646,6 +12657,11 @@ void MlOptimiser::parseFilamentContext()
     std::string alpha = parser.getOption("--filament_alpha", "Filament context, filament mode: weight of the global class distribution. Default: RELION_FILAMENT_ALPHA, else 1", "");
     if (!alpha.empty())
         filctx_opt.alpha = textToFloat(alpha);
+}
+
+void MlOptimiser::parseHelicalTiltWeight()
+{
+    helical_tilt_weight_sigma = textToFloat(parser.getOption("--helical_tilt_weight_sigma", "Down-weight orientations with a tilt away from 90 degrees in the reconstruction (not in the alignment) by a Gaussian of this sigma (in degrees; <= 0: off)", "-1"));
 }
 
 void MlOptimiser::initialiseFilamentContext()

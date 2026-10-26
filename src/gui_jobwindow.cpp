@@ -1991,6 +1991,7 @@ void JobWindow::initialiseClass3DWindow()
     place2("helical_range_distance", "helical_nstart", "Local averaging - range (Å), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
 	place("do_keep_full_filaments", TOGGLE_DEACTIVATE);
+	place("helical_tilt_weight_sigma");
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -2204,6 +2205,7 @@ void JobWindow::initialiseAutorefineWindow()
 	place3("range_rot", "range_tilt", "range_psi", "Angular search range - rot, tilt, psi (deg):", TOGGLE_DEACTIVATE);
     place2("helical_range_distance", "helical_nstart", "Local averaging - range (Å), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
+	place("helical_tilt_weight_sigma");
 
 	// Add a little spacer
 	current_y += STEPY/2;
