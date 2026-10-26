@@ -1482,6 +1482,48 @@ static __global__ void cuda_kernel_coarse_xt_group_x2(
 	}
 }
 
+// The reference values of every orientation block of a set at every pass (the projections cuda_kernel_diff2_coarse_xt_group
+// would make itself, with the same code), written once in the order of its s_ref: [block][pass][row][orientation].
+static __global__ void __launch_bounds__(XT_BLOCK) cuda_kernel_coarse_xt_group_table(
+		const CoarseClassJob *g_classes,
+		const XtGroupBlock *g_blocks,
+		const float *const *g_eul,
+		int image_size,
+		float2 *g_tbl,
+		int b_off)            // first block of the group kernel's grid in g_blocks
+{
+	const int tid = threadIdx.x;
+	const XtGroupBlock B = g_blocks[b_off + blockIdx.x];
+	const CoarseClassJob &c = g_classes[B.cls];
+	AccProjectorKernel projector = c.projector;
+	const float inv_imgX = 1.f / (float) projector.imgX;
+	const int n_valid = min(XT_ORIENT, c.n_orient - B.orient0);
+	const int o = tid & (XT_ORIENT - 1);
+	const int plane = tid >> 4;
+	float e0 = 0.f, e1 = 0.f, e3 = 0.f, e4 = 0.f, e6 = 0.f, e7 = 0.f;
+	if (o < n_valid)
+	{
+		const float *e = g_eul[c.orient_offset + B.orient0 + o];
+		e0 = e[0]; e1 = e[1]; e3 = e[3]; e4 = e[4]; e6 = e[6]; e7 = e[7];
+	}
+	float2 *out = g_tbl + ((size_t) blockIdx.x * gridDim.y + blockIdx.y) * (XT_PIXELS * XT_ORIENT);
+	#pragma unroll
+	for (int k = 0; k < XT_PIXELS / 8; k++)
+	{
+		const int p = blockIdx.y * XT_PIXELS + plane + 8 * k;
+		float re = 0.f, im = 0.f;
+		if (p < image_size)
+		{
+			int y = (int) (((float) p + 0.5f) * inv_imgX);
+			const int x = p - y * projector.imgX;
+			if (y > projector.maxR)
+				y -= projector.imgY;
+			projector.project3Dmodel(x, y, e0, e1, e3, e4, e6, e7, re, im);
+		}
+		out[tid + XT_BLOCK * k] = make_float2(re, im);
+	}
+}
+
 // Group kernel: with 3 tiles per block the registers are held to 168 (3 resident blocks per SM; 188 registers would leave 2).
 // Other tile counts keep the compiler's choice. XT_GMINB=n sets the minimum number of blocks per SM for all tile counts.
 #ifdef XT_GMINB
@@ -1503,9 +1545,12 @@ static __global__ void XT_GBOUNDS cuda_kernel_diff2_coarse_xt_group(
 		const float2 *g_A,
 		const float *g_x2sum,
 		int image_size,
-		int n_chunks)
+		int n_chunks,
+		const float2 *g_tbl,               // PIPE 4: the block's reference values, [block][pass][row][orientation]
+		int n_tbl_pass,
+		int b_off)                         // the blocks of this launch are g_blocks[b_off ..]; the table is for them
 {	const int tid = threadIdx.x;
-	const XtGroupBlock B = g_blocks[blockIdx.x];
+	const XtGroupBlock B = g_blocks[b_off + blockIdx.x];
 	const int ttile0 = blockIdx.z * NT;
 	if (ttile0 * XT_TRANS >= B.n_cols)
 		return;
@@ -1557,7 +1602,7 @@ static __global__ void XT_GBOUNDS cuda_kernel_diff2_coarse_xt_group(
 		// Pipelined pass loop. The reference values (texture fetches), the correlation values and, for PIPE >= 2, the
 		// A values of the next pass are fetched into registers before the products of the current pass, so that their
 		// latency is hidden behind the multiply-adds. Every sum is made from the same terms in the same order.
-		constexpr bool PFA = (PIPE == 3) || (PIPE == 2 && NT <= 2);
+		constexpr bool PFA = (PIPE >= 3) || (PIPE == 2 && NT <= 2);
 		constexpr int NA = NT * (XT_PIXELS * XT_TRANS / XT_BLOCK);
 		__shared__ int s_bcol[NT * XT_TRANS];
 		__shared__ float s_ct[XT_GMAX][XT_PIXELS];
@@ -1582,6 +1627,16 @@ static __global__ void XT_GBOUNDS cuda_kernel_diff2_coarse_xt_group(
 		auto fetch = [&](int pass)
 		{
 			const int base = pass * XT_PIXELS;
+			if (PIPE == 4)
+			{
+				// projected once for all blocks by cuda_kernel_coarse_xt_group_table, in the order of s_ref
+				const float2 *tb = g_tbl + ((size_t) blockIdx.x * n_tbl_pass + pass) * (XT_PIXELS * XT_ORIENT);
+				#pragma unroll
+				for (int k = 0; k < XT_PIXELS / 8; k++)
+					nr[k] = tb[tid + XT_BLOCK * k];
+			}
+			else
+			{
 			#pragma unroll
 			for (int k = 0; k < XT_PIXELS / 8; k++)
 			{
@@ -1596,6 +1651,7 @@ static __global__ void XT_GBOUNDS cuda_kernel_diff2_coarse_xt_group(
 					projector.project3Dmodel(x, y, e0, e1, e3, e4, e6, e7, re, im);
 				}
 				nr[k] = make_float2(re, im);
+			}
 			}
 			#pragma unroll
 			for (int i = 0; i < (XT_GMAX * XT_PIXELS + XT_BLOCK - 1) / XT_BLOCK; i++)

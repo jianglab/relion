@@ -4,9 +4,11 @@
 #include <map>
 #include <array>
 #include <mutex>
+#include <tuple>
 #include <string>
 #include "src/gpu_switch.h"
 #include "src/acc/pair_list.h"
+#include "src/tuning_cache.h"
 /*
 #undef ALTCPU
 #ifdef _CUDA_ENABLED
@@ -1501,6 +1503,145 @@ struct XtTileTuner
 	}
 };
 static XtTileTuner &xtTileTuner() { static XtTileTuner t; return t; }
+
+// Is the reference projection table faster than the texture path on this GPU? (default; RELION_GPU_GROUP_PROJ_TABLE=0 turns the table off, =1 forces it)
+// Both give identical results, so the launches themselves are timed. Single launches are too noisy to compare (sets differ
+// in size, the other MPI workers share the GPU, the tile tuner changes the tiles per block), so the two candidates (0 texture,
+// 1 table) are launched strictly in turn, WINDOW launches each, and the totals decide: time summed over the launches per
+// unit of work summed. Whatever else the GPU is doing then falls on both alike. Events are read later (never waiting).
+// The table needs a 3% gain. The answer is kept in the tuning cache (tunable "group_proj_table", per GPU model and number
+// of translation tiles), so the next job starts with it and does not explore; both are timed again every 2048 launches,
+// so a changed workload is noticed and the cache row replaced.
+struct TableTuner
+{
+	static const int WINDOW = 24;
+	struct Pending { cudaEvent_t t0, t1; int cand; double work; };
+	struct State
+	{
+		double ms[2] = {0, 0}, work[2] = {0, 0};
+		int n[2] = {0, 0};
+		int best = 0;
+		bool announced = false, stored = false, init = false, exploring = true;
+		long calls = 0;
+		std::vector<Pending> pending;
+	};
+	std::mutex mtx;
+	std::map<std::pair<int, int>, State> states;
+
+	static std::string keyOf(int ntt) { return "ntt" + std::to_string(ntt); }
+	static tuning::Context contextOf(int device)
+	{
+		cudaDeviceProp prop;
+		cudaGetDeviceProperties(&prop, device);
+		tuning::Context c;
+		c.device = prop.name;
+		c.sm_count = prop.multiProcessorCount;
+		return c;
+	}
+
+	void collect(State &st)
+	{
+		for (size_t i = 0; i < st.pending.size(); )
+		{
+			Pending &pd = st.pending[i];
+			if (cudaEventQuery(pd.t1) == cudaErrorNotReady) { i++; continue; }
+			float ms = 0;
+			if (cudaEventElapsedTime(&ms, pd.t0, pd.t1) == cudaSuccess && ms > 0 && st.exploring)
+			{
+				st.ms[pd.cand] += ms;
+				st.work[pd.cand] += pd.work;
+				st.n[pd.cand]++;
+			}
+			cudaGetLastError();
+			cudaEventDestroy(pd.t0);
+			cudaEventDestroy(pd.t1);
+			st.pending.erase(st.pending.begin() + i);
+		}
+	}
+
+	// 1: launch with the table, 0: texture. The caller reports the event pair with finish().
+	int begin(int device, int ntt, cudaStream_t stream, int &cand_out, std::pair<cudaEvent_t, cudaEvent_t> &ev)
+	{
+		std::lock_guard<std::mutex> lock(mtx);
+		State &st = states[std::make_pair(device, ntt)];
+		if (!st.init)
+		{
+			st.init = true;
+			tuning::Cache cache(contextOf(device));
+			tuning::Entry e;
+			if (cache.get("group_proj_table", keyOf(ntt), e) && (e.value == "table" || e.value == "texture"))
+			{
+				st.best = e.value == "table";
+				st.stored = st.announced = true;
+				st.exploring = false;
+				fprintf(stderr, " GPU coarse pass, reference projection table: device %d, %d translation tiles -> %s (from the tuning cache; re-checked every 2048 launches)\n",
+						device, ntt, st.best ? "table" : "texture");
+			}
+		}
+		collect(st);
+		if (st.exploring && st.n[0] >= WINDOW && st.n[1] >= WINDOW)
+		{
+			const double rt = st.ms[1] / st.work[1], rx = st.ms[0] / st.work[0];
+			const int pick = rt < rx * 0.97 ? 1 : 0;
+			fprintf(stderr, " GPU coarse pass, reference projection table: device %d, %d translation tiles -> %s (measured over %d launches each, time per work table/texture = %.2f; 3%% margin, re-checked every 2048 launches)\n",
+					device, ntt, pick ? "table" : "texture", WINDOW, rt / rx);
+			if (pick != st.best || !st.stored)
+			{
+				tuning::Cache cache(contextOf(device));
+				cache.put("group_proj_table", keyOf(ntt), pick ? "table" : "texture", rt / rx);
+				st.stored = true;
+			}
+			st.best = pick;
+			st.exploring = false;
+			st.announced = true;
+		}
+		// strictly alternating while exploring, counted by launches started (so late events do not skew the turns)
+		int cand = st.best;
+		if (st.exploring)
+			cand = (int) (st.calls % 2);
+		else if (st.calls > 0 && st.calls % 2048 == 0)
+		{
+			st.exploring = true;
+			st.ms[0] = st.ms[1] = st.work[0] = st.work[1] = 0;
+			st.n[0] = st.n[1] = 0;
+			cand = (int) (st.calls % 2);
+		}
+		st.calls++;
+		cand_out = cand;
+		ev = std::make_pair((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+		if (st.exploring && (int) st.pending.size() < 32)
+		{
+			cudaEvent_t a = NULL, b = NULL;
+			if (cudaEventCreate(&a) == cudaSuccess && cudaEventCreate(&b) == cudaSuccess)
+			{
+				ev = std::make_pair(a, b);
+				cudaEventRecord(a, stream);
+			}
+			else
+			{
+				if (a) cudaEventDestroy(a);
+				cudaGetLastError();
+			}
+		}
+		return cand;
+	}
+
+	void finish(int device, int ntt, std::pair<cudaEvent_t, cudaEvent_t> ev, int cand, double work, cudaStream_t stream)
+	{
+		if (ev.first == NULL) return;
+		cudaEventRecord(ev.second, stream);
+		std::lock_guard<std::mutex> lock(mtx);
+		states[std::make_pair(device, ntt)].pending.push_back(Pending{ev.first, ev.second, cand, work});
+	}
+
+	void discard(std::pair<cudaEvent_t, cudaEvent_t> ev)
+	{
+		if (ev.first == NULL) return;
+		cudaEventDestroy(ev.first);
+		cudaEventDestroy(ev.second);
+	}
+};
+static TableTuner &tableTuner() { static TableTuner t; return t; }
 #endif
 
 // Blocks per multiprocessor that pixel chunks aim for. RELION_GPU_BLOCKS_PER_SM=N overrides. By
@@ -2150,6 +2291,7 @@ static void launchDiff2CoarseBatched(
 
 #ifndef ACC_DOUBLE_PRECISION
 #include "src/acc/cuda/cuda_kernels/coarse_cache.cuh"
+#include "src/acc/cuda/group_table_pool.h"
 
 static CoarseShapeTuner &coarseShapeTuner() { static CoarseShapeTuner t; return t; }
 
@@ -2908,24 +3050,157 @@ static void runDiff2KernelCoarseGroupXt(std::vector<CoarseDeferred *> &items, Ac
 		const int ntt = P.max_tiles;
 		int device = 0, cand = 0;
 		cudaGetDevice(&device);
+		// RELION_GPU_GROUP_PROJ_TABLE (default auto, see use_tbl): the reference projections of the set are made once into a table (one block per orientation
+		// block and pass) instead of by every block of the group kernel. It is used when a block has more than one tile group
+		// (ceil(ntt/NT) > 1: the table is read once per tile group) and the pipelined kernel runs; otherwise the texture path.
+		// The table holds a part of the set's orientation blocks at a time. The part is sized so that the group kernel's grid
+		// has RELION_GPU_GROUP_PROJ_TABLE_WAVES (default 16) waves of resident blocks (cudaOccupancy for the NT in use), which
+		// keeps the per-part launch overhead and tail small; RELION_GPU_GROUP_PROJ_TABLE_MB sets the part size instead. The
+		// process's table memory is shared by its threads and at most a quarter of the free GPU memory (group_table_pool.h,
+		// RELION_GPU_GROUP_PROJ_TABLE_CAP_MB, default 1024); with less than one block the texture path is used. Same values, same sums.
+		// Default (unset or =auto, 2): the table is used where the TableTuner finds it faster than the texture path (see there);
+		// =1 always, =0 never
+		static const int use_tbl = !getenv("RELION_GPU_GROUP_PROJ_TABLE") ? 2 :
+				!strcmp(getenv("RELION_GPU_GROUP_PROJ_TABLE"), "auto") ? 2 : atoi(getenv("RELION_GPU_GROUP_PROJ_TABLE"));
+		bool tbl_now = use_tbl != 0, tbl_used = false;
+		static const double tbl_mb_override = getenv("RELION_GPU_GROUP_PROJ_TABLE_MB") ? atof(getenv("RELION_GPU_GROUP_PROJ_TABLE_MB")) : 0.;
+		static const double tbl_waves = getenv("RELION_GPU_GROUP_PROJ_TABLE_WAVES") ? atof(getenv("RELION_GPU_GROUP_PROJ_TABLE_WAVES")) : 16.;
+		// a part smaller than RELION_GPU_GROUP_PROJ_TABLE_MIN_BLOCKS orientation blocks (default 128, or the whole set if smaller)
+		// costs more in launches than the table saves (measured: 14-block parts of one set took 2771 of 3306 launches), so such a set
+		// takes the texture path
+		static const size_t tbl_min_blocks = getenv("RELION_GPU_GROUP_PROJ_TABLE_MIN_BLOCKS") ? (size_t) atol(getenv("RELION_GPU_GROUP_PROJ_TABLE_MIN_BLOCKS")) : 128;
+		static const size_t tbl_cap = (size_t) ((getenv("RELION_GPU_GROUP_PROJ_TABLE_CAP_MB") ? atof(getenv("RELION_GPU_GROUP_PROJ_TABLE_CAP_MB")) : 1024.) * 1048576.);
+		const int n_tbl_pass = (image_size + XT_PIXELS - 1) / XT_PIXELS;
+		const size_t tbl_block_bytes = (size_t) n_tbl_pass * XT_PIXELS * XT_ORIENT * sizeof(float2);
+		auto occupancy = [&](int ntb) -> int
+		{
+			static std::atomic<int> cache[16][9];
+			const int dv = device & 15;
+			int n = cache[dv][ntb].load();
+			if (n > 0) return n;
+			n = 1;
+			switch (ntb)
+			{
+			case 8: cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, cuda_kernel_diff2_coarse_xt_group<8, 4>, XT_BLOCK, 0); break;
+			case 6: cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, cuda_kernel_diff2_coarse_xt_group<6, 4>, XT_BLOCK, 0); break;
+			case 4: cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, cuda_kernel_diff2_coarse_xt_group<4, 4>, XT_BLOCK, 0); break;
+			case 3: cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, cuda_kernel_diff2_coarse_xt_group<3, 4>, XT_BLOCK, 0); break;
+			case 2: cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, cuda_kernel_diff2_coarse_xt_group<2, 4>, XT_BLOCK, 0); break;
+			default: cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, cuda_kernel_diff2_coarse_xt_group<1, 4>, XT_BLOCK, 0); break;
+			}
+			cudaGetLastError();
+			n = std::max(1, n);
+			cache[dv][ntb] = n;
+			return n;
+		};
 		std::pair<cudaEvent_t, cudaEvent_t> ev((cudaEvent_t) NULL, (cudaEvent_t) NULL);
 		const int nt = ntt > 1 ? xtTileTuner().begin(device, ntt, stream, cand, ev) : 1;
 		// RELION_GPU_XT_PIPE_GROUP sets it for the group kernel alone (to check it against the other kernel)
 		static const int xt_pipe = getenv("RELION_GPU_XT_PIPE_GROUP") ? atoi(getenv("RELION_GPU_XT_PIPE_GROUP"))
 				: getenv("RELION_GPU_XT_PIPE") ? atoi(getenv("RELION_GPU_XT_PIPE")) : 3;
-#define XT_GROUP_LAUNCH_P(NT, PP) cuda_kernel_diff2_coarse_xt_group<NT, PP><<<dim3((unsigned) P.blocks.size(), P.n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
+#define XT_GROUP_LAUNCH_P(NT, PP) cuda_kernel_diff2_coarse_xt_group<NT, PP><<<dim3((unsigned) nb, P.n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
 				(const CoarseClassJob *) &(~tables)[P.off_classes], (const XtGroupBlock *) &(~tables)[P.off_blocks], \
 				(const int *) &(~tables)[P.off_bcols], \
 				(const float *const *) &(~tables)[P.off_eul], (const int *) &(~tables)[P.off_map], d_parts, G, \
-				(const int2 *) &(~tables)[P.off_cols], n_cols, d_A, d_x2sum, image_size, P.n_chunks)
+				(const int2 *) &(~tables)[P.off_cols], n_cols, d_A, d_x2sum, image_size, P.n_chunks, tbl_buf, n_tbl_pass, b0)
 		// RELION_GPU_XT_PIPE_BIG: level used with 6 or more tiles per block (default 0: those blocks are shared-memory limited to 2 per SM and spill)
 		static const int xt_pipe_big = getenv("RELION_GPU_XT_PIPE_BIG") ? atoi(getenv("RELION_GPU_XT_PIPE_BIG")) : 0;
-#define XT_GROUP_LAUNCH(NT) do { const int pp_ = (NT >= 6) ? xt_pipe_big : xt_pipe; if (pp_ >= 3) XT_GROUP_LAUNCH_P(NT, 3); else if (pp_ == 2) XT_GROUP_LAUNCH_P(NT, 2); else if (pp_ == 1) XT_GROUP_LAUNCH_P(NT, 1); else XT_GROUP_LAUNCH_P(NT, 0); } while (0)
-		auto launch = [&](int t)
+#define XT_GROUP_LAUNCH(NT) do { const int pp_ = (NT >= 6) ? xt_pipe_big : xt_pipe; if (tbl_buf != NULL && pp_ >= 3) XT_GROUP_LAUNCH_P(NT, 4); else if (pp_ >= 3) XT_GROUP_LAUNCH_P(NT, 3); else if (pp_ == 2) XT_GROUP_LAUNCH_P(NT, 2); else if (pp_ == 1) XT_GROUP_LAUNCH_P(NT, 1); else XT_GROUP_LAUNCH_P(NT, 0); } while (0)
+		auto launch_impl = [&](int t)
 		{
-			if (t >= 8) XT_GROUP_LAUNCH(8); else if (t >= 6) XT_GROUP_LAUNCH(6); else if (t >= 4) XT_GROUP_LAUNCH(4);
-			else if (t == 3) XT_GROUP_LAUNCH(3); else if (t == 2) XT_GROUP_LAUNCH(2); else XT_GROUP_LAUNCH(1);
+			const int ntb = t >= 8 ? 8 : t >= 6 ? 6 : t >= 4 ? 4 : t;
+			const int tile_groups = (ntt + t - 1) / t;
+			const int pp_t = (ntb >= 6) ? xt_pipe_big : xt_pipe;
+			float2 *tbl_buf = NULL;
+			size_t tbl_blocks = P.blocks.size();   // orientation blocks per table part
+			struct TblLease { int idx; cudaStream_t st; ~TblLease() { GroupTablePool::get().release(idx, st); } } tbl_guard{-1, stream};
+			if (tbl_now)
+			{
+				GroupTablePool &pool = GroupTablePool::get();
+				const char *why = "";
+				size_t buf_cap = 0, free_b = 0, target = 0, share = 0, total_cap = 0;
+				int n_users = 0;
+				if (tile_groups <= 1) why = "one tile group per block, nothing to reuse";
+				else if (pp_t < 3) why = "pipelined kernel not in use";
+				else
+				{
+					int sms = 1;
+					cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device);
+					if (tbl_mb_override > 0.)
+					{
+						target = std::max<size_t>(1, (size_t) (tbl_mb_override * 1048576.) / tbl_block_bytes);
+						why = "part size set by RELION_GPU_GROUP_PROJ_TABLE_MB";
+					}
+					else
+					{
+						target = (size_t) std::ceil(tbl_waves * sms * occupancy(ntb) / ((double) P.n_chunks * tile_groups));
+						why = "part sized to the waves of the group grid";
+					}
+					const size_t min_blocks = std::max<size_t>(1, std::min(tbl_min_blocks, P.blocks.size()));
+					target = std::max(min_blocks, std::min(target, P.blocks.size()));
+					int lease = -1;
+					void *buf = pool.acquire(device, tbl_cap, min_blocks * tbl_block_bytes, target * tbl_block_bytes, stream, &lease, &buf_cap, &free_b, &share, &total_cap, &n_users);
+					tbl_guard.idx = lease;
+					if (buf != NULL)
+					{
+						tbl_buf = (float2 *) buf;
+						tbl_blocks = std::min(P.blocks.size(), buf_cap / tbl_block_bytes);
+						if (tbl_blocks < target) why = "part limited by the table memory share";
+					}
+					else
+						why = "less memory than the minimum part, texture path";
+				}
+				tbl_used = tbl_buf != NULL;
+				if (tbl_buf) { pool.n_used++; pool.n_parts += (long) ((P.blocks.size() + tbl_blocks - 1) / tbl_blocks); } else pool.n_texture++;
+				if (!pool.said.exchange(true) || getenv("RELION_GPU_GROUP_PROJ_TABLE_STATS"))
+					printf(" GPU coarse pass: reference projection table %s (%s): %d tiles per block in %d groups, part of %zu of the set's %zu orientation blocks x %d passes = %.1f MB (set %.1f MB), wave target %zu blocks, n_chunks %d, blocks/SM %d, pool cap %.0f MB for %d threads = share %.0f MB (%zu blocks), free GPU memory %.0f MB\n",
+					       tbl_buf ? "used" : "not used", why, t, tile_groups, tbl_buf ? tbl_blocks : (size_t) 0, P.blocks.size(), n_tbl_pass,
+					       tbl_buf ? (double) (tbl_blocks * tbl_block_bytes) / 1048576. : 0., (double) (tbl_block_bytes * P.blocks.size()) / 1048576., target, P.n_chunks, occupancy(ntb), (double) total_cap / 1048576., n_users, (double) share / 1048576., share / tbl_block_bytes, (double) free_b / 1048576.);
+			}
+			for (size_t b0s = 0; b0s < P.blocks.size(); b0s += tbl_blocks)
+			{
+				const int b0 = (int) b0s;
+				const size_t nb = std::min(tbl_blocks, P.blocks.size() - b0s);
+				if (tbl_buf != NULL)
+				{
+					cuda_kernel_coarse_xt_group_table<<<dim3((unsigned) nb, (unsigned) n_tbl_pass), XT_BLOCK, 0, stream>>>(
+							(const CoarseClassJob *) &(~tables)[P.off_classes], (const XtGroupBlock *) &(~tables)[P.off_blocks],
+							(const float *const *) &(~tables)[P.off_eul], image_size, tbl_buf, b0);
+					const cudaError_t e = cudaGetLastError();
+					if (e != cudaSuccess) return e;
+				}
+				if (t >= 8) XT_GROUP_LAUNCH(8); else if (t >= 6) XT_GROUP_LAUNCH(6); else if (t >= 4) XT_GROUP_LAUNCH(4);
+				else if (t == 3) XT_GROUP_LAUNCH(3); else if (t == 2) XT_GROUP_LAUNCH(2); else XT_GROUP_LAUNCH(1);
+				const cudaError_t e = cudaGetLastError();
+				if (e != cudaSuccess) return e;
+			}
 			return cudaGetLastError();
+		};
+		static const int time_on = getenv("RELION_GPU_GROUP_TIME") ? atoi(getenv("RELION_GPU_GROUP_TIME")) : 0;
+		auto launch = [&](int t) -> cudaError_t
+		{
+			if (use_tbl == 2 && ntt > 1 && (ntt + t - 1) / t > 1)
+			{
+				// time table against texture (identical results); a launch where the table could not be used is not counted
+				std::pair<cudaEvent_t, cudaEvent_t> tev((cudaEvent_t) NULL, (cudaEvent_t) NULL);
+				int tcand = 0;
+				tbl_now = tableTuner().begin(device, ntt, stream, tcand, tev) == 1;
+				tbl_used = false;
+				const cudaError_t e = launch_impl(t);
+				if (e == cudaSuccess && tbl_used == (tcand == 1))
+					tableTuner().finish(device, ntt, tev, tcand, (double) P.blocks.size() * (double) image_size * (double) ntt, stream);
+				else
+					tableTuner().discard(tev);
+				return e;
+			}
+			if (!time_on) return launch_impl(t);
+			cudaEvent_t a, b;
+			cudaEventCreate(&a); cudaEventCreate(&b);
+			cudaEventRecord(a, stream);
+			const cudaError_t e = launch_impl(t);
+			cudaEventRecord(b, stream);
+			GroupTablePool::get().addTime(a, b);
+			return e;
 		};
 #undef XT_GROUP_LAUNCH
 #undef XT_GROUP_LAUNCH_P

@@ -10,6 +10,7 @@
 #include "src/acc/acc_backprojector.h"
 #include "src/acc/acc_bp_accum.h"
 #include "src/acc/cuda/coarse_cache.h"
+#include "src/acc/cuda/group_table_pool.h"
 #include "src/acc/cuda/cuda_fft.h"
 #include "src/acc/cuda/cuda_benchmark_utils.h"
 #include <stack>
@@ -110,6 +111,7 @@ public:
 	{
 		gpuMemTrace("iteration end, before the bundle is released");
 		coarse_cache.release();
+		groupTablePoolTrim(device_id);
 		finishLeanIteration();
 		projectors.clear();
 		backprojectors.clear();
