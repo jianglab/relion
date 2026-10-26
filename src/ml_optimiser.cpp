@@ -479,6 +479,19 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     {
         helical_tube_inner_diameter = textToFloat(fnt);
     }
+    // Same options as parseInitial; a value given here replaces the one of the run being continued
+    fnt = parser.getOption("--helical_sigma_distance_A", "Sigma of distance along the helical tracks (Angstroms)", "OLD");
+    std::string fnt_old_sigma = parser.getOption("--helical_sigma_distance", "OLD: sigma of distance along the helical tracks as a fraction of the box size (use --helical_sigma_distance_A)", "OLD");
+    if (fnt != "OLD")
+    {
+        helical_sigma_distance_A = textToFloat(fnt);
+        helical_sigma_distance = -1.;
+    }
+    else if (fnt_old_sigma != "OLD")
+    {
+        helical_sigma_distance = textToFloat(fnt_old_sigma);
+        helical_sigma_distance_A = -1.;
+    }
     do_helical_context = parser.checkOption("--helical_context", "Use the other segments of each filament as a prior on the class of a segment (helical 2D classification)");
     helical_context_start_iter = textToInteger(parser.getOption("--helical_context_start", "First iteration that uses the filament context prior", "6"));
     helical_context.temper = textToFloat(parser.getOption("--helical_context_temper", "Factor on the class log-likelihoods in the filament chain", "1"));
@@ -962,7 +975,10 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     helical_tube_inner_diameter = textToFloat(parser.getOption("--helical_inner_diameter", "Inner diameter of helical tubes in Angstroms (for masks of helical references and particles)", "-1."));
     helical_tube_outer_diameter = textToFloat(parser.getOption("--helical_outer_diameter", "Outer diameter of helical tubes in Angstroms (for masks of helical references and particles)", "-1."));
     do_helical_symmetry_local_refinement = parser.checkOption("--helical_symmetry_search", "Perform local refinement of helical symmetry?");
-    helical_sigma_distance = textToFloat(parser.getOption("--helical_sigma_distance", "Sigma of distance along the helical tracks", "-1."));
+    helical_sigma_distance_A = textToFloat(parser.getOption("--helical_sigma_distance_A", "Sigma of distance along the helical tracks (Angstroms; the persistence length of the filament, independent of box size and pixel size)", "-1."));
+    helical_sigma_distance = textToFloat(parser.getOption("--helical_sigma_distance", "OLD: sigma of distance along the helical tracks as a fraction of the box size (use --helical_sigma_distance_A)", "-1."));
+    if (helical_sigma_distance_A >= 0. && helical_sigma_distance >= 0.)
+        REPORT_ERROR("ERROR: give only one of --helical_sigma_distance_A and the older --helical_sigma_distance");
 
     do_helical_context = parser.checkOption("--helical_context", "Use the other segments of each filament as a prior on the class of a segment (helical 2D classification)");
     helical_context_start_iter = textToInteger(parser.getOption("--helical_context_start", "First iteration that uses the filament context prior", "6"));
@@ -1397,7 +1413,10 @@ void MlOptimiser::read(FileName fn_in, int rank, bool do_prevent_preread)
         helical_tube_outer_diameter = -1.;
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT, do_helical_symmetry_local_refinement))
         do_helical_symmetry_local_refinement = false;
-    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, helical_sigma_distance))
+    // The Angstrom value written by this version wins; otherwise the older fraction of the box size
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM, helical_sigma_distance_A))
+        helical_sigma_distance_A = -1.;
+    if (helical_sigma_distance_A >= 0. || !MD.getValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, helical_sigma_distance))
         helical_sigma_distance = -1.;
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_KEEP_TILT_PRIOR_FIXED, helical_keep_tilt_prior_fixed))
             helical_keep_tilt_prior_fixed = false;
@@ -1722,7 +1741,10 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
         MD.setValue(EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, helical_tube_inner_diameter);
         MD.setValue(EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, helical_tube_outer_diameter);
         MD.setValue(EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT, do_helical_symmetry_local_refinement);
-        MD.setValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, helical_sigma_distance);
+        if (helical_sigma_distance_A < 0. && helical_sigma_distance >= 0.)
+            MD.setValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, helical_sigma_distance);   // older run, still a fraction of the box
+        else
+            MD.setValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM, helical_sigma_distance_A);
         MD.setValue(EMDL_OPTIMISER_HELICAL_KEEP_TILT_PRIOR_FIXED, helical_keep_tilt_prior_fixed);
         MD.setValue(EMDL_OPTIMISER_HAS_CONVERGED, has_converged);
         MD.setValue(EMDL_OPTIMISER_HAS_HIGH_FSC_AT_LIMIT, has_high_fsc_at_limit);
@@ -4546,7 +4568,7 @@ void MlOptimiser::iterate()
             {
                 updatePriorsForHelicalReconstruction(
                         mydata.MDimg,
-                        helical_sigma_distance * ((RFLOAT)(mymodel.ori_size)),
+                        helicalSigmaDistanceAngst(),
                         mymodel.helical_rise,
                         mymodel.helical_twist,
                         helical_nstart,

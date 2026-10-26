@@ -434,6 +434,7 @@ enum EMDLabel
 	EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER,
 	EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT,
 	EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE,
+	EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM,
 	EMDL_OPTIMISER_HELICAL_KEEP_TILT_PRIOR_FIXED,
 	EMDL_OPTIMISER_LOWRES_LIMIT_EXP,
 	EMDL_OPTIMISER_HIGHRES_LIMIT_EXP,
@@ -1231,7 +1232,8 @@ private:
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, EMDL_DOUBLE, "rlnHelicalMaskTubeInnerDiameter", "Inner diameter of helical tubes in Angstroms (for masks of helical references and particles)");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, EMDL_DOUBLE, "rlnHelicalMaskTubeOuterDiameter", "Outer diameter of helical tubes in Angstroms (for masks of helical references and particles)");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT, EMDL_BOOL, "rlnHelicalSymmetryLocalRefinement", "Flag to indicate that local refinement of helical parameters should be performed");
-		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, EMDL_DOUBLE, "rlnHelicalSigmaDistance", "Sigma of distance along the helical tracks");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, EMDL_DOUBLE, "rlnHelicalSigmaDistance", "Sigma of distance along the helical tracks, as a fraction of the box size (older runs)");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM, EMDL_DOUBLE, "rlnHelicalSigmaDistanceAngst", "Sigma of distance along the helical tracks (Angstroms)");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_KEEP_TILT_PRIOR_FIXED, EMDL_BOOL, "rlnHelicalKeepTiltPriorFixed", "Flag to indicate that helical tilt priors are kept fixed (at 90 degrees) in global angular searches");
 		EMDL::addLabel(EMDL_OPTIMISER_LOWRES_LIMIT_EXP, EMDL_DOUBLE, "rlnLowresLimitExpectation", "Low-resolution-limit (in Angstrom) for the expectation step");
 		EMDL::addLabel(EMDL_OPTIMISER_HIGHRES_LIMIT_EXP, EMDL_DOUBLE, "rlnHighresLimitExpectation", "High-resolution-limit (in Angstrom) for the expectation step");

@@ -723,8 +723,17 @@ public:
 	// Flag whether to do local refinement of helical parameters
 	bool do_helical_symmetry_local_refinement;
 
-	// Sigma of distance along the helical tracks (in Angstroms)
+	// Sigma of distance along the helical tracks, in Angstroms (-1: no averaging along the filament).
+	// helical_sigma_distance is the older option, a fraction of the box size, which is only read for
+	// old runs and command lines; helicalSigmaDistanceAngst() gives the sigma in Angstroms from either.
+	RFLOAT helical_sigma_distance_A;
 	RFLOAT helical_sigma_distance;
+	RFLOAT helicalSigmaDistanceAngst() const
+	{
+		if (helical_sigma_distance_A >= 0.) return helical_sigma_distance_A;
+		if (helical_sigma_distance >= 0.) return helical_sigma_distance * (RFLOAT)mymodel.ori_size * mymodel.pixel_size;
+		return -1.;
+	}
 
 	// Keep helical tilt priors fixed (at 90 degrees) in global angular searches?
 	bool helical_keep_tilt_prior_fixed;
@@ -1070,7 +1079,8 @@ public:
             helical_tube_inner_diameter(0),
             helical_tube_outer_diameter(0),
             do_helical_symmetry_local_refinement(0),
-            helical_sigma_distance(0),
+            helical_sigma_distance_A(-1.),
+            helical_sigma_distance(-1.),
             helical_keep_tilt_prior_fixed(0),
             helical_tilt_weight_sigma(-1.),
             ctf3d_squared(0),

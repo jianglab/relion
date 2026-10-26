@@ -1523,3 +1523,29 @@ TEST_CASE("Queued jobs: a site template keeps its extra fields and no built-in o
 	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
 	else unsetenv("RELION_QSUB_TEMPLATE");
 }
+
+// ---------------------------------------------------------------------------
+// Helical local averaging range: Angstroms, whatever the box size or pixel size
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Refine3D: helical averaging range is sent in Angstroms",
+          "[pipeline][refine3d][helical]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_3DAUTO);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles_not_readable.star");   // the box size must not matter
+	job.joboptions["fn_ref"].setString("ref.mrc");
+	job.joboptions["nr_mpi"].setString("3");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+	job.joboptions["do_helix"].setString("Yes");
+	job.joboptions["helical_range_distance"].setString("90");
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+	REQUIRE(generateCommands(job, commands, final_command, error_message));
+	REQUIRE(commands[0].find(" --helical_sigma_distance_A 30") != std::string::npos);
+	REQUIRE(commands[0].find(" --helical_sigma_distance ") == std::string::npos);
+}

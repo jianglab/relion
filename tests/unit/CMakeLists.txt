@@ -46,6 +46,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_remove_intermediates.cpp
     test_virtual_particles.cpp
     test_helix_coords.cpp
+    test_helical_sigma.cpp
     test_helix_mask.cpp
     test_recover_full_filaments.cpp
     test_resource_report.cpp

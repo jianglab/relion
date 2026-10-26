@@ -1413,7 +1413,7 @@ void MlOptimiserMpi::expectation()
 			node->relion_MPI_Bcast(&mymodel.keep_fixed_bodies[ibody], 1, MPI_INT, first_follower, MPI_COMM_WORLD);
 
 	// Feb15,2016 - Shaoda - copy the following variables to the leader
-	if ( (do_helical_refine) && (!(helical_sigma_distance < 0.)) )
+	if ( (do_helical_refine) && (!(helicalSigmaDistanceAngst() < 0.)) )
 	{
 		node->relion_MPI_Bcast(&sampling.healpix_order, 1, MPI_INT, first_follower, MPI_COMM_WORLD);
 		node->relion_MPI_Bcast(&mymodel.sigma2_rot, 1, MY_MPI_DOUBLE, first_follower, MPI_COMM_WORLD);
@@ -5135,7 +5135,7 @@ void MlOptimiserMpi::iterate()
                 // Only update rot priors in local averaging for 1-start filaments, otherwise centre around rot from previous iteration
                 updatePriorsForHelicalReconstruction(
 							mydata.MDimg,
-							helical_sigma_distance * ((RFLOAT)(mymodel.ori_size)),
+							helicalSigmaDistanceAngst(),
 							mymodel.helical_rise,
 							mymodel.helical_twist,
 							helical_nstart,

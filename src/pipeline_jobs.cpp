@@ -5404,32 +5404,8 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 			if (error_message != "") return false;
 			if (val > 0.)
             {
-                if (!is_continue)
-                {
-                    RFLOAT box_size_Angstrom = 0.;
-                    FileName fn_star = joboptions["fn_img"].getString();
-                    if (fn_star != "")
-                    {
-                        MetaDataTable MDopt;
-                        if (MDopt.read(fn_star, "optics"))
-                        {
-                            RFLOAT angpix = 1.;
-                            int box_size = 256;
-                            MDopt.getValue(EMDL_IMAGE_PIXEL_SIZE, angpix, 0);
-                            if (MDopt.containsLabel(EMDL_IMAGE_SIZE))
-                                MDopt.getValue(EMDL_IMAGE_SIZE, box_size, 0);
-                            box_size_Angstrom = box_size * angpix;
-                        }
-                    }
-                    if (box_size_Angstrom > 0.)
-                        command += " --helical_sigma_distance " + floatToString(val / (3. * box_size_Angstrom));
-                    else
-                        command += " --helical_sigma_distance " + floatToString(val / 3.);
-                }
-                else
-                {
-                    command += " --helical_sigma_distance " + floatToString(val / 3.);
-                }
+                // val is the distance (3 sigma) over which neighbouring segments are averaged, in Angstroms
+                command += " --helical_sigma_distance_A " + floatToString(val / 3.);
                 int nstart = joboptions["helical_nstart"].getNumber(error_message);
                 command += " --helical_nstart " + floatToString(nstart);
             }
@@ -5967,32 +5943,8 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 			if (error_message != "") return false;
 			if (val > 0.)
             {
-                if (!is_continue)
-                {
-                    RFLOAT box_size_Angstrom = 0.;
-                    FileName fn_star = joboptions["fn_img"].getString();
-                    if (fn_star != "")
-                    {
-                        MetaDataTable MDopt;
-                        if (MDopt.read(fn_star, "optics"))
-                        {
-                            RFLOAT angpix = 1.;
-                            int box_size = 256;
-                            MDopt.getValue(EMDL_IMAGE_PIXEL_SIZE, angpix, 0);
-                            if (MDopt.containsLabel(EMDL_IMAGE_SIZE))
-                                MDopt.getValue(EMDL_IMAGE_SIZE, box_size, 0);
-                            box_size_Angstrom = box_size * angpix;
-                        }
-                    }
-                    if (box_size_Angstrom > 0.)
-                        command += " --helical_sigma_distance " + floatToString(val / (3. * box_size_Angstrom));
-                    else
-                        command += " --helical_sigma_distance " + floatToString(val / 3.);
-                }
-                else
-                {
-                    command += " --helical_sigma_distance " + floatToString(val / 3.);
-                }
+                // val is the distance (3 sigma) over which neighbouring segments are averaged, in Angstroms
+                command += " --helical_sigma_distance_A " + floatToString(val / 3.);
                 int nstart = joboptions["helical_nstart"].getNumber(error_message);
                 command += " --helical_nstart " + floatToString(nstart);
             }
