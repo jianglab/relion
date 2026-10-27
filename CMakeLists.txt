@@ -41,6 +41,22 @@ IF("${isSystemDir}" STREQUAL "-1")
     SET(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
 ENDIF("${isSystemDir}" STREQUAL "-1")
 
+# conda compilers put -Wl,-rpath,$CONDA_PREFIX/lib into LDFLAGS, which lands in front of
+# the RPATH above, so a library in that environment (e.g. its libfltk without Xft) shadows
+# the one RELION built and installed. Move such entries to the end of the link line instead.
+foreach(_flags CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
+    string(REGEX MATCHALL "-Wl,-rpath,[^ ]+" _rpath_flags "${${_flags}}")
+    list(APPEND _ldflags_rpath ${_rpath_flags})
+    string(REGEX REPLACE "-Wl,-rpath,[^ ]+" "" ${_flags} "${${_flags}}")
+endforeach()
+if(_ldflags_rpath)
+    list(REMOVE_DUPLICATES _ldflags_rpath)
+    string(REPLACE ";" " " _ldflags_rpath "${_ldflags_rpath}")
+    message(STATUS "Moving rpath entries from the linker flags after RELION's own: ${_ldflags_rpath}")
+    set(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_C_STANDARD_LIBRARIES} ${_ldflags_rpath}")
+    set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} ${_ldflags_rpath}")
+endif()
+
 # ---------------------------------------------------------SET SPECIFIC BUILD TYPE--
 if(NOT ${CMAKE_BUILD_TYPE} STREQUAL "")
 	string( TOLOWER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_LOWER )
