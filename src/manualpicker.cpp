@@ -143,32 +143,6 @@ class MyPickCanvas : public pickerViewerCanvas
 public:
 	int my_imic;
 	MyPickCanvas(int X, int Y, int W, int H) : pickerViewerCanvas(X, Y, W, H), my_imic(-1) {}
-	int handle(int ev)
-	{
-		if (ev == FL_KEYDOWN || ev == FL_SHORTCUT)
-		{
-			int key = Fl::event_key();
-			if (my_imic >= 0 && (key == 'z' || key == 'Z'))
-			{
-				int imic = my_imic - 1;
-				if (imic >= 0 && imic < (int)viewmic_buttons.size())
-				{
-					viewmic_buttons[imic]->do_callback();
-					return 1;
-				}
-			}
-			if (my_imic >= 0 && (key == 'x' || key == 'X'))
-			{
-				int imic = my_imic + 1;
-				if (imic >= 0 && imic < (int)viewmic_buttons.size())
-				{
-					viewmic_buttons[imic]->do_callback();
-					return 1;
-				}
-			}
-		}
-		return pickerViewerCanvas::handle(ev);
-	}
 };
 
 struct PickWindowEntry {
@@ -179,6 +153,75 @@ struct PickWindowEntry {
 };
 std::vector<PickWindowEntry> pick_windows;
 std::map<int, std::pair<int,int>> mic_scroll_pos;
+
+// Hide a pick window and delete it once the current event is done: it may be the
+// window whose key press or close button is being handled right now
+static void destroyPickWindow(Fl_Window *win)
+{
+#ifdef __APPLE__
+	Fl::remove_timeout(disable_tabbing_cb, win);
+#endif
+	win->hide();
+	Fl::delete_widget(win);
+}
+
+// Z/X are handled by the window, not the canvas: keys reach the window whichever of its
+// widgets has the keyboard focus (the canvas, a scrollbar, or none)
+class PickWindow : public Fl_Double_Window
+{
+public:
+	PickWindow(int W, int H, const char *L) : Fl_Double_Window(W, H, L)
+	{
+		callback(cb_close);
+	}
+
+	int handle(int ev)
+	{
+		if (Fl_Double_Window::handle(ev))
+			return 1;
+		if (ev == FL_KEYBOARD || ev == FL_SHORTCUT)
+		{
+			const int key = Fl::event_key();
+			int step = 0;
+			if (key == 'z' || key == 'Z') step = -1;
+			else if (key == 'x' || key == 'X') step = 1;
+			if (step != 0)
+			{
+				for (auto &entry : pick_windows)
+				{
+					if (entry.win != this)
+						continue;
+					int imic = entry.imic + step;
+					if (imic >= 0 && imic < (int)viewmic_buttons.size())
+						viewmic_buttons[imic]->do_callback();
+					return 1;
+				}
+			}
+		}
+		return 0;
+	}
+
+	// Closing a pick window deletes it, so that the next Pick, Z or X opens a new one
+	// (a hidden window would be reused without being shown)
+	static void cb_close(Fl_Widget *w, void *)
+	{
+		for (int i = 0; i < (int)pick_windows.size(); i++)
+		{
+			if (pick_windows[i].win != w)
+				continue;
+			PickWindowEntry &entry = pick_windows[i];
+			mic_scroll_pos[entry.imic] = {entry.scroll->hscrollbar.value(), entry.scroll->scrollbar.value()};
+			if (entry.imic >= 0 && entry.imic < (int)viewmic_buttons.size())
+			{
+				viewmic_buttons[entry.imic]->color(GUI_BUTTON_COLOR, GUI_BUTTON_COLOR);
+				viewmic_buttons[entry.imic]->redraw();
+			}
+			pick_windows.erase(pick_windows.begin() + i);
+			break;
+		}
+		destroyPickWindow((Fl_Window*)w);
+	}
+};
 
 void cb_viewmic(Fl_Widget* w, void* data)
 {
@@ -246,7 +289,7 @@ void cb_viewmic(Fl_Widget* w, void* data)
 	// Delete excess windows (range shrunk)
 	while ((int)pick_windows.size() > required)
 	{
-		delete pick_windows.back().win;
+		destroyPickWindow(pick_windows.back().win);
 		pick_windows.pop_back();
 	}
 
@@ -303,6 +346,12 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			int xsize_canvas = CEIL(XSIZE(img()) * global_micscale);
 			int ysize_canvas = CEIL(YSIZE(img()) * global_micscale);
 
+			// Delete old DisplayBox children of the scroll and clear canvas
+			// pointers before creating new DisplayBoxes for the new micrograph.
+			// (Before a canvas is replaced below, so that its image goes with it.)
+			for (auto *box : entry.canvas->boxes) delete box;
+			entry.canvas->boxes.clear();
+
 			// If canvas dimensions changed, replace the canvas widget
 			if (entry.canvas->w() != xsize_canvas || entry.canvas->h() != ysize_canvas)
 			{
@@ -316,11 +365,6 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			}
 
 			MyPickCanvas *canvas = entry.canvas;
-
-			// Delete old DisplayBox children of the scroll and clear canvas
-			// pointers before creating new DisplayBoxes for the new micrograph.
-			for (auto *box : canvas->boxes) delete box;
-			canvas->boxes.clear();
 
 			FileName fn_coord = global_fn_picks[mymic];
 			// The canvas expects the radius in displayed (scaled) pixels
@@ -389,8 +433,8 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			int ysize_canvas = CEIL(YSIZE(img()) * global_micscale);
 			FileName fn_coord = global_fn_picks[mymic];
 
-			Fl_Double_Window *win = new Fl_Double_Window(xsize_canvas + 20, ysize_canvas + 20,
-								    global_fn_mics[mymic].c_str());
+			PickWindow *win = new PickWindow(xsize_canvas + 20, ysize_canvas + 20,
+							 global_fn_mics[mymic].c_str());
 			Fl_Scroll *scroll = new Fl_Scroll(0, 0, win->w(), win->h());
 			int rad = ROUND(global_micscale * global_particle_diameter/(2. * global_angpix));
 			MyPickCanvas *canvas = new MyPickCanvas(0, 0, xsize_canvas, ysize_canvas);
@@ -1197,6 +1241,9 @@ void ManualPicker::run()
 		MDin.sort(EMDL_CTF_DEFOCUSU, true);
 	else if (sort_micrographs_by == "defocus (low->high)" && MDin.containsLabel(EMDL_CTF_DEFOCUSU))
 		MDin.sort(EMDL_CTF_DEFOCUSU, false);
+
+	// Pick in green, as relion_display --pick does
+	current_selection_type = 2;
 
 	// Transfer all parameters to the gui
 	win.MDin = MDin;

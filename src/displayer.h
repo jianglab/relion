@@ -100,7 +100,8 @@ static int predrag_xc;
 static int predrag_yc;
 static bool has_shift;
 static int preshift_ipos;
-static int current_selection_type;
+// Shared by all files (the manual picker shows its canvases in-process): defined in displayer.cpp
+extern int current_selection_type;
 static int colour_scheme;
 static int fom_is_grey_instead;
 
@@ -566,7 +567,18 @@ public:
 	FileName fn_mic;
 
 	// Constructor with w x h size of the window and a title
-	pickerViewerCanvas(int X, int Y, int W, int H, const char* title=0): basisViewerCanvas(X,Y,W, H, title), startend_style(STARTEND_BOX) { }
+	pickerViewerCanvas(int X, int Y, int W, int H, const char* title=0): basisViewerCanvas(X,Y,W, H, title), startend_style(STARTEND_BOX)
+	{
+		// No colouring unless a color_label is given: draw() adds a column for any other label
+		color_label = EMDL_UNDEFINED;
+		smallest_color_value = 0.;
+		biggest_color_value = 1.;
+		do_blue_to_red = false;
+		do_startend = do_lines = false;
+		particle_radius = 0;
+		coord_scale = 1.;
+		minimum_pick_fom = -9999.;
+	}
 
 	void loadCoordinates(bool ask_filename = false);
 

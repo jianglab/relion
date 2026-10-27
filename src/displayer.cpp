@@ -29,6 +29,8 @@
 #endif
 #include <cstdio>
 
+int current_selection_type = 1;
+
 std::string FullFilamentRecovery::displayArguments() const
 {
 	if (!isActive())
@@ -2768,8 +2770,11 @@ void pickerViewerCanvas::draw()
         {
             int selected;
             MDcoords.getValue(EMDL_PARTICLE_SELECTION_TYPE, selected);
-            int mycol = (selected-1)%6;
-            fl_color(color_choices[mycol].labelcolor_);
+            // Selection types below 1 (e.g. 0 from an older manual picker) have no colour of their own
+            if (selected >= 1)
+                fl_color(color_choices[(selected-1)%NUM_COLORS].labelcolor_);
+            else
+                fl_color(FL_GREEN);
         }
         else
         {
