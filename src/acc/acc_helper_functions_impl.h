@@ -1802,16 +1802,35 @@ void runWavgKernelBatched(
 	if (gpuWavgSum() && !data_is_3D && translation_num > 0 && translation_num <= 1024 &&
 		image_size * translation_num * sizeof(float2) <= ((size_t) 64 << 20))
 	{
+		// The shift of a pixel as the product of a factor of its column and one of its row (2 * translation_num vectors
+		// of imgX and imgY entries, instead of one of image_size) so that the kernel does not read 8 bytes per pixel and
+		// translation from the L2 cache; float rounding of the factors only. RELION_GPU_WAVG_SEPARABLE=0: the full table
+		static const bool wavg_sep = [] { const char *e = getenv("RELION_GPU_WAVG_SEPARABLE"); return !e || atoi(e) != 0; }();
 		AccPtr<float2> shifts = table.make<float2>();
-		shifts.setSize(translation_num * image_size);
-		shifts.deviceAlloc();
-		cuda_kernel_shift_table<<<dim3((image_size + 127) / 128, translation_num), 128, 0, stream>>>(
-				trans_x, trans_y, ~shifts, image_size, projector.imgX, projector.imgY, projector.maxR);
+		AccPtr<float2> shx = table.make<float2>();
+		AccPtr<float2> shy = table.make<float2>();
+		if (wavg_sep)
+		{
+			shx.setSize(translation_num * projector.imgX);
+			shx.deviceAlloc();
+			shy.setSize(translation_num * projector.imgY);
+			shy.deviceAlloc();
+			cuda_kernel_shift_table_sep<<<dim3((projector.imgX + projector.imgY + 127) / 128, translation_num), 128, 0, stream>>>(
+					trans_x, trans_y, ~shx, ~shy, projector.imgX, projector.imgY, projector.maxR);
+		}
+		else
+		{
+			shifts.setSize(translation_num * image_size);
+			shifts.deviceAlloc();
+			cuda_kernel_shift_table<<<dim3((image_size + 127) / 128, translation_num), 128, 0, stream>>>(
+					trans_x, trans_y, ~shifts, image_size, projector.imgX, projector.imgY, projector.maxR);
+		}
 		LAUNCH_HANDLE_ERROR(cudaGetLastError());
 		const size_t smem = (16 + 2 * translation_num) * sizeof(XFLOAT);
 #define WAVG_SUM(RC, R3) cuda_kernel_wavg_sum<RC, R3, WAVG_BLOCK_SIZE><<<dim3(n, wavg_chunks), WAVG_BLOCK_SIZE, smem, stream>>>( \
 		image_size, Fimg_real, Fimg_imag, ctfs, wdiff2s_parts, translation_num, (XFLOAT) op.sum_weight, \
-		(XFLOAT) op.significant_weight, part_scale, ~shifts, d_jobs, d_start, nc, wavg_chunks)
+		(XFLOAT) op.significant_weight, part_scale, wavg_sep ? (float2 *) NULL : ~shifts, d_jobs, d_start, nc, wavg_chunks, \
+		wavg_sep ? ~shx : (float2 *) NULL, wavg_sep ? ~shy : (float2 *) NULL)
 		if (refs_are_ctf_corrected) { if (projector.mdlZ != 0) WAVG_SUM(true, true);  else WAVG_SUM(true, false); }
 		else                        { if (projector.mdlZ != 0) WAVG_SUM(false, true); else WAVG_SUM(false, false); }
 #undef WAVG_SUM
@@ -1869,29 +1888,52 @@ void runDiff2KernelFineBatched(
 	deviceStream_t stream = table.getStream();
 	AccProjectorKernel &projector = jobs[0].projector;
 	// The same kernel variants as runDiff2KernelFine (not do_CC)
-	// 2D references: pixel chunks, like the coarse pass (RELION_GPU_FINE_SPLIT=auto chooses the number, =N sets it; off unless
-	// asked for). Each chunk's partial sums go to a buffer and a second kernel adds them in chunk order, so the result is the same
-	// from run to run (but not the order of the additions of the unchunked kernel: last-digit differences against it).
+	// 2D images: pixel chunks, like the coarse pass (RELION_GPU_FINE_SPLIT=auto chooses the number, =N sets it, =0 turns it off;
+	// on by default for 3D references, off for 2D ones, where it was slower). Each chunk's partial sums go to a buffer and a
+	// second kernel adds them in chunk order, so the result is the same from run to run (but not the order of the additions of
+	// the unchunked kernel: last-digit differences against it).
 	static const char *fine_env = getenv("RELION_GPU_FINE_SPLIT");
 	const int fine_requested = envChunkOverride("RELION_GPU_FINE_SPLIT");
-	const bool fine_on = fine_env != NULL && (fine_requested > 1 || !strcmp(fine_env, "auto"));
-	const int fine_chunks = (!fine_on || data_is_3D || projector.mdlZ != 0) ? 1 : gpuPixelChunks(n, (image_size + D2F_BLOCK_SIZE_2D - 1) / D2F_BLOCK_SIZE_2D, fine_requested);
+	const bool ref3d = !data_is_3D && projector.mdlZ != 0;
+	const bool fine_on = fine_env != NULL ? (fine_requested > 1 || !strcmp(fine_env, "auto")) : ref3d;
+	const int fine_bs = ref3d ? D2F_BLOCK_SIZE_REF3D : D2F_BLOCK_SIZE_2D;
+	const int fine_ch = ref3d ? D2F_CHUNK_REF3D : D2F_CHUNK_2D;
+	const size_t fine_passes = (image_size + fine_bs - 1) / fine_bs;
+	// 3D references (auto): about 32 pixel passes per chunk, at most 8. Filling the GPU from one launch picks too many chunks for
+	// the small launches and too few for the large ones when several threads launch at once (B5 on an A4000, 2 ranks x 3
+	// threads: 8 chunks 6% faster in all, 14% in the final iteration; GPU fill 3%)
+	const int fine_chunks = (!fine_on || data_is_3D) ? 1 :
+		(ref3d && fine_requested <= 1) ? (int) std::max<size_t>(1, std::min<size_t>(8, fine_passes / 32)) :
+		gpuPixelChunks(n, fine_passes, fine_requested);
 	AccPtr<XFLOAT> fine_partial = table.make<XFLOAT>();
+	if (fine_chunks > 1 && ref3d && fine_requested <= 1)
+	{
+		static std::once_flag reported;
+		std::call_once(reported, [&] { std::cout << " GPU fine search: " << fine_chunks << " pixel chunks per particle for " << fine_passes
+			<< " pixel passes (3D references: about 32 passes per chunk, at most 8; RELION_GPU_FINE_SPLIT=N to choose, 0 for none)." << std::endl; });
+	}
+	else if (fine_chunks > 1)
+		reportPixelChunks("fine search", "RELION_GPU_FINE_SPLIT", fine_chunks, n, fine_requested > 1);
 	if (fine_chunks > 1)
 	{
-		fine_partial.setSize((size_t) fine_chunks * n * D2F_CHUNK_2D);
+		fine_partial.setSize((size_t) fine_chunks * n * fine_ch);
 		fine_partial.deviceAlloc();
 	}
-#define D2F_BATCH(R3, D3, BS, CH) cuda_kernel_diff2_fine<R3, D3, BS, CH><<<dim3(n, (R3 || D3) ? 1 : fine_chunks), BS, 0, stream>>>( \
+#define D2F_BATCH(R3, D3, BS, CH) cuda_kernel_diff2_fine<R3, D3, BS, CH><<<dim3(n, D3 ? 1 : fine_chunks), BS, 0, stream>>>( \
 		NULL, Fimgs_real, Fimgs_imag, trans_x, trans_y, trans_z, projector, corr_img, NULL, \
-		image_size, sum_init, 0, translation_num, 0, NULL, NULL, NULL, NULL, d_jobs, d_start, nc, (R3 || D3) ? 1 : fine_chunks, \
+		image_size, sum_init, 0, translation_num, 0, NULL, NULL, NULL, NULL, d_jobs, d_start, nc, D3 ? 1 : fine_chunks, \
 		fine_chunks > 1 ? ~fine_partial : (XFLOAT *) NULL)
-	if (data_is_3D)               D2F_BATCH(true, true, D2F_BLOCK_SIZE_DATA3D, D2F_CHUNK_DATA3D);
-	else if (projector.mdlZ != 0) D2F_BATCH(true, false, D2F_BLOCK_SIZE_REF3D, D2F_CHUNK_REF3D);
-	else                          D2F_BATCH(false, false, D2F_BLOCK_SIZE_2D, D2F_CHUNK_2D);
+	if (data_is_3D)  D2F_BATCH(true, true, D2F_BLOCK_SIZE_DATA3D, D2F_CHUNK_DATA3D);
+	else if (ref3d)  D2F_BATCH(true, false, D2F_BLOCK_SIZE_REF3D, D2F_CHUNK_REF3D);
+	else             D2F_BATCH(false, false, D2F_BLOCK_SIZE_2D, D2F_CHUNK_2D);
 #undef D2F_BATCH
 	if (fine_chunks > 1)
-		cuda_kernel_diff2_fine_sum_chunks<D2F_CHUNK_2D><<<(unsigned) n, 32, 0, stream>>>(d_jobs, d_start, nc, ~fine_partial, fine_chunks, sum_init);
+	{
+		if (ref3d)
+			cuda_kernel_diff2_fine_sum_chunks<D2F_CHUNK_REF3D><<<(unsigned) n, 32, 0, stream>>>(d_jobs, d_start, nc, ~fine_partial, fine_chunks, sum_init);
+		else
+			cuda_kernel_diff2_fine_sum_chunks<D2F_CHUNK_2D><<<(unsigned) n, 32, 0, stream>>>(d_jobs, d_start, nc, ~fine_partial, fine_chunks, sum_init);
+	}
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 }
 
@@ -4564,7 +4606,7 @@ void windowFourierTransform2(
 
 void run_calcPowerSpectrum(Complex *dFaux, int padoridim, Complex *ddata, int data_sz, RFLOAT *dpower_spectrum, RFLOAT *dcounter,
 											  int max_r2, int min_r2, RFLOAT normfft, RFLOAT padding_factor, RFLOAT weight,
-											  RFLOAT *dfourier_mask, int fx, int fy, int fz, bool do_fourier_mask, bool if3D)
+											  RFLOAT *dfourier_mask, int fx, int fy, int fz, bool do_fourier_mask, bool if3D, int z_lo, int z_hi)
 {
 #ifdef _CUDA_ENABLED
 	dim3 bs(32,4);
@@ -4576,10 +4618,10 @@ void run_calcPowerSpectrum(Complex *dFaux, int padoridim, Complex *ddata, int da
 	}
 	if(sizeof(RFLOAT) == sizeof(double))
 		cuda_kernel_calcPowerSpectrum<<<gs,bs>>>((double2*)dFaux,padoridim,(double2*)ddata,data_sz,dpower_spectrum,dcounter,
-												  max_r2,min_r2,normfft,padding_factor,weight,dfourier_mask,fx,fy,fz,do_fourier_mask);
+												  max_r2,min_r2,normfft,padding_factor,weight,dfourier_mask,fx,fy,fz,do_fourier_mask,z_lo,z_hi);
 	else
 		cuda_kernel_calcPowerSpectrum<<<gs,bs>>>((float2*)dFaux,padoridim,(float2*)ddata,data_sz,dpower_spectrum,dcounter,
-												  max_r2,min_r2,normfft,padding_factor,weight,dfourier_mask,fx,fy,fz,do_fourier_mask);
+												  max_r2,min_r2,normfft,padding_factor,weight,dfourier_mask,fx,fy,fz,do_fourier_mask,z_lo,z_hi);
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
 #elif _HIP_ENABLED
 	dim3 bs(32,4);

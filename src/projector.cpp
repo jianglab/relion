@@ -324,6 +324,13 @@ void Projector::computeFourierTransformMap(
 	cufftHandle lean_plan = 0;
 	bool have_lean_plan = false;
 	bool inplace_ft = false;
+	// Slab transform (a 2D real-to-complex transform of every z-slice, then 1D complex transforms along z,
+	// all in place): used only when the plan of the whole 3D transform does not fit in the free GPU memory,
+	// whose work area is as large as the map itself; the slabs need almost none. It is the same
+	// transform up to the order of the additions. RELION_GPU_SLAB_FT=1 forces it (for tests).
+	bool slab_ft = false;
+	int slab_dchunks = 1; // slab mode: the data array is read out of the device in this many planes-at-a-time chunks
+	cufftHandle slab_plan2d = 0, slab_plan1d = 0;
 	if(do_heavy && do_gpu && gpupool::leanMemoryMode() > 0)
 	{
 		if (cufftCreate(&lean_plan) == CUFFT_SUCCESS)
@@ -375,6 +382,57 @@ void Projector::computeFourierTransformMap(
 
 		HANDLE_ERROR(cudaMemGetInfo(&mem_free, &mem_tot));
 		gpuMemTrace("reference transform: before its buffers", (double) mem_req);
+		const char *slab_env = getenv("RELION_GPU_SLAB_FT"); // 1: always, 0: never
+		if(inplace_ft && !(slab_env && atoi(slab_env) == 0) && (mem_free <= mem_req || slab_env != NULL))
+		{
+			const int N = padoridim, Nh = padoridim/2 + 1;
+			int n2[2] = {N, N};
+			int inembed[2] = {N, 2*Nh}, onembed[2] = {N, Nh};
+			int n1[1] = {N};
+			cufftType t2 = (sizeof(RFLOAT) == sizeof(double)) ? CUFFT_D2Z : CUFFT_R2C;
+			cufftType t1 = (sizeof(RFLOAT) == sizeof(double)) ? CUFFT_Z2Z : CUFFT_C2C;
+			size_t ws2 = 0, ws1 = 0;
+			bool ok = cufftCreate(&slab_plan2d) == CUFFT_SUCCESS && cufftCreate(&slab_plan1d) == CUFFT_SUCCESS;
+			if (ok)
+			{
+				cufftSetAutoAllocation(slab_plan2d, 0);
+				cufftSetAutoAllocation(slab_plan1d, 0);
+				ok = cufftMakePlanMany(slab_plan2d, 2, n2, inembed, 1, N*2*Nh, onembed, 1, N*Nh, t2, 1, &ws2) == CUFFT_SUCCESS &&
+				     cufftMakePlanMany(slab_plan1d, 1, n1, n1, N*Nh, 1, n1, N*Nh, 1, t1, Nh, &ws1) == CUFFT_SUCCESS;
+			}
+			cudaGetLastError();
+			// The padded map stays while the transform is read out into the data array (and the Fourier mask is
+			// there): with the 3D plan the work area gives its room to those, here it does not, so count them
+			const int rmax_d = std::min(current_size < 0 ? ori_size / 2 : current_size / 2, ori_size / 2);
+			const size_t pad_d = 2 * (ROUND(padding_factor * rmax_d) + 1) + 1;
+			// The data array leaves the device in chunks of at most about 512 MB (planes of z), so a reference at
+			// the Nyquist limit (3.7 GB of data array at box 384, pad 2) does not need its whole size on the device
+			const size_t plane_bytes = (size_t)sizeof(Complex)*pad_d*(pad_d/2 + 1);
+			const char *chunk_env = getenv("RELION_GPU_DATA_CHUNK_MB"); // for tests
+			const size_t chunk_bytes = ((chunk_env && atoi(chunk_env) > 0) ? (size_t)atoi(chunk_env) : (size_t)512) << 20;
+			const int dchunks = (int) std::max((size_t)1, ((size_t)plane_bytes*pad_d + chunk_bytes - 1) / chunk_bytes);
+			const size_t dplanes = (pad_d + dchunks - 1) / dchunks;
+			const size_t read_out = plane_bytes*(dchunks > 1 ? dplanes : pad_d) +
+					  (do_fourier_mask ? (size_t)sizeof(RFLOAT)*MULTIDIM_SIZE(*fourier_mask) : (size_t)0) + (size_t)sizeof(RFLOAT)*(ori_size + 2)*2 + 65536;
+			size_t slab_req = (size_t)sizeof(RFLOAT)*(size_t)N*(size_t)N*(size_t)(2*Nh) +
+					  (size_t)sizeof(RFLOAT)*MULTIDIM_SIZE(vol_in) + std::max(std::max(ws1, ws2), read_out) + 4096; // dvol's room is a hole once it is freed
+			slab_req = gpupool::transformPoolBytes(slab_req);
+			if (ok && mem_free > slab_req && (slab_req < mem_req || slab_env != NULL))
+			{
+				slab_ft = true;
+				slab_dchunks = dchunks;
+				mem_req = slab_req;
+				ws_sz = std::max(ws1, ws2);
+				cufftDestroy(lean_plan);
+				have_lean_plan = false;
+			}
+			else
+			{
+				if (slab_plan2d) cufftDestroy(slab_plan2d);
+				if (slab_plan1d) cufftDestroy(slab_plan1d);
+				slab_plan2d = slab_plan1d = 0;
+			}
+		}
 		if(mem_free > mem_req)
 		{
 			allocator = new CudaCustomAllocator(mem_req, (size_t)16);
@@ -564,8 +622,45 @@ void Projector::computeFourierTransformMap(
 				dFaux.setDevicePtr((Complex*)~dMpad); // the transform of dMpad lands in its own memory
 			else
 				dFaux.accAlloc();
-			cufftResult err;
-			cufftHandle plan;
+			cufftResult err = CUFFT_SUCCESS;
+			cufftHandle plan = 0;
+
+			if (slab_ft)
+			{
+				AccPtr<char> slab_ws = ptrFactory.make<char>(std::max(ws_sz, (size_t) 1));
+				slab_ws.accAlloc();
+				cufftSetWorkArea(slab_plan2d, ~slab_ws);
+				cufftSetWorkArea(slab_plan1d, ~slab_ws);
+				gpuMemTrace("reference transform: slab buffers and work area in place", (double) ws_sz);
+				if(sizeof(RFLOAT) == sizeof(double))
+				{
+					for (int k = 0; k < padoridim && err == CUFFT_SUCCESS; k++) // one z-slice at a time: the work area of a batch grows with it
+						err = cufftExecD2Z(slab_plan2d, (cufftDoubleReal*)~dMpad + (size_t)k*padoridim*(2*(padoridim/2+1)),
+						                   (cufftDoubleComplex*)~dFaux + (size_t)k*padoridim*(padoridim/2+1));
+					if(err == CUFFT_SUCCESS)
+						for (int j = 0; j < padoridim && err == CUFFT_SUCCESS; j++) // the columns of one row (of x) at a time, for the same reason
+							err = cufftExecZ2Z(slab_plan1d, (cufftDoubleComplex*)~dFaux + (size_t)j*(padoridim/2+1),
+							                   (cufftDoubleComplex*)~dFaux + (size_t)j*(padoridim/2+1), CUFFT_FORWARD);
+				}
+				else
+				{
+					for (int k = 0; k < padoridim && err == CUFFT_SUCCESS; k++)
+						err = cufftExecR2C(slab_plan2d, (cufftReal*)~dMpad + (size_t)k*padoridim*(2*(padoridim/2+1)),
+						                   (cufftComplex*)~dFaux + (size_t)k*padoridim*(padoridim/2+1));
+					if(err == CUFFT_SUCCESS)
+						for (int j = 0; j < padoridim && err == CUFFT_SUCCESS; j++)
+							err = cufftExecC2C(slab_plan1d, (cufftComplex*)~dFaux + (size_t)j*(padoridim/2+1),
+							                   (cufftComplex*)~dFaux + (size_t)j*(padoridim/2+1), CUFFT_FORWARD);
+				}
+				if(err != CUFFT_SUCCESS)
+					REPORT_ERROR("failed to exec slab fft");
+				HANDLE_ERROR(cudaDeviceSynchronize());
+				cufftDestroy(slab_plan2d);
+				cufftDestroy(slab_plan1d);
+				slab_ws.freeIfSet();
+			}
+			else
+			{
 
 			// Work area from the pool, the plan made before when the lean way is on
 			AccPtr<char> fft_ws = ptrFactory.make<char>(std::max(ws_sz, (size_t) 1));
@@ -600,6 +695,7 @@ void Projector::computeFourierTransformMap(
 			// deallocate plan, free mem
 			cufftDestroy(plan);
 			fft_ws.freeIfSet();
+			}
 
 			size_t normfft = (size_t)padoridim*(size_t)padoridim;
 			if(ref_dim == 3) normfft *= (size_t)padoridim;
@@ -693,7 +789,10 @@ void Projector::computeFourierTransformMap(
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
 	int fourier_mask_sz = (do_fourier_mask)?MULTIDIM_SIZE(*fourier_mask):16;
 	int fmXsz, fmYsz, fmZsz;
-	AccPtr<Complex> ddata = ptrFactory.make<Complex>(MULTIDIM_SIZE(data));
+	const bool data_chunked = do_heavy && do_gpu && ref_dim == 3 && slab_dchunks > 1;
+	const size_t data_planes = (size_t)ZSIZE(data), data_plane_n = (size_t)YSIZE(data)*(size_t)(YSIZE(data)/2 + 1);
+	const size_t data_chunk_planes = data_chunked ? (data_planes + slab_dchunks - 1) / slab_dchunks : data_planes;
+	AccPtr<Complex> ddata = ptrFactory.make<Complex>(data_chunked ? data_chunk_planes * data_plane_n : (size_t)MULTIDIM_SIZE(data));
 	AccPtr<RFLOAT> dfourier_mask = ptrFactory.make<RFLOAT>(fourier_mask_sz);
 	AccPtr<RFLOAT> dpower_spectrum = ptrFactory.make<RFLOAT>(ori_size / 2 + 1);
 	AccPtr<RFLOAT> dcounter = ptrFactory.make<RFLOAT>(ori_size / 2 + 1);
@@ -739,11 +838,29 @@ void Projector::computeFourierTransformMap(
 #if defined _CUDA_ENABLED || defined _HIP_ENABLED
 		if(do_gpu)
 		{
+			if (data_chunked)
+			{
+#ifdef _CUDA_ENABLED
+				for (size_t z0 = 0; z0 < data_planes; z0 += data_chunk_planes)
+				{
+					const size_t z1 = std::min(data_planes, z0 + data_chunk_planes);
+					if (z0 > 0)
+						HANDLE_ERROR(cudaMemset(~ddata, 0, data_chunk_planes * data_plane_n * sizeof(Complex)));
+					run_calcPowerSpectrum(~dFaux, padoridim, ~ddata, YSIZE(data), ~dpower_spectrum, ~dcounter,
+										  max_r2, min_r2, normfft, padding_factor, weight,
+										  ~dfourier_mask, fmXsz, fmYsz, fmZsz, do_fourier_mask, ref_dim == 3, (int) z0, (int) z1);
+					HANDLE_ERROR(cudaMemcpy(MULTIDIM_ARRAY(data) + z0 * data_plane_n, ~ddata, (z1 - z0) * data_plane_n * sizeof(Complex), cudaMemcpyDeviceToHost));
+				}
+#endif
+			}
+			else
+			{
 			run_calcPowerSpectrum(~dFaux, padoridim, ~ddata, YSIZE(data), ~dpower_spectrum, ~dcounter,
 								  max_r2, min_r2, normfft, padding_factor, weight,
 								  ~dfourier_mask, fmXsz, fmYsz, fmZsz, do_fourier_mask, ref_dim == 3);
 			ddata.setHostPtr(MULTIDIM_ARRAY(data));
 			ddata.cpToHost();
+			}
 			dfourier_mask.freeIfSet();
 		}
 		else

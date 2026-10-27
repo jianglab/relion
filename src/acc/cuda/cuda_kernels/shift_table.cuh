@@ -37,5 +37,37 @@ static __global__ void cuda_kernel_shift_table(
 	g_table[(size_t) t * image_size + pixel] = make_float2(c, s);
 }
 
+
+// Separable form of the same phases (RELION_GPU_WAVG_SEPARABLE): the phase of a pixel is x*tx + y*ty, so
+// (cos, sin) of it is the complex product of those of x*tx and of y*ty. g_shx[t * img_x + x] holds the first,
+// g_shy[t * img_y + row] the second for the image row `row` (the y coordinate of the row, wrapped as the
+// pixel loops do: rows beyond max_r count from the far side; the rows between, whose pixels use x = max_r,
+// keep their own y). Sizes (img_x + img_y) per translation instead of image_size.
+static __global__ void cuda_kernel_shift_table_sep(
+		const XFLOAT *g_trans_x,
+		const XFLOAT *g_trans_y,
+		float2 *g_shx,
+		float2 *g_shy,
+		int img_x,
+		int img_y,
+		int max_r)
+{
+	const int i = blockIdx.x * blockDim.x + threadIdx.x;
+	const int t = blockIdx.y;
+	XFLOAT s, c;
+	if (i < img_x)
+	{
+		sincosf( i * g_trans_x[t], &s, &c );
+		g_shx[(size_t) t * img_x + i] = make_float2(c, s);
+	}
+	else if (i < img_x + img_y)
+	{
+		const int row = i - img_x;
+		const int y = (row > max_r && row >= img_y - max_r) ? row - img_y : row;
+		sincosf( y * g_trans_y[t], &s, &c );
+		g_shy[(size_t) t * img_y + row] = make_float2(c, s);
+	}
+}
+
 #endif // ACC_DOUBLE_PRECISION
 #endif /* CUDA_SHIFT_TABLE_CUH_ */

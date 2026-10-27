@@ -226,7 +226,9 @@ __global__ void cuda_kernel_wavg_sum(
 		const WavgClassJob *g_classes,
 		const int *g_class_start,
 		int n_classes,
-		int n_chunks)
+		int n_chunks,
+		const float2 *g_shx = NULL, // RELION_GPU_WAVG_SEPARABLE: the shift as the product of g_shx[t * imgX + x] and
+		const float2 *g_shy = NULL) //   g_shy[t * imgY + row] (cuda_kernel_shift_table_sep), instead of g_shift; float rounding only
 {
 	int bid;
 	const int tid = threadIdx.x;
@@ -287,6 +289,7 @@ __global__ void cuda_kernel_wavg_sum(
 			continue;
 		int x = pixel % projector.imgX;
 		int y = floorfracf(pixel, projector.imgX);
+		const int row = y;
 		if (y > projector.maxR)
 		{
 			if (y >= projector.imgY - projector.maxR)
@@ -314,7 +317,15 @@ __global__ void cuda_kernel_wavg_sum(
 		XFLOAT Yr = 0, Yi = 0;
 		for (int k = 0; k < n; k++)
 		{
-			const float2 sc = __ldg(&g_shift[(size_t) s_idx[k] * image_size + pixel]);
+			float2 sc;
+			if (g_shx)
+			{
+				const float2 a = __ldg(&g_shx[(size_t) s_idx[k] * projector.imgX + x]);
+				const float2 b = __ldg(&g_shy[(size_t) s_idx[k] * projector.imgY + row]);
+				sc = make_float2(a.x * b.x - a.y * b.y, a.y * b.x + a.x * b.y);
+			}
+			else
+				sc = __ldg(&g_shift[(size_t) s_idx[k] * image_size + pixel]);
 			const XFLOAT w = s_w[k];
 			Yr += w * (sc.x * xr - sc.y * xi);
 			Yi += w * (sc.x * xi + sc.y * xr);
