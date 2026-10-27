@@ -165,6 +165,41 @@ static void destroyPickWindow(Fl_Window *win)
 	Fl::delete_widget(win);
 }
 
+// Pick buttons and Z/X only ask for a micrograph; it is loaded from a timeout. Loading blocks
+// the event loop, so presses made meanwhile queue up: they then only move the target, and the
+// micrograph browsed to is loaded once, instead of every one passed on the way.
+static int pending_imic = -1;
+static int pending_nr_simultaneous = 1;
+// Z/X wait this long (s) for the next press, so that browsing quickly or holding a key loads nothing on the way
+#define NAV_KEY_DELAY 0.15
+
+static void viewMics(int imic, int nr_simultaneous);
+
+static void cb_load_pending(void*)
+{
+	const int imic = pending_imic;
+	pending_imic = -1;
+	if (imic >= 0)
+		viewMics(imic, pending_nr_simultaneous);
+}
+
+static void requestViewMic(int imic, int nr_simultaneous, double delay)
+{
+	if (imic < 0 || imic >= (int)viewmic_buttons.size())
+		return;
+	pending_imic = imic;
+	pending_nr_simultaneous = nr_simultaneous;
+	highlight_active(imic);
+	Fl::remove_timeout(cb_load_pending);
+	Fl::add_timeout(delay, cb_load_pending);
+}
+
+// Z/X step from the micrograph still waiting to be loaded, else from the one shown
+static int navigationBase(int shown)
+{
+	return (pending_imic >= 0) ? pending_imic : shown;
+}
+
 // Z/X are handled by the window, not the canvas: keys reach the window whichever of its
 // widgets has the keyboard focus (the canvas, a scrollbar, or none)
 class PickWindow : public Fl_Double_Window
@@ -191,9 +226,7 @@ public:
 				{
 					if (entry.win != this)
 						continue;
-					int imic = entry.imic + step;
-					if (imic >= 0 && imic < (int)viewmic_buttons.size())
-						viewmic_buttons[imic]->do_callback();
+					requestViewMic(navigationBase(entry.imic) + step, 1, NAV_KEY_DELAY);
 					return 1;
 				}
 			}
@@ -223,13 +256,12 @@ public:
 	}
 };
 
-void cb_viewmic(Fl_Widget* w, void* data)
+static void viewMics(int imic, int nr_simultaneous)
 {
-	int *iptr = (int*)data;
-	int imic = *iptr;
-
-	const bool with_control = (Fl::event_ctrl() != 0);
-	int nr_simultaneous = (with_control) ? global_nr_simultaneous : 1;
+	// Show that the GUI is busy, not frozen, while the micrographs load
+	for (Fl_Window *win = Fl::first_window(); win; win = Fl::next_window(win))
+		win->cursor(FL_CURSOR_WAIT);
+	Fl::flush();
 
 	for (int mymic = first_pick_viewed; mymic <= last_pick_viewed; mymic++)
 	{
@@ -482,6 +514,16 @@ void cb_viewmic(Fl_Widget* w, void* data)
 			viewmic_buttons[i]->color(GUI_BUTTON_COLOR, GUI_BUTTON_COLOR);
 		viewmic_buttons[i]->redraw();
 	}
+
+	for (Fl_Window *win = Fl::first_window(); win; win = Fl::next_window(win))
+		win->cursor(FL_CURSOR_DEFAULT);
+}
+
+void cb_viewmic(Fl_Widget* w, void* data)
+{
+	int *iptr = (int*)data;
+	const bool with_control = (Fl::event_ctrl() != 0);
+	requestViewMic(*iptr, (with_control) ? global_nr_simultaneous : 1, 0.);
 }
 
 void cb_viewctf(Fl_Widget* w, void* data)
@@ -745,22 +787,24 @@ int manualpickerGuiWindow::handle(int event)
 		const int key = Fl::event_key();
 		const int n = (int)viewmic_buttons.size();
 
-		if ((key == 'z' || key == 'Z') && first_pick_viewed > 0)
+		const int base = navigationBase(first_pick_viewed);
+
+		if ((key == 'z' || key == 'Z') && base > 0)
 		{
-			int imic = first_pick_viewed - 1;
+			int imic = base - 1;
 			if (imic >= 0 && imic < n)
 			{
-				viewmic_buttons[imic]->do_callback();
+				requestViewMic(imic, 1, NAV_KEY_DELAY);
 				scroll_widget->scroll_to(0, 25 + imic * 35);
 			}
 			return 1;
 		}
-		else if ((key == 'x' || key == 'X') && first_pick_viewed < n - 1)
+		else if ((key == 'x' || key == 'X') && base < n - 1)
 		{
-			int imic = first_pick_viewed + 1;
+			int imic = base + 1;
 			if (imic >= 0 && imic < n)
 			{
-				viewmic_buttons[imic]->do_callback();
+				requestViewMic(imic, 1, NAV_KEY_DELAY);
 				scroll_widget->scroll_to(0, 25 + (imic - 2) * 35);
 			}
 			return 1;
