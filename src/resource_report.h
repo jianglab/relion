@@ -61,8 +61,9 @@ std::vector<std::string> summary(const std::vector<ProcessStats> &procs, bool mp
 void accumulate(ProcessStats &total, const ProcessStats &phase);
 void finish(ProcessStats &total);
 
-/// The advice, one line per point; empty when the run is balanced.
-std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi);
+/// The advice, one line per point; empty when the run is balanced. target_workers: the measured
+/// workers per GPU for this kind of job (parhint::workersPerGpuTarget), 0: unknown.
+std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi, int target_workers = 0);
 
 /// CPU cores this process may run on (sched_getaffinity).
 std::vector<int> allowedCores();

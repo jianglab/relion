@@ -30,13 +30,21 @@ is what the per-job learning of relion_launch is for.
 Other cards, same runs (8 cores; best count first, then the 3090 rule's count when different and
 how much slower it was): B1 Class2D: RTX 6000 (48 GB) 6 (4: +10%), RTX 4090 8 (4: +4%), A5000 8
 (4: +16%), A4000 8 (4: +19%, noisy), a second RTX 6000 8 (4: +8%). B3 Class3D: 2 on all, except the RTX
-4090, 4 (2: +13%). B4 skip-align: 4 on all six models. With 4 cores (1, 2 or 4 workers): Class2D is
+4090, 4 (2: +13%). B4 skip-align: 4 on all six models on this small set, but not on a real-sized
+one (below). With 4 cores (1, 2 or 4 workers): Class2D is
 still fastest with 4 workers of one thread each, Class3D is flat, and skip-align with 4 one-thread
 workers is up to 25% slower than 2 workers of 2 threads on every card, hence its 2-thread minimum.
 So one rule fits all six models within about 10% (the learning of relion_launch closes the rest),
 and no per-model table is needed.
 
-Rule: workers per GPU = 4 (Class2D, skip-align), 2 (Class3D), 2 (auto-refine; the number of
+Skip-align on a real-sized set (2026-10-27): helical Class3D --skip_align, 70k segments, 5
+iterations, 8 cores, RTX A4000, two runs each, warm file cache: 1 worker x 8 threads 415 s, 2 x 4
+416 s, 4 x 2 450 s (E-step 2-5: 78, 78-93 and 84-99 s each). 4 workers kept the GPU no busier
+(42-54% for all three). Its rule is therefore 2 workers: as fast as 1 when the images are in memory,
+and two readers when they are not (a first, cold run spent most of iteration 1 waiting for images).
+An A5000 node with a slow shared disk gave 1100-3500 s for all three layouts, too noisy to rank them.
+
+Rule: workers per GPU = 4 (Class2D), 2 (Class3D, skip-align), 2 (auto-refine; the number of
 workers must be even), limited by 75% of the GPU memory / memory per worker, 60% of the host
 memory, one core per worker (two for skip-align), and 300 particles per worker; threads per worker = cores / workers,
 at most 8. `RELION_RANKS_PER_GPU` overrides the workers per GPU, `RELION_GPU_GB_PER_RANK` the

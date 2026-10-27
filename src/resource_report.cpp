@@ -243,7 +243,7 @@ void finish(ProcessStats &total)
 		if (b >= 0. && total.wall > 0.) b /= total.wall;
 }
 
-std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi)
+std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi, int target_workers)
 {
 	std::vector<std::string> out;
 	std::map<std::string, std::vector<size_t> > by_host;
@@ -335,19 +335,24 @@ std::vector<std::string> advise(const std::vector<ProcessStats> &procs, bool mpi
 				for (size_t i : h.second) mps = mps || procs[i].mps;
 				o << "The " << gpus << " busy only " << pct(busy) << " of the time" << where
 				  << ": the work per particle is small and the GPU waits for the CPU side. ";
-				const int suggest = std::max(2, ncores - 1);
+				// the measured workers per GPU for this kind of job, else one per core
+				const int suggest = target_workers > 0 ? target_workers : std::max(2, ncores - 1);
+				const int suggest_j = std::max(1, ncores / suggest);
 				// spare cores fewer than the workers: no whole thread more per worker to suggest
 				if ((ncores - threads) / workers > 0)
 					o << "Raise --j from " << per_worker << " to " << per_worker + (ncores - threads) / workers
 					  << " (a thread per allocated core): more threads keep more work on the GPU.";
+				else if (target_workers > 0 && workers >= target_workers * ngpu)
+					o << "More worker processes per GPU than the " << workers / ngpu << " used were measured to be no faster"
+					  << " for this kind of job, so the limit is on the CPU side (reading images, preparing particles).";
 				else if (!mps)
-					o << "Run several MPI processes per GPU (about " << suggest << ", each with --j 1) under NVIDIA MPS, "
+					o << "Run several MPI processes per GPU (about " << suggest << ", each with --j " << suggest_j << ") under NVIDIA MPS, "
 					  << "which lets their GPU work run at the same time; without MPS they take turns and gain little. "
 					  << "relion_refine_mpi starts MPS by itself; for other programs start it inside the job before mpirun: "
 					  << "export CUDA_MPS_PIPE_DIRECTORY=$TMPDIR/mps CUDA_MPS_LOG_DIRECTORY=$TMPDIR/mps; "
 					  << "mkdir -p $TMPDIR/mps; nvidia-cuda-mps-control -d (and stop it afterwards with: echo quit | nvidia-cuda-mps-control).";
 				else
-					o << "MPS is running: more MPI processes per GPU (about " << suggest << ", each with --j 1) should feed it better.";
+					o << "MPS is running: more MPI processes per GPU (about " << suggest << ", each with --j " << suggest_j << ") should feed it better.";
 				out.push_back(o.str());
 				if (threads >= ncores && cores_idle)
 					out.push_back("Many threads were waiting rather than computing (" + use.str() + "); if images are read from a slow disk, --preread_images or --scratch_dir may help.");

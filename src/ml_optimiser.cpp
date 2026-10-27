@@ -12639,7 +12639,10 @@ void MlOptimiser::stopResourceMonitor()
 
 void MlOptimiser::reportResources(const std::vector<resrep::ProcessStats> &procs, bool mpi)
 {
-    std::vector<std::string> advice = resrep::advise(procs, mpi);
+    const parhint::Work work = do_skip_align ? parhint::Work::SkipAlign
+                             : do_auto_refine ? parhint::Work::AutoRefine
+                             : mymodel.ref_dim == 2 ? parhint::Work::Class2D : parhint::Work::Class3D;
+    std::vector<std::string> advice = resrep::advise(procs, mpi, parhint::workersPerGpuTarget(work));
     double wall = 0.;
     for (const auto &p : procs) wall = std::max(wall, p.wall);
     std::cout << " Resource use over " << resource_nr_steps_ << " E-steps (" << (int)std::lround(wall) << " s):" << std::endl;

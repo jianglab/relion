@@ -427,7 +427,8 @@ WorkProfile profileOf(Work w)
 	{
 	case Work::Class2D:    return {4, 0.4, 0.4, "EM Class2D", 1};
 	case Work::Class3D:    return {2, 2.5, 0.7, "3D classification with alignment", 1};
-	case Work::SkipAlign:  return {4, 2.5, 1.8, "3D classification without alignment", 2};
+	// 4 was best on a 4.5k-particle set; on 70k segments 4 workers were 8% slower than 1 or 2 (A4000)
+	case Work::SkipAlign:  return {2, 2.5, 1.8, "3D classification without alignment", 2};
 	case Work::AutoRefine: return {2, 7.8, 14.0, "auto-refine", 1};
 	}
 	return {1, 1.0, 1.0, "", 1};

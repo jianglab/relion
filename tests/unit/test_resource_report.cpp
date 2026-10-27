@@ -59,6 +59,22 @@ TEST_CASE("a starved GPU with a thread per core recommends MPI processes under M
 	CHECK(!mentions(a, "Raise --j from"));
 }
 
+TEST_CASE("a starved GPU follows the measured workers per GPU of the job", "[resource_report]")
+{
+	std::vector<resrep::ProcessStats> one(1, proc("n1", 8, 8, 0, 0.4));
+	CHECK(mentions(resrep::advise(one, false, 2), "about 2, each with --j 4"));
+
+	// leader + 2 workers on one GPU: already at the measured count, so no call for more processes
+	std::vector<resrep::ProcessStats> two;
+	two.push_back(proc("n1", 1, 8, 0, -3.));
+	two.push_back(proc("n1", 4, 8, 0, 0.4));
+	two.push_back(proc("n1", 4, 8, 0, 0.4));
+	for (auto &p : two) p.mps = true;
+	auto a = resrep::advise(two, true, 2);
+	CHECK(mentions(a, "measured to be no faster"));
+	CHECK(!mentions(a, "about 2"));
+}
+
 TEST_CASE("a starved GPU without idle cores makes no guess at a core count", "[resource_report]")
 {
 	std::vector<resrep::ProcessStats> p(1, proc("n1", 4, 4, 0, 0.2));

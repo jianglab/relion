@@ -332,7 +332,7 @@ TEST_CASE("ranks per GPU: workers by kind of work, limited by memory, cores and 
 		CHECK(a.mpi == 5);
 		CHECK(a.threads == 3);          // 12 threads per GPU shared by 4 workers
 		CHECK(ask(Work::Class3D, 1, 0, 0, 0).workers_per_gpu == 2);
-		CHECK(ask(Work::SkipAlign, 1, 0, 0, 0).workers_per_gpu == 4);
+		CHECK(ask(Work::SkipAlign, 1, 0, 0, 0).workers_per_gpu == 2);
 		CHECK_FALSE(a.reason.empty());
 	}
 	SECTION("auto-refine: even number of workers, at least 2 (one per half-set)")
@@ -345,7 +345,7 @@ TEST_CASE("ranks per GPU: workers by kind of work, limited by memory, cores and 
 	SECTION("GPU memory: a 24 GB card holds 2 auto-refine workers, not 4")
 	{
 		CHECK(ask(Work::AutoRefine, 1, 64, 24, 0).mpi == 3);
-		CHECK(ask(Work::SkipAlign, 1, 64, 12, 0).workers_per_gpu == 3);   // 12 GB card, 2.5 GB each, 75%
+		CHECK(ask(Work::SkipAlign, 1, 64, 6, 0).workers_per_gpu == 1);    // 6 GB card, 2.5 GB each, 75%
 		auto a = ask(Work::Class3D, 1, 64, 3, 0);
 		CHECK(a.workers_per_gpu == 1);
 		CHECK(a.mpi == 1);                                                  // one worker: no leader
@@ -357,10 +357,10 @@ TEST_CASE("ranks per GPU: workers by kind of work, limited by memory, cores and 
 		CHECK(ask(Work::Class2D, 1, 3, 0, 0).workers_per_gpu == 3);
 		CHECK(ask(Work::Class2D, 2, 16, 0, 0).workers_per_gpu == 4);
 		CHECK(ask(Work::Class2D, 1, 4, 0, 0).workers_per_gpu == 4);      // one thread each is still fastest
-		auto s = ask(Work::SkipAlign, 1, 4, 0, 0);                       // skip-align wants 2 threads per worker
-		CHECK(s.workers_per_gpu == 2);
+		auto s = ask(Work::SkipAlign, 1, 2, 0, 0);                       // skip-align wants 2 threads per worker
+		CHECK(s.workers_per_gpu == 1);
 		CHECK(s.threads == 2);
-		CHECK(ask(Work::SkipAlign, 1, 8, 0, 0).workers_per_gpu == 4);
+		CHECK(ask(Work::SkipAlign, 1, 8, 0, 0).workers_per_gpu == 2);
 	}
 	SECTION("particles: at least 300 per worker")
 	{
