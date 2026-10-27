@@ -28,6 +28,7 @@
 #include "src/ctf.h"
 #include <src/jaz/single_particle/obs_model.h>
 #include <random>
+#include <functional>
 #include <src/jaz/tomography/tomogram_set.h>
 #include <src/jaz/tomography/tomo_ctf_helper.h>
 #include <src/jaz/tomography/tomogram.h>
@@ -211,6 +212,21 @@ public:
 	// Indices of the sorted particles
 	std::vector<long int> sorted_idx;
 
+	// When sorted_idx is in micrograph or filament order: the particle-level shuffle it would
+	// otherwise be (empty if it is that). Samples that should be random take their particles
+	// from it (the accuracy trials, see swapInRandomOrder)
+	std::vector<long int> random_sorted_idx;
+
+	// Swap sorted_idx and random_sorted_idx (no-op without a separate random order); call again to swap back
+	void swapInRandomOrder()
+	{
+		if (!random_sorted_idx.empty())
+			sorted_idx.swap(random_sorted_idx);
+	}
+
+	// Put sorted_idx in order(by_mic, rng); when by_mic, keep order(false, rng) in random_sorted_idx
+	void orderKeepingRandom(const std::function<void(bool, std::mt19937 &)> &order, bool by_mic, int seed, std::mt19937 &rng);
+
 	// Shuffle whole micrographs in [first, last), keeping each one's particles together in file
 	// order (RELION_PARTICLE_ORDER=micrograph, see randomiseParticlesOrder); with
 	// RELION_PARTICLE_ORDER=filament, whole helical filaments in track order
@@ -277,6 +293,7 @@ public:
 		particles.clear(); // reserve upon reading
         particleSet.clearParticles();
 		sorted_idx.clear();
+		random_sorted_idx.clear();
 		nr_particles_subset1 = nr_particles_subset2 = 0;
 		nr_bodies = 1;
 		fn_scratch = "";

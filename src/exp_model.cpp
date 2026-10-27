@@ -509,6 +509,25 @@ void Experiment::shuffleMicrographs(std::vector<long int>::iterator first, std::
 	}
 }
 
+// By micrograph or filament: first the particle-level shuffle with the random numbers it gets without
+// (kept in random_sorted_idx), then the micrograph order from a generator seeded alike, so each order is
+// the one it would be on its own. rng must be fresh from seed.
+void Experiment::orderKeepingRandom(const std::function<void(bool, std::mt19937 &)> &order, bool by_mic, int seed, std::mt19937 &rng)
+{
+	if (!by_mic)
+	{
+		random_sorted_idx.clear();
+		order(false, rng);
+		return;
+	}
+	const std::vector<long int> unshuffled = sorted_idx;
+	order(false, rng);
+	random_sorted_idx.swap(sorted_idx);
+	sorted_idx = unshuffled;
+	std::mt19937 rng_mic(seed);
+	order(true, rng_mic);
+}
+
 void Experiment::randomiseParticlesOrder(int seed, bool do_split_random_halves, int subsets_size)
 {
 	//This static flag is for only randomize once
@@ -541,36 +560,44 @@ void Experiment::randomiseParticlesOrder(int seed, bool do_split_random_halves, 
 				REPORT_ERROR("ERROR Experiment::randomiseParticlesOrder: invalid half2 size:" + integerToString(nr_half2) + " != " + integerToString(nr_particles_subset2));
 
 			// Randomise the two particle lists
-			if (particleOrderByMicrograph() && !doing_subset)
+			auto order = [&](bool by_mic, std::mt19937 &r)
 			{
-				shuffleMicrographs(sorted_idx.begin(), sorted_idx.begin() + nr_half1, rng);
-				shuffleMicrographs(sorted_idx.begin() + nr_half1, sorted_idx.end(), rng);
-			}
-			else
-			{
-				std::shuffle(sorted_idx.begin(), sorted_idx.begin() + nr_half1, rng);
-				std::shuffle(sorted_idx.begin() + nr_half1, sorted_idx.end(), rng);
-			}
+				if (by_mic)
+				{
+					shuffleMicrographs(sorted_idx.begin(), sorted_idx.begin() + nr_half1, r);
+					shuffleMicrographs(sorted_idx.begin() + nr_half1, sorted_idx.end(), r);
+				}
+				else
+				{
+					std::shuffle(sorted_idx.begin(), sorted_idx.begin() + nr_half1, r);
+					std::shuffle(sorted_idx.begin() + nr_half1, sorted_idx.end(), r);
+				}
 
-			// Make sure the particles are sorted on their optics_group.
-			// Otherwise CudaFFT re-calculation of plans every time image size changes slows down things a lot!
-			long max_nr1 = doing_subset ? subsets_size : nr_half1;
-			long max_nr2 = doing_subset ? subsets_size : nr_half2;
-			std::stable_sort(sorted_idx.begin(), sorted_idx.begin() + max_nr1, compareOpticsGroupsParticles(particles));
-			std::stable_sort(sorted_idx.begin() + nr_half1, sorted_idx.begin() + nr_half1 + max_nr2, compareOpticsGroupsParticles(particles));
+				// Make sure the particles are sorted on their optics_group.
+				// Otherwise CudaFFT re-calculation of plans every time image size changes slows down things a lot!
+				long max_nr1 = doing_subset ? subsets_size : nr_half1;
+				long max_nr2 = doing_subset ? subsets_size : nr_half2;
+				std::stable_sort(sorted_idx.begin(), sorted_idx.begin() + max_nr1, compareOpticsGroupsParticles(particles));
+				std::stable_sort(sorted_idx.begin() + nr_half1, sorted_idx.begin() + nr_half1 + max_nr2, compareOpticsGroupsParticles(particles));
+			};
+			orderKeepingRandom(order, particleOrderByMicrograph() && !doing_subset, seed, rng);
 		}
 		else
 		{
 			// Just randomise the entire vector
-			if (particleOrderByMicrograph() && !doing_subset)
-				shuffleMicrographs(sorted_idx.begin(), sorted_idx.end(), rng);
-			else
-				std::shuffle(sorted_idx.begin(), sorted_idx.end(), rng);
+			auto order = [&](bool by_mic, std::mt19937 &r)
+			{
+				if (by_mic)
+					shuffleMicrographs(sorted_idx.begin(), sorted_idx.end(), r);
+				else
+					std::shuffle(sorted_idx.begin(), sorted_idx.end(), r);
 
-			// Make sure the particles are sorted on their optics_group.
-			// Otherwise CudaFFT re-calculation of plans every time image size changes slows down things a lot!
-			long max_nr = doing_subset ? subsets_size : numberOfParticles();
- 			std::stable_sort(sorted_idx.begin(), sorted_idx.begin() + max_nr, compareOpticsGroupsParticles(particles));
+				// Make sure the particles are sorted on their optics_group.
+				// Otherwise CudaFFT re-calculation of plans every time image size changes slows down things a lot!
+				long max_nr = doing_subset ? subsets_size : numberOfParticles();
+				std::stable_sort(sorted_idx.begin(), sorted_idx.begin() + max_nr, compareOpticsGroupsParticles(particles));
+			};
+			orderKeepingRandom(order, particleOrderByMicrograph() && !doing_subset, seed, rng);
 		}
 
 		randomised = true;

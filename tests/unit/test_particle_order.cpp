@@ -99,6 +99,47 @@ TEST_CASE("micrograph order: the micrograph order follows the seed", "[particle_
 	CHECK(micOrder(1).size() == 5);
 }
 
+// The accuracy trials take the first particles: in micrograph order they must still be upstream's random sample
+TEST_CASE("micrograph order keeps the particle-level shuffle for random samples", "[particle_order]")
+{
+	const int seed = 11;
+	Experiment exp;
+	makeExperiment(exp);
+	const std::vector<long int> unshuffled = exp.sorted_idx;
+	auto order = [&](bool by_mic, std::mt19937 &r)
+	{
+		if (by_mic)
+			exp.shuffleMicrographs(exp.sorted_idx.begin(), exp.sorted_idx.end(), r);
+		else
+			std::shuffle(exp.sorted_idx.begin(), exp.sorted_idx.end(), r);
+	};
+
+	std::vector<long int> plain = unshuffled, by_mic = unshuffled;
+	std::mt19937 r1(seed), r2(seed);
+	std::shuffle(plain.begin(), plain.end(), r1);
+	exp.shuffleMicrographs(by_mic.begin(), by_mic.end(), r2);
+	exp.sorted_idx = by_mic;
+	REQUIRE(exp.sorted_idx != plain);
+
+	std::mt19937 rng(seed);
+	exp.sorted_idx = unshuffled;
+	exp.orderKeepingRandom(order, true, seed, rng);
+	CHECK(exp.sorted_idx == by_mic);          // processing order unchanged
+	CHECK(exp.random_sorted_idx == plain);    // what the order would be without micrograph order
+	exp.swapInRandomOrder();
+	CHECK(exp.sorted_idx == plain);
+	exp.swapInRandomOrder();
+	CHECK(exp.sorted_idx == by_mic);
+
+	std::mt19937 rng2(seed);
+	exp.sorted_idx = unshuffled;
+	exp.orderKeepingRandom(order, false, seed, rng2);
+	CHECK(exp.sorted_idx == plain);
+	CHECK(exp.random_sorted_idx.empty());
+	exp.swapInRandomOrder();                  // no-op
+	CHECK(exp.sorted_idx == plain);
+}
+
 TEST_CASE("micrograph order: without micrograph names, by stack file", "[particle_order]")
 {
 	Experiment exp;

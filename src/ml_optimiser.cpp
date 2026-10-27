@@ -4776,8 +4776,11 @@ void MlOptimiser::expectation()
         // Set the exp_metadata (but not the exp_imagedata which is not needed for calculateExpectedAngularErrors)
         int n_trials_acc = (mymodel.ref_dim==3 && (mymodel.data_dim != 3 || mydata.is_tomo)) ? 100 : 10;
         n_trials_acc = XMIPP_MIN(n_trials_acc, mydata.numberOfParticles());
+        // The trials are the first particles: in random order, not a few micrographs or filaments
+        mydata.swapInRandomOrder();
         getMetaAndImageDataSubset(0, n_trials_acc-1, false);
         calculateExpectedAngularErrors(0, n_trials_acc-1);
+        mydata.swapInRandomOrder();
     }
 
     applyCoarseEarly(verb > 0);

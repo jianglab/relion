@@ -1973,8 +1973,9 @@ void MlOptimiserMpi::expectation()
 					if (prefetcher_ != NULL)
 					{
 						if (fw_timing)
-							fprintf(stderr, "MPI_TIMING it%d rank%d prefetch: hits %d misses %d wait %.2f s, pool read %.2f s\n", iter, node->rank,
-							        prefetch_hits_, prefetch_misses_, prefetcher_->waitTimeUs() / 1.e6, prefetcher_->poolReadTimeUs() / 1.e6);
+							fprintf(stderr, "MPI_TIMING it%d rank%d prefetch: hits %d misses %d wait %.2f s, pool read %.2f s, readers %d depth %d\n", iter, node->rank,
+							        prefetch_hits_, prefetch_misses_, prefetcher_->waitTimeUs() / 1.e6, prefetcher_->poolReadTimeUs() / 1.e6,
+							        prefetcher_->readers(), prefetcher_->depth());
 						delete prefetcher_;
 						prefetcher_ = NULL;
 					}
@@ -4570,6 +4571,8 @@ void MlOptimiserMpi::calculateExpectedAngularErrors(long int my_first_part_id, l
 	int first_follower = 1;
 	int my_nr_images, length_fn_ctf;
 
+	// The trials are the first particles: in random order, not a few micrographs or filaments
+	mydata.swapInRandomOrder();
 	if (node->isLeader())
 	{
 		// Leader sends metadata (but not imagedata) for first 100 particles to first_follower (for calculateExpectedAngularErrors)
@@ -4601,6 +4604,7 @@ void MlOptimiserMpi::calculateExpectedAngularErrors(long int my_first_part_id, l
 		}
 		MlOptimiser::calculateExpectedAngularErrors(my_first_part_id, my_last_part_id);
 	}
+	mydata.swapInRandomOrder();
 
 	// The reconstructing follower Bcast acc_rottilt, acc_psi, acc_trans to all other nodes!
 	node->relion_MPI_Bcast(&acc_rot, 1, MY_MPI_DOUBLE, first_follower, MPI_COMM_WORLD);
