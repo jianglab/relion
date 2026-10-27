@@ -11042,7 +11042,7 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
                                 if (doHelicalTiltWeight())
                                 {
                                     const RFLOAT tilt_weight = helicalTiltWeight(tilt);
-                                    Fimg *= tilt_weight;
+                                    Fimg *= Complex(tilt_weight, 0.);
                                     Fweight *= tilt_weight;
                                 }
 
