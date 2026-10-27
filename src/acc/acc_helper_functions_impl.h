@@ -2200,6 +2200,7 @@ void runBackProjectKernelBatched(
 #undef BP3D_BATCH_S
 #undef BP3D_BATCH_H
 		};
+#ifndef ACC_DOUBLE_PRECISION  // the check compares float models
 		static int tile_checks_left = [] { const char *e = getenv("RELION_GPU_BP_TILE_CHECKS"); return e ? atoi(e) : 2; }();
 		if (bp_tile_mode == 2 && tile_checks_left > 0 && !data_is_3D && nc == 1 && acc.cap == 0 && BP.mdlXYZ > 0)
 		{
@@ -2240,6 +2241,7 @@ void runBackProjectKernelBatched(
 					md, mr, mr > 0 ? md / mr : 0.f, h_sum[1] > 0 ? sqrt(h_sum[0] / h_sum[1]) : 0.0);
 		}
 		else
+#endif
 			launch_bp(pack_ok ? 2 : (bp_tile_mode == 1 ? 1 : 0));
 	}
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
@@ -2611,6 +2613,7 @@ bool runDiff2KernelCoarseBatched(
 			          : "direct kernel (the cross-term kernel is for 3D references and 2D images with a table up to 128 MB)") << "." << std::endl;
 	}
 #else
+	const int xt_mode = 0;
 	const bool use_xt = false;
 #endif
 #ifndef ACC_DOUBLE_PRECISION

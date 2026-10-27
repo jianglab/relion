@@ -19,7 +19,7 @@ import subprocess
 
 import pytest
 
-from fixtures import generate_test_dataset
+from fixtures import generate_test_dataset, gpu_double_precision
 
 N_FIL = 10
 
@@ -96,6 +96,8 @@ class TestGroupShared:
     def test_shared_projections_are_exact(self, test_data_dir, relion_bin, relion_runner):
         if not _gpu_available():
             pytest.skip("no GPU visible")
+        if gpu_double_precision(relion_bin):
+            pytest.skip("the shared coarse pass is single-precision only")
         paths = generate_test_dataset(str(test_data_dir / "data"), relion_bin, relion_runner,
                                       num_particles=60, size=32, angpix=1.0)
         star = test_data_dir / "filaments.star"

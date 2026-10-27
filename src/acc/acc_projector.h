@@ -45,6 +45,8 @@ class AccProjector
 #ifdef ALTCPU
 	std::complex<XFLOAT> *mdlComplex;
 	int externalFree;
+#elif defined _CUDA_ENABLED || defined _HIP_ENABLED
+	XFLOAT *mdlReal, *mdlImag;
 #else
 	XFLOAT *mdlComplex;
 #endif
@@ -71,6 +73,9 @@ public:
 		mdlReal = 0;
 		mdlImag = 0;
 		pitch2D = 0;
+#elif defined _CUDA_ENABLED || defined _HIP_ENABLED
+		mdlReal = 0;
+		mdlImag = 0;
 #else
 		mdlComplex = 0;
 #ifdef ALTCPU

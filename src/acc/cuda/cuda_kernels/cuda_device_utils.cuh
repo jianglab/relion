@@ -4,20 +4,6 @@
 #include <cuda_runtime.h>
 #include "src/acc/cuda/cuda_settings.h"
 
-#ifdef ACC_DOUBLE_PRECISION
-__device__ inline double cuda_atomic_add(double* address, double val)
-{
-	unsigned long long int* address_as_ull = (unsigned long long int*)address;
-	unsigned long long int old = *address_as_ull, assumed;
-	do
-	{
-		assumed = old;
-		old = atomicCAS(address_as_ull, assumed, __double_as_longlong(val + __longlong_as_double(assumed)));
-	}
-	while (assumed != old); // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
-	return __longlong_as_double(old);
-}
-#else
 // Class batching: the class whose blocks include `block`, given the first block of
 // every class (class_start[0] = 0, class_start[n] = total; empty classes allowed),
 // and the block's index within that class
@@ -36,6 +22,20 @@ __device__ inline int findBatchClass(const int *class_start, int n, int block, i
 	return lo;
 }
 
+#ifdef ACC_DOUBLE_PRECISION
+__device__ inline double cuda_atomic_add(double* address, double val)
+{
+	unsigned long long int* address_as_ull = (unsigned long long int*)address;
+	unsigned long long int old = *address_as_ull, assumed;
+	do
+	{
+		assumed = old;
+		old = atomicCAS(address_as_ull, assumed, __double_as_longlong(val + __longlong_as_double(assumed)));
+	}
+	while (assumed != old); // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
+	return __longlong_as_double(old);
+}
+#else
 __device__ inline void cuda_atomic_add(float* address, float value)
 {
 #if defined(__CUDA_ARCH__) && !defined(RELION_GENERIC_ATOMICS)

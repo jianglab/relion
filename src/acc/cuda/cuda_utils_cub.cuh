@@ -579,6 +579,9 @@ __global__ void cuda_kernel_block_sort_significance(const T *weights, int n, T *
 // RELION_GPU_BLOCK_SORT=0 always uses the radix sort of the weights (the block-wise sort is on by default)
 inline bool gpuBlockSort()
 {
+#ifdef ACC_DOUBLE_PRECISION
+	return false;  // a 1024-thread block of doubles needs more registers than the GPU has: radix sort
+#endif
 	static const bool on = gpuswitch::on("RELION_GPU_BLOCK_SORT");
 	return on;
 }
@@ -1285,6 +1288,9 @@ static void fusedWeightPass(AccPtr<T> &weights, double adaptive_fraction, long m
 // of the sum, the smallest weight and the threshold. r: sum_weight, idx, first (smallest weight), max, wmax.
 inline bool gpuSkipAlignBlock()
 {
+#ifdef ACC_DOUBLE_PRECISION
+	return false;  // uses the block sort (see gpuBlockSort)
+#endif
 	static const bool on = gpuswitch::on("RELION_GPU_SKIPALIGN_BLOCK");
 	return on;
 }

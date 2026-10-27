@@ -71,7 +71,7 @@ public:
 		{};
 #endif
 
-#if defined _CUDA_ENABLED || defined _HIP_ENABLED
+#if (defined _CUDA_ENABLED || defined _HIP_ENABLED) && !defined PROJECTOR_NO_TEXTURES
 	// RELION_GPU_FLOAT2_TEX: real and imaginary part in one two-channel texture (mdlImag == mdlReal), one fetch
 	__device__ __forceinline__ void tex3Dfetch(XFLOAT x, XFLOAT y, XFLOAT z, XFLOAT &re, XFLOAT &im) const
 	{
@@ -328,6 +328,9 @@ __device__ __forceinline__
 #ifndef PROJECTOR_NO_TEXTURES
 					*p.mdlReal,
 					*p.mdlImag
+#elif defined _CUDA_ENABLED || defined _HIP_ENABLED
+					p.mdlReal,
+					p.mdlImag
 #else
 					p.mdlComplex
 #endif

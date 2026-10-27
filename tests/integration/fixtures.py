@@ -249,6 +249,13 @@ _rlnCorrectedFourierShellCorrelationPhaseRandomizedMaskedMaps #8
         f.write(content)
 
 
+def gpu_double_precision(relion_bin):
+    """True if relion_refine was built with double-precision GPU code (-DDoublePrec_ACC=ON)."""
+    import subprocess
+    res = subprocess.run([str(Path(relion_bin) / "relion_refine"), "--version"], capture_output=True, text=True)
+    return "CUDA-ACC=double" in res.stdout + res.stderr
+
+
 def generate_test_dataset(test_dir, relion_bin, relion_runner, num_particles=10, size=32, angpix=1.0):
     """
     Generate a complete synthetic test dataset using relion_project.

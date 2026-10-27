@@ -18,7 +18,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from fixtures import generate_test_dataset, read_mrc
+from fixtures import generate_test_dataset, gpu_double_precision, read_mrc
 
 
 def _gpu_available(relion_bin):
@@ -66,6 +66,8 @@ class TestCoarseCache:
     def setup(self, test_data_dir, relion_bin, relion_runner):
         if not _gpu_available(relion_bin):
             pytest.skip("no GPU visible")
+        if gpu_double_precision(relion_bin):
+            pytest.skip("the projection cache and cross-term kernel are single-precision only")
         paths = generate_test_dataset(str(test_data_dir / "data"), relion_bin, relion_runner,
                                       num_particles=60, size=32, angpix=1.0)
         ref, out, _ = _run(relion_bin, paths, test_data_dir / "off", {"RELION_GPU_COARSE_CACHE": "0"})
