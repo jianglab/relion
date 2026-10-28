@@ -579,10 +579,10 @@ void getFourierTransformsAndCtfs(long int part_id,
             if (helixMaskBad == NULL)
                 HANDLE_ERROR(cudaMallocHost((void **) &helixMaskBad, sizeof(int)));
             *helixMaskBad = 0;
-            RFLOAT a10, a11, R1, R2, D1, D2;
+            RFLOAT a00, a01, a10, a11, R1, R2, D1, D2;
             helixMaskParameters2D(img.data.xdim, img.data.ydim, psi_deg, my_mask_radius,
                                   (baseMLO->helical_tube_outer_diameter / (2. * my_pixel_size)),
-                                  baseMLO->width_mask_edge, a10, a11, R1, R2, D1, D2);
+                                  baseMLO->width_mask_edge, a00, a01, a10, a11, R1, R2, D1, D2);
             static thread_local double *helixPartials = NULL; // this thread's, device
             if (helixPartials == NULL)
                 HANDLE_ERROR(cudaMalloc((void **) &helixPartials, 2 * HELIX_MASK_PARTIALS * sizeof(double)));
@@ -593,7 +593,7 @@ void getFourierTransformsAndCtfs(long int part_id,
                 return e && std::string(e) != "0" && std::string(e) != "off";
             }();
             bool mask_done = false;
-            if (mask_fused)
+            if (mask_fused && !baseMLO->helical_cylindrical_mask) // the fused kernel has no cylinder
             {
                 XFLOAT *fimg = ~d_img;
                 int fxd = img.data.xdim, fyd = img.data.ydim, fnp = HELIX_MASK_PARTIALS;
@@ -613,7 +613,7 @@ void getFourierTransformsAndCtfs(long int part_id,
                     ~d_img, img.data.xdim, img.data.ydim, a10, a11, D1, D2,
                     baseMLO->width_mask_edge, helixPartials);
             cuda_kernel_helixMaskApply2D<<<(n + HELIX_MASK_BLOCK - 1) / HELIX_MASK_BLOCK, HELIX_MASK_BLOCK, 0, d_img.getStream()>>>(
-                    ~d_img, img.data.xdim, img.data.ydim, a10, a11, R1, R2, D1, D2,
+                    ~d_img, img.data.xdim, img.data.ydim, a00, a01, a10, a11, baseMLO->helical_cylindrical_mask, R1, R2, D1, D2,
                     baseMLO->width_mask_edge, helixPartials, HELIX_MASK_PARTIALS, helixMaskBad);
             }
             LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
@@ -649,7 +649,7 @@ void getFourierTransformsAndCtfs(long int part_id,
             {
                 softMaskOutsideMapForHelix(img(), mypsi_deg, mytilt_deg, my_mask_radius,
                                            (baseMLO->helical_tube_outer_diameter / (2. * my_pixel_size)),
-                                           baseMLO->width_mask_edge);
+                                           baseMLO->width_mask_edge, NULL, false, baseMLO->helical_cylindrical_mask);
             }
             else
             {
@@ -661,7 +661,7 @@ void getFourierTransformsAndCtfs(long int part_id,
                 softMaskOutsideMapForHelix(img(), mypsi_deg, mytilt_deg, my_mask_radius,
                                            (baseMLO->helical_tube_outer_diameter / (2. * my_pixel_size)),
                                            baseMLO->width_mask_edge,
-                                           &Mnoise);
+                                           &Mnoise, false, baseMLO->helical_cylindrical_mask);
             }
 
             // ... and re-upload img

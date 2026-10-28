@@ -632,11 +632,13 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		MDvals.read(fn_star, "joboptions_values");
 		std::string label, value;
 		bool read_auto_parallel = false;
+		bool read_cylindrical_mask = false;
 		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDvals)
 		{
 			MDvals.getValue(EMDL_JOBOPTION_VARIABLE, label);
 			MDvals.getValue(EMDL_JOBOPTION_VALUE, value);
 			if (label == "auto_parallel") read_auto_parallel = true;
+			if (label == "helical_cylindrical_mask") read_cylindrical_mask = true;
 			if (joboptions.find(label) == joboptions.end())
 			{
 				std::cerr << "WARNING: cannot find " << label << " in the defined joboptions. Ignoring it ..." <<std::endl;
@@ -649,6 +651,9 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		// Jobs saved before RELION could choose MPI processes and threads keep their numbers
 		if (!read_auto_parallel && joboptions.find("auto_parallel") != joboptions.end())
 			joboptions["auto_parallel"].value = "No";
+		// Jobs saved before the cylindrical mask existed keep the mask they had
+		if (!read_cylindrical_mask && joboptions.find("helical_cylindrical_mask") != joboptions.end())
+			joboptions["helical_cylindrical_mask"].value = "No";
 		have_read = true;
 	}
 
@@ -4056,6 +4061,8 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 	{
 		label += ".helical";
 		refine += " --helical_outer_diameter " + source_job.joboptions["helical_tube_outer_diameter"].getString();
+		if (source_job.joboptions.find("helical_cylindrical_mask") != source_job.joboptions.end())
+			refine += source_job.joboptions["helical_cylindrical_mask"].getBoolean() ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
 		refine += " --no_init_blobs";
 		if (source_job.joboptions["do_bimodal_psi"].getBoolean()) refine += " --bimodal_psi";
 		refine += " --sigma_psi " + floatToString(source_job.joboptions["range_psi"].getNumber(error_message) / 3.);
@@ -4176,6 +4183,9 @@ If auto-sampling is used, this will be the value for the first iteration(s) only
 	joboptions["helical_tube_outer_diameter"] = JobOption("Tube diameter (A): ", 200, 100, 1000, 10, "Outer diameter (in Angstroms) of helical tubes. \
 This value should be slightly larger than the actual width of the tubes. You may want to copy the value from previous particle extraction job. \
 If negative value is provided, this option is disabled and ordinary circular masks will be applied. Sometimes '--dont_check_norm' option is useful to prevent errors in normalisation of helical segments.");
+	joboptions["helical_cylindrical_mask"] = JobOption("Use cylindrical mask?", true, "If set to Yes, helical segments are masked with a cylinder: as wide as the tube diameter \
+and as long as the mask diameter (Optimisation tab) along the helical axis, with soft edges in both directions. \
+If set to No, the tube is masked within a circle (sphere) of the mask diameter, as before.");
 	joboptions["do_bimodal_psi"] = JobOption("Do bimodal angular searches?", true, "Do bimodal search for psi angles? \
 Set to Yes if you want to classify 2D helical segments with priors of psi angles. The priors should be bimodal due to unknown polarities of the segments. \
 Set to No if the 3D helix looks the same when rotated upside down. If it is set to No, ordinary angular searches will be performed.\n\nThis option will be invalid if you choose not to perform image alignment on 'Sampling' tab.");
@@ -4443,6 +4453,7 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 		label += ".helical";
 
 		command_after_scratch += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
+		command_after_scratch += joboptions["helical_cylindrical_mask"].getBoolean() ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
         command_after_scratch += " --no_init_blobs";
 
 		if (joboptions["dont_skip_align"].getBoolean())
@@ -4993,6 +5004,9 @@ particle mask for each segment. If the psi priors of the extracted segments are 
 	joboptions["helical_tube_outer_diameter"] = JobOption("Tube diameter - outer (A):", std::string("-1"),"Inner and outer diameter (in Angstroms) of the reconstructed helix spanning across Z axis. \
 Set the inner diameter to negative value if the helix is not hollow in the center. The outer diameter should be slightly larger than the actual width of helical tubes because it also decides the shape of 2D \
 particle mask for each segment. If the psi priors of the extracted segments are not accurate enough due to high noise level or flexibility of the structure, then set the outer diameter to a large value.");
+	joboptions["helical_cylindrical_mask"] = JobOption("Use cylindrical mask?", true, "If set to Yes, helical segments are masked with a cylinder: as wide as the tube diameter \
+and as long as the mask diameter (Optimisation tab) along the helical axis, with soft edges in both directions. \
+If set to No, the tube is masked within a circle (sphere) of the mask diameter, as before.");
 	joboptions["range_rot"] = JobOption("Angular search range - rot (deg):", std::string("-1"), "Local angular searches will be performed \
 within +/- of the given amount (in degrees) from the optimal orientation in the previous iteration. The default negative value means that no local searches will be performed. \
 A Gaussian prior will be applied, so that orientations closer to the optimal orientation \
@@ -5351,6 +5365,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 			command += " --helical_inner_diameter " + joboptions["helical_tube_inner_diameter"].getString();
 
 		command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
+		command += joboptions["helical_cylindrical_mask"].getBoolean() ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
         command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
         command += " --helical_twist_initial " + joboptions["helical_twist_initial"].getString();
         command += " --helical_rise_initial " + joboptions["helical_rise_initial"].getString();
@@ -5570,6 +5585,9 @@ particle mask for each segment. If the psi priors of the extracted segments are 
 	joboptions["helical_tube_outer_diameter"] = JobOption("Tube diameter - outer (A):", std::string("-1"),"Inner and outer diameter (in Angstroms) of the reconstructed helix spanning across Z axis. \
 Set the inner diameter to negative value if the helix is not hollow in the center. The outer diameter should be slightly larger than the actual width of helical tubes because it also decides the shape of 2D \
 particle mask for each segment. If the psi priors of the extracted segments are not accurate enough due to high noise level or flexibility of the structure, then set the outer diameter to a large value.");
+	joboptions["helical_cylindrical_mask"] = JobOption("Use cylindrical mask?", true, "If set to Yes, helical segments are masked with a cylinder: as wide as the tube diameter \
+and as long as the mask diameter (Optimisation tab) along the helical axis, with soft edges in both directions. \
+If set to No, the tube is masked within a circle (sphere) of the mask diameter, as before.");
 	joboptions["range_rot"] = JobOption("Angular search range - rot (deg):", std::string("-1"), "Local angular searches will be performed \
 within +/- of the given amount (in degrees) from the optimal orientation in the previous iteration. The default negative value means that no local searches will be performed. \
 A Gaussian prior will be applied, so that orientations closer to the optimal orientation \
@@ -5889,6 +5907,7 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 				command += " --helical_inner_diameter " + joboptions["helical_tube_inner_diameter"].getString();
 
 			command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
+			command += joboptions["helical_cylindrical_mask"].getBoolean() ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
             command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
             command += " --helical_twist_initial " + joboptions["helical_twist_initial"].getString();
             command += " --helical_rise_initial " + joboptions["helical_rise_initial"].getString();
@@ -8899,6 +8918,12 @@ If set to a value larger than the image size no masking will be performed.");
 	joboptions["helical_nr_asu"] = JobOption("Number of helical asymmetrical units:", 1, 1, 100, 1, "Number of unique helical asymmetrical units in each segment box.");
 	joboptions["helical_rise"] = JobOption("Helical rise (A):", 1., 0., 50., 0.5, "Helical rise in Angstroms.");
 	joboptions["helical_twist"] = JobOption("Helical twist (deg):", -1., -50., 50., 1., "Helical twist in degrees. Positive for right-handed helix.");
+	joboptions["helical_tube_outer_diameter"] = JobOption("Tube diameter (A):", std::string("-1"), "Outer diameter (in Angstroms) of the helical tubes. \
+With helical symmetry, the symmetry is also imposed in real space within the tube and the map outside it is set to zero (with a soft edge), as in 3D auto-refine. \
+For helical segments that are extracted and reconstructed in one step (Reconstruction tab), the background of each segment is taken from outside the tube along its psi prior, \
+as when helical segments are extracted. Leave at -1 for particles that are not helical segments.");
+	joboptions["helical_z_percentage"] = JobOption("Central Z length (%):", 30., 5., 80., 1., "Helical symmetry is imposed in real space from this central part of the box along Z \
+(the helical axis), as in 3D auto-refine. Used only with a tube diameter.");
 	joboptions["do_apply_helical_symmetry"] = JobOption("Apply helical symmetry?", false, "If set to Yes, helical symmetry will be applied in the reconstruction. Set to No if helical symmetry is unknown or not yet estimated.");
 
 	joboptions["do_pad1"] = JobOption("Skip padding?", false, "If set to Yes, the reconstruction will not use padding in Fourier space. Otherwise, the reconstruction is padded 2x. Skipping padding (i.e. use --pad 1) gives nearly as good results as using --pad 2, but some artifacts may appear in the corners from signal that is folded back.");
@@ -8975,7 +9000,12 @@ bool RelionJob::getCommandsReconstruct3DJob(std::string &outputname, std::vector
 		command += " --nr_helical_asu " + joboptions["helical_nr_asu"].getString();
 		command += " --helical_rise " + joboptions["helical_rise"].getString();
 		command += " --helical_twist " + joboptions["helical_twist"].getString();
+		if (joboptions["helical_tube_outer_diameter"].getNumber(error_message) > 0.)
+			command += " --helical_z_percentage " + floatToString(joboptions["helical_z_percentage"].getNumber(error_message) / 100.);
 	}
+	if (joboptions["helical_tube_outer_diameter"].getNumber(error_message) > 0.)
+		command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
+
 
 	// Pre-read and cache options
 	if (joboptions["cache_dir"].getString() != "")

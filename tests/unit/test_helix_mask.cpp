@@ -112,3 +112,68 @@ TEST_CASE("the helical mask is bitwise unchanged in 2D and 3D, with and without 
 				CHECK(identical(a, b));
 			}
 }
+
+namespace
+{
+// A tube of ones (|y| <= tube_half) along x on a background of zeros, n x n (2D) or n x n x n
+// with the tube along z (3D)
+MultidimArray<RFLOAT> tube(int dim, int n, int tube_half)
+{
+	MultidimArray<RFLOAT> a;
+	if (dim == 2) a.resize(n, n); else a.resize(n, n, n);
+	a.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(a)
+	{
+		const long int across = (dim == 2) ? i : std::max(std::abs(i), std::abs(j));
+		A3D_ELEM(a, k, i, j) = (std::abs(across) <= tube_half) ? 1. : 0.;
+	}
+	return a;
+}
+}
+
+TEST_CASE("the cylindrical helical mask is as wide as the tube and as long as the mask diameter", "[helix_mask]")
+{
+	const int n = 64;
+	const RFLOAT R = 16., D = 9., w = 3.;   // mask radius, tube radius, soft edge
+	// the last two arguments: follow the box shape (no: square boxes), cylinder
+
+	SECTION("2D, helical axis along x (psi 0)")
+	{
+		MultidimArray<RFLOAT> sphere = tube(2, n, 6), cyl = sphere;
+		softMaskOutsideMapForHelix(sphere, 0., 0., R, D, w, NULL, false, false);
+		softMaskOutsideMapForHelix(cyl, 0., 0., R, D, w, NULL, false, true);
+		// inside the tube, 15 along the axis and 6 across: outside the circle (r = 16.2 > 16)
+		CHECK(A2D_ELEM(cyl, 6, 15) == 1.);                 // kept by the cylinder
+		CHECK(A2D_ELEM(sphere, 6, 15) < 1.);               // softened by the circle
+		CHECK(A2D_ELEM(cyl, 0, 15) == 1.);
+		// along the axis, beyond the soft edge: background
+		CHECK(A2D_ELEM(cyl, 0, 20) == Approx(0.).margin(1e-12));
+		CHECK(A2D_ELEM(cyl, 0, -20) == Approx(0.).margin(1e-12));
+		// in the soft edge along the axis: the raised cosine, as across the tube
+		CHECK(A2D_ELEM(cyl, 0, 17) == Approx(1. - (0.5 + 0.5 * cos(PI * (R + w - 17.) / w))));
+	}
+
+	SECTION("2D, the mask turns with psi")
+	{
+		MultidimArray<RFLOAT> along_x = tube(2, n, 6), along_y;
+		along_y.resize(n, n);
+		along_y.setXmippOrigin();
+		FOR_ALL_ELEMENTS_IN_ARRAY2D(along_y)
+			A2D_ELEM(along_y, i, j) = A2D_ELEM(along_x, j, i);
+		softMaskOutsideMapForHelix(along_x, 0., 0., R, D, w, NULL, false, true);
+		softMaskOutsideMapForHelix(along_y, 90., 0., R, D, w, NULL, false, true);
+		FOR_ALL_ELEMENTS_IN_ARRAY2D(along_y)
+			if (i > STARTINGY(along_y) && j > STARTINGX(along_y))
+				REQUIRE(A2D_ELEM(along_y, i, j) == Approx(A2D_ELEM(along_x, j, i)).margin(1e-9));
+	}
+
+	SECTION("3D, helical axis along z (tilt 0, psi 0)")
+	{
+		MultidimArray<RFLOAT> sphere = tube(3, 40, 6), cyl = sphere;
+		softMaskOutsideMapForHelix(sphere, 0., 0., R, D, w, NULL, false, false);
+		softMaskOutsideMapForHelix(cyl, 0., 0., R, D, w, NULL, false, true);
+		CHECK(A3D_ELEM(cyl, 15, 6, 0) == 1.);
+		CHECK(A3D_ELEM(sphere, 15, 6, 0) < 1.);
+		CHECK(A3D_ELEM(cyl, 19, 0, 0) == Approx(0.).margin(1e-12));
+	}
+}

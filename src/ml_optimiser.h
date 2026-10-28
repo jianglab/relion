@@ -720,6 +720,10 @@ public:
 	bool do_rect_mask_length;
 	std::vector<RFLOAT> helical_polarity_psi_prior; // per particle: the psi prior of its last E-step
 
+	// Mask helical segments with a cylinder (tube diameter wide, mask diameter long) instead of
+	// the intersection of the tube with a sphere of the mask diameter
+	bool helical_cylindrical_mask;
+
 	// Flag whether to do local refinement of helical parameters
 	bool do_helical_symmetry_local_refinement;
 
@@ -1078,6 +1082,7 @@ public:
             helical_z_percentage(0),
             helical_tube_inner_diameter(0),
             helical_tube_outer_diameter(0),
+            helical_cylindrical_mask(false),
             do_helical_symmetry_local_refinement(0),
             helical_sigma_distance_A(-1.),
             helical_sigma_distance(-1.),

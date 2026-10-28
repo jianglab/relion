@@ -154,6 +154,7 @@ void helixMaskParameters2D(
 		RFLOAT mask_sphere_radius_pix,
 		RFLOAT mask_cyl_radius_pix,
 		RFLOAT cosine_width,
+		RFLOAT &a00, RFLOAT &a01,
 		RFLOAT &a10, RFLOAT &a11,
 		RFLOAT &R1, RFLOAT &R2, RFLOAT &D1, RFLOAT &D2)
 {
@@ -178,6 +179,8 @@ void helixMaskParameters2D(
 	A.resize(3, 3);
 	Euler_angles2matrix(0., 0., psi_deg, A, false);
 	A = A.transpose();
+	a00 = A(0, 0);
+	a01 = A(0, 1);
 	a10 = A(1, 0);
 	a11 = A(1, 1);
 }
@@ -190,7 +193,8 @@ void softMaskOutsideMapForHelix(
 		RFLOAT mask_cyl_radius_pix,
 		RFLOAT cosine_width,
 		MultidimArray<RFLOAT> *Mnoise,
-		bool follow_box_shape)
+		bool follow_box_shape,
+		bool cylinder)
 {
 	Matrix2D<RFLOAT> A;
 	RFLOAT sum_bg, sum, R1, R2, D1, D2, r, d, noise_w, noise_w1, noise_w2, noise_val;
@@ -284,6 +288,7 @@ void softMaskOutsideMapForHelix(
 	// result is bitwise the same, without allocating a vector for every pixel.
 	const RFLOAT a00 = A(0, 0), a01 = A(0, 1), a02 = A(0, 2);
 	const RFLOAT a10 = A(1, 0), a11 = A(1, 1), a12 = A(1, 2);
+	const RFLOAT a20 = A(2, 0), a21 = A(2, 1), a22 = A(2, 2);
 	auto axisDistance = [&](long int k, long int i, long int j) -> RFLOAT
 	{
 		const RFLOAT x = (RFLOAT)j, y = (RFLOAT)i, z = (dim == 3) ? (RFLOAT)k : 0.;
@@ -294,6 +299,14 @@ void softMaskOutsideMapForHelix(
 			return sqrt(ry * ry + rx * rx);
 		}
 		return ABS(ry);
+	};
+	// Distance of a pixel from the centre along the helical axis
+	auto axisPosition = [&](long int k, long int i, long int j) -> RFLOAT
+	{
+		const RFLOAT x = (RFLOAT)j, y = (RFLOAT)i, z = (dim == 3) ? (RFLOAT)k : 0.;
+		if (dim == 3)
+			return ABS(((0. + a20 * x) + a21 * y) + a22 * z);
+		return ABS(((0. + a00 * x) + a01 * y) + a02 * z);
 	};
 
 	// Calculate noise weights for all voxels
@@ -331,7 +344,14 @@ void softMaskOutsideMapForHelix(
 		d = axisDistance(k, i, j);
 
 		bool in_sphere, out_sphere;
-		if (follow_box_shape)
+		if (cylinder)
+		{
+			// Distance from the centre along the helical axis
+			r = axisPosition(k, i, j);
+			in_sphere = (r < R1);
+			out_sphere = (r > R2);
+		}
+		else if (follow_box_shape)
 		{
 			t = ellipse.edge(j, i, (dim == 3) ? k : 0);
 			in_sphere = (t <= 0.);
@@ -360,7 +380,7 @@ void softMaskOutsideMapForHelix(
 		else // Edges of info areas
 		{
 			noise_w1 = noise_w2 = 0.;
-			if (follow_box_shape)
+			if (follow_box_shape && !cylinder)
 			{
 				if (t > 0.)
 					noise_w1 = 0.5 - 0.5 * cos(PI * t);

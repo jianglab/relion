@@ -144,7 +144,8 @@ void imposeHelicalSymmetryInRealSpace(
 		// For a cuboid reference: mask with the ellipsoid along the box whose semi-axis along
 		// the longest side is the sphere radius (BoxEllipse in mask.h), instead of the sphere
 		bool ellipsoid_mask = false,
-		int threads = 0); // 0: as many as OpenMP allows
+		int threads = 0, // 0: as many as OpenMP allows
+		bool cylinder = false);   // within sphere_radius_A along Z, instead of from the centre (cubic boxes)
 
 // Some functions only for specific testing
 void calcRadialAverage(

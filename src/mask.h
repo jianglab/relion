@@ -135,13 +135,15 @@ void softMaskOutsideMap(
 
 // The parameters of softMaskOutsideMapForHelix for a 2D image of xdim x ydim, with the
 // same checks (errors as there): the radii and the terms of the rotation that give
-// a pixel's distance to the helical axis, |a10 * x + a11 * y| (for the GPU version)
+// a pixel's distance to the helical axis, |a10 * x + a11 * y|, and its position along
+// the axis, a00 * x + a01 * y (for the GPU version)
 void helixMaskParameters2D(
 		int xdim, int ydim,
 		RFLOAT psi_deg,
 		RFLOAT mask_sphere_radius_pix,
 		RFLOAT mask_cyl_radius_pix,
 		RFLOAT cosine_width,
+		RFLOAT &a00, RFLOAT &a01,
 		RFLOAT &a10, RFLOAT &a11,
 		RFLOAT &R1, RFLOAT &R2, RFLOAT &D1, RFLOAT &D2);
 
@@ -150,6 +152,10 @@ void helixMaskParameters2D(
 // follow_box_shape (rectangular images) the sphere becomes the BoxEllipse of the box,
 // whose semi-axis along the longest side is mask_sphere_radius_pix; the tube must fit
 // inside its shortest semi-axis.
+// Without follow_box_shape: keeps what is within mask_cyl_radius_pix of the helical axis and within
+// mask_sphere_radius_pix of the centre (a sphere, or a circle in 2D); with cylinder,
+// within mask_sphere_radius_pix of the centre along the axis instead (a cylinder as long
+// as the mask diameter, a rectangle in 2D). Soft edges of cosine_width in both directions.
 void softMaskOutsideMapForHelix(
 		MultidimArray<RFLOAT> &vol,
 		RFLOAT psi_deg,
@@ -158,7 +164,8 @@ void softMaskOutsideMapForHelix(
 		RFLOAT mask_cyl_radius_pix,
 		RFLOAT cosine_width = 3,
 		MultidimArray<RFLOAT> *Mnoise = NULL,
-		bool follow_box_shape = false);
+		bool follow_box_shape = false,
+		bool cylinder = false);   // a cylinder overrides the box shape
 
 // Apply a soft mask and set density outside the mask at the average value of those pixels in the original map
 void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, MultidimArray<RFLOAT> &msk, bool invert_mask = false);

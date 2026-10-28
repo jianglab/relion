@@ -1549,3 +1549,94 @@ TEST_CASE("Refine3D: helical averaging range is sent in Angstroms",
 	REQUIRE(commands[0].find(" --helical_sigma_distance_A 30") != std::string::npos);
 	REQUIRE(commands[0].find(" --helical_sigma_distance ") == std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Helical segments: cylindrical mask, and the tube in 3D reconstruction
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Helical refinement jobs: cylindrical-mask choice emits a flag either way", "[pipeline][helix]")
+{
+	for (int type : {PROC_2DCLASS, PROC_3DCLASS, PROC_3DAUTO})
+	{
+		INFO("job type " << type);
+		RelionJob job;
+		setUpRefineJob(job, type);
+		REQUIRE(job.joboptions.find("helical_cylindrical_mask") != job.joboptions.end());
+		CHECK(job.joboptions["helical_cylindrical_mask"].getBoolean());   // default Yes
+		job.joboptions["do_helix"].setString("Yes");
+		if (job.joboptions.find("helical_rise") != job.joboptions.end())
+			job.joboptions["helical_rise"].setString("4.75");
+		std::string command;
+		REQUIRE(generateCommand(job, command));
+		CHECK(command.find(" --helical_cylindrical_mask") != std::string::npos);
+		job.joboptions["helical_cylindrical_mask"].setString("No");
+		REQUIRE(generateCommand(job, command));
+		CHECK(command.find(" --dont_helical_cylindrical_mask") != std::string::npos);
+		// not helical: neither
+		job.joboptions["do_helix"].setString("No");
+		REQUIRE(generateCommand(job, command));
+		CHECK(command.find("helical_cylindrical_mask") == std::string::npos);
+	}
+}
+
+TEST_CASE("Helical refinement jobs: jobs saved before the cylindrical mask keep their mask", "[pipeline][helix]")
+{
+	RelionJob job;
+	setUpRefineJob(job, PROC_3DCLASS);
+	std::string fn = "cylmask_old_" + integerToString((int)std::time(NULL)) + ".star";
+	job.write(fn);
+	{
+		std::ifstream in(fn.c_str());
+		std::string line, text;
+		while (std::getline(in, line))
+			if (line.find("helical_cylindrical_mask") == std::string::npos)
+				text += line + "\n";
+		in.close();
+		std::ofstream(fn.c_str()) << text;
+	}
+	RelionJob loaded;
+	loaded.clear();
+	bool is_continue = false;
+	REQUIRE(loaded.read(fn, is_continue, true));
+	CHECK(loaded.joboptions["helical_cylindrical_mask"].getString() == "No");
+	std::remove(fn.c_str());
+}
+
+TEST_CASE("Reconstruct3D: the tube diameter goes to relion_reconstruct for symmetry and fused extraction", "[pipeline][reconstruct3d][helix]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_RECONSTRUCT3D);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	REQUIRE(job.joboptions["helical_tube_outer_diameter"].getString() == "-1");
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	CHECK(command.find("--helical_outer_diameter") == std::string::npos);
+
+	// helical symmetry without a tube: as before
+	job.joboptions["do_apply_helical_symmetry"].setString("Yes");
+	job.joboptions["helical_rise"].setString("4.75");
+	job.joboptions["helical_twist"].setString("-1.2");
+	REQUIRE(generateCommand(job, command));
+	CHECK(command.find("--helical_rise 4.75") != std::string::npos);
+	CHECK(command.find("--helical_outer_diameter") == std::string::npos);
+	CHECK(command.find("--helical_z_percentage") == std::string::npos);
+
+	// with a tube: real-space symmetry within it
+	job.joboptions["helical_tube_outer_diameter"].setString("200");
+	REQUIRE(generateCommand(job, command));
+	CHECK(command.find("--helical_outer_diameter 200") != std::string::npos);
+	CHECK(command.find("--helical_z_percentage 0.3") != std::string::npos);
+
+	// a tube without symmetry (fused extraction of segments): the tube, no Z percentage
+	job.joboptions["do_apply_helical_symmetry"].setString("No");
+	REQUIRE(generateCommand(job, command));
+	CHECK(command.find("--helical_outer_diameter 200") != std::string::npos);
+	CHECK(command.find("--helical_z_percentage") == std::string::npos);
+	CHECK(command.find("--fused_helical_diameter") == std::string::npos);
+}

@@ -949,7 +949,8 @@ void imposeHelicalSymmetryInRealSpace(
 		RFLOAT twist_deg,
 		RFLOAT cosine_width_pix,
 		bool ellipsoid_mask,
-		int threads)
+		int threads,
+		bool cylinder)
 {
 	if (threads <= 0)
 		threads = omp_get_max_threads();
@@ -1046,7 +1047,7 @@ void imposeHelicalSymmetryInRealSpace(
 		g.start_z = STARTINGZ(v); g.start_y = STARTINGY(v); g.start_x = STARTINGX(v);
 		g.r_min = r_min; g.r_max = r_max; g.d_min = d_min; g.d_max = d_max; g.D_min = D_min; g.D_max = D_max;
 		g.z_min = z_min; g.z_max = z_max; g.rise_pix = rise_pix; g.cosine_width_pix = cosine_width_pix;
-		g.sin_rec = sin_rec; g.cos_rec = cos_rec;
+		g.sin_rec = sin_rec; g.cos_rec = cos_rec; g.cylinder = cylinder;
 		std::string reason;
 		bool gpu_bad = false;
 		static bool reported_gpu = false, reported_cpu = false;
@@ -1082,7 +1083,7 @@ void imposeHelicalSymmetryInRealSpace(
 				RFLOAT dd = (RFLOAT)(i * i + j * j);
 				RFLOAT rr = dd + (RFLOAT)(k * k);
 				RFLOAT d = sqrt(dd);
-				RFLOAT r = sqrt(rr);
+				RFLOAT r = cylinder ? (RFLOAT)ABS(k) : sqrt(rr);
 				const bool outside_sphere = cuboid ? (ellipsoid.edge(j, i, k) >= 1.) : (r > r_max);
 				if ( outside_sphere || (d < d_min) || (d > D_max) )
 					outside[(k - STARTINGZ(v)) * vxy + (i - STARTINGY(v)) * vx + (j - STARTINGX(v))] = 1;
@@ -1106,7 +1107,8 @@ void imposeHelicalSymmetryInRealSpace(
 		RFLOAT dd = (RFLOAT)(i * i + j * j);
 		RFLOAT rr = dd + (RFLOAT)(k * k);
 		RFLOAT d = sqrt(dd);
-		RFLOAT r = sqrt(rr);
+		// distance from the centre, or along the helical axis for a cylinder
+		RFLOAT r = cylinder ? (RFLOAT)ABS(k) : sqrt(rr);
 		// Where a voxel of a cuboid lies across the edge of the ellipsoid (0 inside, 1 outside)
 		const RFLOAT t = cuboid ? ellipsoid.edge(j, i, k) : 0.;
 		const bool inside_sphere = cuboid ? (t <= 0.) : (r < r_min);

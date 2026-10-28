@@ -229,7 +229,7 @@ __global__ void cuda_kernel_helixMaskBackground2D(
 
 __global__ void cuda_kernel_helixMaskApply2D(
 		XFLOAT *img, int xdim, int ydim,
-		double a10, double a11,
+		double a00, double a01, double a10, double a11, bool cylinder,
 		double R1, double R2, double D1, double D2, double cosine_width,
 		const double *partials, int nr_partials, int *bad);
 

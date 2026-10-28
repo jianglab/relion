@@ -89,6 +89,7 @@ struct HelixRealSpaceInput
 	RFLOAT r_min = 0., r_max = 0., d_min = 0., d_max = 0., D_min = 0., D_max = 0.;
 	RFLOAT z_min = 0., z_max = 0., rise_pix = 1., cosine_width_pix = 1.;
 	std::vector<RFLOAT> sin_rec, cos_rec;
+	bool cylinder = false;   // a cylinder along Z of radius r_max instead of a sphere (as on the CPU)
 };
 /// v is replaced by the result; false (with the reason) when the CPU has to do it. bad: the
 /// "ERROR in imposing symmetry" case of the CPU code

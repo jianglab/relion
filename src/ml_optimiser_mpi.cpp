@@ -3010,7 +3010,8 @@ void MlOptimiserMpi::maximization()
 								mymodel.helical_twist[ith_recons],
 								width_mask_edge,
 								rectMaskAlongLength(),
-								nr_threads);
+								nr_threads,
+								helical_cylindrical_mask);
 					}
 					helical_rise_half1 = mymodel.helical_rise[ith_recons];
 					helical_twist_half1 = mymodel.helical_twist[ith_recons];
@@ -3151,7 +3152,8 @@ void MlOptimiserMpi::maximization()
 										mymodel.helical_twist[ith_recons],
 										width_mask_edge,
 										rectMaskAlongLength(),
-										nr_threads);
+										nr_threads,
+										helical_cylindrical_mask);
 							}
 						} // end if !do_join_random_halves
 

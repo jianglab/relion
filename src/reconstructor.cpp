@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/reconstructor.h"
+#include "src/helix.h"
 #include "src/cache_manager.h"
 #include "src/virtual_particles.h"
 #include "src/fftw_rect.h"
@@ -253,7 +254,8 @@ s2_ctf_oversampling_min = textToInteger(parser.getOption("--s2_ctf_oversampling_
 	fused_recipe.bg_radius = textToFloat(parser.getOption("--fused_bg_radius", "Fused extraction from coordinates: background radius (pixels of the output images) for --fused_norm", "-1"));
 	fused_recipe.ramp = !parser.checkOption("--fused_no_ramp", "Fused extraction from coordinates: do not subtract a fitted background plane");
 	fused_recipe.invert_contrast = parser.checkOption("--fused_invert_contrast", "Fused extraction from coordinates: invert the contrast of the particles, as relion_preprocess --invert_contrast");
-	fused_recipe.helical_diameter = textToFloat(parser.getOption("--fused_helical_diameter", "Fused extraction from coordinates, helical segments: outer diameter of the tube (A); the background is then the outside of a tube along the psi prior", "-1"));
+	// --fused_helical_diameter: the earlier name of --helical_outer_diameter, still accepted
+	const RFLOAT fused_helical_diameter = textToFloat(parser.getOption("--fused_helical_diameter", "Same as --helical_outer_diameter (earlier name)", "-1"));
 	fused_recipe.rotate = parser.checkOption("--fused_rotate_to_horizontal", "Fused extraction from coordinates: turn each box so that its tube lies horizontal, as relion_preprocess --rotate_to_horizontal: by rlnParticleExtractionAngle if the STAR file has it (particles from such an extraction), else by minus rlnAnglePsiPrior. The orientations in the STAR file must belong to the turned images");
 	fused_recipe.mic_angpix = textToFloat(parser.getOption("--fused_mic_angpix", "Fused extraction from coordinates: pixel size (A) of the micrographs. Default: rlnMicrographOriginalPixelSize of the optics table", "-1"));
 	newbox = textToInteger(parser.getOption("--newbox", "Box size of reconstruction after Ewald sphere correction", "-1"));
@@ -268,6 +270,12 @@ s2_ctf_oversampling_min = textToInteger(parser.getOption("--s2_ctf_oversampling_
 	nr_helical_asu = textToInteger(parser.getOption("--nr_helical_asu", "Number of helical asymmetrical units", "1"));
 	helical_rise = textToFloat(parser.getOption("--helical_rise", "Helical rise (in Angstroms)", "0."));
 	helical_twist = textToFloat(parser.getOption("--helical_twist", "Helical twist (in degrees, + for right-handedness)", "0."));
+	helical_outer_diameter = textToFloat(parser.getOption("--helical_outer_diameter", "Outer diameter of helical tubes (A). With helical symmetry, the symmetry is also imposed in real space within the tube and the map outside it is set to zero (soft edge of --width_mask_edge), as relion_refine does; with fused extraction from coordinates, the background is the outside of the tube along the psi prior", "-1"));
+	helical_inner_diameter = textToFloat(parser.getOption("--helical_inner_diameter", "Inner diameter of helical tubes (A), for imposing helical symmetry in real space", "-1"));
+	helical_z_percentage = textToFloat(parser.getOption("--helical_z_percentage", "Central part along Z (fraction of the box) from which helical symmetry is imposed in real space", "0.3"));
+	if (helical_outer_diameter <= 0. && fused_helical_diameter > 0.)
+		helical_outer_diameter = fused_helical_diameter;
+	fused_recipe.helical_diameter = helical_outer_diameter;
 
 	int subtomogram_section = parser.addSection("Subtomogram averaging");
 	normalised_subtomo = parser.checkOption("--normalised_subtomo", "Have subtomograms been multiplicity normalised? (Default=False)");
@@ -452,7 +460,7 @@ void Reconstructor::initialise()
 				{
 					fused_recipe.helical = true;
 					if (!DF.containsLabel(EMDL_ORIENT_PSI_PRIOR))
-						REPORT_ERROR("ERROR: --fused_helical_diameter needs rlnAnglePsiPrior in the STAR file.");
+						REPORT_ERROR("ERROR: fused extraction of helical segments (--helical_outer_diameter) needs rlnAnglePsiPrior in the STAR file.");
 				}
 				if (fused_recipe.rotate && !DF.containsLabel(EMDL_ORIENT_PSI_PRIOR) && !DF.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE))
 					REPORT_ERROR("ERROR: --fused_rotate_to_horizontal needs rlnParticleExtractionAngle or rlnAnglePsiPrior in the STAR file.");
@@ -1786,6 +1794,22 @@ void Reconstructor::reconstruct()
 		}
 	}
 
+
+// Helical symmetry in real space as well, as relion_refine does: each voxel within the tube the average of
+// its symmetry copies in the central part along Z, the map outside the tube zero (soft edge)
+if (!do_reconstruct_ctf && helical_outer_diameter > 0. && helical_rise > 0. && vol().getDim() == 3)
+{
+	const int box = std::min(XSIZE(vol()), std::min(YSIZE(vol()), ZSIZE(vol())));
+	const RFLOAT sphere_radius_A = (box / 2 - width_mask_edge - 1) * angpix;   // half length along Z: as long as the box allows
+	if (verb > 0)
+		std::cout << " + Imposing helical symmetry in real space within a tube of " << helical_outer_diameter
+		          << " A, from the central " << helical_z_percentage * 100. << "% along Z ..." << std::endl;
+	vol().setXmippOrigin();
+	imposeHelicalSymmetryInRealSpace(vol(), angpix, sphere_radius_A,
+	                                 helical_inner_diameter / 2., helical_outer_diameter / 2.,
+	                                 helical_z_percentage, helical_rise, helical_twist, width_mask_edge,
+	                                 false, 0, true);   // a cylinder: the whole length of the box
+}
 
 vol.setSamplingRateInHeader(angpix);
 if (do_invert_contrast)

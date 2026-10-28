@@ -186,7 +186,7 @@ __global__ void cuda_kernel_helixMaskBackground2D(
 
 __global__ void cuda_kernel_helixMaskApply2D(
 		XFLOAT *img, int xdim, int ydim,
-		double a10, double a11,
+		double a00, double a01, double a10, double a11, bool cylinder,
 		double R1, double R2, double D1, double D2, double cosine_width,
 		const double *partials, int nr_partials, int *bad)
 {
@@ -219,7 +219,8 @@ __global__ void cuda_kernel_helixMaskApply2D(
 		return;
 	const int i = p / xdim + y0, j = p % xdim + x0;
 	const double d = helixAxisDistance(p, xdim, x0, y0, a10, a11);
-	const double r = sqrt((double) (i * i + j * j));
+	// distance from the centre, or along the helical axis for a cylinder (as the CPU version)
+	const double r = cylinder ? helixAxisDistance(p, xdim, x0, y0, a00, a01) : sqrt((double) (i * i + j * j));
 	if ((r < R1) && (d < D1))
 		return;
 	if ((r > R2) || (d > D2))

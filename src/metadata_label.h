@@ -432,6 +432,7 @@ enum EMDLabel
 	EMDL_OPTIMISER_HELICAL_NSTART,
 	EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER,
 	EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER,
+	EMDL_OPTIMISER_HELICAL_CYLINDRICAL_MASK,
 	EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT,
 	EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE,
 	EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM,
@@ -1231,6 +1232,7 @@ private:
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_NSTART, EMDL_INT, "rlnNrHelicalNStart", "The N-number for an N-start helix");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, EMDL_DOUBLE, "rlnHelicalMaskTubeInnerDiameter", "Inner diameter of helical tubes in Angstroms (for masks of helical references and particles)");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, EMDL_DOUBLE, "rlnHelicalMaskTubeOuterDiameter", "Outer diameter of helical tubes in Angstroms (for masks of helical references and particles)");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CYLINDRICAL_MASK, EMDL_BOOL, "rlnHelicalCylindricalMask", "Mask helical segments with a cylinder as long as the mask diameter, instead of a sphere of that diameter");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT, EMDL_BOOL, "rlnHelicalSymmetryLocalRefinement", "Flag to indicate that local refinement of helical parameters should be performed");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, EMDL_DOUBLE, "rlnHelicalSigmaDistance", "Sigma of distance along the helical tracks, as a fraction of the box size (older runs)");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM, EMDL_DOUBLE, "rlnHelicalSigmaDistanceAngst", "Sigma of distance along the helical tracks (Angstroms)");

@@ -516,6 +516,11 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     {
         helical_tube_outer_diameter = textToFloat(fnt);
     }
+    // Without either, the mask of the run that is continued
+    if (parser.checkOption("--helical_cylindrical_mask", "Mask helical segments with a cylinder as wide as the tube and as long as the mask diameter"))
+        helical_cylindrical_mask = true;
+    if (parser.checkOption("--dont_helical_cylindrical_mask", "Mask helical segments with the tube within a sphere of the mask diameter"))
+        helical_cylindrical_mask = false;
     fnt = parser.getOption("--perturb", "Perturbation factor for the angular sampling (0=no perturb; 0.5=perturb)", "OLD");
     if (fnt != "OLD")
     {
@@ -974,6 +979,11 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     helical_z_percentage = textToFloat(parser.getOption("--helical_z_percentage", "This box length along the center of Z axis contains good information of the helix. Important in imposing and refining symmetry", "0.3"));
     helical_tube_inner_diameter = textToFloat(parser.getOption("--helical_inner_diameter", "Inner diameter of helical tubes in Angstroms (for masks of helical references and particles)", "-1."));
     helical_tube_outer_diameter = textToFloat(parser.getOption("--helical_outer_diameter", "Outer diameter of helical tubes in Angstroms (for masks of helical references and particles)", "-1."));
+    // Default: the cylinder (helical Refine3D, 220 A mask around a 180 A tube: 4.9 -> 3.2 A with the same postprocess mask)
+    helical_cylindrical_mask = true;
+    parser.checkOption("--helical_cylindrical_mask", "Mask helical segments with a cylinder as wide as the tube and as long as the mask diameter (the default)");
+    if (parser.checkOption("--dont_helical_cylindrical_mask", "Mask helical segments with the tube within a sphere of the mask diameter, as before"))
+        helical_cylindrical_mask = false;
     do_helical_symmetry_local_refinement = parser.checkOption("--helical_symmetry_search", "Perform local refinement of helical symmetry?");
     helical_sigma_distance_A = textToFloat(parser.getOption("--helical_sigma_distance_A", "Sigma of distance along the helical tracks (Angstroms; the persistence length of the filament, independent of box size and pixel size)", "-1."));
     helical_sigma_distance = textToFloat(parser.getOption("--helical_sigma_distance", "OLD: sigma of distance along the helical tracks as a fraction of the box size (use --helical_sigma_distance_A)", "-1."));
@@ -1411,6 +1421,8 @@ void MlOptimiser::read(FileName fn_in, int rank, bool do_prevent_preread)
         helical_tube_inner_diameter = -1.;
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, helical_tube_outer_diameter))
         helical_tube_outer_diameter = -1.;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CYLINDRICAL_MASK, helical_cylindrical_mask))
+        helical_cylindrical_mask = false;   // runs from before the option
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT, do_helical_symmetry_local_refinement))
         do_helical_symmetry_local_refinement = false;
     // The Angstrom value written by this version wins; otherwise the older fraction of the box size
@@ -1740,6 +1752,7 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
         MD.setValue(EMDL_OPTIMISER_HELICAL_NSTART, helical_nstart);
         MD.setValue(EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, helical_tube_inner_diameter);
         MD.setValue(EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, helical_tube_outer_diameter);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CYLINDRICAL_MASK, helical_cylindrical_mask);
         MD.setValue(EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT, do_helical_symmetry_local_refinement);
         if (helical_sigma_distance_A < 0. && helical_sigma_distance >= 0.)
             MD.setValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, helical_sigma_distance);   // older run, still a fraction of the box
@@ -3388,7 +3401,8 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
                     {
                         if (is_helical_segment)
                             softMaskOutsideMapForHelix(img(), psi_prior, tilt_prior, (particle_diameter / (2. * my_pixel_size)),
-                                    (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge);
+                                    (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge, NULL,
+                                    rectMaskAlongLength(), helical_cylindrical_mask);   // as the serial loop below
                         else
                             softMaskOutsideMap(img(), particle_diameter / (2. * my_pixel_size), width_mask_edge, NULL, mymodel.isRect());
                     }
@@ -3625,7 +3639,7 @@ void MlOptimiser::calculateSumOfPowerSpectraAndAverageImage(MultidimArray<RFLOAT
                 if (is_helical_segment)
                 {
                     softMaskOutsideMapForHelix(img(), psi_prior, tilt_prior, (particle_diameter / (2. * my_pixel_size)),
-                            (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge, NULL, rectMaskAlongLength());
+                            (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge, NULL, rectMaskAlongLength(), helical_cylindrical_mask);
                 }
                 else
                 {
@@ -6357,7 +6371,8 @@ void MlOptimiser::makeGoodHelixForEachRef()
                         mymodel.helical_twist[iclass],
                         width_mask_edge,
                         rectMaskAlongLength(),
-                        nr_threads);
+                        nr_threads,
+                        helical_cylindrical_mask);
             }
         }
     }
@@ -7180,6 +7195,14 @@ int MlOptimiser::maximizationGradientParameters() {
     return skip_class;
 }
 
+// 1 up to edge, a raised cosine down to 0 over width, then 0 (as the circular solvent mask)
+static RFLOAT softStep(RFLOAT x, RFLOAT edge, RFLOAT width)
+{
+    if (x < edge) return 1.;
+    if (x > edge + width) return 0.;
+    return 0.5 - 0.5 * cos(PI * (edge + width - x) / width);
+}
+
 void MlOptimiser::solventFlatten()
 {
 #ifdef DEBUG
@@ -7210,6 +7233,13 @@ void MlOptimiser::solventFlatten()
                         helical_tube_outer_diameter / mymodel.pixel_size,
                         width_mask_edge,
                         ZSIZE(mymodel.Iref[0])); // as deep as a cuboid reference
+                // As long as the mask diameter along the helical axis (Z), as the particles
+                if (helical_cylindrical_mask)
+                {
+                    const RFLOAT half_length = particle_diameter / (2. * mymodel.pixel_size);
+                    FOR_ALL_ELEMENTS_IN_ARRAY3D(Isolvent())
+                        A3D_ELEM(Isolvent(), k, i, j) *= softStep(ABS(k), half_length, width_mask_edge);
+                }
             }
             else
             {
@@ -7218,6 +7248,16 @@ void MlOptimiser::solventFlatten()
                     A3D_ELEM(Isolvent(), k, i, j) = 1.;
                 }
             }
+        }
+        else if (helical_cylindrical_mask && mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0.)
+        {
+            // 2D classes of helical segments (helical axis along X): as wide as the tube and as long
+            // as the mask diameter, as the particles
+            const RFLOAT half_length = particle_diameter / (2. * mymodel.pixel_size);
+            const RFLOAT half_width = helical_tube_outer_diameter / (2. * mymodel.pixel_size);
+            FOR_ALL_ELEMENTS_IN_ARRAY3D(Isolvent())
+                A3D_ELEM(Isolvent(), k, i, j) = std::min(softStep(ABS(j), half_length, width_mask_edge),
+                                                         softStep(ABS(i), half_width, width_mask_edge));
         }
         else
         {
@@ -8094,7 +8134,7 @@ void MlOptimiser::getFourierTransformsAndCtfs(
                     mytilt_deg = tilt_deg;
                 }
                 softMaskOutsideMapForHelix(img(), mypsi_deg, mytilt_deg, my_mask_radius,
-                    (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge, &Mnoise, rectMaskAlongLength());
+                    (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge, &Mnoise, rectMaskAlongLength(), helical_cylindrical_mask);
             }
             else
                 softMaskOutsideMap(img(), my_mask_radius, (RFLOAT)width_mask_edge, &Mnoise, mymodel.isRect(), rectMaskAlongLength());
@@ -8105,7 +8145,7 @@ void MlOptimiser::getFourierTransformsAndCtfs(
             if (is_helical_segment)
             {
                 softMaskOutsideMapForHelix(img(), psi_deg, tilt_deg, my_mask_radius,
-                        (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge, NULL, rectMaskAlongLength());
+                        (helical_tube_outer_diameter / (2. * my_pixel_size)), width_mask_edge, NULL, rectMaskAlongLength(), helical_cylindrical_mask);
             }
             else
                 softMaskOutsideMap(img(), my_mask_radius, (RFLOAT)width_mask_edge, NULL, mymodel.isRect(), rectMaskAlongLength());

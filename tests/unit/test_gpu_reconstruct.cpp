@@ -119,20 +119,21 @@ TEST_CASE("GPU real-space helical symmetry equals the CPU's to rounding", "[gpu_
 	const int n = 48;
 	const RFLOAT angpix = 2.;
 	struct Case { RFLOAT sphere_A, inner_A, outer_A, z_frac, rise_A, twist; };
+	for (const bool cyl : {false, true})   // a sphere, or a cylinder along Z (--helical_cylindrical_mask)
 	for (const Case &c : {Case{44., -1., 30., 0.3, 4.75, -1.2}, Case{40., 8., 26., 0.3, 4., 30.},
 	                      Case{46., -1., 20., 0.5, 2.38, 179.4}})
 	{
-		INFO("twist " << c.twist << " rise " << c.rise_A);
+		INFO("twist " << c.twist << " rise " << c.rise_A << " cylinder " << cyl);
 		MultidimArray<RFLOAT> a(n, n, n);
 		std::mt19937 rng(11);
 		std::normal_distribution<RFLOAT> g(0., 1.);
 		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(a) DIRECT_MULTIDIM_ELEM(a, n) = g(rng);
 		MultidimArray<RFLOAT> b = a;
 		gpurec::setGpuRequested(false);
-		imposeHelicalSymmetryInRealSpace(a, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., false, 4);
+		imposeHelicalSymmetryInRealSpace(a, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., false, 4, cyl);
 		setenv("RELION_GPU_RECONSTRUCT", "1", 1);
 		gpurec::setGpuRequested(true);
-		imposeHelicalSymmetryInRealSpace(b, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., false, 4);
+		imposeHelicalSymmetryInRealSpace(b, angpix, c.sphere_A, c.inner_A, c.outer_A, c.z_frac, c.rise_A, c.twist, 3., false, 4, cyl);
 		unsetenv("RELION_GPU_RECONSTRUCT");
 		gpurec::setGpuRequested(false);
 		REQUIRE(a.sameShape(b));

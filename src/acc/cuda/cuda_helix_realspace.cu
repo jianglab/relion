@@ -31,6 +31,7 @@ struct HelixDev
 	long int zdim, ydim, xdim, sz, sy, sx;
 	RFLOAT r_min, r_max, d_min, d_max, D_min, D_max, z_min, z_max, rise_pix, cw;
 	int rec_len;
+	bool cylinder;   // r: the distance along the helical axis (Z), not from the centre
 };
 
 __device__ __forceinline__ int hFLOOR(RFLOAT x) { return (x == (int)x) ? (int)x : ((x > 0) ? (int)x : (int)(x - 1)); }
@@ -41,7 +42,7 @@ __device__ __forceinline__ bool isOutside(long int k, long int i, long int j, co
 {
 	const RFLOAT dd = (RFLOAT)(i * i + j * j);
 	const RFLOAT rr = dd + (RFLOAT)(k * k);
-	const RFLOAT d = sqrt(dd), r = sqrt(rr);
+	const RFLOAT d = sqrt(dd), r = p.cylinder ? (RFLOAT)(k < 0 ? -k : k) : sqrt(rr);
 	return (r > p.r_max) || (d < p.d_min) || (d > p.D_max);
 }
 
@@ -66,7 +67,7 @@ __global__ void kHelixRealSpace(const RFLOAT *v, RFLOAT *vout, HelixDev p, const
 		RFLOAT dd = (RFLOAT)(i * i + j * j);
 		RFLOAT rr = dd + (RFLOAT)(k * k);
 		RFLOAT d = sqrt(dd);
-		RFLOAT r = sqrt(rr);
+		RFLOAT r = p.cylinder ? (RFLOAT)(k < 0 ? -k : k) : sqrt(rr);
 		if ((r > p.r_max) || (d < p.d_min) || (d > p.D_max))
 		{
 			vout[here] = 0.;
@@ -159,7 +160,7 @@ bool helicalSymmetryRealSpace(const HelixRealSpaceInput &in, RFLOAT *v, std::str
 	}
 	HelixDev p = {in.zdim, in.ydim, in.xdim, in.start_z, in.start_y, in.start_x,
 	              in.r_min, in.r_max, in.d_min, in.d_max, in.D_min, in.D_max, in.z_min, in.z_max, in.rise_pix, in.cosine_width_pix,
-	              (int)in.sin_rec.size()};
+	              (int)in.sin_rec.size(), in.cylinder};
 	RFLOAT *dv = nullptr, *dout = nullptr, *dsin = nullptr, *dcos = nullptr;
 	int *dbad = nullptr;
 	auto cleanup = [&]() { cudaFree(dv); cudaFree(dout); cudaFree(dsin); cudaFree(dcos); cudaFree(dbad); };

@@ -77,6 +77,9 @@ public:
 
 	RFLOAT blob_radius, blob_alpha, angular_error, shift_error, angpix, maxres,
 	       helical_rise, helical_twist;
+	// Helical tubes (A; -1: not given) and the central part along Z (fraction) for imposing helical
+	// symmetry in real space, as relion_refine does
+	RFLOAT helical_outer_diameter = -1., helical_inner_diameter = -1., helical_z_percentage = 0.3;
 	int s2_ctf_oversampling_min = 2;
 	RFLOAT voltage_for_s2_ = -1.0;
 	bool s2_uniform_fill_ = false;
