@@ -68,3 +68,45 @@ use):
   background of each segment is taken from outside the tube along its psi
   prior, as when segments are extracted. `--fused_helical_diameter`, the
   earlier name of this option, is still accepted.
+
+## Horizontal, centred 2D classes of helical segments
+
+With "Center class averages?" (`--center_classes`), helical Class2D used to move
+each class average's centre of mass to the centre of the box. Along a helix that
+means little, and nothing kept the class horizontal: averages drifted a degree
+or two off the segments' psi priors. Now, after every iteration, each class is
+turned and centred so that its helical axis lies along X through the centre
+(`src/helical_class_align.{h,cpp}`), in one resampling:
+
+- **Angle**, from the segments rather than the image: the median over the
+  class's segments of psi minus the psi prior (a segment of opposite polarity
+  counts the same). Picking errors in psi are small and average out. On the class
+  image, the strands of a twisted filament cross the axis at several degrees and
+  can be taken for it. Classes with fewer than 20 segments, data without psi
+  priors, and angles under a quarter of a degree are not turned.
+- **Across the axis**, the class's own centre of mass, within the translation
+  search range. Not the segments' offsets from their picked lines: in
+  EMPIAR-10944 those lines are 20-25 A off the axis, the same along a whole
+  filament, so they do not average out; centring on them cost about 3 points of
+  class purity.
+- **Along the axis**, nothing: a helix has no centre there.
+
+With VDAM (`--grad`), whose momenta are kept in Fourier space, classes are only
+shifted across the axis, not turned. `RELION_HELICAL_CLASS_CENTER=com` restores
+the centre of mass in 2D. The output gives the mean and largest angle and shift
+of each iteration.
+
+Separating filament types is unchanged (class purity: the share of segments in a
+class of their own type's majority; 50 classes, 25 iterations, two seeds):
+
+| | centre of mass | this |
+|---|---|---|
+| EMPIAR-10944, 3 types, binned (25.8k segments) | 0.588 / 0.563 | 0.591 / 0.584 |
+| EMPIAR-10944, unbinned (18.3k) | 0.739 / 0.750 | 0.719 / 0.736 |
+| EMPIAR-10943, types A and B (20.0k) | 0.914 / 0.924 | 0.917 / 0.919 |
+
+Turning a class is cosmetic for the classification, as it should be: resampling
+the classes (half a pixel there and back each iteration) or turning alone left
+the purity where it was. An earlier version measured angle and offset on the
+class image and lowered purity (0.50 against 0.57), mostly through the offset.
+Tests: `[helical_class_align]`.

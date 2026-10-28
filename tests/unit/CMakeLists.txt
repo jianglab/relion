@@ -49,6 +49,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_helical_sigma.cpp
     test_helix_mask.cpp
     test_recover_full_filaments.cpp
+    test_helical_class_align.cpp
     test_resource_report.cpp
     test_filament_context.cpp
     test_import_project.cpp

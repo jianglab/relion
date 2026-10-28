@@ -1394,6 +1394,14 @@ public:
 	 */
 	void centerClasses();
 
+	/* Helical 2D classes: per class, the in-plane angle of its segments' axes, the median of psi minus the
+	 * psi prior (helixalign::classAngle); NaN for a class with too few segments or data without psi priors.
+	 * Needs the particles' metadata (MPI: the leader).
+	 */
+	void helicalClassAngles(std::vector<double> &angles);
+	// Filled by the MPI leader and broadcast before centerClasses(); empty: centerClasses() computes it
+	std::vector<double> helical_class_angles;
+
 	/* Align all classes to the largest class (for Class3D)
 	 */
 	void alignClasses();

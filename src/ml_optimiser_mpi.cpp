@@ -5162,7 +5162,17 @@ void MlOptimiserMpi::iterate()
 
 		// Skip center classes in the final stages of gradient refinement
 		if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
+		{
+			// The leader has the metadata, from which helical classes may be turned and centred
+			if (mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0.)
+			{
+				helical_class_angles.resize(mymodel.nr_classes);
+				if (node->isLeader())
+					helicalClassAngles(helical_class_angles);
+				node->relion_MPI_Bcast(&helical_class_angles[0], helical_class_angles.size(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+			}
 			centerClasses();
+		}
 
 		// Align all classes to the largest class at the last iteration
 		if (do_align_classes && mymodel.nr_classes > 1 && iter == nr_iter)

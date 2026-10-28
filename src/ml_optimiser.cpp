@@ -56,6 +56,7 @@
 #include "src/gpu_reconstruct.h"
 #include "src/gpu_switch.h"
 #include "src/async_serial.h"
+#include "src/helical_class_align.h"
 #include "src/fixed_class_initialisation.h"
 #include "src/class2d_consensus_metadata.h"
 #include "src/spatial_frequency_grid.h"
@@ -6590,6 +6591,57 @@ void MlOptimiser::centerClasses()
 
     RFLOAT offset_range_pix = sampling.offset_range / mymodel.pixel_size;
 
+    // 2D classes of helical segments: turn each by the in-plane angle of its segments' axes and centre it across
+    // the axis by its centre of mass (helical_class_align.h), instead of moving its centre of mass in 2D (which
+    // along the axis means nothing). VDAM keeps momenta of the references in Fourier space: there, only shift.
+    // RELION_HELICAL_CLASS_CENTER=com: the centre of mass in 2D, as upstream.
+    static const bool helical_com = [] { const char *e = getenv("RELION_HELICAL_CLASS_CENTER"); return e && std::string(e) == "com"; }();
+    if (mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0. && !helical_com)
+    {
+        std::vector<double> angles;
+        angles.swap(helical_class_angles);
+        if (angles.empty())
+            helicalClassAngles(angles);
+        double sum_turn = 0., max_turn = 0., sum_shift = 0., max_shift = 0.;
+        int n = 0;
+        for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+        {
+            if (mymodel.pdf_class[iclass] == 0.) continue;
+            // Each turn interpolates the class once more: not for less than a quarter of a degree
+            double angle = angles[iclass];
+            if (do_grad || std::isnan(angle) || ABS(angle) < 0.25)
+                angle = 0.;
+            const double offset = XMIPP_MIN(offset_range_pix, XMIPP_MAX(-offset_range_pix,
+                    helixalign::offsetAcross(mymodel.Iref[iclass], angle)));
+            if (do_grad)
+            {
+                // Prevent small "vibrations", as below
+                if (ABS(offset) < XMIPP_MAX(0.01 * particle_diameter / mymodel.pixel_size, 2))
+                    continue;
+                MultidimArray<Complex> aux = mymodel.Igrad1[iclass];
+                shiftImageInContinuousFourierTransform(aux, mymodel.Igrad1[iclass],
+                                                       mymodel.ori_size * mymodel.padding_factor, 0., -offset, 0.);
+                if (mymodel.pseudo_halfsets)
+                {
+                    aux = mymodel.Igrad1[iclass + mymodel.nr_classes];
+                    shiftImageInContinuousFourierTransform(aux, mymodel.Igrad1[iclass + mymodel.nr_classes],
+                                                           mymodel.ori_size * mymodel.padding_factor, 0., -offset, 0.);
+                }
+            }
+            helixalign::apply(mymodel.Iref[iclass], angle, offset);
+            n++;
+            sum_turn += ABS(angle);
+            max_turn = XMIPP_MAX(max_turn, ABS(angle));
+            sum_shift += ABS(offset);
+            max_shift = XMIPP_MAX(max_shift, ABS(offset));
+        }
+        if (verb > 0 && n > 0)
+            std::cout << " Helical classes turned by the in-plane angle of their segments (mean " << sum_turn / n << ", max "
+                      << max_turn << " degrees) and centred across the axis (mean " << sum_shift / n * mymodel.pixel_size
+                      << ", max " << max_shift * mymodel.pixel_size << " A)" << std::endl;
+        return;
+    }
+
     // Shift all classes to their center-of-mass, and store all center-of-mass in coms vector
     for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
     {
@@ -6625,6 +6677,28 @@ void MlOptimiser::centerClasses()
                                                        mymodel.ori_size * mymodel.padding_factor, x, y, z);
         }
     }
+}
+
+void MlOptimiser::helicalClassAngles(std::vector<double> &angles)
+{
+    const int K = mymodel.nr_classes;
+    angles.assign(K, std::numeric_limits<double>::quiet_NaN());
+    MetaDataTable &md = mydata.MDimg;
+    if (!md.containsLabel(EMDL_ORIENT_PSI_PRIOR))
+        return;
+    std::vector<std::vector<double> > d(K);
+    FOR_ALL_OBJECTS_IN_METADATA_TABLE(md)
+    {
+        int iclass;
+        RFLOAT psi, prior;
+        md.getValue(EMDL_PARTICLE_CLASS, iclass);
+        md.getValue(EMDL_ORIENT_PSI, psi);
+        md.getValue(EMDL_ORIENT_PSI_PRIOR, prior);
+        if (iclass >= 1 && iclass <= K && prior < 998.99)
+            d[iclass - 1].push_back(psi - prior);
+    }
+    for (int k = 0; k < K; k++)
+        angles[k] = helixalign::classAngle(d[k]);
 }
 
 int MlOptimiser::classAlignmentFreedom()
