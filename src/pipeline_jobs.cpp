@@ -2423,6 +2423,31 @@ rlnParticleSelectZScore \n rlnClassNumber \n rlnAutopickFigureOfMerit \n rlnAngl
 Particles that are not in this STAR file, but present in the picked coordinates file will be colored green. If this field is left empty, then the color label (e.g. rlnAutopickFigureOfMerit) should be present in the coordinates STAR file.");
 	joboptions["blue_value"] = JobOption("Blue value: ", 0., 0., 4., 0.1, "The value of this entry will be blue. There will be a linear scale from blue to red, according to this value and the one given below.");
 	joboptions["red_value"] = JobOption("Red value: ", 2., 0., 4., 0.1, "The value of this entry will be red. There will be a linear scale from blue to red, according to this value and the one given above.");
+
+	joboptions["nr_preload"] = JobOption("Micrographs to preload:", 3, 0, 10, 1, "While you pick on one micrograph, this many of the following ones are read, filtered and scaled in the background, so that the next one (X) opens at once. \
+The one before is kept as well, for going back (Z). Each takes the memory of one displayed micrograph. Use 0 to load each micrograph only when it is opened.");
+	joboptions["nr_load_threads"] = JobOption("Loading threads:", 2, 1, 8, 1, "How many of the preloaded micrographs are loaded at the same time. A virtual micrograph that is not in the cache yet is built from its movie by the thread that loads it, \
+which takes the memory of a motion correction; more threads keep up with faster picking, at the cost of memory. The CPU cores are shared out among these threads and the builders below.");
+	joboptions["nr_vmovie_builders"] = JobOption("Virtual micrograph builders:", 2, 0, 8, 1, "Only for virtual micrographs (movie averages that are built from the movies when read), when their cache is on. \
+This many are built into the cache at once in the background, further ahead than the preloaded ones, so that they only need to be read when their turn comes. Fewer builders run if the memory is short. Use 0 to build none in the background.");
+	joboptions["nr_prebuild"] = JobOption("Prebuild virtual micrographs:", 0, 0, 200, 10, "Only for virtual micrographs, when their cache is on. When the picker starts, this many virtual micrographs, from the one where you left off \
+(the one opened last) onwards, are built into the cache in the background by the builders above, while you start picking. Those already in the cache are skipped. Use 0 to build only those just ahead of the one you view.");
+}
+
+std::string RelionJob::getManualpickLoadingArguments()
+{
+	// Settings saved before these options existed lack them: the program's defaults hold
+	std::string args;
+	if (joboptions.count("nr_preload"))
+		args += " --preload " + joboptions["nr_preload"].getString();
+	if (joboptions.count("nr_load_threads"))
+		args += " --load_threads " + joboptions["nr_load_threads"].getString();
+	if (joboptions.count("nr_vmovie_builders"))
+		args += " --vmovie_builders " + joboptions["nr_vmovie_builders"].getString();
+	std::string error_message;
+	if (joboptions.count("nr_prebuild") && joboptions["nr_prebuild"].getNumber(error_message) > 0. && error_message == "")
+		args += " --prebuild " + joboptions["nr_prebuild"].getString();
+	return args;
 }
 
 bool RelionJob::getCommandsManualpickJob(std::string &outputname, std::vector<std::string> &commands,
@@ -2491,6 +2516,7 @@ bool RelionJob::getCommandsManualpickJob(std::string &outputname, std::vector<st
 		command += " --sort_by_defocus_low_high";
 
 	command += " --particle_diameter " + joboptions["diameter"].getString();
+	command += getManualpickLoadingArguments();
 
 	if (joboptions["do_startend"].getBoolean() || joboptions["do_lines"].getBoolean())
 	{
@@ -2689,6 +2715,7 @@ bool RelionJob::getCommandsAutopickJob(std::string &outputname, std::vector<std:
 			}
 
 			command += " --particle_diameter " + manualpickjob.joboptions["diameter"].getString();
+			command += manualpickjob.getManualpickLoadingArguments();
 			if (manualpickjob.joboptions["do_fom_threshold"].getBoolean())
 			{
 				command += " --minimum_pick_fom " + manualpickjob.joboptions["minimum_pick_fom"].getString();

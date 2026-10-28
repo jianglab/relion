@@ -1311,6 +1311,22 @@ void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, RFLOAT _minval, RFLOA
 	boxes.push_back(my_box);
 }
 
+void basisViewerCanvas::fillPrescaled(MultidimArray<RFLOAT> &scaled_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale)
+{
+	xoff = yoff = 0;
+	nrow = ncol = 1;
+	xsize_box = XSIZE(scaled_image);
+	ysize_box = YSIZE(scaled_image);
+	DisplayBox* my_box = new DisplayBox(0, 0, xsize_box, ysize_box, "dummy");
+	MetaDataTable MDtmp;
+	MDtmp.addObject();
+	my_box->setData(scaled_image, MDtmp.getObject(), 0, _minval, _maxval, 1., true);
+	// Picked coordinates are converted with the scale of the box
+	my_box->scale = _scale;
+	my_box->redraw();
+	boxes.push_back(my_box);
+}
+
 void basisViewerCanvas::fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &fom_image,
                              RFLOAT _minval, RFLOAT _maxval, RFLOAT _fom_min, RFLOAT _fom_max,
                              RFLOAT _sigma_contrast, RFLOAT _scale)

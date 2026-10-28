@@ -113,6 +113,8 @@ public:
 	void expectMicrographs(long n);
 	/// At most k builders (interactive programs); call before upcoming()
 	void limitBuilders(int k);
+	/// Threads of each builder instead of the automatic choice (RELION_VMOVIE_BUILD_THREADS wins); call before upcoming()
+	void setBuildThreads(int t);
 	/// False when switched off (depth 0): callers need not build the list
 	bool enabled() const;
 	/// Micrographs kept queued or in progress now
@@ -123,6 +125,10 @@ public:
 	/// The micrographs after the current one, in reading order (up to WINDOW; the first `depth` that
 	/// need building are kept queued or in progress, replacing what was queued before).
 	void upcoming(const std::vector<std::string>& next);
+	/// Micrographs to build whenever nothing from upcoming() is waiting, in this order and however many (the manual
+	/// picker's prebuild from where picking was left off); upcoming() does not replace them. Which of them need
+	/// building is found by the builders, so the call returns at once.
+	void batch(const std::vector<std::string>& list);
 	/// Wait until nothing is queued or being built (for tests)
 	void waitIdle();
 	/// Entries this object built, and micrographs it was asked to build (RELION_VMOVIE_READ_AHEAD_STATS=1 prints them at the end)

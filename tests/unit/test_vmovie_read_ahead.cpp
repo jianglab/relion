@@ -104,6 +104,25 @@ TEST_CASE("vmovies::ReadAhead builders and threads: automatic, overridden and li
 		ra.waitIdle();
 		CHECK(ra.builders() == 2);
 	}
+	SECTION("setBuildThreads, unless RELION_VMOVIE_BUILD_THREADS is set")
+	{
+		Env b("RELION_VMOVIE_BUILDERS", "3");
+		{
+			Env t("RELION_VMOVIE_BUILD_THREADS", NULL);
+			vmovies::ReadAhead ra;
+			ra.setBuildThreads(2);
+			ra.upcoming(one);
+			ra.waitIdle();
+			CHECK(ra.builders() == 3);
+			CHECK(ra.buildThreads() == 2);
+		}
+		Env t("RELION_VMOVIE_BUILD_THREADS", "1");
+		vmovies::ReadAhead rb;
+		rb.setBuildThreads(2);
+		rb.upcoming(one);
+		rb.waitIdle();
+		CHECK(rb.buildThreads() == 1);
+	}
 	system(("rm -rf " + dir).c_str());
 }
 
@@ -164,6 +183,29 @@ TEST_CASE("vmovies::ReadAhead asks for nothing it cannot use", "[unit][vmovies]"
 		ra.upcoming({dir + "/plain.mrc", dir + "/desc.mrc", dir + "/desc2.mrc", dir + "/desc3.mrc"});
 		ra.waitIdle();
 		CHECK(ra.requested() == 2);
+	}
+	SECTION("a batch: all its descriptors, whatever the depth, and upcoming() does not drop it")
+	{
+		Env c("RELION_VMOVIE_AVERAGE_CACHE", cache.c_str());
+		writeFile(dir + "/desc2.mrc", std::string(MAGIC) + "other garbage\n");
+		writeFile(dir + "/desc3.mrc", std::string(MAGIC) + "more garbage\n");
+		vmovies::ReadAhead ra(1);
+		ra.batch({dir + "/plain.mrc", dir + "/missing.mrc", dir + "/desc.mrc", dir + "/desc2.mrc"});
+		ra.upcoming(std::vector<std::string>(1, dir + "/desc3.mrc"));
+		ra.waitIdle();
+		CHECK(ra.requested() == 3);
+		CHECK(ra.built() == 0);
+		ra.batch({dir + "/plain.mrc", dir + "/missing.mrc"});   // checked already: nothing asked for
+		ra.waitIdle();
+		CHECK(ra.requested() == 3);
+	}
+	SECTION("a batch asks for nothing when off")
+	{
+		Env c("RELION_VMOVIE_AVERAGE_CACHE", cache.c_str());
+		vmovies::ReadAhead ra(0);
+		ra.batch(std::vector<std::string>(1, dir + "/desc.mrc"));
+		ra.waitIdle();
+		CHECK(ra.requested() == 0);
 	}
 
 	unlink((dir + "/plain.mrc").c_str());

@@ -22,8 +22,17 @@
 #include "src/displayer.h"
 #include "src/virtual_movie_averages.h"
 #include "src/fftw.h"
+#include "src/transformations.h"
 #include <signal.h>
 #include <cstdio>
+#include <algorithm>
+#include <condition_variable>
+#include <deque>
+#include <fstream>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <omp.h>
 #include <FL/x.H>
 #ifdef __APPLE__
 #include <objc/runtime.h>
@@ -119,6 +128,311 @@ FileName global_pickname;
 FileName global_fn_color;
 FileName global_color_label;
 bool global_do_color;
+int global_nr_preload;
+int global_nr_load_threads;
+int global_nr_vmovie_builders;
+int global_nr_prebuild;
+// Remember the micrograph opened last, to continue from it (when picking, not when only displaying)
+static bool record_last_viewed = false;
+
+// ---------------------------------------------------------------------------
+// Loading ahead
+
+// A micrograph as a pick window shows it: filtered, contrast applied and scaled (what canvas->fill makes of it)
+struct PreparedMic
+{
+	Image<RFLOAT> I;
+	RFLOAT minval, maxval;
+};
+
+static std::shared_ptr<PreparedMic> prepareMicrograph(int imic)
+{
+	std::shared_ptr<PreparedMic> mic(new PreparedMic);
+	mic->I.read(global_fn_mics[imic]);
+	MultidimArray<RFLOAT> &img = mic->I();
+	if (global_lowpass > 0.)
+		lowPassFilterMap(img, global_lowpass, global_angpix);
+	if (global_highpass > 0.)
+		highPassFilterMap(img, global_highpass, global_angpix, 25);
+	mic->minval = global_black_val;
+	mic->maxval = global_white_val;
+	RFLOAT sigma_contrast = global_sigma_contrast;
+	getImageContrast(img, mic->minval, mic->maxval, sigma_contrast);
+	if (ABS(global_micscale - 1.) > 0.01)
+		selfScaleToSize(img, CEIL(XSIZE(img) * global_micscale), CEIL(YSIZE(img) * global_micscale));
+	return mic;
+}
+
+// Threads for one background load or build: the cores shared by the loaders and the builders
+static int backgroundJobThreads()
+{
+	const int jobs = std::max(1, global_nr_load_threads + global_nr_vmovie_builders);
+	return std::max(1, omp_get_max_threads() / jobs);
+}
+
+// Loads the micrographs after those viewed on background threads, ready to show, so that the next one opens at once;
+// the one before those viewed is kept for Z. One that is not ready when asked for is loaded by the caller (or waited
+// for, while a thread is loading it), and one whose background load failed is loaded again, so errors show as before.
+class MicrographPreloader
+{
+public:
+	MicrographPreloader() : lo(0), hi(-1), stop(false) {}
+
+	// Waits for the loads in progress (a virtual micrograph that is not cached yet may take a while)
+	~MicrographPreloader()
+	{
+		int loading = 0;
+		{
+			std::lock_guard<std::mutex> lock(m);
+			stop = true;
+			queue.clear();
+			for (auto &s : slots)
+				if (s.second.loading) loading++;
+		}
+		cv.notify_all();
+		if (loading > 0)
+			std::cout << " Waiting for " << loading << " micrograph(s) being loaded in the background..." << std::endl;
+		for (size_t i = 0; i < workers.size(); i++)
+			workers[i].join();
+	}
+
+	// Micrographs first..last are about to be viewed: load them and global_nr_preload after them, the nearest first
+	void want(int first, int last)
+	{
+		if (global_nr_preload <= 0)
+			return;
+		{
+			std::lock_guard<std::mutex> lock(m);
+			lo = std::max(0, first - 1);
+			hi = std::min((int)global_fn_mics.size() - 1, last + global_nr_preload);
+			for (auto it = slots.begin(); it != slots.end(); )
+			{
+				if ((it->first < lo || it->first > hi) && !it->second.loading)
+					it = slots.erase(it);
+				else
+					++it;
+			}
+			queue.clear();
+			for (int i = first; i <= hi; i++)
+			{
+				Slot &s = slots[i];
+				if (!s.mic && !s.loading && !s.failed)
+					queue.push_back(i);
+			}
+			if (workers.empty())
+			{
+				const int threads = backgroundJobThreads();
+				for (int i = 0; i < global_nr_load_threads; i++)
+					workers.push_back(std::thread(&MicrographPreloader::run, this, threads));
+			}
+		}
+		cv.notify_all();
+	}
+
+	std::shared_ptr<PreparedMic> take(int imic)
+	{
+		std::unique_lock<std::mutex> lock(m);
+		std::map<int, Slot>::iterator it = slots.find(imic);
+		if (it != slots.end() && it->second.loading)
+		{
+			cv.wait(lock, [this, imic] { std::map<int, Slot>::iterator j = slots.find(imic); return j == slots.end() || !j->second.loading; });
+			it = slots.find(imic);
+		}
+		if (it != slots.end() && it->second.mic)
+			return it->second.mic;
+		if (it != slots.end())
+		{
+			// Not started yet, or failed: load it here rather than wait for a thread
+			queue.erase(std::remove(queue.begin(), queue.end(), imic), queue.end());
+			it->second.loading = true;
+		}
+		const bool tracked = (it != slots.end());
+		lock.unlock();
+
+		std::shared_ptr<PreparedMic> mic;
+		try
+		{
+			mic = prepareMicrograph(imic);
+		}
+		catch (...)
+		{
+			if (tracked)
+			{
+				lock.lock();
+				slots.erase(imic);
+				lock.unlock();
+				cv.notify_all();
+			}
+			throw;
+		}
+
+		lock.lock();
+		if (tracked || (imic >= lo && imic <= hi))
+		{
+			Slot &s = slots[imic];
+			s.mic = mic;
+			s.loading = s.failed = false;
+		}
+		lock.unlock();
+		cv.notify_all();
+		return mic;
+	}
+
+private:
+	struct Slot
+	{
+		std::shared_ptr<PreparedMic> mic;   // null while queued or loading
+		bool loading, failed;
+		Slot() : loading(false), failed(false) {}
+	};
+	std::mutex m;
+	std::condition_variable cv;
+	std::map<int, Slot> slots;   // micrographs lo..hi: loaded, loading or queued (and ones outside still loading)
+	std::deque<int> queue;
+	std::vector<std::thread> workers;
+	int lo, hi;
+	bool stop;
+
+	void run(int threads)
+	{
+		// The reader's threads, for building a virtual micrograph that is not cached yet
+		omp_set_num_threads(threads);
+		for (;;)
+		{
+			int imic;
+			{
+				std::unique_lock<std::mutex> lock(m);
+				cv.wait(lock, [this] { return stop || !queue.empty(); });
+				if (stop) return;
+				imic = queue.front();
+				queue.pop_front();
+				slots[imic].loading = true;
+			}
+			std::shared_ptr<PreparedMic> mic;
+			try
+			{
+				// FFTW's cleanup, were it run, would wait for the transforms of this load
+				FftwBackgroundScope fftw_in_use;
+				mic = prepareMicrograph(imic);
+			}
+			catch (RelionError&) {}   // the viewer loads it again and reports the error
+			catch (std::exception&) {}
+			{
+				std::lock_guard<std::mutex> lock(m);
+				std::map<int, Slot>::iterator it = slots.find(imic);
+				if (it != slots.end())
+				{
+					if (imic < lo || imic > hi)
+						slots.erase(it);
+					else
+					{
+						it->second.mic = mic;
+						it->second.loading = false;
+						it->second.failed = !mic;
+					}
+				}
+			}
+			cv.notify_all();
+		}
+	}
+};
+
+// Made at first use, so that at exit it goes (waiting for its threads) before the globals that those threads use
+static MicrographPreloader &preloader()
+{
+	static MicrographPreloader p;
+	return p;
+}
+
+// Virtual movie averages further ahead than those preloaded are built into the cache in the background, and so is the
+// prebuild batch (the destructor waits for the builds in progress)
+static vmovies::ReadAhead &buildAhead()
+{
+	static vmovies::ReadAhead read_ahead;
+	static const bool configured = (read_ahead.limitBuilders(global_nr_vmovie_builders),
+	                                read_ahead.setBuildThreads(std::min(4, backgroundJobThreads())), true);
+	(void) configured;
+	return read_ahead;
+}
+
+// Micrographs imic and on will be viewed next
+static void buildAheadFrom(int imic)
+{
+	if (global_nr_vmovie_builders <= 0 || !buildAhead().enabled())
+		return;
+	std::vector<std::string> next;
+	for (int k = imic; k < (int)global_fn_mics.size() && (int)next.size() < vmovies::ReadAhead::WINDOW; k++)
+		next.push_back(global_fn_mics[k]);
+	buildAhead().upcoming(next);
+}
+
+// Where picking was left off: the micrograph opened last, kept in the output directory
+static FileName lastViewedFile()
+{
+	return global_fn_odir + ".last_viewed_micrograph";
+}
+
+static void recordLastViewed(int imic)
+{
+	if (!record_last_viewed || global_fn_odir == "")
+		return;
+	std::ofstream fh(lastViewedFile().c_str(), std::ios::out | std::ios::trunc);
+	if (fh)
+		fh << global_fn_mics[imic] << std::endl;
+}
+
+static int resumePoint()
+{
+	const int n = global_fn_mics.size();
+	if (!record_last_viewed || global_fn_odir == "" || n == 0)
+		return 0;
+	std::ifstream fh(lastViewedFile().c_str());
+	std::string name;
+	if (fh && std::getline(fh, name))
+	{
+		for (int i = 0; i < n; i++)
+			if (global_fn_mics[i] == name)
+				return i;
+		return 0;
+	}
+	// No record (picked before it was kept): after the last micrograph with picks, unless all have some (continued autopicking)
+	int last = -1;
+	bool all = true;
+	for (int i = 0; i < n; i++)
+	{
+		if (number_picked[i] > 0) last = i;
+		else all = false;
+	}
+	return (last < 0 || all) ? 0 : std::min(last + 1, n - 1);
+}
+
+// Before anything is opened: load the micrograph to continue from and those after it, and prebuild virtual ones
+static void startLoadingAt(int imic)
+{
+	if (imic < 0 || imic >= (int)global_fn_mics.size())
+		return;
+	preloader().want(imic, imic);
+	const int after_preload = imic + 1 + global_nr_preload;
+	buildAheadFrom(after_preload);
+	// Only when picking: not when displaying the picks of a finished job
+	if (global_nr_prebuild <= 0 || !record_last_viewed)
+		return;
+	if (global_nr_vmovie_builders <= 0 || vmovies::cacheDirectory() == "")
+	{
+		std::cout << " Not prebuilding virtual micrographs: "
+		          << (global_nr_vmovie_builders <= 0 ? "--vmovie_builders is 0" : "the virtual movie average cache is off") << std::endl;
+		return;
+	}
+	// The preloader loads (and builds) the first ones itself
+	std::vector<std::string> list;
+	for (int k = after_preload; k < imic + global_nr_prebuild && k < (int)global_fn_mics.size(); k++)
+		list.push_back(global_fn_mics[k]);
+	if (list.empty())
+		return;
+	buildAhead().batch(list);
+	std::cout << " Building in the background the virtual micrographs among the " << global_nr_prebuild
+	          << " from " << global_fn_mics[imic] << " on" << std::endl;
+}
 
 #ifdef __APPLE__
 // Deferred call to disable macOS native tabbing on a window
@@ -318,6 +632,11 @@ static void viewMics(int imic, int nr_simultaneous)
 
 	int required = last_pick_viewed - first_pick_viewed + 1;
 
+	// The ones after these load on other threads while these are shown
+	preloader().want(first_pick_viewed, last_pick_viewed);
+	buildAheadFrom(last_pick_viewed + 1 + global_nr_preload);
+	recordLastViewed(first_pick_viewed);
+
 	// Delete excess windows (range shrunk)
 	while ((int)pick_windows.size() > required)
 	{
@@ -341,29 +660,6 @@ static void viewMics(int imic, int nr_simultaneous)
 		canvas->do_read_whole_stacks = false;
 	};
 
-	// Helper: read, filter and return the image for a given micrograph index
-	auto readMicrograph = [](int idx) -> Image<RFLOAT>
-	{
-		// Virtual movie averages after the one viewed are built in the background (the destructor waits for the one in progress)
-		static vmovies::ReadAhead read_ahead;
-		static const bool read_ahead_limited = (read_ahead.limitBuilders(2), true);   // interactive: leave the CPUs to the viewer
-		(void) read_ahead_limited;
-		Image<RFLOAT> img;
-		img.read(global_fn_mics[idx]);
-		if (read_ahead.enabled())
-		{
-			std::vector<std::string> next;
-			for (int k = idx + 1; k < (int) global_fn_mics.size() && (int) next.size() < vmovies::ReadAhead::WINDOW; k++)
-				next.push_back(global_fn_mics[k]);
-			read_ahead.upcoming(next);
-		}
-		if (global_lowpass > 0.)
-			lowPassFilterMap(img(), global_lowpass, global_angpix);
-		if (global_highpass > 0.)
-			highPassFilterMap(img(), global_highpass, global_angpix, 25);
-		return img;
-	};
-
 	for (int idx = 0; idx < required; idx++)
 	{
 		int mymic = first_pick_viewed + idx;
@@ -374,9 +670,9 @@ static void viewMics(int imic, int nr_simultaneous)
 			PickWindowEntry &entry = pick_windows[idx];
 			entry.imic = mymic;
 
-			Image<RFLOAT> img = readMicrograph(mymic);
-			int xsize_canvas = CEIL(XSIZE(img()) * global_micscale);
-			int ysize_canvas = CEIL(YSIZE(img()) * global_micscale);
+			std::shared_ptr<PreparedMic> mic = preloader().take(mymic);
+			int xsize_canvas = XSIZE(mic->I());
+			int ysize_canvas = YSIZE(mic->I());
 
 			// Delete old DisplayBox children of the scroll and clear canvas
 			// pointers before creating new DisplayBoxes for the new micrograph.
@@ -416,8 +712,7 @@ static void viewMics(int imic, int nr_simultaneous)
 			// scroll draws the frame last. Ensure the window is the current
 			// Fl_Group so new DisplayBoxes are correctly parented.
 			entry.win->begin();
-			canvas->fill(img(), global_black_val, global_white_val,
-				     global_sigma_contrast, global_micscale);
+			canvas->fillPrescaled(mic->I(), mic->minval, mic->maxval, global_micscale);
 			entry.win->end();
 
 			canvas->fn_coords = fn_coord;
@@ -460,9 +755,9 @@ static void viewMics(int imic, int nr_simultaneous)
 		else
 		{
 			// ---- Create new window ----
-			Image<RFLOAT> img = readMicrograph(mymic);
-			int xsize_canvas = CEIL(XSIZE(img()) * global_micscale);
-			int ysize_canvas = CEIL(YSIZE(img()) * global_micscale);
+			std::shared_ptr<PreparedMic> mic = preloader().take(mymic);
+			int xsize_canvas = XSIZE(mic->I());
+			int ysize_canvas = YSIZE(mic->I());
 			FileName fn_coord = global_fn_picks[mymic];
 
 			PickWindow *win = new PickWindow(xsize_canvas + 20, ysize_canvas + 20,
@@ -477,7 +772,7 @@ static void viewMics(int imic, int nr_simultaneous)
 			canvas->do_lines = global_pick_lines;
 			canvas->coord_scale = global_coord_scale;
 			canvas->SetScroll(scroll);
-			canvas->fill(img(), global_black_val, global_white_val, global_sigma_contrast, global_micscale);
+			canvas->fillPrescaled(mic->I(), mic->minval, mic->maxval, global_micscale);
 			canvas->fn_coords = fn_coord;
 			canvas->fn_mic = global_fn_mics[mymic];
 			setupCanvasColors(canvas);
@@ -765,9 +1060,22 @@ int manualpickerGuiWindow::fill()
 	// Also count the number of particles that were already picked
 	cb_menubar_recount_i();
 
-	// Highlight the first micrograph as initially active
+	// Continue where picking was left off: highlight that micrograph, scroll to it, let X open it,
+	// and start loading it and the ones after it
+	record_last_viewed = do_allow_save;
 	if (text_displays.size() > 0)
-		highlight_active(0);
+	{
+		const int resume = resumePoint();
+		highlight_active(resume);
+		first_pick_viewed = last_pick_viewed = resume - 1;
+		if (resume > 0)
+		{
+			const int max_scroll = XMIPP_MAX(0, (int)text_displays.size() * ystep - scroll_widget->h());
+			scroll_widget->scroll_to(0, XMIPP_MIN(max_scroll, XMIPP_MAX(0, (resume - 2) * ystep)));
+			std::cout << " Continuing from micrograph " << resume + 1 << ": " << global_fn_mics[resume] << std::endl;
+		}
+		startLoadingAt(resume);
+	}
 
 	// Global keyboard handler for Z/X passthrough from pick windows
 #ifdef __APPLE__
@@ -1161,6 +1469,16 @@ void ManualPicker::read(int argc, char **argv)
 	global_color_label = parser.getOption("--color_label", "MetaDataLabel to color particles on (e.g. rlnParticleSelectZScore)", "");
 	global_blue_value = textToFloat(parser.getOption("--blue", "Value of the blue color", "1."));
 	global_red_value = textToFloat(parser.getOption("--red", "Value of the red color", "0."));
+
+	int load_section = parser.addSection("Loading options");
+	global_nr_preload = textToInteger(parser.getOption("--preload", "Load this many micrographs after the one viewed in the background, ready to show (0: load each one when it is opened)", "3"));
+	global_nr_load_threads = textToInteger(parser.getOption("--load_threads", "Background threads loading those micrographs at once (each builds a virtual micrograph that is not cached yet)", "2"));
+	global_nr_vmovie_builders = textToInteger(parser.getOption("--vmovie_builders", "Virtual micrographs built into the cache at once in the background, further ahead than those preloaded (0: none)", "2"));
+	global_nr_prebuild = textToInteger(parser.getOption("--prebuild", "At the start, build this many virtual micrographs into the cache in the background, from where picking was left off (0: none)", "0"));
+	global_nr_load_threads = XMIPP_MAX(0, global_nr_load_threads);
+	global_nr_preload = (global_nr_load_threads > 0) ? XMIPP_MAX(0, global_nr_preload) : 0;
+	global_nr_vmovie_builders = XMIPP_MAX(0, global_nr_vmovie_builders);
+	global_nr_prebuild = XMIPP_MAX(0, global_nr_prebuild);
 
 	// Check for errors in the command-line option
 	if (parser.checkForErrors())

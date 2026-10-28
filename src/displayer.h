@@ -311,6 +311,8 @@ public:
               RFLOAT central_z_thickness_pixels = 0., bool _show_z = true, bool _show_y = true, bool _show_x = true);
     void fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &fom_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _fom_min, RFLOAT _fom_max, RFLOAT _sigma_contrast, RFLOAT _scale = 1.);
     void fill(MultidimArray<RFLOAT> &image, MultidimArray<RFLOAT> &mask_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _sigma_contrast, RFLOAT _scale);
+    // As the 2D fill above, for an image already at the display scale with its contrast applied (prepared on another thread)
+    void fillPrescaled(MultidimArray<RFLOAT> &scaled_image, RFLOAT _minval, RFLOAT _maxval, RFLOAT _scale);
 
 	void setSelectionType();
 	void setFOMThreshold();

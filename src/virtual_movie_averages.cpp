@@ -424,12 +424,14 @@ struct ReadAhead::Impl
 	std::mutex m;
 	std::condition_variable cv;
 	std::deque<std::string> queue;
+	std::deque<std::string> backlog;   // batch(): built when the queue is empty, not checked yet
+	int checking;                      // taken from the backlog and being checked (not inflight yet)
 	std::set<std::string> inflight;
 	std::set<std::string> settled;   // not descriptors, or cached
 	std::vector<std::thread> workers;
 	bool stop, disabled, started;
 	int k_active, t_cur;
-	int k_limit;              // 0: none (the manual picker asks for 2)
+	int k_limit;              // 0: none (the manual picker passes its --vmovie_builders)
 	Phase phase;
 	long long per_build;      // bytes, measured; 0 until the first build is done
 	long phase_done, phase_target;
@@ -442,7 +444,7 @@ struct ReadAhead::Impl
 	std::thread sampler;
 	std::atomic<long> built, requested;
 
-	Impl() : depth_env(-1), builders_env(0), threads_env(0), cores(1), stop(false), disabled(false), started(false),
+	Impl() : depth_env(-1), builders_env(0), threads_env(0), cores(1), checking(0), stop(false), disabled(false), started(false),
 	         k_active(1), t_cur(1), k_limit(0), phase(PROBE), per_build(0), phase_done(0), phase_target(0), thr_one(0.), k_one(1), k_two(1), t_two(2), thr_two(0.), expected(0), base_rss(0), peak_est(0),
 	         built(0), requested(0) {}
 
@@ -594,6 +596,26 @@ struct ReadAhead::Impl
 		}
 	}
 
+	// m not held; called by the program's thread. False when the cache cannot be written: then nothing is built
+	bool start(const std::string& dir)
+	{
+		if (started) return true;
+		// The cache must be writable, or the first build would be wasted
+		vcache::makeDirs(dir);
+		if (access(dir.c_str(), W_OK) != 0)
+		{
+			disabled = true;
+			return false;
+		}
+		std::lock_guard<std::mutex> lock(m);
+		started = true;
+		if (builders_env > 0)
+			chooseBuilders();   // the user's choice: no probe
+		else
+			spawn(1);           // the first build is the probe: alone, its memory is measured
+		return true;
+	}
+
 	void run(int id)
 	{
 		for (;;)
@@ -601,12 +623,53 @@ struct ReadAhead::Impl
 			std::string fn;
 			int t;
 			long long need = 0;
+			bool from_backlog = false;
 			{
 				std::unique_lock<std::mutex> lock(m);
-				cv.wait(lock, [this, id] { return stop || (!queue.empty() && id < k_active); });
+				cv.wait(lock, [this, id] { return stop || ((!queue.empty() || !backlog.empty()) && id < k_active); });
 				if (stop) return;
-				fn = queue.front();
-				queue.pop_front();
+				from_backlog = queue.empty();
+				std::deque<std::string>& from = from_backlog ? backlog : queue;
+				fn = from.front();
+				from.pop_front();
+				if (from_backlog)
+				{
+					if (settled.count(fn) || inflight.count(fn))
+					{
+						cv.notify_all();   // waitIdle() may be waiting for the backlog to empty
+						continue;
+					}
+					checking++;
+				}
+			}
+			if (from_backlog)
+			{
+				// upcoming() checks its micrographs before queueing them; a batch is checked here, off the caller's thread
+				bool needed = false;
+				try
+				{
+					needed = isVirtualMovieAverageFile(fn) && !cacheEntryExists(fn);
+				}
+				catch (RelionError&) {}
+				if (!needed)
+				{
+					std::lock_guard<std::mutex> lock(m);
+					checking--;
+					settled.insert(fn);
+					cv.notify_all();
+					continue;
+				}
+			}
+			{
+				std::unique_lock<std::mutex> lock(m);
+				if (from_backlog) checking--;
+				if (stop) return;
+				if (inflight.count(fn))
+				{
+					cv.notify_all();
+					continue;
+				}
+				if (from_backlog) requested++;
 				if (inflight.empty()) base_rss = procKb("/proc/self/status", "VmRSS:");
 				inflight.insert(fn);
 				t = t_cur;
@@ -686,6 +749,7 @@ ReadAhead::~ReadAhead()
 		std::lock_guard<std::mutex> lock(impl_->m);
 		impl_->stop = true;
 		impl_->queue.clear();
+		impl_->backlog.clear();
 	}
 	impl_->cv.notify_all();
 	for (size_t i = 0; i < impl_->workers.size(); i++)
@@ -707,6 +771,14 @@ void ReadAhead::limitBuilders(int k)
 {
 	std::lock_guard<std::mutex> lock(impl_->m);
 	impl_->k_limit = std::max(0, k);
+}
+
+void ReadAhead::setBuildThreads(int t)
+{
+	std::lock_guard<std::mutex> lock(impl_->m);
+	const char* env = getenv("RELION_VMOVIE_BUILD_THREADS");
+	if (env == NULL || env[0] == '\0')
+		impl_->threads_env = std::max(0, t);
 }
 
 bool ReadAhead::enabled() const { return impl_->depth_env != 0; }
@@ -752,26 +824,7 @@ void ReadAhead::upcoming(const std::vector<std::string>& next)
 			impl_->settled.insert(next[i]);
 		}
 	}
-	if (want.empty()) return;
-
-	if (!impl_->started)
-	{
-		// The cache must be writable, or the first build would be wasted
-		vcache::makeDirs(dir);
-		if (access(dir.c_str(), W_OK) != 0)
-		{
-			impl_->disabled = true;
-			return;
-		}
-		std::lock_guard<std::mutex> lock(impl_->m);
-		impl_->started = true;
-		if (impl_->builders_env > 0)
-		{
-			impl_->chooseBuilders();   // the user's choice: no probe
-		}
-		else
-			impl_->spawn(1);           // the first build is the probe: alone, its memory is measured
-	}
+	if (want.empty() || !impl_->start(dir)) return;
 	{
 		std::lock_guard<std::mutex> lock(impl_->m);
 		impl_->queue.clear();
@@ -788,7 +841,19 @@ void ReadAhead::upcoming(const std::vector<std::string>& next)
 void ReadAhead::waitIdle()
 {
 	std::unique_lock<std::mutex> lock(impl_->m);
-	impl_->cv.wait(lock, [this] { return impl_->queue.empty() && impl_->inflight.empty(); });
+	impl_->cv.wait(lock, [this] { return impl_->queue.empty() && impl_->backlog.empty() && impl_->checking == 0 && impl_->inflight.empty(); });
+}
+
+void ReadAhead::batch(const std::vector<std::string>& list)
+{
+	if (impl_->depth_env == 0 || impl_->disabled || list.empty()) return;
+	const std::string dir = cacheDirectory();
+	if (dir.empty() || writingPaused(dir) || !impl_->start(dir)) return;
+	{
+		std::lock_guard<std::mutex> lock(impl_->m);
+		impl_->backlog.insert(impl_->backlog.end(), list.begin(), list.end());
+	}
+	impl_->cv.notify_all();
 }
 
 bool removeProjectCache(const std::string& project_dir)

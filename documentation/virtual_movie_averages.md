@@ -208,10 +208,14 @@ node instead. Command construction: `src/virtualize_project.{h,cpp}`
   low-pass image: crop each shifted frame in Fourier space before summing
   (measured 6–8 s per 5760×4092×50 movie, most of it the movie read and FFT).
   They are under 1 MB, so they are cached rather than regenerated per run.
-- **Prefetch in ManualPick.** The picker knows the order it visits micrographs
-  in; while the user picks one, a background thread builds the picking image of
-  the next (or next few), so moving on never waits the 6–8 s (or 10–20 s for a
-  full micrograph). Built images stay in the cache, so going back is instant.
+- **Prefetch in ManualPick** (done for full micrographs): while the user picks
+  one, `--load_threads` threads read, filter and scale the next `--preload`
+  micrographs into memory, building any virtual one that is not cached; past
+  them `--vmovie_builders` builders fill the cache, and `--prebuild N` builds
+  the N from where picking was left off (the micrograph opened last, kept in
+  `<job>/.last_viewed_micrograph`) when the picker starts. All in the
+  "Loading" tab of the job. Still to do: building only the binned picking image
+  (above), which would make each build several times cheaper.
 - **Local CTF / tilt fitting from tile power spectra** computed from frame
   groups, like the whole-micrograph `_PS.mrc` used for global fits today.
 - **The movies become the only copy** of the data once micrographs and particle

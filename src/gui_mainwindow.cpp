@@ -1610,6 +1610,7 @@ void GuiMainWindow::cb_display_io_node_i()
 				command += " --angpix " + manualpickjob.joboptions["angpix"].getString();
 
 			command += " --particle_diameter " + manualpickjob.joboptions["diameter"].getString();
+			command += manualpickjob.getManualpickLoadingArguments();
 			if (manualpickjob.joboptions["do_fom_threshold"].getBoolean())
 			{
 				command += " --minimum_pick_fom " + manualpickjob.joboptions["minimum_pick_fom"].getString();

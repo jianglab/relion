@@ -839,7 +839,7 @@ void JobWindow::initialiseCtffindWindow()
 
 void JobWindow::initialiseManualpickWindow()
 {
-	setupTabs(3);
+	setupTabs(4);
 
 	tab1->begin();
 	tab1->label("I/O");
@@ -903,6 +903,18 @@ void JobWindow::initialiseManualpickWindow()
 	guientries["do_color"].cb_menu_i(); // make default active
 
 	tab3->end();
+	tab4->begin();
+	tab4->label("Loading");
+	resetHeight();
+
+	place("nr_preload");
+	place("nr_load_threads");
+
+	current_y += STEPY/2;
+	place("nr_vmovie_builders");
+	place("nr_prebuild");
+
+	tab4->end();
 
 	// Always deactivate the queue option
 	guientries["do_queue"].deactivate_option = TOGGLE_ALWAYS_DEACTIVATE;

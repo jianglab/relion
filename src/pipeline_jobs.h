@@ -944,6 +944,8 @@ public:
 	void initialiseManualpickJob();
 	bool getCommandsManualpickJob(std::string &outputname, std::vector<std::string> &commands,
 			std::string &final_command, bool do_makedir, int job_counter, std::string &error_message);
+	// The manual picker's loading options of this (Manualpick) job, for every command that starts relion_manualpick
+	std::string getManualpickLoadingArguments();
 
 	void initialiseAutopickJob();
 	bool getCommandsAutopickJob(std::string &outputname, std::vector<std::string> &commands,
