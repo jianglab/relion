@@ -4174,8 +4174,10 @@ an additional 5 iterations (for example with a finer angular sampling), then the
 	joboptions["nr_parallel_runs"] = JobOption("Number of parallel runs:", 1, 1, 999, 1, "Run this many independent Class2D replicas in one pipeline job. Local replicas start concurrently; queued replicas use a Slurm job array.");
 	joboptions["random_seed"] = JobOption("Base random seed:", std::string("-1"), "Use -1 to choose and save an automatic seed when multiple replicas are generated. Replica N uses base seed + N - 1.");
 
-	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
+	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", -1, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
+The default, -1, uses the largest mask that fits the box: the box size minus the soft edge (90% of the box for 3D helical \
+refinement), rounded down to a whole Angstrom; the output says which. A mask a little wider than the particle keeps out more noise. \
 If set to a value larger than the image size no masking will be performed.\n\n\
 The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
 For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");
@@ -4640,8 +4642,10 @@ weight on the experimental data. Values around 2-4 have been observed to be usef
 These classes will be made in an unsupervised manner, starting from a single reference in the initial iterations of the SGD, and the references will become increasingly dissimilar during the inbetween iterations.");
 	joboptions["sym_name"] = JobOption("Symmetry:", std::string("C1"), "The initial model is always generated in C1 and then aligned to and symmetrized with the specified point group. If the automatic alignment fails, please manually rotate run_itNNN_class001.mrc (NNN is the number of iterations) so that it conforms the symmetry convention.");
 	joboptions["do_run_C1"] = JobOption("Run in C1 and apply symmetry later? ", true, "If set to Yes, the gradient-driven optimisation is run in C1 and the symmetry orientation is searched and applied later. If set to No, the entire optimisation is run in the symmetry point group indicated above.");
-	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
+	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", -1, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
+The default, -1, uses the largest mask that fits the box: the box size minus the soft edge (90% of the box for 3D helical \
+refinement), rounded down to a whole Angstrom; the output says which. A mask a little wider than the particle keeps out more noise. \
 If set to a value larger than the image size no masking will be performed.\n\n\
 The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
 For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");
@@ -4972,8 +4976,10 @@ The number given here is the TOTAL number of iterations. For example, if 10 iter
 an additional 5 iterations (for example with a finer angular sampling), then the number given here should be 10+5=15.");
 	joboptions["do_fast_subsets"] = JobOption("Use fast subsets (for large data sets)?", false, "If set to Yes, the first 5 iterations will be done with random subsets of only K*1500 particles (K being the number of classes); the next 5 with K*4500 particles, the next 5 with 30% of the data set; and the final ones with all data. This was inspired by a cisTEM implementation by Niko Grigorieff et al.");
 
-	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
+	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", -1, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
+The default, -1, uses the largest mask that fits the box: the box size minus the soft edge (90% of the box for 3D helical \
+refinement), rounded down to a whole Angstrom; the output says which. A mask a little wider than the particle keeps out more noise. \
 If set to a value larger than the image size no masking will be performed.\n\n\
 The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
 For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");
@@ -5552,8 +5558,10 @@ only be performed from the first peak of each CTF onward. This can be useful if 
 Still, in general using higher amplitude contrast on the CTFs (e.g. 10-20%) often yields better results. \
 Therefore, this option is not generally recommended: try increasing amplitude contrast (in your input STAR file) first!");
 
-	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", 200, 0, 1000, 10, "The experimental images will be masked with a soft \
+	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", -1, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
+The default, -1, uses the largest mask that fits the box: the box size minus the soft edge (90% of the box for 3D helical \
+refinement), rounded down to a whole Angstrom; the output says which. A mask a little wider than the particle keeps out more noise. \
 If set to a value larger than the image size no masking will be performed.\n\n\
 The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
 For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");

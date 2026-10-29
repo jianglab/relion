@@ -408,6 +408,21 @@ TEST_CASE("Refinement jobs: RELION_KEEP_ALL_ITERATIONS sets the GUI default",
 	unsetenv("RELION_KEEP_ALL_ITERATIONS");
 }
 
+TEST_CASE("Refinement jobs: the mask diameter defaults to automatic (-1, the largest that fits the box)",
+          "[pipeline]")
+{
+	const int types[] = {PROC_2DCLASS, PROC_INIMODEL, PROC_3DCLASS, PROC_3DAUTO};
+	for (int t : types)
+	{
+		INFO("job type " << t);
+		RelionJob job;
+		setUpRefineJob(job, t);
+		std::string command;
+		REQUIRE(generateCommand(job, command));
+		REQUIRE(command.find(" --particle_diameter -1 ") != std::string::npos);
+	}
+}
+
 TEST_CASE("Refinement jobs: masks along the length of rectangular boxes only when asked",
           "[pipeline][rectangular]")
 {

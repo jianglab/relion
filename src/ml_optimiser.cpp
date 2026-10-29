@@ -2638,16 +2638,15 @@ void MlOptimiser::initialiseGeneral(int rank)
         // Set particle diameter to 90% the box size if user does not give this parameter
         if (particle_diameter < 0.)
         {
-            if (verb > 0)
-                std::cout << " Automatically set particle diameter to 90% the box size for 3D helical reconstruction." << std::endl;
-
             // Rectangular images: the box width, or with --rect_mask_length the long axis of an elliptical mask
             const RFLOAT helix_box = !mymodel.isRect() ? (RFLOAT)(mymodel.ori_size) :
                     (rectMaskAlongLength() ? (RFLOAT)rectMaskLength() : (RFLOAT)XMIPP_MIN(mymodel.imgX(), mymodel.imgY()));
             particle_diameter = helix_box;
             if ( (helix_box * 0.05) < width_mask_edge)
                 particle_diameter -= 2. * width_mask_edge;
-            particle_diameter *= (0.90 * mymodel.pixel_size);
+            particle_diameter = floor(particle_diameter * 0.90 * mymodel.pixel_size);   // whole Angstroms
+            if (verb > 0)
+                std::cout << " Mask diameter set automatically to " << particle_diameter << " A: 90% of the box for 3D helical reconstruction" << std::endl;
         }
 
         if (ignore_helical_symmetry)
@@ -2783,8 +2782,13 @@ void MlOptimiser::initialiseGeneral(int rank)
 
     // Rectangular images: the box width, or with --rect_mask_length the long axis of an elliptical mask
     if (particle_diameter < 0.)
-        particle_diameter = ((!mymodel.isRect() ? mymodel.ori_size :
-                (rectMaskAlongLength() ? rectMaskLength() : XMIPP_MIN(mymodel.imgX(), mymodel.imgY()))) - width_mask_edge) * mymodel.pixel_size;
+    {
+        // The largest that fits the box, in whole Angstroms
+        particle_diameter = floor(((!mymodel.isRect() ? mymodel.ori_size :
+                (rectMaskAlongLength() ? rectMaskLength() : XMIPP_MIN(mymodel.imgX(), mymodel.imgY()))) - width_mask_edge) * mymodel.pixel_size);
+        if (verb > 0)
+            std::cout << " Mask diameter set automatically to " << particle_diameter << " A: the box minus the soft edge" << std::endl;
+    }
     checkRectangularMask();
     warnRectangularWrapAround();
 
