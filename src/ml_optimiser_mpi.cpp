@@ -5315,6 +5315,9 @@ void MlOptimiserMpi::iterate()
 	// Hopefully this barrier will prevent some bus errors
 	MPI_Barrier(MPI_COMM_WORLD);
 
+	if (node->isLeader())
+		reportHelicalSymmetry();
+
 	// delete threads etc.
 	MlOptimiser::iterateWrapUp();
 	MPI_Barrier(MPI_COMM_WORLD);

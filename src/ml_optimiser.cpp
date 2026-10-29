@@ -48,6 +48,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "src/ml_optimiser.h"
+#include "src/helix_report.h"
 #include "src/parallel_hint.h"
 #include <thread>
 #ifdef __linux__
@@ -4029,6 +4030,19 @@ void MlOptimiser::iterateSetup()
     for (int i = 0; i < NR_CLASS_MUTEXES; i++)
         omp_init_lock(global_mutex2 + i);
 }
+void MlOptimiser::reportHelicalSymmetry()
+{
+    if (!do_helical_refine || mymodel.ref_dim != 3 || !helixreport::enabled() || mymodel.helical_twist.empty() || mymodel.helical_rise.empty())
+        return;
+    helixreport::Result r = helixreport::analyse(mydata.MDimg, [&](int optics_group) { return (double) mydata.getOpticsPixelSize(optics_group - 1); },
+            mymodel.helical_twist[0], mymodel.helical_rise[0]);
+    if (r.text.empty())
+        return;
+    std::cout << std::endl << r.text;
+    std::ofstream(fn_out + "_helical_symmetry_report.txt") << r.text;
+    std::ofstream(fn_out + "_helical_symmetry_filaments.csv") << helixreport::csv(r);
+}
+
 void MlOptimiser::iterateWrapUp()
 {
 
@@ -4672,6 +4686,8 @@ void MlOptimiser::iterate()
         if (!learned.empty() && verb > 0)
             std::cout << learned << std::endl;
     }
+
+    reportHelicalSymmetry();
 
     // delete threads etc
     iterateWrapUp();

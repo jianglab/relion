@@ -1255,6 +1255,9 @@ public:
 	/* Delete threads and task distributors */
 	void iterateWrapUp();
 
+	// Read-only report on the symmetry the poses of a helical run show (src/helix_report.h), at the end of the run on the process that holds all the particles
+	void reportHelicalSymmetry();
+
 	/* Perform expectation-maximization iterations */
 	void iterate();
 
