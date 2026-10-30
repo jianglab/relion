@@ -154,8 +154,14 @@ TEST_CASE("GUI: without a site template the Running tab has the built-in Slurm f
 		JobWindow window;
 		REQUIRE_NOTHROW(window.initialise(type, false));
 		REQUIRE_NOTHROW(window.updateMyJob());
-		for (const char *name : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_args"})
+		for (const char *name : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_exclude", "slurm_args"})
 			CHECK(window.guientries.find(name) != window.guientries.end());
+		// the queue and the nodes to exclude can be chosen from what Slurm lists
+		for (const char *name : {"queuename", "slurm_exclude"})
+		{
+			REQUIRE(window.guientries[name].browse != NULL);
+			CHECK(std::string(window.guientries[name].browse->label()) == "Choose");
+		}
 	}
 	if (saved) setenv("RELION_QSUB_TEMPLATE", saved_value.c_str(), 1);
 }
@@ -212,11 +218,14 @@ std::vector<std::string> layoutProblems(Fl_Group *tab)
 	std::vector<Leaf> leaves;
 	collectLeaves(tab, "", leaves);
 	std::vector<std::string> problems;
+	// what is drawn: the tab's group can reach below the tabs that hold it
+	const Fl_Widget *tabs = tab->parent() ? (const Fl_Widget *)tab->parent() : tab;
+	const int bottom = std::min(tab->y() + tab->h(), tabs->y() + tabs->h());
 	for (size_t i = 0; i < leaves.size(); i++)
 	{
 		const Fl_Widget *a = leaves[i].w;
 		if (a->x() < tab->x() || a->x() + a->w() > tab->x() + tab->w()
-		    || a->y() < tab->y() || a->y() + a->h() > tab->y() + tab->h())
+		    || a->y() < tab->y() || a->y() + a->h() > bottom)
 			problems.push_back("outside the tab: " + describe(a));
 		for (size_t j = i + 1; j < leaves.size(); j++)
 		{
@@ -281,7 +290,7 @@ TEST_CASE("GUI: Class3D several reference maps set the number of classes", "[gui
 				std::string all;
 				for (const auto &p : problems) all += "\n  " + p;
 				INFO("reference " << value << ", tab " << (tab->label() ? tab->label() : "?") << all);
-				REQUIRE(problems.empty());
+				CHECK(problems.empty());
 			}
 		}
 	}
@@ -303,7 +312,7 @@ TEST_CASE("GUI: no tab of any job window has overlapping or out-of-tab widgets",
 			for (const auto &p : problems)
 				all += "\n  " + p;
 			INFO("layout problems:" << all);
-			REQUIRE(problems.empty());
+			CHECK(problems.empty());   // every tab reported, not only the first
 		}
 	}
 }

@@ -79,10 +79,11 @@ extern bool create_scheduler_gui;
 //#define XCOL4 475
 //#define XCOL5 535
 //Additional space in tab if more than 4 XXXextraiXXX template variables are used defined by
-//environment variable RELION_QSUB_EXTRA_COUNT
+//environment variable RELION_QSUB_EXTRA_COUNT, plus one row for the longest tabs (Running with RELION's own Slurm
+//script, Class2D/Class3D Optimisation)
 #define GUIEXTRA \
-	( (getenv ("RELION_QSUB_EXTRA_COUNT"))? \
-	(std::max(0,(atoi(getenv ("RELION_QSUB_EXTRA_COUNT"))-4))*STEPY) : 0 )
+	( ( (getenv ("RELION_QSUB_EXTRA_COUNT"))? \
+	(std::max(0,(atoi(getenv ("RELION_QSUB_EXTRA_COUNT"))-4))*STEPY) : 0 ) + STEPY )
 #define MENUHEIGHT 30
 #define TABHEIGHT 25
 #define GUIWIDTH 800

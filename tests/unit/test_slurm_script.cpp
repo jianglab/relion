@@ -44,6 +44,30 @@ TEST_CASE("Slurm script: node list from sinfo", "[slurm]")
 	CHECK(slurmscript::parseSinfo("").empty());
 }
 
+TEST_CASE("Slurm script: queues and nodes to choose from", "[slurm]")
+{
+	auto parts = slurmscript::parsePartitions("typeA* up 10/2/0/12\ngpu up 6/0/0/6\nold down 0/0/1/1\nbad;name up 1/1/0/2\n");
+	REQUIRE(parts.size() == 3);   // a name sinfo could not have given is dropped
+	CHECK(parts[0].name == "typeA");
+	CHECK(parts[0].is_default);
+	CHECK(parts[0].idle == 2);
+	CHECK(parts[0].total == 12);
+	CHECK(parts[0].label() == "typeA (default): 2 of 12 nodes idle");
+	CHECK_FALSE(parts[1].is_default);
+	CHECK(parts[1].label() == "gpu: 0 of 6 nodes idle");
+	CHECK_FALSE(parts[2].up);
+	CHECK(parts[2].label() == "old: down");
+	CHECK(slurmscript::parsePartitions("").empty());
+
+	// one line per node and partition: each node once
+	auto nodes = slurmscript::parseNodes("n1 mix gpu:typeD:4\nn2 idle (null)\nn1 mix gpu:typeD:4\n");
+	REQUIRE(nodes.size() == 2);
+	CHECK(nodes[0].name == "n1");
+	CHECK(nodes[0].state == "mix");
+	CHECK(nodes[0].gres == "gpu:typeD:4");
+	CHECK(nodes[1].gres.empty());
+}
+
 TEST_CASE("Slurm script: one node, memory the job's share of the smallest node that fits", "[slurm]")
 {
 	auto nodes = slurmscript::parseSinfo(NODES);
@@ -112,6 +136,11 @@ TEST_CASE("Slurm script: text", "[slurm]")
 	CHECK(t.find("\nXXXcommandXXX\n") != std::string::npos);
 	CHECK(t.find("mpirun") == std::string::npos);
 	CHECK(t.find("--time") == std::string::npos);
+	CHECK(t.find("--exclude") == std::string::npos);
+	r.exclude = "n3, n7";
+	t = slurmscript::templateText(r, slurmscript::plan(r, nodes), "");
+	CHECK(t.find("#SBATCH --exclude=n3,n7\n") != std::string::npos);
+	r.exclude.clear();
 
 	r.exports.push_back("RELION_EXAMPLE_SWITCH=1");
 	t = slurmscript::templateText(r, slurmscript::plan(r, nodes), "");

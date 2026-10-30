@@ -1002,6 +1002,7 @@ slurmscript::Request RelionJob::slurmRequest()
 	}
 	r.mem = value("slurm_mem", "auto");
 	r.time = value("slurm_time", "");
+	r.exclude = value("slurm_exclude", "");
 	r.args = value("slurm_args", "");
 	return r;
 }
@@ -1412,7 +1413,8 @@ the job will be executed locally. Note that only MPI jobs may be sent to a queue
 	}
 
 	// Need the std::string(), as otherwise it will be overloaded and passed as a boolean....
-	joboptions["queuename"] = JobOption("Queue name: ", std::string(default_queue), "Name of the queue to which to submit the job. The default name can be set through the environment variable RELION_QUEUE_NAME.");
+	joboptions["queuename"] = JobOption("Queue name: ", std::string(default_queue), "Name of the queue to which to submit the job. The default name can be set through the environment variable RELION_QUEUE_NAME.\n\n\
+With Slurm, Choose lists the queues and how many of their nodes are idle.");
 
 	// Check for environment variable RELION_QSUB_COMMAND
 	const char * default_command = getenv("RELION_QSUB_COMMAND");
@@ -1438,6 +1440,8 @@ of the smallest node of the queue that fits the job, by its share of that node's
 Rest the mouse on the field to see the amount.");
 		joboptions["slurm_time"] = JobOption("Walltime:", std::string(""), "Maximum run time, as Slurm takes it (for example 2-00:00:00 for two days). \
 Leave empty for the queue's default.");
+		joboptions["slurm_exclude"] = JobOption("Exclude nodes:", std::string(""), "Nodes the job must not run on, separated by commas \
+(sbatch --exclude). Choose lists the nodes of the queue to tick. The memory for auto is still worked out from all nodes of the queue.");
 		joboptions["slurm_args"] = JobOption("Additional sbatch arguments:", std::string(""), "Any other options for sbatch, for example --account=myaccount.");
 	}
 

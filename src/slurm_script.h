@@ -56,6 +56,7 @@ struct Request
 	int gpus = 0;
 	std::string mem = "auto";  // GB for the job, or "auto"
 	std::string time;          // empty: the queue's default
+	std::string exclude;       // nodes not to run on, comma separated
 	std::string args;          // more sbatch options, as typed
 	std::vector<std::string> exports;  // NAME=VALUE, exported before the command
 	// relion_launch chooses the processes and threads on the node the job lands on (rank_launcher.h):
@@ -76,6 +77,32 @@ std::vector<NodeType> parseSinfo(const std::string &sinfo_output);
 
 /// The nodes of a Slurm partition ("" for all), asking sinfo; empty if it cannot be asked.
 std::vector<NodeType> partitionNodes(const std::string &partition);
+
+/// A queue, from `sinfo -h -o "%P %a %F"` (name, up or down, nodes allocated/idle/other/total).
+struct Partition
+{
+	std::string name;
+	bool is_default = false;  // marked "*" by sinfo
+	bool up = true;
+	int idle = 0, total = 0;
+	std::string label() const;  // for a menu: "name (default): 2 of 6 nodes idle"
+};
+
+std::vector<Partition> parsePartitions(const std::string &sinfo_output);
+
+/// The queues of the cluster, asking sinfo now; empty if it cannot be asked.
+std::vector<Partition> partitions();
+
+/// A node, from `sinfo -h -N -o "%N %t %G"`.
+struct Node
+{
+	std::string name, state, gres;  // gres empty without GPUs
+};
+
+std::vector<Node> parseNodes(const std::string &sinfo_output);
+
+/// The nodes of a queue ("" for all), asking sinfo now; empty if it cannot be asked.
+std::vector<Node> partitionNodeList(const std::string &partition);
 
 struct Layout
 {

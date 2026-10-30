@@ -1351,7 +1351,7 @@ TEST_CASE("Queued jobs: an empty submission-script field means RELION's own Slur
 	job.initialise(PROC_3DAUTO);
 	job.label = get_proc_label(job.type);
 	REQUIRE(job.joboptions["qsubscript"].getString() == "");
-	for (const char *key : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_args"})
+	for (const char *key : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_exclude", "slurm_args"})
 		REQUIRE(job.joboptions.find(key) != job.joboptions.end());
 	job.joboptions["fn_img"].setString("particles.star");
 	job.joboptions["fn_ref"].setString("ref.mrc");
@@ -1362,6 +1362,7 @@ TEST_CASE("Queued jobs: an empty submission-script field means RELION's own Slur
 	job.joboptions["slurm_gpus"].setString("1");
 	job.joboptions["slurm_mem"].setString("12");
 	job.joboptions["slurm_time"].setString("1-00:00:00");
+	job.joboptions["slurm_exclude"].setString("n3,n7");
 	job.joboptions["auto_parallel"].setString("Yes");
 	job.joboptions["nr_cpus"].setString("8");
 	job.joboptions["scratch_dir"].setString("");
@@ -1381,6 +1382,7 @@ TEST_CASE("Queued jobs: an empty submission-script field means RELION's own Slur
 	CHECK(script.find("#SBATCH --gpus=1\n") != std::string::npos);
 	CHECK(script.find("#SBATCH --mem=12G\n") != std::string::npos);
 	CHECK(script.find("#SBATCH --time=1-00:00:00\n") != std::string::npos);
+	CHECK(script.find("#SBATCH --exclude=n3,n7\n") != std::string::npos);
 	CHECK(script.find("#SBATCH --output=" + outputname + "run.out") != std::string::npos);
 	CHECK(script.find("relion_launch `which relion_refine_mpi`") != std::string::npos);
 	CHECK(script.find("mpirun") == std::string::npos);

@@ -38,6 +38,18 @@ bool safeName(const std::string &s)
 		[](char c) { return std::isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.' || c == ','; });
 }
 
+std::string runSinfo(const std::string &args)
+{
+	std::string out;
+	if (FILE *p = popen(("timeout 10 sinfo " + args + " 2>/dev/null").c_str(), "r"))
+	{
+		char buf[512];
+		while (fgets(buf, sizeof buf, p)) out += buf;
+		pclose(p);
+	}
+	return out;
+}
+
 std::string where(const Request &r)
 {
 	return trim(r.partition).empty() ? "the cluster" : "queue " + trim(r.partition);
@@ -80,21 +92,67 @@ std::vector<NodeType> parseSinfo(const std::string &sinfo_output)
 
 std::vector<NodeType> partitionNodes(const std::string &partition)
 {
-	std::string cmd = "timeout 10 sinfo -h -o '%D %c %m %G'";
-	if (!partition.empty())
+	if (!partition.empty() && !safeName(partition)) return {};
+	return parseSinfo(runSinfo("-h -o '%D %c %m %G'" + (partition.empty() ? std::string() : " -p '" + partition + "'")));
+}
+
+std::string Partition::label() const
+{
+	return name + (is_default ? " (default)" : "") + (up ? ": " + std::to_string(idle) + " of " + std::to_string(total) +
+	       (total == 1 ? " node" : " nodes") + " idle" : ": down");
+}
+
+std::vector<Partition> parsePartitions(const std::string &sinfo_output)
+{
+	std::vector<Partition> parts;
+	std::istringstream in(sinfo_output);
+	std::string line;
+	while (std::getline(in, line))
 	{
-		if (!safeName(partition)) return {};
-		cmd += " -p '" + partition + "'";
+		std::istringstream ls(line);
+		std::string name, avail, counts;
+		if (!(ls >> name >> avail >> counts)) continue;
+		Partition p;
+		p.is_default = name.back() == '*';
+		if (p.is_default) name.pop_back();
+		if (!safeName(name)) continue;
+		p.name = name;
+		p.up = avail == "up";
+		int alloc = 0, other = 0;
+		std::sscanf(counts.c_str(), "%d/%d/%d/%d", &alloc, &p.idle, &other, &p.total);
+		parts.push_back(p);
 	}
-	cmd += " 2>/dev/null";
-	std::string out;
-	if (FILE *p = popen(cmd.c_str(), "r"))
+	return parts;
+}
+
+std::vector<Partition> partitions()
+{
+	return parsePartitions(runSinfo("-h -o '%P %a %F'"));
+}
+
+std::vector<Node> parseNodes(const std::string &sinfo_output)
+{
+	std::vector<Node> nodes;
+	std::istringstream in(sinfo_output);
+	std::string line;
+	while (std::getline(in, line))
 	{
-		char buf[512];
-		while (fgets(buf, sizeof buf, p)) out += buf;
-		pclose(p);
+		std::istringstream ls(line);
+		Node n;
+		if (!(ls >> n.name >> n.state) || !safeName(n.name)) continue;
+		ls >> n.gres;
+		if (n.gres == "(null)") n.gres.clear();
+		// a node in several of the listed partitions is listed once
+		if (std::none_of(nodes.begin(), nodes.end(), [&](const Node &m) { return m.name == n.name; }))
+			nodes.push_back(n);
 	}
-	return parseSinfo(out);
+	return nodes;
+}
+
+std::vector<Node> partitionNodeList(const std::string &partition)
+{
+	if (!partition.empty() && !safeName(partition)) return {};
+	return parseNodes(runSinfo("-h -N -o '%N %t %G'" + (partition.empty() ? std::string() : " -p '" + partition + "'")));
 }
 
 Layout plan(const Request &r, const std::vector<NodeType> &nodes)
@@ -225,6 +283,10 @@ std::string templateText(const Request &r, const Layout &l, const std::string &p
 	const std::string time = trim(r.time);
 	if (!time.empty() && time != "0")
 		t << "#SBATCH --time=" << time << "\n";
+	std::string exclude = trim(r.exclude);
+	exclude.erase(std::remove(exclude.begin(), exclude.end(), ' '), exclude.end());
+	if (!exclude.empty())
+		t << "#SBATCH --exclude=" << exclude << "\n";
 	const std::string args = trim(r.args);
 	if (!args.empty())
 		t << "#SBATCH " << args << "\n";

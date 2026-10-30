@@ -21,8 +21,11 @@
 #include "src/parallel_hint.h"
 #include "src/gui_entries.h"
 #include "src/reference_list.h"
+#include <FL/Fl_Check_Browser.H>
+#include <FL/Fl_Double_Window.H>
 #include <cstdlib>
 #include <memory>
+#include <set>
 JobWindow::JobWindow(int _x, int _y, int _w, int _h, const char* title ) : Fl_Box(_x,_y,_w,_h,title)
 {
 	clear();
@@ -127,6 +130,91 @@ void JobWindow::setupTabs(int nr_tabs)
 	}
 }
 
+// "Choose" beside the queue name: Slurm's queues, asked when clicked so that the idle counts are current
+static void cb_choose_queue(Fl_Widget *w, void *data)
+{
+	GuiEntry *queue = (GuiEntry *)data;
+	const std::vector<slurmscript::Partition> parts = slurmscript::partitions();
+	if (parts.empty())
+	{
+		fl_message("Slurm did not list any queues (sinfo).");
+		return;
+	}
+	std::vector<std::string> labels;
+	for (const slurmscript::Partition &p : parts)
+		labels.push_back(p.label());
+	std::vector<Fl_Menu_Item> items(parts.size() + 1);  // zero-filled: the last one ends the menu
+	for (size_t i = 0; i < parts.size(); i++)
+	{
+		items[i].text = labels[i].c_str();
+		items[i].labelsize_ = ENTRY_FONTSIZE;
+		if (!parts[i].up)
+			items[i].flags = FL_MENU_INACTIVE;
+	}
+	const Fl_Menu_Item *m = items[0].popup(w->x(), w->y() + w->h());
+	if (m != NULL)
+		queue->setValue(parts[m - &items[0]].name);
+}
+
+// "Choose" beside the excluded nodes: tick nodes of the queue
+static void cb_choose_excluded(Fl_Widget *, void *data)
+{
+	JobWindow *win = (JobWindow *)data;
+	GuiEntry &exclude = win->guientries["slurm_exclude"];
+	const std::string queue = win->guientries["queuename"].inp->value();
+	const std::vector<slurmscript::Node> nodes = slurmscript::partitionNodeList(queue);
+	if (nodes.empty())
+	{
+		fl_message("Slurm did not list any nodes for queue \"%s\" (sinfo).", queue.c_str());
+		return;
+	}
+	std::vector<std::string> now;  // excluded so far
+	std::stringstream ss(exclude.inp->value());
+	for (std::string name; std::getline(ss, name, ',');)
+	{
+		name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
+		if (!name.empty()) now.push_back(name);
+	}
+	const std::set<std::string> excluded(now.begin(), now.end());
+
+	Fl_Double_Window dialog(360, 330, "Exclude nodes");
+	Fl_Check_Browser list(10, 10, 340, 270);
+	list.textsize(ENTRY_FONTSIZE);
+	for (const slurmscript::Node &n : nodes)
+		list.add((n.name + "   " + n.state + (n.gres.empty() ? "" : "   " + n.gres)).c_str(), excluded.count(n.name) > 0);
+	Fl_Button ok(190, 290, 75, 30, "OK"), cancel(275, 290, 75, 30, "Cancel");
+	dialog.end();
+	int done = 0;  // 1: OK, 2: cancelled or closed
+	ok.callback([](Fl_Widget *, void *d) { *(int *)d = 1; }, &done);
+	cancel.callback([](Fl_Widget *, void *d) { *(int *)d = 2; }, &done);
+	dialog.callback([](Fl_Widget *, void *d) { *(int *)d = 2; }, &done);
+	dialog.set_modal();
+	dialog.show();
+	while (done == 0 && dialog.shown())
+		Fl::wait();
+	if (done != 1)
+		return;
+
+	std::string value;
+	for (size_t i = 0; i < nodes.size(); i++)
+		if (list.checked(i + 1))
+			value += (value.empty() ? "" : ",") + nodes[i].name;
+	// names typed that this queue does not list are kept
+	for (const std::string &name : now)
+		if (std::none_of(nodes.begin(), nodes.end(), [&](const slurmscript::Node &n) { return n.name == name; }))
+			value += (value.empty() ? "" : ",") + name;
+	exclude.setValue(value);
+}
+
+// A "Choose" button in the column of the Browse buttons
+static void addChooser(GuiEntry &entry, Fl_Callback *cb, void *data)
+{
+	entry.browse = new Fl_Button(XCOL4, entry.inp->y(), WCOL4, entry.inp->h(), "Choose");
+	entry.browse->callback(cb, data);
+	entry.browse->color(GUI_BUTTON_COLOR);
+	entry.browse->labelsize(ENTRY_FONTSIZE);
+}
+
 void JobWindow::setupRunTab()
 {
 	runtab->begin();
@@ -218,6 +306,10 @@ void JobWindow::setupRunTab()
 	queue_group->begin();
 
 	place("queuename");
+	// RELION's own Slurm script: the queues and nodes to choose from
+	const bool builtin_slurm = myjob.joboptions.find("slurm_mem") != myjob.joboptions.end();
+	if (builtin_slurm)
+		addChooser(guientries["queuename"], cb_choose_queue, &guientries["queuename"]);
 
 	place("qsub");
 
@@ -235,9 +327,11 @@ void JobWindow::setupRunTab()
 	}
 
 	// RELION's own Slurm script (no site template)
-	for (const char *key : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_args"})
+	for (const char *key : {"slurm_gpus", "slurm_mem", "slurm_time", "slurm_exclude", "slurm_args"})
 		if (myjob.joboptions.find(key) != myjob.joboptions.end())
 			place(key);
+	if (builtin_slurm)
+		addChooser(guientries["slurm_exclude"], cb_choose_excluded, this);
 	// The job as the fields are now, for the hints below
 	auto currentJob = [this]()
 	{
@@ -1604,7 +1698,7 @@ void JobWindow::initialiseClass2DWindow()
 	place("highres_limit", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
-	current_y += STEPY/2;
+	current_y += STEPY/4;   // the last row must stay inside the tab
 
 	place("do_center");
 
@@ -1896,7 +1990,7 @@ void JobWindow::initialiseClass3DWindow()
 	place("highres_limit", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
-	current_y += STEPY/2;
+	current_y += STEPY/4;   // the last rows must stay inside the tab
 
 	// Blush group
 	group9 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
