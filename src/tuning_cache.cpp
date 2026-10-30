@@ -1,5 +1,6 @@
 #include "src/tuning_cache.h"
 
+#include <cmath>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -142,12 +143,33 @@ bool Cache::get(const std::string &tunable, const std::string &key, Entry &out) 
 	return found;
 }
 
-bool Cache::put(const std::string &tunable, const std::string &key, const std::string &value, double rel_time)
+bool Cache::put(const std::string &tunable, const std::string &key, const std::string &value, double rel_time, double same_within)
 {
 	if (path_.empty()) return false;
 	makeParentDir(path_);
 	Lock lock(path_, true, true);
 	if (!lock.ok()) return false;
+
+	// the newest row already says this: nothing to add (equal, or numbers within same_within of each other)
+	{
+		std::string text;
+		const std::string dev = clean(ctx_.device), tun = clean(tunable), k = clean(key), sm = std::to_string(ctx_.sm_count), v = clean(value);
+		std::string last;
+		bool found = false;
+		if (readAll(path_, text))
+			for (const std::string &l : lines(text))
+			{
+				const std::vector<std::string> f = split(l);
+				if (f.size() == kColumns && f[0] == tun && f[1] == dev && f[2] == sm && f[6] == k) { last = f[7]; found = true; }
+			}
+		if (found && last == v) return true;
+		if (found && same_within > 0.)
+		{
+			char *e1 = NULL, *e2 = NULL;
+			const double a = strtod(last.c_str(), &e1), b = strtod(v.c_str(), &e2);
+			if (*e1 == 0 && *e2 == 0 && a > 0. && std::fabs(a - b) <= same_within * a) return true;
+		}
+	}
 	char date[32] = "";
 	const time_t now = time(NULL);
 	struct tm tmv;

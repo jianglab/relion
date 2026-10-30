@@ -49,8 +49,10 @@ public:
 
 	// the newest row of this tunable, key and context
 	bool get(const std::string &tunable, const std::string &key, Entry &out) const;
-	// appends a row; false if it could not be written
-	bool put(const std::string &tunable, const std::string &key, const std::string &value, double rel_time = 0.);
+	// appends a row; false if it could not be written. Nothing is appended (true) when the newest row of
+	// this tunable, key and context has the same value, or, with same_within > 0, a number within that
+	// fraction of the new one: the file stays a short list of results, not a log of every run.
+	bool put(const std::string &tunable, const std::string &key, const std::string &value, double rel_time = 0., double same_within = 0.);
 
 	// rows above which put() rewrites the file with the newest row per (tunable, device, sm, key)
 	static constexpr size_t kCompactRows = 2000;

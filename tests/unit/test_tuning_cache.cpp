@@ -310,3 +310,27 @@ TEST_CASE("tuning_cache compacts a long file", "[tuning_cache]")
 	// no stray temporary files
 	CHECK(system(("ls '" + td.dir + "' | grep -q '\\.tmp\\.'").c_str()) != 0);
 }
+
+TEST_CASE("tuning_cache adds no row when the newest one already says the same", "[tuning_cache]")
+{
+	TempDir td;
+	REQUIRE(!td.dir.empty());
+	tuning::Cache cache(ctxA(), td.file());
+	REQUIRE(cache.put("t", "k", "table", 0.9));
+	REQUIRE(cache.put("t", "k", "table", 0.8));          // same value: no new row
+	CHECK(readLines(td.file()).size() == 2);
+	REQUIRE(cache.put("t", "k", "texture", 0.8));        // changed: new row
+	REQUIRE(cache.put("t", "k", "table", 0.8));          // changed back: new row
+	CHECK(readLines(td.file()).size() == 4);
+
+	REQUIRE(cache.put("n", "k", "1000", 0., 0.05));
+	REQUIRE(cache.put("n", "k", "1040", 0., 0.05));      // within 5%: skipped
+	REQUIRE(cache.put("n", "k", "960", 0., 0.05));       // within 5% of the stored 1000: skipped
+	CHECK(readLines(td.file()).size() == 5);
+	REQUIRE(cache.put("n", "k", "1200", 0., 0.05));      // beyond: new row
+	REQUIRE(cache.put("n", "other", "1200", 0., 0.05));  // another key: new row
+	CHECK(readLines(td.file()).size() == 7);
+	tuning::Entry e;
+	REQUIRE(cache.get("n", "k", e));
+	CHECK(e.value == "1200");
+}

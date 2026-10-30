@@ -259,7 +259,7 @@ void MlDeviceBundle::finishLeanIteration()
 	if (store && !lean_key.empty())
 	{
 		tuning::Cache cache(leanContext(device_id));
-		cache.put("gpu_pool_peak", lean_key, std::to_string(peak));
+		cache.put("gpu_pool_peak", lean_key, std::to_string(peak), 0., 0.05);
 	}
 }
 
