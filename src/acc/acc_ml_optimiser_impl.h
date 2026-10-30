@@ -1820,7 +1820,9 @@ bool coarsePassCanBeDeferred(MlOptimiser *baseMLO, MlClass *accMLO, const Sampli
 #else
 	const bool shared3D = false;
 #endif
-	const bool refs_ok = baseMLO->mymodel.ref_dim == 2 || (shared3D && baseMLO->mymodel.ref_dim == 3);
+	// Not forced on: shared only while the groups' orientation sets overlap enough (filament_groups.h)
+	static const bool share_forced = filgroup::envSet("RELION_GPU_GROUP_SHARED") && gpuswitch::optIn("RELION_GPU_GROUP_SHARED") != 0;
+	const bool refs_ok = baseMLO->mymodel.ref_dim == 2 || (shared3D && baseMLO->mymodel.ref_dim == 3 && (share_forced || filgroup::sharePays()));
 	return gpuClassBatching() && !do_CC && sp.nr_images == 1 && refs_ok && !accMLO->dataIs3D &&
 			baseMLO->mymodel.nr_bodies == 1 && accMLO->generateProjectionPlanOnTheFly && !baseMLO->do_skip_align;
 }

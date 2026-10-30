@@ -13,6 +13,7 @@
 set(RELION_UNIT_TEST_SOURCES
  main.cpp
  test_group_size_tuner.cpp
+ test_filament_groups.cpp
  test_ctf.cpp
  test_spatial_frequency_grid.cpp
  test_fft_nufft_consistency.cpp

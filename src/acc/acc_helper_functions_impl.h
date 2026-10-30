@@ -3043,6 +3043,8 @@ static void runDiff2KernelCoarseGroupXt(std::vector<CoarseDeferred *> &items, Ac
 		}
 		const long k = n_sets.fetch_add((long) sets.size());
 		n_parts += parts; n_own += own; n_union += uni;
+		if (uni > 0)
+			filgroup::shareRatioUpdate((double) own / (double) uni);
 		if (k == 0 || (stats && k / 5000 != (k + (long) sets.size()) / 5000))
 			printf(" GPU coarse pass: particle groups share their projections (RELION_GPU_GROUP_SHARED): %.1f particles per set, "
 			       "%.2fx fewer orientations projected, %.2fx the differences needed (%ld sets so far)\n",
