@@ -1141,6 +1141,16 @@ void GuiMainWindow::fillRunningJobLists()
 
 void GuiMainWindow::fillToAndFromJobLists()
 {
+	// The periodic refresh rebuilds these lists, so keep the user's scroll positions,
+	// unless a different job was loaded since the last fill
+	static long int last_filled_job = -1;
+	bool keep_positions = (current_job == last_filled_job);
+	last_filled_job = current_job;
+	int mypos_input = input_job_browser->position();
+	int mypos_output = output_job_browser->position();
+	int myhpos_input = input_job_browser->hposition();
+	int myhpos_output = output_job_browser->hposition();
+
 	display_io_node->clear();
 	input_job_browser->clear();
 	output_job_browser->clear();
@@ -1219,6 +1229,14 @@ void GuiMainWindow::fillToAndFromJobLists()
 				}
 			}
 		}
+	}
+
+	if (keep_positions)
+	{
+		input_job_browser->position(mypos_input);
+		output_job_browser->position(mypos_output);
+		input_job_browser->hposition(myhpos_input);
+		output_job_browser->hposition(myhpos_output);
 	}
 }
 
