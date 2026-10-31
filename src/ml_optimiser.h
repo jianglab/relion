@@ -39,6 +39,7 @@
 #include "src/ctf.h"
 #include "src/time.h"
 #include "src/mask.h"
+#include "src/auto_mask.h"
 #include "src/healpix_sampling.h"
 #include "src/helix.h"
 #include "src/helix_context.h"
@@ -345,6 +346,21 @@ public:
 
 	// Correct gold-standard FSC for solvent mask?
 	bool do_phase_random_fsc;
+
+	// Mask the references with automatic masks made from them (as trueFSC in helicon, see auto_mask.h)
+	bool do_auto_mask;
+
+	// Only once the resolution is better than this (A)
+	RFLOAT auto_mask_start_res;
+
+	// Width of their soft edge (A); < 0: optimised from the half-maps (3 times the resolution in classification)
+	RFLOAT auto_mask_soft_edge;
+
+	// Mass (kDa) inside the binary masks; <= 0: Otsu's threshold
+	RFLOAT auto_mask_mass;
+
+	// The automatic masks of the classes (one shared by the two half-maps); empty until made
+	std::vector<MultidimArray<RFLOAT> > auto_masks;
 
 	// Filename for a user-provided second solvent mask
 	// This solvent mask will have its own average density and may be useful for example to fill the interior of an icosahedral virus
@@ -1031,6 +1047,10 @@ public:
             do_helical_polarity(0),
             helical_polarity_start_iter(3),
             do_rect_mask_length(0),
+            do_auto_mask(false),
+            auto_mask_start_res(12.),
+            auto_mask_soft_edge(-1.),
+            auto_mask_mass(-1.),
             do_helical_context(0),
             helical_context_types_max(-1),
             helical_context_types_tol(0.01),
@@ -1391,6 +1411,31 @@ public:
 	/* Apply a solvent flattening to a map
 	 */
 	void solventFlatten();
+
+	/* Whether the automatic masks are made in this iteration (the resolution is good enough)
+	 */
+	bool autoMaskThisIteration() const;
+
+	/* The resolution (A) of a class for its automatic mask, from its data_vs_prior, and the
+	 * low-pass filter of the mask (A); false if the class is not good enough for one yet
+	 */
+	bool autoMaskClassResolution(int iclass, RFLOAT &resolution, RFLOAT &lowpass) const;
+
+	/* The automatic mask of a class from its reference alone (classification)
+	 */
+	void calculateAutoMaskOfClass(int iclass, RFLOAT resolution, RFLOAT lowpass, AutoMaskReport &report);
+
+	/* One line about an automatic mask
+	 */
+	void printAutoMaskReport(int iclass, const AutoMaskReport &report) const;
+
+	/* The automatic masks of all classes, without MPI
+	 */
+	void calculateAutoMasks();
+
+	/* Write an automatic mask of this iteration
+	 */
+	void writeAutoMask(int iclass);
 
 	/* Center classes based on their center-of-mass
 	 * and also update the origin offsets in the _data.star file correspondingly

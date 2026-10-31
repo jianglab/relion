@@ -4163,6 +4163,11 @@ void MlOptimiserMpi::reconstructUnregularisedMapAndCalculateSolventCorrectedFSC(
 			{
 				Imask() = mymodel.masks_bodies[ibody];
 			}
+			else if (fn_mask == "None")
+			{
+				// The automatic mask of the previous iteration
+				Imask() = auto_masks[0];
+			}
 			else
 			{
 				Imask.read(fn_mask);
@@ -4565,6 +4570,106 @@ void MlOptimiserMpi::compareTwoHalves()
 #ifdef DEBUG
 	std::cerr << "MlOptimiserMpi::compareTwoHalves: done" << std::endl;
 #endif
+}
+
+void MlOptimiserMpi::updateAutoMasks()
+{
+	if (!autoMaskThisIteration())
+		return;
+
+	if ((int)auto_masks.size() != mymodel.nr_classes)
+		auto_masks.resize(mymodel.nr_classes);
+
+	// What the output says about each mask: lowpass, threshold, mass, soft edge, optimised, resolution
+	const int nr_stats = 6;
+	std::vector<RFLOAT> stats(nr_stats);
+	auto packReport = [&](const AutoMaskReport &r)
+	{
+		stats[0] = r.lowpass; stats[1] = r.threshold; stats[2] = r.mass;
+		stats[3] = r.soft_edge; stats[4] = r.soft_edge_optimised ? 1. : 0.; stats[5] = r.resolution;
+	};
+	auto unpackReport = [&](AutoMaskReport &r)
+	{
+		r.lowpass = stats[0]; r.threshold = stats[1]; r.mass = stats[2];
+		r.soft_edge = stats[3]; r.soft_edge_optimised = (stats[4] > 0.5); r.resolution = stats[5];
+	};
+
+	if (do_split_random_halves)
+	{
+		// The half-maps of the (single) class meet on the first follower, which makes the mask of both
+		MultidimArray<RFLOAT> &half1 = mymodel.Iref[0];
+		if (verb > 0)
+			std::cout << " Making the automatic mask from the two half-maps ..." << std::endl;
+		if (node->rank == 2)
+		{
+			node->relion_MPI_Send(MULTIDIM_ARRAY(half1), MULTIDIM_SIZE(half1), MY_MPI_DOUBLE, 1, MPITAG_IMAGE, MPI_COMM_WORLD);
+		}
+		else if (node->rank == 1)
+		{
+			MPI_Status status;
+			MultidimArray<RFLOAT> half2(half1);
+			node->relion_MPI_Recv(MULTIDIM_ARRAY(half2), MULTIDIM_SIZE(half2), MY_MPI_DOUBLE, 2, MPITAG_IMAGE, MPI_COMM_WORLD, status);
+
+			AutoMaskOptions opt;
+			opt.mass = auto_mask_mass;
+			opt.soft_edge = (auto_mask_soft_edge >= 0.) ? auto_mask_soft_edge / mymodel.pixel_size : -1.;
+			// The references carry no signal beyond the current image size
+			opt.max_shell = mymodel.current_size / 2;
+			AutoMaskReport report;
+			autoMaskFromHalfMaps(half1, half2, mymodel.pixel_size, opt, auto_masks[0], &report, nr_threads);
+			packReport(report);
+		}
+
+		if (node->rank != 1)
+			auto_masks[0].resize(mymodel.Iref[0]);
+		auto_masks[0].setXmippOrigin();
+		node->relion_MPI_Bcast(MULTIDIM_ARRAY(auto_masks[0]), MULTIDIM_SIZE(auto_masks[0]), MY_MPI_DOUBLE, 1, MPI_COMM_WORLD);
+		node->relion_MPI_Bcast(&stats[0], nr_stats, MY_MPI_DOUBLE, 1, MPI_COMM_WORLD);
+		if (node->isLeader())
+		{
+			AutoMaskReport report;
+			unpackReport(report);
+			if (verb > 0)
+				printAutoMaskReport(0, report);
+			writeAutoMask(0);
+		}
+	}
+	else
+	{
+		// Every class on the follower that reconstructed it (all ranks have all references and spectra)
+		std::vector<AutoMaskReport> reports(mymodel.nr_classes);
+		for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+		{
+			RFLOAT resolution, lowpass;
+			if (!autoMaskClassResolution(iclass, resolution, lowpass))
+				continue;
+			const int class_rank = iclass % (node->size - 1) + 1;
+			if (node->rank == class_rank)
+				calculateAutoMaskOfClass(iclass, resolution, lowpass, reports[iclass]);
+		}
+		for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+		{
+			RFLOAT resolution, lowpass;
+			if (!autoMaskClassResolution(iclass, resolution, lowpass))
+				continue;
+			const int class_rank = iclass % (node->size - 1) + 1;
+			if (node->rank != class_rank)
+				auto_masks[iclass].resize(mymodel.Iref[iclass]);
+			auto_masks[iclass].setXmippOrigin();
+			node->relion_MPI_Bcast(MULTIDIM_ARRAY(auto_masks[iclass]), MULTIDIM_SIZE(auto_masks[iclass]), MY_MPI_DOUBLE, class_rank, MPI_COMM_WORLD);
+			if (node->rank == class_rank)
+				packReport(reports[iclass]);
+			node->relion_MPI_Bcast(&stats[0], nr_stats, MY_MPI_DOUBLE, class_rank, MPI_COMM_WORLD);
+			if (node->isLeader())
+			{
+				AutoMaskReport report;
+				unpackReport(report);
+				if (verb > 0)
+					printAutoMaskReport(iclass, report);
+				writeAutoMask(iclass);
+			}
+		}
+	}
 }
 
 void MlOptimiserMpi::calculateExpectedAngularErrors(long int my_first_part_id, long int my_last_part_id)
@@ -5036,7 +5141,8 @@ void MlOptimiserMpi::iterate()
 
 			// Sjors 27-oct-2015
 			// Calculate gold-standard FSC curve
-			if (do_phase_random_fsc && (fn_mask != "None" || mymodel.nr_bodies > 1) )
+			if (do_phase_random_fsc && (fn_mask != "None" || mymodel.nr_bodies > 1 ||
+			    (!auto_masks.empty() && MULTIDIM_SIZE(auto_masks[0]) > 0)))
 				reconstructUnregularisedMapAndCalculateSolventCorrectedFSC();
 			else
 				compareTwoHalves();
@@ -5188,6 +5294,9 @@ void MlOptimiserMpi::iterate()
         timer.toc(TIMING_ITER_HELICALREFINE);
         timer.tic(TIMING_SOLVFLAT);
 #endif
+        if (do_auto_mask && do_solvent && !has_converged)
+        	updateAutoMasks();
+		sclock.mark("auto_mask", iter, node->rank);
         if (do_solvent && !has_converged)
         	solventFlatten();
 		sclock.mark("solvent_flatten", iter, node->rank);

@@ -135,6 +135,12 @@ public:
      */
     void compareTwoHalves();
 
+    /** Make the automatic masks of this iteration and give them to all ranks: in auto-refinement
+     *  one from the two half-maps (on the first follower), in classification one per class (on the
+     *  follower of the class)
+     */
+    void updateAutoMasks();
+
     /**
      * Align two half-maps during auto-refine to prevent orientation divergence
      */

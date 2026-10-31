@@ -27,15 +27,17 @@
 #include <src/mask.h>
 #include <src/time.h>
 #include <src/helix.h>
+#include <src/auto_mask.h>
 
 class mask_create_parameters
 {
 	public:
-	FileName fn_apply_in, fn_mask, fn_apply_out, fn_thr, fn_omask, fn_and, fn_or, fn_andnot, fn_ornot;
+	FileName fn_apply_in, fn_mask, fn_apply_out, fn_thr, fn_omask, fn_and, fn_or, fn_andnot, fn_ornot, fn_half2;
 	RFLOAT ini_threshold, extend_ini_mask, width_soft_edge, lowpass, angpix, helical_z_percentage;
 	RFLOAT inner_radius, outer_radius, center_x, center_y, center_z;
-	bool do_invert, do_helix, do_denovo;
-	int n_threads, box_size;
+	RFLOAT auto_threshold, auto_fraction, auto_mass;
+	bool do_invert, do_helix, do_denovo, do_auto, has_soft_edge;
+	int n_threads, box_size, auto_seeds;
 	IOParser parser;
 
 	void usage()
@@ -75,6 +77,15 @@ class mask_create_parameters
 		center_y = textToFloat(parser.getOption("--center_y", "Y coordinate of the center of the mask in pixels", "0"));
 		center_z = textToFloat(parser.getOption("--center_z", "Z coordinate of the center of the mask in pixels", "0"));
 
+		int auto_section = parser.addSection("Automatic mask creation (as trueFSC in helicon)");
+		do_auto = parser.checkOption("--auto", "Make the mask automatically: low-pass filter the map, threshold it (Otsu's method by default), keep the regions that hold its brightest voxels and add a soft edge. --lowpass, --extend_inimask and --width_soft_edge still apply; --ini_threshold does not");
+		fn_half2 = parser.getOption("--i2", "With --auto: the second half-map (--i is the first). The mask is made from their average; without --lowpass the map is low-pass filtered where their FSC drops below 0.8, and without --width_soft_edge the soft edge is the width that best separates signal from noise in the FSCs of the masked (and phase-randomised) half-maps", "");
+		auto_threshold = textToFloat(parser.getOption("--auto_threshold", "With --auto: binarise at this map value instead of Otsu's threshold", "-1"));
+		auto_fraction = textToFloat(parser.getOption("--auto_fraction", "With --auto: binarise at this fraction of the maximum of the low-pass filtered map", "-1"));
+		auto_mass = textToFloat(parser.getOption("--auto_mass", "With --auto: binarise at the threshold that encloses this mass (kDa, at 0.81 Da/A^3)", "-1"));
+		auto_seeds = textToInteger(parser.getOption("--auto_seeds", "With --auto: keep the regions above the threshold that hold any of this many brightest voxels", "1000"));
+		has_soft_edge = checkParameter(argc, argv, "--width_soft_edge");
+
 		// Check for errors in the command-line option
 		if (parser.checkForErrors())
 			REPORT_ERROR("Errors encountered on the command line, exiting...");
@@ -84,6 +95,12 @@ class mask_create_parameters
 
 		if (do_denovo && box_size < 0)
 			REPORT_ERROR("For de novo mask creation, please specify the box size in --box_size");
+
+		if (do_auto && (do_denovo || fn_and != "" || fn_or != "" || fn_andnot != "" || fn_ornot != ""))
+			REPORT_ERROR("--auto cannot be combined with --denovo, --and, --or, --and_not or --or_not");
+
+		if (fn_half2 != "" && !do_auto)
+			REPORT_ERROR("--i2 is only used with --auto");
 	}
 
 
@@ -99,6 +116,10 @@ class mask_create_parameters
 				std::cerr << "WARNING: The pixel size was not specified. 1.00 is set to the output mask." << std::endl;
 				angpix = 1.0;
 			}
+		}
+		else if (do_auto)
+		{
+			makeAutoMask(Iout);
 		}
 		else
 		{
@@ -125,6 +146,57 @@ class mask_create_parameters
 		Iout().reshape(box_size, box_size, box_size);
 
 		raisedCrownMask(Iout(), inner_radius, outer_radius, width_soft_edge, center_x, center_y, center_z);
+	}
+
+	void makeAutoMask(Image<RFLOAT> &Iout)
+	{
+		Image<RFLOAT> Iin, Ihalf2;
+		std::cout << " Creating a mask automatically ..." << std::endl;
+		Iin.read(fn_thr);
+		Iin().setXmippOrigin();
+		if (ZSIZE(Iin()) < 2)
+			REPORT_ERROR("ERROR: --auto needs a 3D map");
+
+		if (angpix < 0)
+		{
+			angpix = Iin.samplingRateX();
+			std::cerr << "WARNING: The pixel size (--angpix) was not specified." << std::endl;
+			std::cerr << "         The value in the input image header (= " << angpix << ") is used instead." << std::endl;
+		}
+
+		AutoMaskOptions opt;
+		opt.lowpass = lowpass;
+		opt.threshold = auto_threshold;
+		opt.threshold_fraction = auto_fraction;
+		opt.mass = auto_mass;
+		opt.extend = extend_ini_mask;
+		opt.soft_edge = has_soft_edge ? width_soft_edge : -1.;
+		opt.nr_seeds = auto_seeds;
+		opt.verb = true;
+
+		AutoMaskReport report;
+		if (fn_half2 != "")
+		{
+			Ihalf2.read(fn_half2);
+			Ihalf2().setXmippOrigin();
+			if (!Ihalf2().sameShape(Iin()))
+				REPORT_ERROR("ERROR: --i and --i2 maps are different shapes!");
+			autoMaskFromHalfMaps(Iin(), Ihalf2(), angpix, opt, Iout(), &report, n_threads);
+		}
+		else
+		{
+			if (lowpass <= 0)
+				std::cerr << "WARNING: without --lowpass or a second half-map (--i2), the map is not low-pass filtered before binarisation." << std::endl;
+			// Without a resolution estimate, the soft edge is only what --width_soft_edge asks for
+			if (opt.soft_edge < 0.)
+				opt.soft_edge = width_soft_edge;
+			autoMaskFromMap(Iin(), angpix, -1., opt, Iout(), &report, n_threads);
+		}
+
+		if (do_helix)
+		{
+			cutZCentralPartOfSoftMask(Iout(), helical_z_percentage, report.soft_edge);
+		}
 	}
 
 	void makeMaskFromFile(Image<RFLOAT> &Iout)

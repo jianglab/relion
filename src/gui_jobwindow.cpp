@@ -1923,6 +1923,15 @@ void JobWindow::initialiseClass3DWindow()
     place("fn_ref", TOGGLE_DEACTIVATE);
     place("fn_mask");
 
+    // Automatic masks instead of a reference mask
+    Fl_Group *group_auto_mask = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+    group_auto_mask->end();
+    place("do_auto_mask", TOGGLE_LEAVE_ACTIVE, group_auto_mask);
+    group_auto_mask->begin();
+    place("auto_mask_start_res");
+    group_auto_mask->end();
+    guientries["do_auto_mask"].cb_menu_i(); // to make default effective
+
 	current_y += STEPY/2;
 
 	place("fn_cont", TOGGLE_REACTIVATE);
@@ -2204,6 +2213,15 @@ void JobWindow::initialiseAutorefineWindow()
     place("fn_ref", TOGGLE_DEACTIVATE);
     place("fn_mask");
 
+    // Automatic masks instead of a reference mask
+    Fl_Group *group_auto_mask = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+    group_auto_mask->end();
+    place("do_auto_mask", TOGGLE_LEAVE_ACTIVE, group_auto_mask);
+    group_auto_mask->begin();
+    place("auto_mask_start_res");
+    group_auto_mask->end();
+    guientries["do_auto_mask"].cb_menu_i(); // to make default effective
+
     current_y += STEPY/2;
 
 	place("fn_cont", TOGGLE_REACTIVATE);
@@ -2481,6 +2499,20 @@ void JobWindow::initialiseMaskcreateWindow()
 	resetHeight();
 
 	place("fn_in", TOGGLE_DEACTIVATE); //(current_y, "Input 3D map:", NODE_3DREF, "", "MRC map files (*.mrc)", "Provide an input MRC map from which to start binarizing the map.");
+
+	// Add a little spacer
+	current_y += STEPY/2;
+
+	Fl_Group *group_auto = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_auto->end();
+	place("do_auto", TOGGLE_LEAVE_ACTIVE, group_auto);
+	group_auto->begin();
+	place("fn_in2");
+	place("auto_mass");
+	place("auto_soft_optimise");
+	group_auto->end();
+	guientries["do_auto"].cb_menu_i(); // to make default effective
+
 	tab1->end();
 
 	tab2->begin();

@@ -4915,6 +4915,11 @@ Each map becomes one class, so the number of classes is the number of maps and '
 All maps need the same box size and pixel size. RELION writes the list as a STAR file in the References directory when the job is run. \
 A STAR file with a column _rlnReferenceImage, such as run_it025_model.star of an earlier job, can also be given here instead of a map.");
 	joboptions["fn_ref"].multiple_files = true;
+	joboptions["do_auto_mask"] = JobOption("Use automatic masks?", false, "If set to Yes (and no reference mask is given), then once the resolution of a class is better than the value below, \
+its reference is masked at every iteration with a mask made automatically from the reference itself, as trueFSC in helicon: \
+low-pass filtered, binarised at Otsu's threshold, the regions that hold its brightest voxels kept, and a raised-cosine soft edge of 3 times the resolution of the class added. \
+The automatic mask is applied inside the spherical mask of the mask diameter. Each iteration writes them as _itNNN_classNNN_automask.mrc.");
+	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", 12, 3, 30, 1, "Spherical masks are used until the resolution is better than this (in Angstroms); from then on the automatic masks.");
 	joboptions["fn_mask"] = JobOption("Reference mask (optional):", LABEL_MASK_CPIPE, 1, "", "Image Files (*.{spi,vol,msk,mrc})", "\
 If no mask is provided, a soft spherical mask based on the particle diameter will be used.\n\
 \n\
@@ -5342,6 +5347,16 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 		inputNodes.push_back(node);
 	}
 
+	if (joboptions["do_auto_mask"].getBoolean())
+	{
+		if (joboptions["fn_mask"].getString().length() > 0)
+		{
+			error_message = "ERROR: give either a reference mask or use automatic masks, not both.";
+			return false;
+		}
+		command += " --auto_mask --auto_mask_start_res " + joboptions["auto_mask_start_res"].getString();
+	}
+
 	// Sampling
 	if (!joboptions["dont_skip_align"].getBoolean())
 	{
@@ -5519,6 +5534,13 @@ If they are the same, the program will automatically add a '_ctX' to the output 
 with X being the iteration from which one continues the previous run.");
 	joboptions["fn_ref"] = JobOption("Reference map:", LABEL_MAP_CPIPE, 1, "", "Image Files (*.{spi,vol,mrc})", "A 3D map in MRC/Spider format. \
 	Make sure this map has the same dimensions and the same pixel size as your input images, or specify that one can resize the reference if needed.");
+	joboptions["do_auto_mask"] = JobOption("Use automatic masks?", false, "If set to Yes (and no reference mask is given), then once the resolution is better than the value below, \
+the two half-maps are masked at every iteration with one mask made automatically from them, as trueFSC in helicon: \
+their average is low-pass filtered where their FSC drops below 0.8, binarised at Otsu's threshold, the regions that hold its brightest voxels are kept, \
+and a raised-cosine soft edge is added whose width best separates signal from noise in the FSCs of the masked half-maps and of the masked phase-randomised half-maps. \
+The automatic mask is applied inside the spherical mask of the mask diameter. With solvent-flattened FSCs (Optimisation tab), the FSC of the next iteration is corrected for this mask. \
+Each iteration writes it as _itNNN_automask.mrc. Searching for the soft edge takes a few Fourier transforms of the box per step on the first MPI follower.");
+	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", 12, 3, 30, 1, "A spherical mask is used until the resolution is better than this (in Angstroms); from then on the automatic mask.");
 	joboptions["fn_mask"] = JobOption("Reference mask (optional):", LABEL_MASK_CPIPE, 1, "", "Image Files (*.{spi,vol,msk,mrc})", "\
 If no mask is provided, a soft spherical mask based on the particle diameter will be used.\n\
 \n\
@@ -5576,7 +5598,7 @@ This will remove noise and therefore increase sensitivity in the alignment and c
 between the Fourier components that are not modelled. When set to No, then the solvent area is filled with random noise, which prevents introducing correlations.\
 High-resolution refinements (e.g. ribosomes or other large complexes in 3D auto-refine) tend to work better when filling the solvent area with random noise (i.e. setting this option to No), refinements of smaller complexes and most classifications go better when using zeros (i.e. setting this option to Yes).");
 	joboptions["do_solvent_fsc"] = JobOption("Use solvent-flattened FSCs?", false, "If set to Yes, then instead of using unmasked maps to calculate the gold-standard FSCs during refinement, \
-masked half-maps are used and a post-processing-like correction of the FSC curves (with phase-randomisation) is performed every iteration. This only works when a reference mask is provided on the I/O tab. \
+masked half-maps are used and a post-processing-like correction of the FSC curves (with phase-randomisation) is performed every iteration. This only works when a reference mask is provided on the I/O tab, or with automatic masks. \
 This may yield higher-resolution maps, especially when the mask contains only a relatively small volume inside the box.");
 	joboptions["do_blush"] = JobOption("Use Blush regularisation?", false, "If set to Yes, relion_refine will use a neural network to perform regularisation by denoising at every iteration, instead of the standard smoothness regularisation.");
     joboptions["blush_version"] = JobOption("Blush network version:", job_blush_version_options, 0, "Which version of the Blush network to use. v1.0 is the original version published in Kiamnius et al (2024) Nature Methods; amy-v1.0 is a newer version that was trained specifically for use with amyloid filaments.");
@@ -5897,6 +5919,18 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 
 		Node node(joboptions["fn_mask"].getString(), joboptions["fn_mask"].node_type);
 		inputNodes.push_back(node);
+	}
+
+	if (joboptions["do_auto_mask"].getBoolean())
+	{
+		if (joboptions["fn_mask"].getString().length() > 0)
+		{
+			error_message = "ERROR: give either a reference mask or use automatic masks, not both.";
+			return false;
+		}
+		command += " --auto_mask --auto_mask_start_res " + joboptions["auto_mask_start_res"].getString();
+		if (joboptions["do_solvent_fsc"].getBoolean())
+			command += " --solvent_correct_fsc ";
 	}
 
 	if (!is_continue)
@@ -6355,6 +6389,16 @@ void RelionJob::initialiseMaskcreateJob()
 
 	joboptions["fn_in"] = JobOption("Input 3D map:", LABEL_MAP_CPIPE, 1, "", "MRC map files (*.mrc)", "Provide an input MRC map from which to start binarizing the map.");
 
+	joboptions["do_auto"] = JobOption("Make the mask automatically?", false, "If set to Yes, the mask is made as in trueFSC of helicon: the map is low-pass filtered, \
+binarised at Otsu's threshold (or at the threshold that encloses the mass below), the regions that hold its brightest voxels are kept, and the soft edge is added. \
+The initial binarisation threshold on the Mask tab is not used; the extension and the soft edge are. \
+With a second half-map (the input map being the first), the mask is made from their average, the low-pass filter is where their FSC drops below 0.8 \
+(the low-pass filter on the Mask tab is not used), and the soft edge can be optimised.");
+	joboptions["fn_in2"] = JobOption("Second half-map (optional):", LABEL_MAP_CPIPE, 1, "", "MRC map files (*.mrc)", "With automatic masks: the other unfiltered half-map, if the input map is one (e.g. run_half1_class001_unfil.mrc and run_half2_class001_unfil.mrc of a 3D auto-refine job).");
+	joboptions["auto_mass"] = JobOption("Mass inside the mask (kDa):", 0, 0, 5000, 50, "With automatic masks: binarise at the threshold that encloses this mass (at 0.81 Da/A^3). If 0, Otsu's threshold is used.");
+	joboptions["auto_soft_optimise"] = JobOption("Optimise the soft edge?", true, "With automatic masks from two half-maps: if set to Yes, the soft edge is the width that best separates signal from noise \
+in the FSCs of the masked half-maps and of the masked phase-randomised half-maps, and the soft-edge width on the Mask tab is not used.");
+
 	joboptions["lowpass_filter"] = JobOption("Lowpass filter map (A)", 15, 10, 100, 5, "Lowpass filter that will be applied to the input map, prior to binarization. To calculate solvent masks, a lowpass filter of 15-20A may work well.");
 	joboptions["angpix"] = JobOption("Pixel size (A)", -1, 0.3, 5, 0.1, "Provide the pixel size of the input map in Angstroms to calculate the low-pass filter. This value is also used in the output image header.");
 
@@ -6391,7 +6435,24 @@ bool RelionJob::getCommandsMaskcreateJob(std::string &outputname, std::vector<st
 	Node node2(outputname + "mask.mrc", LABEL_MASK3D_MASK);
 	outputNodes.push_back(node2);
 
-	if (joboptions["lowpass_filter"].getNumber(error_message) > 0)
+	const bool do_auto = joboptions["do_auto"].getBoolean();
+	const bool has_half2 = do_auto && joboptions["fn_in2"].getString() != "";
+	if (do_auto)
+	{
+		command += " --auto";
+		if (has_half2)
+		{
+			command += " --i2 " + joboptions["fn_in2"].getString();
+			Node node3(joboptions["fn_in2"].getString(), joboptions["fn_in2"].node_type);
+			inputNodes.push_back(node3);
+		}
+		if (joboptions["auto_mass"].getNumber(error_message) > 0)
+			command += " --auto_mass " + joboptions["auto_mass"].getString();
+		if (error_message != "") return false;
+	}
+
+	// With two half-maps the low-pass filter comes from their FSC
+	if (!has_half2 && joboptions["lowpass_filter"].getNumber(error_message) > 0)
 	{
 		command += " --lowpass " + joboptions["lowpass_filter"].getString();
 	}
@@ -6403,9 +6464,11 @@ bool RelionJob::getCommandsMaskcreateJob(std::string &outputname, std::vector<st
 	}
 	if (error_message != "") return false;
 
-	command += " --ini_threshold " + joboptions["inimask_threshold"].getString();
+	if (!do_auto)
+		command += " --ini_threshold " + joboptions["inimask_threshold"].getString();
 	command += " --extend_inimask " + joboptions["extend_inimask"].getString();
-	command += " --width_soft_edge " + joboptions["width_mask_edge"].getString();
+	if (!(has_half2 && joboptions["auto_soft_optimise"].getBoolean()))
+		command += " --width_soft_edge " + joboptions["width_mask_edge"].getString();
 
 	if (joboptions["do_helix"].getBoolean())
 	{

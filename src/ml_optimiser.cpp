@@ -309,6 +309,21 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     if (fnt != "OLD")
         fn_mask2 = fnt;
 
+    // Automatic masks: switched on or off, or their settings changed
+    if (parser.checkOption("--auto_mask", "Mask the references with automatic masks made from them", "OLD"))
+        do_auto_mask = true;
+    if (parser.checkOption("--dont_auto_mask", "Stop masking the references with automatic masks", "OLD"))
+        do_auto_mask = false;
+    fnt = parser.getOption("--auto_mask_start_res", "Make automatic masks only once the resolution is better than this (in A)", "OLD");
+    if (fnt != "OLD")
+        auto_mask_start_res = textToFloat(fnt);
+    fnt = parser.getOption("--auto_mask_soft", "Width of the soft edge of the automatic masks (in A)", "OLD");
+    if (fnt != "OLD")
+        auto_mask_soft_edge = textToFloat(fnt);
+    fnt = parser.getOption("--auto_mask_mass", "Binarise the automatic masks at the threshold that encloses this mass (in kDa)", "OLD");
+    if (fnt != "OLD")
+        auto_mask_mass = textToFloat(fnt);
+
     // These are still experimental; so not in the optimiser.star yet.
     fn_lowpass_mask = parser.getOption("--lowpass_mask", "User-provided mask for low-pass filtering", "None");
     lowpass = textToFloat(parser.getOption("--lowpass", "User-provided cutoff for region specified above", "0"));
@@ -814,6 +829,10 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     do_solvent = parser.checkOption("--flatten_solvent", "Perform masking on the references as well?");
     fn_mask = parser.getOption("--solvent_mask", "User-provided mask for the references (default is to use spherical mask with particle_diameter)", "None");
     fn_mask2 = parser.getOption("--solvent_mask2", "User-provided secondary mask (with its own average density)", "None");
+    do_auto_mask = parser.checkOption("--auto_mask", "Mask the 3D references at every iteration with masks made from them automatically, as trueFSC in helicon: low-pass filtered, thresholded (Otsu), the regions with the brightest voxels kept and a soft edge added (in auto-refinement made from the two half-maps, with the soft edge that best separates signal from noise). Needs --flatten_solvent; not with --solvent_mask");
+    auto_mask_start_res = textToFloat(parser.getOption("--auto_mask_start_res", "Make the automatic masks only once the resolution is better than this (in A); spherical masks until then", "12"));
+    auto_mask_soft_edge = textToFloat(parser.getOption("--auto_mask_soft", "Width of the soft edge of the automatic masks (in A). Default: optimised from the half-maps in auto-refinement, 3 times the resolution of the class in classification", "-1"));
+    auto_mask_mass = textToFloat(parser.getOption("--auto_mask_mass", "Binarise the automatic masks at the threshold that encloses this mass (in kDa) instead of at Otsu's threshold", "-1"));
     fn_lowpass_mask = parser.getOption("--lowpass_mask", "User-provided mask for low-pass filtering", "None");
     lowpass = textToFloat(parser.getOption("--lowpass", "User-provided cutoff for region specified above", "0"));
     fn_tau = parser.getOption("--tau", "STAR file with input tau2-spectrum (to be kept constant)", "None");
@@ -1494,6 +1513,14 @@ void MlOptimiser::read(FileName fn_in, int rank, bool do_prevent_preread)
         fn_body_masks = "None";
     if (!MD.getValue(EMDL_OPTIMISER_DO_SOLVENT_FSC, do_phase_random_fsc))
         do_phase_random_fsc = false;
+    if (!MD.getValue(EMDL_OPTIMISER_AUTO_MASK, do_auto_mask))
+        do_auto_mask = false;
+    if (!MD.getValue(EMDL_OPTIMISER_AUTO_MASK_START_RES, auto_mask_start_res))
+        auto_mask_start_res = 12.;
+    if (!MD.getValue(EMDL_OPTIMISER_AUTO_MASK_SOFT_EDGE, auto_mask_soft_edge))
+        auto_mask_soft_edge = -1.;
+    if (!MD.getValue(EMDL_OPTIMISER_AUTO_MASK_MASS, auto_mask_mass))
+        auto_mask_mass = -1.;
     if (!MD.getValue(EMDL_OPTIMISER_FAST_SUBSETS, do_fast_subsets))
         do_fast_subsets = false;
     if (!MD.getValue(EMDL_OPTIMISER_DO_EXTERNAL_RECONSTRUCT, do_external_reconstruct))
@@ -1687,6 +1714,10 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
         MD.setValue(EMDL_OPTIMISER_DO_ZERO_MASK, do_zero_mask);
         MD.setValue(EMDL_OPTIMISER_DO_SOLVENT_FLATTEN, do_solvent);
         MD.setValue(EMDL_OPTIMISER_DO_SOLVENT_FSC, do_phase_random_fsc);
+        MD.setValue(EMDL_OPTIMISER_AUTO_MASK, do_auto_mask);
+        MD.setValue(EMDL_OPTIMISER_AUTO_MASK_START_RES, auto_mask_start_res);
+        MD.setValue(EMDL_OPTIMISER_AUTO_MASK_SOFT_EDGE, auto_mask_soft_edge);
+        MD.setValue(EMDL_OPTIMISER_AUTO_MASK_MASS, auto_mask_mass);
         MD.setValue(EMDL_OPTIMISER_SOLVENT_MASK_NAME, fn_mask);
         MD.setValue(EMDL_OPTIMISER_SOLVENT_MASK2_NAME, fn_mask2);
         MD.setValue(EMDL_BODY_STAR_FILE, fn_body_masks);
@@ -2919,6 +2950,20 @@ void MlOptimiser::initialiseGeneral(int rank)
     // Check mask angpix, boxsize and [0,1] compliance right away.
     if (fn_mask != "None") checkMask(fn_mask, 1, rank);
     if (fn_mask2 != "None") checkMask(fn_mask2, 2, rank);
+
+    if (do_auto_mask)
+    {
+        // Multi-body refinement masks each body with its own mask (also when it continues an auto-masked refinement)
+        if (mymodel.nr_bodies > 1 || do_initialise_bodies)
+            do_auto_mask = false;
+        else if (mymodel.ref_dim != 3)
+            REPORT_ERROR("ERROR: --auto_mask is only for 3D references (3D classification and auto-refinement)");
+        else if (fn_mask != "None")
+            REPORT_ERROR("ERROR: give either a --solvent_mask or --auto_mask, not both (--dont_auto_mask switches automatic masks off in a continuation)");
+        else if (!do_solvent)
+            REPORT_ERROR("ERROR: --auto_mask needs --flatten_solvent");
+        auto_masks.resize(mymodel.nr_classes);
+    }
 
     // Write out unmasked 2D class averages
     do_write_unmasked_refs = (mymodel.ref_dim == 2 && !gradient_refine);
@@ -4642,6 +4687,8 @@ void MlOptimiser::iterate()
 #endif
         // Apply masks to the reference images
         // At the last iteration, do not mask the map for validation purposes
+        if (do_auto_mask && do_solvent && !has_converged)
+            calculateAutoMasks();
         if (do_solvent && !has_converged)
             solventFlatten();
 
@@ -7428,6 +7475,10 @@ void MlOptimiser::solventFlatten()
         // Then apply the expanded solvent mask to the map
         mymodel.Iref[iclass] *= Isolvent(); // this is the tight mask
 
+        // And the automatic mask, inside the spherical one
+        if (iclass < (int)auto_masks.size() && auto_masks[iclass].sameShape(mymodel.Iref[iclass], true))
+            mymodel.Iref[iclass] *= auto_masks[iclass];
+
         if (fn_lowpass_mask != "None")
             mymodel.Iref[iclass] += Itmp;
 
@@ -7442,6 +7493,93 @@ void MlOptimiser::solventFlatten()
     std::cerr << "Leaving MlOptimiser::solventFlatten" << std::endl;
 #endif
 
+}
+
+bool MlOptimiser::autoMaskThisIteration() const
+{
+    return do_auto_mask && mymodel.ref_dim == 3 && mymodel.nr_bodies == 1 &&
+           mymodel.current_resolution > 0. && 1. / mymodel.current_resolution <= auto_mask_start_res;
+}
+
+bool MlOptimiser::autoMaskClassResolution(int iclass, RFLOAT &resolution, RFLOAT &lowpass) const
+{
+    // The FSC between half-maps that goes with the class's SSNR (data_vs_prior): the SSNR of the
+    // full map gives its FSC with the truth, SSNR / (1 + SSNR), and the FSC between half-maps is
+    // FSC / (2 - FSC) of that, i.e. SSNR / (2 + SSNR)
+    const MultidimArray<RFLOAT> &ssnr = mymodel.data_vs_prior_class[iclass];
+    MultidimArray<RFLOAT> fsc;
+    fsc.initZeros(XSIZE(ssnr));
+    FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY1D(ssnr)
+    {
+        const RFLOAT d = XMIPP_MAX(0., DIRECT_A1D_ELEM(ssnr, i));
+        DIRECT_A1D_ELEM(fsc, i) = d / (2. + d);
+    }
+    // The lowest frequency always has signal
+    if (XSIZE(fsc) > 0)
+        DIRECT_A1D_ELEM(fsc, 0) = 1.;
+
+    resolution = autoMaskResolutionAtFsc(fsc, 0.143, mymodel.ori_size, mymodel.pixel_size);
+    if (resolution < 0.)
+        resolution = 2. * mymodel.pixel_size;
+    lowpass = autoMaskResolutionAtFsc(fsc, 0.8, mymodel.ori_size, mymodel.pixel_size);
+    if (lowpass < 0.)
+        lowpass = 2. * mymodel.pixel_size;
+    return mymodel.pdf_class[iclass] > 0. && resolution <= auto_mask_start_res;
+}
+
+void MlOptimiser::calculateAutoMaskOfClass(int iclass, RFLOAT resolution, RFLOAT lowpass, AutoMaskReport &report)
+{
+    AutoMaskOptions opt;
+    opt.lowpass = lowpass;
+    opt.mass = auto_mask_mass;
+    opt.soft_edge = (auto_mask_soft_edge >= 0.) ? auto_mask_soft_edge / mymodel.pixel_size : -1.;
+    if ((int)auto_masks.size() != mymodel.nr_classes)
+        auto_masks.resize(mymodel.nr_classes);
+    autoMaskFromMap(mymodel.Iref[iclass], mymodel.pixel_size, resolution, opt, auto_masks[iclass], &report, nr_threads);
+}
+
+void MlOptimiser::printAutoMaskReport(int iclass, const AutoMaskReport &report) const
+{
+    std::cout << " Auto mask";
+    if (mymodel.nr_classes > 1)
+        std::cout << " of class " << iclass + 1;
+    std::cout << ": low-pass " << ((report.lowpass > 0.) ? floatToString(report.lowpass) + " A" : std::string("none"))
+              << ", threshold " << report.threshold << ", " << ROUND(report.mass) << " kDa inside, soft edge "
+              << report.soft_edge * mymodel.pixel_size << " A" << (report.soft_edge_optimised ? " (optimised)" : "")
+              << " (resolution " << report.resolution << " A)" << std::endl;
+}
+
+void MlOptimiser::writeAutoMask(int iclass)
+{
+    if (iclass >= (int)auto_masks.size() || MULTIDIM_SIZE(auto_masks[iclass]) == 0)
+        return;
+    FileName fn_mask_out;
+    fn_mask_out.compose(fn_out + "_it", iter, "", 3);
+    if (mymodel.nr_classes > 1)
+        fn_mask_out.compose(fn_mask_out + "_class", iclass + 1, "", 3);
+    fn_mask_out += "_automask.mrc";
+    Image<RFLOAT> Imask;
+    Imask() = auto_masks[iclass];
+    Imask.setStatisticsInHeader();
+    Imask.setSamplingRateInHeader(mymodel.pixel_size);
+    Imask.write(fn_mask_out);
+}
+
+void MlOptimiser::calculateAutoMasks()
+{
+    if (!autoMaskThisIteration())
+        return;
+    for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+    {
+        RFLOAT resolution, lowpass;
+        if (!autoMaskClassResolution(iclass, resolution, lowpass))
+            continue;
+        AutoMaskReport report;
+        calculateAutoMaskOfClass(iclass, resolution, lowpass, report);
+        if (verb > 0)
+            printAutoMaskReport(iclass, report);
+        writeAutoMask(iclass);
+    }
 }
 
 void MlOptimiser::updateCurrentResolution()
