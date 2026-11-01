@@ -245,6 +245,7 @@ void GuiEntry::setValue(std::string _value)
 {
 	joboption.value = _value;
 	inp->value(_value.c_str());
+	setting_value = true;
 
 	// Also update menu or slider if necessary
 	if (menu != NULL)
@@ -263,6 +264,7 @@ void GuiEntry::setValue(std::string _value)
 			else menu->picked(&menu->menu()[0]);
 		}
 	}
+	setting_value = false;
 	if (slider != NULL)
 	{
 		if (_value.substr(0,2) != "$$")
@@ -289,6 +291,8 @@ void GuiEntry::deactivate(bool do_deactivate)
 			browse->deactivate();
 		if (add_button)
 			add_button->deactivate();
+		if (extra)
+			extra->deactivate();
 		if (menu)
 			menu->deactivate();
 		if (slider)
@@ -304,6 +308,8 @@ void GuiEntry::deactivate(bool do_deactivate)
 			browse->activate();
 		if (add_button)
 			add_button->activate();
+		if (extra)
+			extra->activate();
 		if (menu)
 			menu->activate();
 		if (slider)
@@ -465,6 +471,8 @@ void GuiEntry::cb_browse_node_i(bool append) {
 void GuiEntry::cb_menu(Fl_Widget* o, void* v) {
 	GuiEntry* T=(GuiEntry*)v;
 	T->cb_menu_i();
+	if (T->on_pick && !T->setting_value)
+		T->on_pick();
 }
 
 
@@ -487,7 +495,7 @@ void GuiEntry::cb_menu_i()
 			if (myval.substr(0,2) == "$$")
 				my_deactivate_group->activate();
 			else if ( actually_activate && (strcmp(inp->value(), "Yes") == 0) ||
-				!actually_activate && (strcmp(inp->value(), "No") == 0 || strcmp(inp->value(), "Off") == 0))
+				!actually_activate && (strcmp(inp->value(), "No") == 0 || strcmp(inp->value(), "Off") == 0 || strcmp(inp->value(), "Helical types") == 0))
 				my_deactivate_group->deactivate();
 			else
 				my_deactivate_group->activate();

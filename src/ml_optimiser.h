@@ -723,8 +723,9 @@ public:
 	bool helical_context_warm;
 	int helical_context_types_max;     // > nr_types: choose the number of types by cross-validation (once)
 	RFLOAT helical_context_types_tol;  // ... the fewest types within this (nats per segment) of the best
+	RFLOAT helical_context_types_agree; // > 0: instead the most types whose folds agree to this (adjusted Rand index)
 	int helical_context_types_min;     // lower bound of the search (the initial --helical_context_types)
-	int helical_context_types_every;   // re-select every this many iterations (near the current number) and at the last iteration (full range)
+	int helical_context_types_every;   // re-select every this many iterations (near the current number)
 	int helical_context_types_last_iter; // iteration of the last selection (-1: none yet)
 	bool helical_context_types_selected;
 	RFLOAT helical_context_class_min_frac; // per-type class files: classes with at least this share of their segments in the type
@@ -1063,6 +1064,7 @@ public:
             do_helical_context(0),
             helical_context_types_max(-1),
             helical_context_types_tol(0.01),
+            helical_context_types_agree(0.9),
             helical_context_types_min(4),
             helical_context_types_every(5),
             helical_context_types_last_iter(-1),

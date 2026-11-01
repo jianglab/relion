@@ -20,7 +20,7 @@ public:
 	IOParser parser;
 	FileName fn_in, fn_out;
 	int K, nr_iter, types_max, nr_folds;
-	RFLOAT diameter, max_prob, types_tol;
+	RFLOAT diameter, max_prob, types_tol, types_agree;
 	FileName fn_classes;
 	RFLOAT class_min_frac;
 	long int class_min_segs;
@@ -37,6 +37,7 @@ public:
 		ctx.nr_types = textToInteger(parser.getOption("--types", "Number of helical types (one more if there are junk filaments)", "4"));
 		types_max = textToInteger(parser.getOption("--types_max", "Choose the number of types between --types and this by held-out log-likelihood (cross-validation over filaments; <= 0: no)", "-1"));
 		types_tol = textToFloat(parser.getOption("--types_tol", "With --types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
+		types_agree = textToFloat(parser.getOption("--types_agree", "With --types_max: use the most types whose segment types, learnt from separate folds of the filaments, agree to at least this (adjusted Rand index); 0: by log-likelihood (--types_tol)", "0.9"));
 		nr_folds = textToInteger(parser.getOption("--folds", "Number of cross-validation folds for --types_max", "3"));
 		fn_classes = parser.getOption("--classes", "Class averages (default: the _classes.mrcs next to the input _data.star)", "");
 		class_min_frac = textToFloat(parser.getOption("--class_min_frac", "Files per type: include a class if at least this fraction of its segments is of the type", "0.1"));
@@ -99,7 +100,7 @@ public:
 			ctx.storeLogLik(i, ll);
 		}
 		if (types_max > ctx.nr_types)
-			ctx.selectNrTypes(ctx.nr_types, types_max, nr_folds, types_tol);
+			ctx.selectNrTypes(ctx.nr_types, types_max, nr_folds, types_tol, types_agree);
 		ctx.update();
 		{
 			std::ofstream fa((fn_out + "_q.txt").c_str());

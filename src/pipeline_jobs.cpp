@@ -100,13 +100,15 @@ static bool containsCommandLineOption(const std::string &arguments, const std::s
 }
 
 // Filament context fields shared by Class2D and Class3D; 'what' completes the sentence "... they share the polymorph, and <what>."
-static void addFilamentContextOptions(std::map<std::string, JobOption> &joboptions_, const char *what)
+static void addFilamentContextOptions(std::map<std::string, JobOption> &joboptions_, const char *what, bool class2d = false)
 {
-	joboptions_["filctx_mode"] = JobOption("Filament context:", job_filament_context_options, 0, "The segments of one filament are not independent: they share the polymorph, and " + std::string(what) + ". \
+	joboptions_["filctx_mode"] = JobOption("Filament context:", class2d ? job_filament_context_options_2d : job_filament_context_options, 0, "The segments of one filament are not independent: they share the polymorph, and " + std::string(what) + ". \
 If set to anything but Off, each segment gets a prior over the classes from the other segments of its filament, computed from their class likelihoods of the previous iteration (the segment's own data is never counted in its prior). \
 'Markov chain' (along the filament) learns, from the data, how likely the class of the next segment is given the class of this one (use it when the classes follow each other along the filament). \
 'Per filament' (one class distribution per filament) lets all segments of a filament share one class distribution (use it when every filament is of one kind). \
-Needs several classes and particles with rlnHelicalTubeID and rlnMicrographName (and rlnHelicalTrackLengthAngst, unless the likelihood power is given below), as written by helical extraction. Off is the default; the RELION_FILAMENT_CONTEXT environment variable does not apply to jobs started from this window.");
+Needs several classes and particles with rlnHelicalTubeID and rlnMicrographName (and rlnHelicalTrackLengthAngst, unless the likelihood power is given below), as written by helical extraction. " +
+	std::string(class2d ? "'Helical types' (needs the EM algorithm on the Optimisation tab) groups the classes into helical types (the views of one kind of filament) and uses the types of the other segments of the filament as the prior; it chooses the number of types (2 to 6) as the most that are found again from separate thirds of the filaments, and writes the type of each segment (rlnHelicalType) and one particle and class file per type (run_itNNN_typeK_*). It needs rlnHelicalTrackLengthAngst; the parameters below do not apply to it. Setting 'Classify 2D helical segments?' to Yes picks it, together with the EM algorithm." : "Off is the default.") +
+	" The RELION_FILAMENT_CONTEXT environment variable does not apply to jobs started from this window.");
 	joboptions_["filctx_temper"] = JobOption("Likelihood power:", std::string("-1"), "Overlapping segments share pixels, so their likelihoods repeat the same noise. Each likelihood is raised to this power before it is used for the prior of its neighbours, so that every pixel of the filament counts about once. \
 A negative value (the default) uses the distance between consecutive segments divided by the box length, which needs rlnHelicalTrackLengthAngst in the particle STAR file.");
 	joboptions_["filctx_gap"] = JobOption("Gap (segments):", 1, 1, 20, 1, "Segments closer than this many steps along the filament are left out of a segment's prior. 1 leaves out only the segment itself. Larger values make the prior less dependent on the immediate neighbours, which share most of their pixels with the segment.");
@@ -118,6 +120,21 @@ A negative value (the default) uses the distance between consecutive segments di
 static bool addFilamentContextCommand(std::map<std::string, JobOption> &joboptions_, std::string &command, std::string &error_message)
 {
 	const std::string choice = joboptions_["filctx_mode"].getString();
+	if (choice == job_filament_context_options_2d[3])
+	{
+		if (!joboptions_["do_em"].getBoolean())
+		{
+			error_message = "ERROR: Filament context 'Helical types' needs the EM algorithm (Optimisation tab); with VDAM the types come out wrong.";
+			return false;
+		}
+		// more types than classes cannot be told apart
+		const int K = (int)joboptions_["nr_classes"].getNumber(error_message);
+		if (error_message != "") return false;
+		command += " --filament_context off";
+		if (K >= 2)
+			command += " --helical_context --helical_context_types 2 --helical_context_types_max " + integerToString(std::min(6, K));
+		return true;
+	}
 	if (choice != job_filament_context_options[1] && choice != job_filament_context_options[2])
 	{
 		command += " --filament_context off";
@@ -4248,8 +4265,8 @@ an additional 5 iterations (for example with a finer angular sampling), then the
 
 	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", -1, 0, 1000, 10, "The experimental images will be masked with a soft \
 circular mask with this diameter. Make sure this radius is not set too small because that may mask away part of the signal! \
-The default, -1, uses the largest mask that fits the box: the box size minus the soft edge (90% of the box for 3D helical \
-refinement), rounded down to a whole Angstrom; the output says which. A mask a little wider than the particle keeps out more noise. \
+The default, -1, uses the largest mask that fits the box: the box size minus the soft edge (90% of the box for helical \
+segments), rounded down to a whole Angstrom; the output says which. A mask a little wider than the particle keeps out more noise. \
 If set to a value larger than the image size no masking will be performed.\n\n\
 The same diameter will also be used for a spherical mask of the reference structures if no user-provided mask is specified.\n\n\
 For rectangular particles this diameter applies to the box width, unless the masks are set to follow the box length (Class2D, Class3D and Refine3D).");
@@ -4297,7 +4314,7 @@ A range of 15 degrees is the same as sigma = 5 degrees. Note that the ranges of 
 	joboptions["do_restrict_xoff"] = JobOption("Restrict helical offsets to rise:", true, "Set to Yes if you want to restrict the translational offsets along the helices to the rise of the helix given below. Set to No to allow free (conventional) translational offsets.");
 	joboptions["helical_rise"] = JobOption("Helical rise (A):", 4.75, -1, 100, 1, "The helical rise (in Angstroms). Translational offsets along the helical axis will be limited from -rise/2 to +rise/2, with a flat prior.");
 
-	addFilamentContextOptions(joboptions, "along a twisted filament the 2D classes (views) follow each other in a fixed order");
+	addFilamentContextOptions(joboptions, "along a twisted filament the 2D classes (views) follow each other in a fixed order", true);
 
 
 	joboptions["nr_pool"] = JobOption("Number of pooled particles:", 3, 1, 16, 1, "Particles are processed in individual batches by MPI followers. During each batch, a stack of particle images is only opened and closed once to improve disk access times. \

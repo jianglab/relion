@@ -1915,6 +1915,18 @@ void JobWindow::initialiseClass2DWindow()
 	group4->end();
 	guientries["do_helix"].cb_menu_i(); // to make default effective
 
+	// Helical segments default to EM with helical types (with VDAM the types come out wrong); back to VDAM if
+	// both are still as set here
+	guientries["do_helix"].on_pick = [this]()
+	{
+		const bool helix = std::string(guientries["do_helix"].inp->value()) == "Yes";
+		if (!helix && std::string(guientries["filctx_mode"].inp->value()) != job_filament_context_options_2d[3])
+			return;
+		guientries["do_em"].setValue(helix ? "Yes" : "No");
+		guientries["do_grad"].setValue(helix ? "No" : "Yes");
+		guientries["filctx_mode"].setValue(helix ? job_filament_context_options_2d[3] : job_filament_context_options[0]);
+	};
+
 	tab5->end();
 
 	tab6->begin();

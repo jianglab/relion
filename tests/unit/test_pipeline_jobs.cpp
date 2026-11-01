@@ -550,10 +550,35 @@ TEST_CASE("Class2D: filament context options reach the command line",
 
 	job.joboptions["do_helix"].setString("Yes");
 
-	SECTION("helical, default: off is emitted explicitly")
+	SECTION("helical types (EM only), 2 up to 6 but not more than the classes")
 	{
+		job.joboptions["filctx_mode"].setString(job_filament_context_options_2d[3]);
+		job.joboptions["do_em"].setString("No");
+		job.joboptions["do_grad"].setString("Yes");
+		REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(error_message.find("EM algorithm") != std::string::npos);
+		error_message = "";
+		job.joboptions["do_em"].setString("Yes");
+		job.joboptions["do_grad"].setString("No");
+		job.joboptions["nr_classes"].setString("50");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context off --helical_context --helical_context_types 2 --helical_context_types_max 6") != std::string::npos);
+		REQUIRE(commands[0].find("--filament_temper") == std::string::npos);
+		job.joboptions["nr_classes"].setString("4");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --helical_context_types_max 4") != std::string::npos);
+		job.joboptions["nr_classes"].setString("1");
 		REQUIRE(generateCommands(job, commands, final_command, error_message));
 		REQUIRE(commands[0].find(" --filament_context off") != std::string::npos);
+		REQUIRE(commands[0].find("--helical_context") == std::string::npos);
+	}
+
+	SECTION("helical, default: off is emitted explicitly, no helical types")
+	{
+		REQUIRE(job.joboptions["filctx_mode"].getString() == job_filament_context_options[0]);
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context off") != std::string::npos);
+		REQUIRE(commands[0].find("--helical_context") == std::string::npos);
 		REQUIRE(commands[0].find("--filament_temper") == std::string::npos);
 	}
 

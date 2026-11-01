@@ -135,10 +135,11 @@ public:
 	// Learn the model, compute posteriors, priors, types and sections
 	void update();
 
-	// Choose the number of types (tmin..tmax) by the log-likelihood of held-out filaments (nfold-fold
-	// cross-validation over the filaments): the smallest number within tol (nats per segment) of the best;
-	// sets nr_types and returns it
-	int selectNrTypes(int tmin, int tmax, int nfold = 3, RFLOAT tol = 0.01);
+	// Choose the number of types (tmin..tmax) by nfold-fold cross-validation over the filaments: with agree_min > 0
+	// the most types whose folds agree on the segment types (adjusted Rand index) to agree_min (none: the best
+	// agreement, or with keep the current nr_types), else the smallest number within tol (nats per segment) of the
+	// best held-out log-likelihood; sets nr_types and returns it
+	int selectNrTypes(int tmin, int tmax, int nfold = 3, RFLOAT tol = 0.01, RFLOAT agree_min = 0.9, bool keep = false);
 
 	// Prior factor for class k of segment i (1 before the first update)
 	inline RFLOAT getPrior(long int i, int k) const

@@ -819,6 +819,11 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 			MDclass.setValue(EMDL_MLMODEL_HELICAL_RISE, helical_rise[iclass]);
 			MDclass.setValue(EMDL_MLMODEL_HELICAL_TWIST, helical_twist[iclass]);
 		}
+		if ((int)helical_type_class.size() == nr_classes_bodies && (int)helical_type_class_frac.size() == nr_classes_bodies)
+		{
+			MDclass.setValue(EMDL_PARTICLE_HELICAL_TYPE, helical_type_class[iclass]);
+			MDclass.setValue(EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY, helical_type_class_frac[iclass]);
+		}
 	}
 	MDclass.write(fo);
 	class_settings.write(fo);

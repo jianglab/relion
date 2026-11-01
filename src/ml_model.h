@@ -229,6 +229,11 @@ public:
 	// Helical rise (in Angstroms)
 	std::vector<RFLOAT> helical_rise;
 
+	// With --helical_context: the type of each class (the most common type of its segments, 1-based; 0: no
+	// segments) and the fraction of its segments of that type; written to model_classes when set
+	std::vector<int> helical_type_class;
+	std::vector<RFLOAT> helical_type_class_frac;
+
 	// Per-class settings from the columns of a --ref STAR file, one entry per class; a vector is empty when
 	// its column is absent. Kept in model.star (table model_class_settings) for --continue.
 	struct ClassSettings

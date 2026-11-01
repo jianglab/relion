@@ -88,6 +88,11 @@ static const std::vector<std::string> job_filament_context_options{
     "Off", "Markov chain", "Per filament"
 };
 
+// Class2D also offers the helical types (--helical_context, EM only)
+static const std::vector<std::string> job_filament_context_options_2d{
+    "Off", "Markov chain", "Per filament", "Helical types"
+};
+
 static const std::vector<std::string> job_undefined_options{
 	"undefined"
 };

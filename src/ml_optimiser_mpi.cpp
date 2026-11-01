@@ -5486,6 +5486,11 @@ void MlOptimiserMpi::updateHelicalContextMpi()
 		node->relion_MPI_Bcast(&have, 1, MPI_INT, 0, MPI_COMM_WORLD);
 		helical_context.have_prior = (have == 1);
 		node->relion_MPI_Bcast(&helical_context.prior[0], helical_context.prior.size(), MPI_FLOAT, 0, MPI_COMM_WORLD);
+		// the class types are computed by the leader, the model is written by a follower
+		mymodel.helical_type_class.resize(mymodel.nr_classes, 0);
+		mymodel.helical_type_class_frac.resize(mymodel.nr_classes, 0.);
+		node->relion_MPI_Bcast(&mymodel.helical_type_class[0], mymodel.nr_classes, MPI_INT, 0, MPI_COMM_WORLD);
+		node->relion_MPI_Bcast(&mymodel.helical_type_class_frac[0], mymodel.nr_classes, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
 	}
 	MPI_Barrier(MPI_COMM_WORLD);
 }

@@ -516,7 +516,8 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     helical_context.nr_types = textToInteger(parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", "4"));
     helical_context_types_max = textToInteger(parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", "-1"));
     helical_context_types_tol = textToFloat(parser.getOption("--helical_context_types_tol", "With --helical_context_types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
-    helical_context_types_every = textToInteger(parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now), and at the last iteration (full range)", "5"));
+    helical_context_types_agree = textToFloat(parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", "0.9"));
+    helical_context_types_every = textToInteger(parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now)", "5"));
     helical_context_types_min = helical_context.nr_types;
     helical_context.nr_bw_iter = textToInteger(parser.getOption("--helical_context_bw_iter", "Baum-Welch iterations of the filament chain per iteration", "3"));
     helical_context_warm = parser.checkOption("--helical_context_warm", "Continue the filament chain model from the last iteration (default: start again from the current classes)");
@@ -1018,7 +1019,8 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     helical_context.nr_types = textToInteger(parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", "4"));
     helical_context_types_max = textToInteger(parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", "-1"));
     helical_context_types_tol = textToFloat(parser.getOption("--helical_context_types_tol", "With --helical_context_types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
-    helical_context_types_every = textToInteger(parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now), and at the last iteration (full range)", "5"));
+    helical_context_types_agree = textToFloat(parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", "0.9"));
+    helical_context_types_every = textToInteger(parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now)", "5"));
     helical_context_types_min = helical_context.nr_types;
     helical_context.nr_bw_iter = textToInteger(parser.getOption("--helical_context_bw_iter", "Baum-Welch iterations of the filament chain per iteration", "3"));
     helical_context_warm = parser.checkOption("--helical_context_warm", "Continue the filament chain model from the last iteration (default: start again from the current classes)");
@@ -2716,7 +2718,7 @@ void MlOptimiser::initialiseGeneral(int rank)
                 particle_diameter -= 2. * width_mask_edge;
             particle_diameter = floor(particle_diameter * 0.90 * mymodel.pixel_size);   // whole Angstroms
             if (verb > 0)
-                std::cout << " Mask diameter set automatically to " << particle_diameter << " A: 90% of the box for 3D helical reconstruction" << std::endl;
+                std::cout << " Mask diameter set automatically to " << particle_diameter << " A: 90% of the box for helical segments" << std::endl;
         }
 
         if (ignore_helical_symmetry)
@@ -4185,6 +4187,12 @@ void MlOptimiser::initialiseHelicalContext()
 {
     if (mymodel.ref_dim != 2 || mydata.is_3D || mydata.is_tomo)
         REPORT_ERROR("ERROR: --helical_context and --helical_polarity are only implemented for 2D classification of helical segments");
+    // measured on a 3-type mix: with VDAM the types came out wrong and the run took 5-10x longer (each mini-batch sees part of the filaments)
+    if (do_helical_context && gradient_refine)
+        REPORT_ERROR("ERROR: --helical_context needs the EM algorithm (it does not work with --grad)");
+    // both turn the classes of the other segments of a filament into a prior: together they would count that evidence twice
+    if (do_helical_context && filctx_opt.mode != filctx::OFF)
+        REPORT_ERROR("ERROR: use either --helical_context or --filament_context chain/filament, not both (check RELION_FILAMENT_CONTEXT too)");
     if (do_helical_polarity)
     {
         if (!do_bimodal_psi || mymodel.sigma2_psi <= 0. || mymodel.orientational_prior_mode == NOPRIOR)
@@ -4440,12 +4448,12 @@ void MlOptimiser::updateHelicalContext()
     if (!helical_context_warm || iter + 1 < helical_context_start_iter)
         helical_context.initialised_model = false;
     // Number of types: chosen first in the iteration before the prior is used (full range), then again as the classes
-    // mature (near the current number) and at the last iteration (full range, for the output)
+    // mature (near the current number; a full-range choice at the end could still jump to a split or merge)
     if (helical_context_types_max > helical_context_types_min && iter + 1 >= helical_context_start_iter)
     {
         int tmin = helical_context_types_min, tmax = helical_context_types_max;
         bool do_select = false;
-        if (!helical_context_types_selected || iter == nr_iter)
+        if (!helical_context_types_selected)
             do_select = true;
         else if (helical_context_types_every > 0 && iter - helical_context_types_last_iter >= helical_context_types_every)
         {
@@ -4455,7 +4463,7 @@ void MlOptimiser::updateHelicalContext()
         }
         if (do_select)
         {
-            helical_context.selectNrTypes(tmin, tmax, 3, helical_context_types_tol);
+            helical_context.selectNrTypes(tmin, tmax, 3, helical_context_types_tol, helical_context_types_agree, helical_context_types_selected);
             helical_context_types_selected = true;
             helical_context_types_last_iter = iter;
         }
@@ -4480,6 +4488,23 @@ void MlOptimiser::updateHelicalContext()
     helical_context.fitPeriods(psi, psi_prior);
     double t_periods = omp_get_wtime();
     helical_context.writeLabels(mydata.MDimg, helical_context_rows, &cls);
+    // the type of each class for model_classes: the most common type of its segments
+    {
+        const int K = mymodel.nr_classes, T = helical_context.nr_types;
+        std::vector<long int> count((size_t)K * T, 0), total(K, 0);
+        for (long int i = 0; i < nr_parts; i++)
+            if (cls[i] >= 0 && cls[i] < K && helical_context.seg_type[i] >= 0 && helical_context.seg_type[i] < T)
+                count[(size_t)cls[i] * T + helical_context.seg_type[i]]++, total[cls[i]]++;
+        mymodel.helical_type_class.assign(K, 0);
+        mymodel.helical_type_class_frac.assign(K, 0.);
+        for (int k = 0; k < K; k++)
+            for (int t = 0; t < T; t++)
+                if (count[(size_t)k * T + t] > 0 && (mymodel.helical_type_class[k] == 0 || count[(size_t)k * T + t] > count[(size_t)k * T + mymodel.helical_type_class[k] - 1]))
+                {
+                    mymodel.helical_type_class[k] = t + 1;
+                    mymodel.helical_type_class_frac[k] = (RFLOAT)count[(size_t)k * T + t] / total[k];
+                }
+    }
     helical_context.writeStar(fn_out + "_it" + integerToString(iter, 3) + "_filaments.star");
     double t_write = omp_get_wtime();
 

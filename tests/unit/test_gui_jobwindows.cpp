@@ -326,7 +326,7 @@ TEST_CASE("GUI: no tab of any job window has overlapping or out-of-tab widgets",
 	}
 }
 
-TEST_CASE("GUI: Class2D filament context parameters are greyed out while Off", "[gui][layout][filament_context]")
+TEST_CASE("GUI: Class2D filament context parameters are greyed out while Off or Helical types", "[gui][layout][filament_context]")
 {
 	JobWindow window;
 	window.initialise(PROC_2DCLASS, false);
@@ -335,6 +335,7 @@ TEST_CASE("GUI: Class2D filament context parameters are greyed out while Off", "
 	for (const char *name : {"filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
 		REQUIRE(window.guientries.find(name) != window.guientries.end());
 
+	REQUIRE(std::string(window.guientries["filctx_mode"].inp->value()) == job_filament_context_options[0]);
 	REQUIRE_FALSE(window.group_filctx->active());
 
 	SECTION("loading a job that uses a mode activates them")
@@ -345,6 +346,56 @@ TEST_CASE("GUI: Class2D filament context parameters are greyed out while Off", "
 		REQUIRE(window.group_filctx->active());
 		window.guientries["filctx_mode"].setValue(job_filament_context_options[0]);
 		REQUIRE_FALSE(window.group_filctx->active());
+		window.guientries["filctx_mode"].setValue(job_filament_context_options_2d[3]);
+		REQUIRE_FALSE(window.group_filctx->active());
+	}
+}
+
+// Pick a menu item as the user does (the menu's callback), not as loading a job does (setValue)
+static void pickMenu(GuiEntry &entry, const char *item)
+{
+	const Fl_Menu_Item *p = entry.menu->find_item(item);
+	REQUIRE(p != nullptr);
+	entry.menu->picked(p);
+	GuiEntry::cb_menu(entry.menu, &entry);
+}
+
+TEST_CASE("GUI: Class2D helical segments default to EM with helical types", "[gui][filament_context]")
+{
+	JobWindow window;
+	window.initialise(PROC_2DCLASS, false);
+	auto value = [&window](const char *key) { return std::string(window.guientries[key].inp->value()); };
+	REQUIRE(value("do_em") == "No");
+	REQUIRE(value("filctx_mode") == job_filament_context_options[0]);
+
+	pickMenu(window.guientries["do_helix"], "Yes");
+	CHECK(value("do_em") == "Yes");
+	CHECK(value("do_grad") == "No");
+	CHECK(value("filctx_mode") == job_filament_context_options_2d[3]);
+
+	SECTION("back to No: VDAM and Off again")
+	{
+		pickMenu(window.guientries["do_helix"], "No");
+		CHECK(value("do_em") == "No");
+		CHECK(value("do_grad") == "Yes");
+		CHECK(value("filctx_mode") == job_filament_context_options[0]);
+	}
+	SECTION("back to No after the user chose another mode: the user's choices stay")
+	{
+		pickMenu(window.guientries["filctx_mode"], job_filament_context_options[1].c_str());
+		pickMenu(window.guientries["do_helix"], "No");
+		CHECK(value("do_em") == "Yes");
+		CHECK(value("filctx_mode") == job_filament_context_options[1]);
+	}
+	SECTION("loading a job changes nothing else")
+	{
+		window.guientries["do_helix"].setValue("No");
+		window.guientries["do_em"].setValue("No");
+		window.guientries["do_grad"].setValue("Yes");
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[0]);
+		window.guientries["do_helix"].setValue("Yes");
+		CHECK(value("do_em") == "No");
+		CHECK(value("filctx_mode") == job_filament_context_options[0]);
 	}
 }
 

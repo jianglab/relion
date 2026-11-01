@@ -224,6 +224,7 @@ public:
 
     // The "+" button after Browse (only for an entry that takes several files)
     Fl_Button* add_button;
+    Fl_Widget* extra; ///< another widget that belongs to this entry (greyed out with it), or NULL
 
     ////////////// Radio entry
 
@@ -259,6 +260,7 @@ public:
 		help = NULL;
 		browse = NULL;
 		add_button = NULL;
+		extra = NULL;
 		choice = NULL;
 		menu = NULL;
 		my_deactivate_group = NULL;
@@ -295,6 +297,9 @@ public:
     // Called whenever the value changes: typed (with cb_changed as the input's callback),
     // browsed or set
     std::function<void()> on_change;
+    // Called only when the user picks a menu item (not when a job is loaded)
+    std::function<void()> on_pick;
+    bool setting_value = false; // picked() in setValue runs the menu callback too
     static void cb_changed(Fl_Widget*, void*);
 
     /** Call-back functions for the help button

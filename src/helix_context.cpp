@@ -988,15 +988,35 @@ void HelicalContext::resetEvidence()
 	std::fill(pol_llr.begin(), pol_llr.end(), std::numeric_limits<float>::quiet_NaN());
 }
 
-int HelicalContext::selectNrTypes(int tmin, int tmax, int nfold, RFLOAT tol)
+// Adjusted Rand index of two labellings (labels >= 0; segments with a negative label in either are left out)
+static double adjustedRand(const std::vector<int> &a, const std::vector<int> &b)
 {
+	std::map<std::pair<int, int>, double> nab;
+	std::map<int, double> na, nb;
+	double n = 0.;
+	for (size_t i = 0; i < a.size(); i++)
+		if (a[i] >= 0 && b[i] >= 0)
+			nab[{a[i], b[i]}] += 1., na[a[i]] += 1., nb[b[i]] += 1., n += 1.;
+	auto pairs = [](double x) { return 0.5 * x * (x - 1.); };
+	double sab = 0., sa = 0., sb = 0.;
+	for (auto &x : nab) sab += pairs(x.second);
+	for (auto &x : na) sa += pairs(x.second);
+	for (auto &x : nb) sb += pairs(x.second);
+	const double expected = (n > 1.) ? sa * sb / pairs(n) : 0., top = 0.5 * (sa + sb);
+	return (top > expected) ? (sab - expected) / (top - expected) : 1.;
+}
+
+int HelicalContext::selectNrTypes(int tmin, int tmax, int nfold, RFLOAT tol, RFLOAT agree_min, bool keep)
+{
+	const int current = nr_types;
 	const int nch = chains.size();
 	int verb_save = verb;
 	verb = 0;
-	std::vector<double> score(tmax + 1, 0.);
+	std::vector<double> score(tmax + 1, 0.), agree(tmax + 1, 0.);
 	for (int T = tmin; T <= tmax; T++)
 	{
 		nr_types = T;
+		std::vector<std::vector<int> > fold_types(nfold);
 		for (int fold = 0; fold < nfold; fold++)
 		{
 			chain_test.assign(nch, 0);
@@ -1005,28 +1025,68 @@ int HelicalContext::selectNrTypes(int tmin, int tmax, int nfold, RFLOAT tol)
 			initialised_model = false;
 			update();
 			score[T] += loglik_test;
+			fold_types[fold] = seg_type;
 		}
+		// how well the types learnt from different filaments agree on all segments: real types are found
+		// again, splits of real types are not
+		int npair = 0;
+		for (int a = 0; a < nfold; a++)
+			for (int b = a + 1; b < nfold; b++, npair++)
+				agree[T] += adjustedRand(fold_types[a], fold_types[b]);
+		if (npair > 0) agree[T] /= npair;
 	}
 	chain_test.clear();
 	int top = tmin;
 	for (int T = tmin; T <= tmax; T++)
 		if (score[T] > score[top])
 			top = T;
-	// the smallest number of types that is (nearly) as good: more types split real ones less reproducibly
 	int best = top;
-	for (int T = tmin; T <= tmax; T++)
-		if (score[T] / N >= score[top] / N - tol)
+	std::string why;
+	if (agree_min > 0.)
+	{
+		// the most types that are found again from other filaments (the held-out log-likelihood hardly differs
+		// between numbers of types); none early on, while the classes are unsettled: the best agreement, later: no change
+		best = -1;
+		for (int T = tmin; T <= tmax; T++)
+			if (agree[T] >= agree_min)
+				best = T;
+		if (best < 0 && keep && current >= tmin && current <= tmax)
 		{
-			best = T;
-			break;
+			best = current;
+			why = "none agrees to " + floatToString(agree_min) + ": keeping the current number";
 		}
+		else if (best < 0)
+		{
+			best = tmin;
+			for (int T = tmin; T <= tmax; T++)
+				if (agree[T] > agree[best])
+					best = T;
+			why = "none agrees to " + floatToString(agree_min) + ": the best agreement";
+		}
+		else
+			why = "the most with agreement of at least " + floatToString(agree_min);
+	}
+	else
+	{
+		// the smallest number of types that is (nearly) as good: more types split real ones less reproducibly
+		for (int T = tmin; T <= tmax; T++)
+			if (score[T] / N >= score[top] / N - tol)
+			{
+				best = T;
+				break;
+			}
+		why = "the fewest within " + floatToString(tol) + " of the best log-likelihood, " + integerToString(top);
+	}
 	verb = verb_save;
 	if (verb > 0)
 	{
 		std::cout << " Filament context: held-out log-likelihood per segment by number of types (" << nfold << "-fold over filaments):";
 		for (int T = tmin; T <= tmax; T++)
 			std::cout << " " << T << ": " << std::setprecision(5) << score[T] / N;
-		std::cout << std::endl << " Filament context: using " << best << " types (the fewest within " << tol << " of the best, " << top << ")" << std::endl;
+		std::cout << std::endl << " Filament context: agreement of the types between the folds (adjusted Rand index) by number of types:";
+		for (int T = tmin; T <= tmax; T++)
+			std::cout << " " << T << ": " << std::setprecision(4) << agree[T];
+		std::cout << std::endl << " Filament context: using " << best << " types (" << why << ")" << std::endl;
 	}
 	nr_types = best;
 	initialised_model = false;
