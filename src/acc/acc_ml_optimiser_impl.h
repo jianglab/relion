@@ -1153,6 +1153,65 @@ struct CoarseHold
 };
 #endif
 
+// Filament context: each class's best coarse score for this segment, from the coarse differences
+// (classes end to end, as the projector plans list them)
+inline void storeFilamentScores(MlOptimiser *baseMLO, const OptimisationParamters &op, const SamplingParameters &sp,
+		std::vector<AccProjectorPlan> &projectorPlans, AccPtr<XFLOAT> &allWeights, size_t allWeights_size, size_t translation_num,
+		AccProjectorPlan *batch = NULL)
+{
+	if (baseMLO->filctx_opt.mode == filctx::OFF || baseMLO->filctx_loglik.empty() || sp.nr_images != 1)
+		return;
+	// allWeights may live on the device only: copy into a host buffer of our own
+	std::vector<XFLOAT> hw(allWeights_size);
+#if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED)
+	if (allWeights_size > 0)
+	{
+		allWeights.cpToHost(&hw[0], allWeights_size);
+		allWeights.streamSync();
+	}
+#else
+	for (size_t i = 0; i < allWeights_size; i++) hw[i] = allWeights[i];
+#endif
+	const int K = baseMLO->mymodel.nr_classes;
+	float *row = &baseMLO->filctx_loglik[(size_t)op.part_id * K];
+	for (int k = 0; k < K; k++) row[k] = -1e30f;
+	size_t per_class = 0;
+	for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+		per_class += projectorPlans[iclass].orientation_num;
+#ifdef _CUDA_ENABLED
+	// Class batching: one plan holds all classes' orientations end to end and the per-class plans are empty;
+	// each orientation's class is in iorientclasses (iclass * nr_dir * nr_psi + orientation)
+	if (per_class == 0 && batch != NULL && batch->orientation_num > 0)
+	{
+		const size_t n = batch->orientation_num;
+		std::vector<unsigned long> ioc(n);
+		HANDLE_ERROR(cudaMemcpy(ioc.data(), ~batch->iorientclasses, n * sizeof(unsigned long), cudaMemcpyDeviceToHost));
+		std::vector<XFLOAT> best(K, std::numeric_limits<XFLOAT>::max());
+		const unsigned long per = (unsigned long)sp.nr_dir * sp.nr_psi;
+		for (size_t i = 0; i < n && (i + 1) * translation_num <= allWeights_size; i++)
+		{
+			const unsigned long k = ioc[i] / per;
+			if (k >= (unsigned long)K) continue;
+			for (size_t t = i * translation_num; t < (i + 1) * translation_num; t++)
+				if (hw[t] < best[k]) best[k] = hw[t];
+		}
+		for (int k = 0; k < K; k++)
+			if (best[k] < std::numeric_limits<XFLOAT>::max()) row[k] = (float)(op.min_diff2 - best[k]);
+		return;
+	}
+#endif
+	size_t pos = 0;
+	for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+	{
+		const size_t n = (size_t)projectorPlans[iclass].orientation_num * translation_num;
+		XFLOAT best = std::numeric_limits<XFLOAT>::max();
+		for (size_t i = pos; i < pos + n; i++)
+			if (hw[i] < best) best = hw[i];
+		if (n > 0) row[iclass] = (float)(op.min_diff2 - best);
+		pos += n;
+	}
+}
+
 // With `hold` (CUDA, one image, 2D references with class batching and on-the-fly plans, no CC) the pass is
 // prepared but not launched: see CoarseHold and finishCoarseDeferred
 template <class MlClass>
@@ -1770,34 +1829,8 @@ void getAllSquaredDifferencesCoarse(
     op.min_diff2 = AccUtilities::getMinOnDevice<XFLOAT>(allWeights);
     //std::cerr << " min_diff2 coarse= " << op.min_diff2 << std::endl;
 
-	// Filament context: each class's best coarse score for this segment
-	if (baseMLO->filctx_opt.mode != filctx::OFF && !baseMLO->filctx_loglik.empty() && sp.nr_images == 1)
-	{
-		// allWeights may live on the device only: copy into a host buffer of our own
-		std::vector<XFLOAT> hw(allWeights_size);
-#if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED)
-		if (allWeights_size > 0)
-		{
-			allWeights.cpToHost(&hw[0], allWeights_size);
-			allWeights.streamSync();
-		}
-#else
-		for (size_t i = 0; i < allWeights_size; i++) hw[i] = allWeights[i];
-#endif
-		const int K = baseMLO->mymodel.nr_classes;
-		float *row = &baseMLO->filctx_loglik[(size_t)op.part_id * K];
-		for (int k = 0; k < K; k++) row[k] = -1e30f;
-		size_t pos = 0;
-		for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
-		{
-			const size_t n = (size_t)projectorPlans[iclass].orientation_num * translation_num;
-			XFLOAT best = std::numeric_limits<XFLOAT>::max();
-			for (size_t i = pos; i < pos + n; i++)
-				if (hw[i] < best) best = hw[i];
-			if (n > 0) row[iclass] = (float)(op.min_diff2 - best);
-			pos += n;
-		}
-	}
+	storeFilamentScores(baseMLO, op, sp, projectorPlans, allWeights, allWeights_size, translation_num,
+			planBatches.empty() ? NULL : &planBatches[0]);
 
 #ifdef TIMING
 	if (op.part_id == baseMLO->exp_my_first_part_id)
@@ -5763,6 +5796,15 @@ void accDoExpectationParticleGroup(MlClass *myInstance, const std::vector<unsign
 			AccPtr<char> recs = ptrFactory.make<char>(), xt_tables = ptrFactory.make<char>(), xt_work = ptrFactory.make<char>();
 			runDiff2KernelCoarseGroup(items, recs, xt_tables, xt_work);
 			finishCoarseDeferred(holds, ops, mws, ptrFactory);
+			if (baseMLO->filctx_opt.mode != filctx::OFF)
+				for (auto &w : sg)
+					if (w->hold->def.n_classes > 0)
+					{
+						HANDLE_ERROR(cudaStreamSynchronize(w->hold->def.stream));
+						storeFilamentScores(baseMLO, w->op, w->sp, w->hold->projectorPlans, *w->hold->allWeights,
+								w->hold->allWeights->getSize(), w->hold->def.translation_num,
+								w->hold->planBatches.empty() ? NULL : &w->hold->planBatches[0]);
+					}
 			CTOC(timer,"getAllSquaredDifferencesCoarse");
 		}
 		if (group_check)

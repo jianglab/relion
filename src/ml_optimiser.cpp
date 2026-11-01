@@ -13024,6 +13024,13 @@ void MlOptimiser::updateFilamentContext()
 
     filctx::computePriors(filctx_filaments, filctx_loglik, K, pi, filctx_opt, filctx_temper, filctx_T, filctx_logprior);
 
+    // A row of zeros was never scored (the context then ignores that segment): say so, it weakens the prior
+    long int nr_unscored = 0;
+    for (size_t i = 0; i < filctx_loglik.size(); i += K)
+        nr_unscored += std::all_of(&filctx_loglik[i], &filctx_loglik[i] + K, [](float v) { return v == 0.f; });
+    if (verb > 0 && nr_unscored > 0)
+        std::cout << " Filament context: WARNING " << nr_unscored << " of " << filctx_loglik.size() / K << " segments have no class scores" << std::endl;
+
     if (verb > 0 && filctx_opt.mode == filctx::CHAIN)
     {
         double stay = 0.;
@@ -13051,7 +13058,39 @@ void MlOptimiser::enforceFilamentConsistency()
     for (long int part_id = 0; part_id < nr_parts; part_id++)
         mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, old_classes[part_id], part_id);
 
-    long int n_changed = ::enforceFilamentConsistency(mydata.MDimg, mymodel.nr_classes, verb);
+    // Prototype: with the filament context's per-class scores, give each filament the class with the
+    // highest summed score of its segments (one class = one type in Class3D) instead of the most votes
+    const char *vote_env = getenv("RELION_FILAMENT_VOTE");
+    const bool vote_ll = vote_env != NULL && std::string(vote_env) == "ll" && !filctx_loglik.empty() && !filctx_filaments.empty();
+    long int n_changed = 0;
+    if (vote_ll)
+    {
+        const int K = mymodel.nr_classes;
+        if (getenv("RELION_FILAMENT_VOTE_DUMP"))
+        {
+            std::ofstream fd((fn_out + "_it" + integerToString(iter, 3) + "_vote_dump.txt").c_str());
+            for (size_t f = 0; f < filctx_filaments.size(); f++)
+                for (long int p : filctx_filaments[f])
+                {
+                    fd << f << " " << p << " " << old_classes[p];
+                    for (int k = 0; k < K; k++) fd << " " << filctx_loglik[(size_t)p * K + k];
+                    fd << "\n";
+                }
+        }
+        for (const auto &fil : filctx_filaments)
+        {
+            std::vector<double> sum(K, 0.);
+            for (int k = 0; k < K; k++) sum[k] = std::log(std::max((RFLOAT)1e-30, mymodel.pdf_class[k]));
+            for (long int p : fil)
+                for (int k = 0; k < K; k++) sum[k] += std::max(-1e6f, filctx_loglik[(size_t)p * K + k]);
+            const int best = 1 + (int)(std::max_element(sum.begin(), sum.end()) - sum.begin());
+            for (long int p : fil)
+                if (old_classes[p] != best)
+                    mydata.MDimg.setValue(EMDL_PARTICLE_CLASS, best, p), n_changed++;
+        }
+    }
+    else
+        n_changed = ::enforceFilamentConsistency(mydata.MDimg, mymodel.nr_classes, verb);
 
     if (n_changed > 0)
     {
@@ -13094,7 +13133,7 @@ void MlOptimiser::enforceFilamentConsistency()
 
     if (verb > 0)
         std::cout << " Enforcing filament consistency: changed " << n_changed
-                  << " particles (of " << nr_parts << ") to match their filament majority."
+                  << " particles (of " << nr_parts << (vote_ll ? ") to the class with the best summed score of their filament." : ") to match their filament majority.")
                   << std::endl;
 }
 

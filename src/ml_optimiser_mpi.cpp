@@ -2300,7 +2300,7 @@ void MlOptimiserMpi::expectation()
 	// scored by one follower, the other rows are zero), then each works out the priors
 	if (filctx_opt.mode != filctx::OFF)
 	{
-		if (filctx_loglik.empty()) // the leader does not score particles
+		if (node->isLeader()) // the leader does not score particles (and must not add last iteration's scores)
 			filctx_loglik.assign((size_t)mydata.numberOfParticles() * mymodel.nr_classes, 0.f);
 		const long int n = (long int)filctx_loglik.size(), chunk = 1L << 26;
 		for (long int off = 0; off < n; off += chunk)
