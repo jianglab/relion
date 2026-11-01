@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 
+#include <limits>
 #include "src/ml_model.h"
 #include "src/async_file_writer.h"
 #include <memory>
@@ -961,6 +962,9 @@ void MlModel::initialiseFromImages(
 			do_generate_seeds = false;
 			// ignore nr_classes from the command line, use number of entries in STAR file
 			nr_classes = 0;
+			ref_helical_twist.clear();
+			ref_helical_rise.clear();
+			ref_sym.clear();
 			Iref.clear();
 			Igrad1.clear();
 			Igrad2.clear();
@@ -968,6 +972,11 @@ void MlModel::initialiseFromImages(
 			FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDref)
 			{
 				MDref.getValue(EMDL_MLMODEL_REF_IMAGE, fn_tmp);
+				RFLOAT ref_twist, ref_rise;
+				ref_helical_twist.push_back(MDref.getValue(EMDL_MLMODEL_HELICAL_TWIST, ref_twist) ? ref_twist : std::numeric_limits<RFLOAT>::quiet_NaN());
+				ref_helical_rise.push_back(MDref.getValue(EMDL_MLMODEL_HELICAL_RISE, ref_rise) ? ref_rise : std::numeric_limits<RFLOAT>::quiet_NaN());
+				std::string ref_symmetry;
+				ref_sym.push_back(MDref.getValue(EMDL_SAMPLING_SYMMETRY, ref_symmetry) ? ref_symmetry : std::string());
 				img.read(fn_tmp);
 				img().setXmippOrigin();
 				if (_ref_angpix > 0.)

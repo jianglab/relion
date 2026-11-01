@@ -229,6 +229,11 @@ public:
 	// Helical rise (in Angstroms)
 	std::vector<RFLOAT> helical_rise;
 
+	// Helical twist and rise of each reference in a --ref STAR file (rlnHelicalTwist, rlnHelicalRise; NaN when not given)
+	std::vector<RFLOAT> ref_helical_twist, ref_helical_rise;
+	// and its point group (rlnSymmetryGroup; empty when not given)
+	std::vector<std::string> ref_sym;
+
 	// Self-organizing map
 	SomGraph som;
 	int last_som_add_iter;

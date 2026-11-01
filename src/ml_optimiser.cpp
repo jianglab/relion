@@ -2483,6 +2483,31 @@ void MlOptimiser::initialiseGeneral(int rank)
                 do_average_unaligned, do_generate_seeds,refs_are_ctf_corrected,
                 ref_angpix, gradient_refine, grad_pseudo_halfsets, do_trust_ref_size, (rank==0));
 
+        // Each class starts from the helical twist and rise of its --ref STAR row when given, else from the command line
+        // (MlModel::initialise() gives classes beyond --K a twist and rise of 0)
+        if (do_helical_refine && !ignore_helical_symmetry && mymodel.ref_dim == 3)
+        {
+            bool from_refs = false;
+            for (int k = 0; k < mymodel.nr_classes; k++)
+            {
+                const bool has_t = k < (int)mymodel.ref_helical_twist.size() && !std::isnan(mymodel.ref_helical_twist[k]);
+                const bool has_r = k < (int)mymodel.ref_helical_rise.size() && !std::isnan(mymodel.ref_helical_rise[k]);
+                mymodel.helical_twist[k] = has_t ? mymodel.ref_helical_twist[k] : helical_twist_initial;
+                mymodel.helical_rise[k] = has_r ? mymodel.ref_helical_rise[k] : helical_rise_initial;
+                from_refs = from_refs || has_t || has_r;
+            }
+            if (from_refs)
+            {
+                helical_class_twist_start = mymodel.helical_twist;
+                helical_class_rise_start = mymodel.helical_rise;
+                // the translations along the helical axis must cover the largest rise
+                helical_rise_initial = *std::max_element(mymodel.helical_rise.begin(), mymodel.helical_rise.end());
+                if (rank == 0)
+                    for (int k = 0; k < mymodel.nr_classes; k++)
+                        std::cout << " Class " << k + 1 << " starts with helical twist " << mymodel.helical_twist[k]
+                                  << " deg and rise " << mymodel.helical_rise[k] << " A (from the reference STAR file)" << std::endl;
+            }
+        }
     }
 
 	if (do_fix_classes)
@@ -2882,6 +2907,27 @@ void MlOptimiser::initialiseGeneral(int rank)
 
     // Initialise the wsum_model according to the mymodel
     wsum_model.initialise(mymodel, sampling.symmetryGroup(), asymmetric_padding, skip_gridding, grad_pseudo_halfsets);
+
+    // Each class's point group from its --ref STAR row (rlnSymmetryGroup), applied when reconstructing it; the
+    // orientations are still sampled in the run's --sym, which must then be C1
+    // shortcut: not saved, so a --continue run reconstructs every class in --sym again
+    bool class_syms = false;
+    for (const std::string &s : mymodel.ref_sym) class_syms = class_syms || !s.empty();
+    if (class_syms && mymodel.ref_dim == 3)
+    {
+        if (sampling.symmetryGroup() != "C1" && sampling.symmetryGroup() != "c1")
+            REPORT_ERROR("ERROR: point groups per reference (rlnSymmetryGroup in the --ref STAR file) need --sym C1");
+        if (wsum_model.pseudo_halfsets || mymodel.nr_bodies > 1)
+            REPORT_ERROR("ERROR: point groups per reference are not supported with pseudo half-sets or multiple bodies");
+        for (int k = 0; k < mymodel.nr_classes && k < (int)mymodel.ref_sym.size(); k++)
+        {
+            if (mymodel.ref_sym[k].empty()) continue;
+            wsum_model.BPref[k].SL = SymList();
+            wsum_model.BPref[k].SL.read_sym_file(mymodel.ref_sym[k]);
+            if (verb > 0)
+                std::cout << " Class " << k + 1 << " is reconstructed with point group " << mymodel.ref_sym[k] << " (from the reference STAR file)" << std::endl;
+        }
+    }
 
     // Initialise sums of hidden variable changes
     // In later iterations, this will be done in updateOverallChangesInHiddenVariables
@@ -6392,6 +6438,18 @@ void MlOptimiser::applyLocalSymmetryForEachRef()
     }
 }
 
+void MlOptimiser::helicalSearchRange(int iclass, RFLOAT &rise_min, RFLOAT &rise_max, RFLOAT &twist_min, RFLOAT &twist_max) const
+{
+    rise_min = mymodel.helical_rise_min; rise_max = mymodel.helical_rise_max;
+    twist_min = mymodel.helical_twist_min; twist_max = mymodel.helical_twist_max;
+    // shortcut: the per-class starts are not saved, so a --continue run searches the global range again
+    if (iclass >= (int)helical_class_twist_start.size())
+        return;
+    const RFLOAT rh = 0.5 * (rise_max - rise_min), th = 0.5 * (twist_max - twist_min);
+    rise_min = helical_class_rise_start[iclass] - rh; rise_max = helical_class_rise_start[iclass] + rh;
+    twist_min = helical_class_twist_start[iclass] - th; twist_max = helical_class_twist_start[iclass] + th;
+}
+
 void MlOptimiser::makeGoodHelixForEachRef()
 {
     if ( (!do_helical_refine) || (ignore_helical_symmetry) || (mymodel.ref_dim == 2) )
@@ -6410,6 +6468,8 @@ void MlOptimiser::makeGoodHelixForEachRef()
             {
                 if ( (iter > 1) && (do_helical_symmetry_local_refinement) )
                 {
+                    RFLOAT rmin, rmax, tmin, tmax;
+                    helicalSearchRange(iclass, rmin, rmax, tmin, tmax);
                     localSearchHelicalSymmetry(
                             mymodel.Iref[ith_recons],
                             mymodel.pixel_size,
@@ -6417,12 +6477,12 @@ void MlOptimiser::makeGoodHelixForEachRef()
                             (helical_tube_inner_diameter / 2.),
                             (helical_tube_outer_diameter / 2.),
                             helical_z_percentage,
-                            mymodel.helical_rise_min,
-                            mymodel.helical_rise_max,
+                            rmin,
+                            rmax,
                             mymodel.helical_rise_inistep,
                             mymodel.helical_rise[iclass],
-                            mymodel.helical_twist_min,
-                            mymodel.helical_twist_max,
+                            tmin,
+                            tmax,
                             mymodel.helical_twist_inistep,
                             mymodel.helical_twist[iclass],
                             NULL,
@@ -13092,6 +13152,35 @@ void MlOptimiser::enforceFilamentConsistency()
     else
         n_changed = ::enforceFilamentConsistency(mydata.MDimg, mymodel.nr_classes, verb);
 
+    // Short filaments flip between classes from one iteration to the next: give each segment the class
+    // it had most often over the last N iterations (ties: the most recent). The class labels do not feed
+    // the next E-step, so this only changes the written assignment (and orientations, from the per-class data).
+    // shortcut: the history is not saved, so a --continue run starts it afresh
+    const char *win_env = getenv("RELION_FILAMENT_VOTE_ITERS");
+    const int vote_iters = win_env ? std::max(1, atoi(win_env)) : 1;
+    long int n_smoothed = 0;
+    if (vote_iters > 1)
+    {
+        std::vector<int> now(nr_parts);
+        for (long int p = 0; p < nr_parts; p++)
+            mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, now[p], p);
+        filament_class_history_.push_back(now);
+        while ((int)filament_class_history_.size() > vote_iters)
+            filament_class_history_.pop_front();
+        std::vector<int> count(mymodel.nr_classes + 1);
+        for (long int p = 0; p < nr_parts; p++)
+        {
+            std::fill(count.begin(), count.end(), 0);
+            int best = now[p];
+            for (auto h = filament_class_history_.rbegin(); h != filament_class_history_.rend(); ++h)
+                if (++count[(*h)[p]] > count[best])
+                    best = (*h)[p];
+            if (best != now[p])
+                mydata.MDimg.setValue(EMDL_PARTICLE_CLASS, best, p), n_smoothed++;
+        }
+        n_changed += n_smoothed;
+    }
+
     if (n_changed > 0)
     {
         // Update orientations for particles whose class was changed
@@ -13135,6 +13224,9 @@ void MlOptimiser::enforceFilamentConsistency()
         std::cout << " Enforcing filament consistency: changed " << n_changed
                   << " particles (of " << nr_parts << (vote_ll ? ") to the class with the best summed score of their filament." : ") to match their filament majority.")
                   << std::endl;
+    if (verb > 0 && vote_iters > 1)
+        std::cout << " Filament classes voted over the last " << filament_class_history_.size() << " of "
+                  << vote_iters << " iterations (RELION_FILAMENT_VOTE_ITERS): " << n_smoothed << " particles changed." << std::endl;
 }
 
 long int enforceFilamentConsistency(MetaDataTable &MDimg, int nr_classes, int verb)

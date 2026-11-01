@@ -2978,6 +2978,8 @@ void MlOptimiserMpi::maximization()
 					// Shaoda Jul26,2015 - Helical symmetry local refinement
 					if ( (iter > 1) && (do_helical_refine) && (!ignore_helical_symmetry) && (do_helical_symmetry_local_refinement) && mymodel.ref_dim != 2)
 					{
+						RFLOAT rmin, rmax, tmin, tmax;
+						helicalSearchRange(ith_recons, rmin, rmax, tmin, tmax);
 						localSearchHelicalSymmetry(
 								mymodel.Iref[ith_recons],
 								mymodel.pixel_size,
@@ -2985,12 +2987,12 @@ void MlOptimiserMpi::maximization()
 								(helical_tube_inner_diameter / 2.),
 								(helical_tube_outer_diameter / 2.),
 								helical_z_percentage,
-								mymodel.helical_rise_min,
-								mymodel.helical_rise_max,
+								rmin,
+								rmax,
 								mymodel.helical_rise_inistep,
 								mymodel.helical_rise[ith_recons],
-								mymodel.helical_twist_min,
-								mymodel.helical_twist_max,
+								tmin,
+								tmax,
 								mymodel.helical_twist_inistep,
 								mymodel.helical_twist[ith_recons],
 								NULL,
@@ -3120,6 +3122,8 @@ void MlOptimiserMpi::maximization()
 							// Shaoda Jul26,2015 - Helical symmetry local refinement
 							if ( (iter > 1) && (do_helical_refine) && (!ignore_helical_symmetry) && (do_helical_symmetry_local_refinement) && mymodel.ref_dim != 2 )
 							{
+								RFLOAT rmin, rmax, tmin, tmax;
+								helicalSearchRange(ith_recons, rmin, rmax, tmin, tmax);
 								localSearchHelicalSymmetry(
 										mymodel.Iref[ith_recons],
 										mymodel.pixel_size,
@@ -3127,12 +3131,12 @@ void MlOptimiserMpi::maximization()
 										(helical_tube_inner_diameter / 2.),
 										(helical_tube_outer_diameter / 2.),
 										helical_z_percentage,
-										mymodel.helical_rise_min,
-										mymodel.helical_rise_max,
+										rmin,
+										rmax,
 										mymodel.helical_rise_inistep,
 										mymodel.helical_rise[ith_recons],
-										mymodel.helical_twist_min,
-										mymodel.helical_twist_max,
+										tmin,
+										tmax,
 										mymodel.helical_twist_inistep,
 										mymodel.helical_twist[ith_recons],
 										NULL,

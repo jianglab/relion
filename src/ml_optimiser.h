@@ -32,6 +32,7 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <deque>
 #include <iterator>
 #include "src/ml_model.h"
 #include "src/parallel.h"
@@ -693,6 +694,11 @@ public:
 	// Initial helical twist in degrees
 	RFLOAT helical_twist_initial;
 
+	// Each class's starting helical twist and rise when the --ref STAR file gives them (empty otherwise): the
+	// local symmetry search then stays within the --helical_twist/rise_min/max range width around each class's start
+	std::vector<RFLOAT> helical_class_twist_start, helical_class_rise_start;
+	void helicalSearchRange(int iclass, RFLOAT &rise_min, RFLOAT &rise_max, RFLOAT &twist_min, RFLOAT &twist_max) const;
+
 	// Initial helical rise in Angstroms
 	RFLOAT helical_rise_initial;
 
@@ -856,6 +862,8 @@ public:
 	// Per-class best orientations for each particle [nr_parts][nr_classes * METADATA_NR_CLASS_PARAMS]
 	// Used by enforceFilamentConsistency to fix orientations after class reassignment
 	MultidimArray<RFLOAT> exp_per_class_metadata_;
+	// Filament classes of the last iterations, before smoothing (RELION_FILAMENT_VOTE_ITERS)
+	std::deque<std::vector<int> > filament_class_history_;
 
 	// CPU/GPU use of each E-step (resource_report.h)
 	resrep::Monitor resource_monitor_;
