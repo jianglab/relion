@@ -1837,7 +1837,21 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
 
     // And write the mydata to file
     if (do_write_data)
+    {
+        // Keep the class under a name of its own, so that later jobs (which overwrite rlnClassNumber) do not lose it
+        const EMDLabel kind = (mymodel.ref_dim == 2) ? EMDL_PARTICLE_CLASS_2D :
+                (mymodel.ref_dim == 3 && !do_auto_refine && mymodel.nr_classes > 1 && mymodel.nr_bodies == 1) ? EMDL_PARTICLE_CLASS_3D : EMDL_UNDEFINED;
+        if (kind != EMDL_UNDEFINED && mydata.MDimg.containsLabel(EMDL_PARTICLE_CLASS))
+        {
+            int iclass;
+            FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
+            {
+                mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, iclass);
+                mydata.MDimg.setValue(kind, iclass);
+            }
+        }
         mydata.write(fn_root + "_data.star", remove_offset_priors_again, true);
+    }
     if (itTimingOn()) { wt3 = itNow(); fprintf(stderr, "ITER_TIMING write it%d ms: optimiser %.0f model %.0f data %.0f\n", iter, 1e3*(wt1-wt0), 1e3*(wt2-wt1), 1e3*(wt3-wt2)); }
 
     // And write the sampling object

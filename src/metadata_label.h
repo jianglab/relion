@@ -515,6 +515,8 @@ enum EMDLabel
 	EMDL_PARTICLE_HELICAL_POLARITY_FLIP_PROBABILITY,
 	EMDL_PARTICLE_SELECTION_TYPE,
 	EMDL_PARTICLE_CLASS,
+	EMDL_PARTICLE_CLASS_2D,
+	EMDL_PARTICLE_CLASS_3D,
 	EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY,
 	EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY,
 	EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT,
@@ -1320,6 +1322,8 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_CONTEXT_PROBABILITY, EMDL_DOUBLE, "rlnHelicalContextProbability", "Probability of the assigned class from the segments of the same filament only (filament context prior)");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_POLARITY_FLIP_PROBABILITY, EMDL_DOUBLE, "rlnHelicalPolarityFlipProbability", "Probability (given the whole filament) that the polarity of a helical segment is opposite to its picking direction (psi = psi prior + 180)");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS, EMDL_INT, "rlnClassNumber", "Class number for which a particle has its highest probability");
+		EMDL::addLabel(EMDL_PARTICLE_CLASS_2D, EMDL_INT, "rlnClass2DNumber", "rlnClassNumber of the last 2D classification (kept by later jobs, which overwrite rlnClassNumber)");
+		EMDL::addLabel(EMDL_PARTICLE_CLASS_3D, EMDL_INT, "rlnClass3DNumber", "rlnClassNumber of the last 3D classification (kept by later jobs, which overwrite rlnClassNumber)");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_PROBABILITY, EMDL_DOUBLE, "rlnClass2DConsensusProbability", "Posterior probability of the assigned Class2D consensus class");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, EMDL_DOUBLE, "rlnClass2DConsensusEntropy", "Normalised entropy of the consensus posterior (categorical EM) or membership (sparse NMF) distribution");
 		EMDL::addLabel(EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT, EMDL_DOUBLE, "rlnClass2DConsensusAgreement", "Fraction of label-mapped Class2D replicas agreeing with the consensus class");
