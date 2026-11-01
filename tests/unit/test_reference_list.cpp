@@ -10,6 +10,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -360,4 +361,112 @@ TEST_CASE("Class3D: the list survives the saved job", "[pipeline][class3d][refer
 	bool is_continue = false;
 	REQUIRE(again.read("saved/", is_continue, true));
 	REQUIRE(again.joboptions["fn_ref"].getString() == "x/a.mrc,x/b.mrc");
+}
+
+TEST_CASE("reference list: per-class table is completed, trimmed, written and read back", "[reference_list]")
+{
+	using namespace reflist;
+	WorkDir work;
+	const std::vector<std::string> maps = {"a.mrc", "b.mrc", "c.mrc"};
+	const std::map<std::string, std::string> defaults = {
+		{"rlnSymmetryGroup", "C1"}, {"rlnSolventMaskName", "None"},
+		{"rlnHelicalTwist", "-1.1"}, {"rlnHelicalMaskTubeOuterDiameter", "200"}};
+	const std::vector<std::string> labels = {"rlnSymmetryGroup", "rlnSolventMaskName", "rlnHelicalTwist", "rlnHelicalMaskTubeOuterDiameter"};
+
+	// Nothing given: every cell is the job's value, and no column is per class
+	ClassTable t = completeTable(ClassTable(), maps, labels, defaults);
+	REQUIRE(t.cells.size() == 3);
+	REQUIRE(t.cells[2][2] == "-1.1");
+	ClassTable trimmed = t;
+	dropDefaultColumns(trimmed, defaults);
+	REQUIRE(trimmed.labels.empty());
+
+	// Two columns differ per class; "-1.10" equals the default as a number
+	t.cells[0][2] = "-1.13"; t.cells[1][2] = "-0.89"; t.cells[2][2] = "-1.10";
+	t.cells[1][3] = "155";
+	t.cells[0][1] = "auto";
+	dropDefaultColumns(t, defaults);
+	REQUIRE(t.labels == std::vector<std::string>{"rlnSolventMaskName", "rlnHelicalTwist", "rlnHelicalMaskTubeOuterDiameter"});
+	std::string error;
+	REQUIRE(checkTable(t, error));
+
+	const std::string fn = tableStarNameFor(t);
+	REQUIRE(fn.rfind("References/refs_", 0) == 0);
+	REQUIRE(writeTable(fn, t, error));
+	ClassTable back;
+	REQUIRE(readTable(fn, back, error));
+	REQUIRE(back.maps == maps);
+	REQUIRE(back.labels == t.labels);
+	REQUIRE(back.cells[0][0] == "auto");
+	REQUIRE(back.cells[1][2] == "155");
+	Resolved r;
+	REQUIRE(resolve(fn, r, error));
+	REQUIRE(r.maps == maps);
+
+	// Reopened with a map added: rows are matched by map, the new one gets the defaults
+	ClassTable again = completeTable(back, {"a.mrc", "b.mrc", "c.mrc", "d.mrc"}, labels, defaults);
+	REQUIRE(again.cells[1][again.column("rlnHelicalTwist")] == "-0.89");
+	REQUIRE(again.cells[3][again.column("rlnHelicalTwist")] == "-1.1");
+	REQUIRE(again.cells[3][again.column("rlnSymmetryGroup")] == "C1");
+}
+
+TEST_CASE("reference list: bad per-class tables are refused", "[reference_list]")
+{
+	using namespace reflist;
+	ClassTable t;
+	t.maps = {"a.mrc"};
+	std::string error;
+
+	t.labels = {"rlnHelicalTwist"}; t.cells = {{"abc"}};
+	REQUIRE_FALSE(checkTable(t, error));
+	t.labels = {"rlnSolventMaskName"}; t.cells = {{"no_such_mask.mrc"}};
+	REQUIRE_FALSE(checkTable(t, error));
+	REQUIRE(error.find("no_such_mask.mrc") != std::string::npos);
+	t.labels = {"rlnHelicalTwistMin"}; t.cells = {{"-1.2"}};
+	REQUIRE_FALSE(checkTable(t, error));
+	t.labels = {"rlnHelicalTwistMin", "rlnHelicalTwist", "rlnHelicalTwistMax"}; t.cells = {{"-1.2", "-0.9", "-1.0"}};
+	REQUIRE_FALSE(checkTable(t, error));
+	REQUIRE(error == "class 1: Twist lies outside Twist min to Twist max");  // the table's headings, not STAR labels
+	t.cells = {{"-1.2", "-1.1", "-1.0"}};
+	REQUIRE(checkTable(t, error));
+}
+
+TEST_CASE("Class3D: per-class symmetry needs C1 for the job", "[pipeline][class3d][reference_list]")
+{
+	WorkDir work;
+	reflist::ClassTable t;
+	t.maps = {"a.mrc", "b.mrc"};
+	t.labels = {"rlnSymmetryGroup"};
+	t.cells = {{"C3"}, {"C1"}};
+	std::string error, command;
+	REQUIRE(reflist::writeTable("per_class.star", t, error));
+
+	RelionJob job;
+	setUpClass3D(job, "per_class.star", 2);
+	job.joboptions["sym_name"].setString("C2");
+	REQUIRE_FALSE(commandOf(job, false, command, error));
+	REQUIRE(error.find("C1") != std::string::npos);
+	job.joboptions["sym_name"].setString("C1");
+	REQUIRE(commandOf(job, false, command, error));
+	REQUIRE(command.find(" --ref per_class.star") != std::string::npos);
+	REQUIRE(command.find(" --K 2") != std::string::npos);
+}
+
+TEST_CASE("reference list: one map starting two classes keeps each row's settings", "[reference_list]")
+{
+	using namespace reflist;
+	ClassTable given;
+	given.maps = {"a.mrc", "a.mrc"};
+	given.labels = {"rlnHelicalTwist", "rlnClassDistribution"};
+	given.cells = {{"-1.1", "0.5"}, {"1.1", "0.5"}};
+	const ClassTable t = completeTable(given, given.maps, {"rlnHelicalTwist"}, {{"rlnHelicalTwist", "0"}});
+	REQUIRE(t.cells[0][0] == "-1.1");
+	REQUIRE(t.cells[1][0] == "1.1");
+	// a text column RELION knows is not held to be a number
+	ClassTable text;
+	text.maps = {"a.mrc"};
+	text.labels = {"rlnHelicalTwist", "rlnMicrographName"};
+	text.cells = {{"-1.1", "mic.mrc"}};
+	std::string error;
+	REQUIRE(checkTable(text, error));
 }

@@ -20,6 +20,7 @@
  */
 
 #include <string>
+#include <map>
 #include <vector>
 
 namespace reflist {
@@ -62,6 +63,46 @@ struct Resolved
 
 /// Work out the maps and the --ref argument from the field. False, with a message, for an empty list or "None" among maps.
 bool resolve(const std::string& field, Resolved& result, std::string& error);
+
+/// Per-class settings beside the maps of a --ref STAR file (relion_refine reads them into
+/// MlModel::ClassSettings): one row per map, columns keyed by label name ("rlnHelicalTwist", ...).
+struct ClassTable
+{
+	std::vector<std::string> maps;
+	std::vector<std::string> labels;              ///< the settings columns, in order
+	std::vector<std::vector<std::string> > cells; ///< cells[row][column]
+	int column(const std::string& label) const;   ///< -1 if absent
+};
+
+/// A column the per-class table offers: STAR label, short heading, job option holding its job-wide value, helical only?
+struct TableColumn
+{
+	const char* label;
+	const char* heading;
+	const char* job_option; ///< "" when there is no job-wide value
+	bool helical;
+};
+const std::vector<TableColumn>& tableColumns();
+
+/// The maps and every other column of a STAR file (table model_classes if there is one, else the first table).
+bool readTable(const std::string& fn_star, ClassTable& table, std::string& error);
+
+/// A table with these maps and these columns: cells of `from` are kept (rows matched by map, else by
+/// position), missing cells get the value in `defaults` (keyed by label).
+ClassTable completeTable(const ClassTable& from, const std::vector<std::string>& maps,
+                         const std::vector<std::string>& labels, const std::map<std::string, std::string>& defaults);
+
+/// Drop the columns whose every cell is its default (compared as numbers when both are numbers): not per class.
+void dropDefaultColumns(ClassTable& table, const std::map<std::string, std::string>& defaults);
+
+/// Numbers where numbers belong, a search range around its start, mask files that exist ("None" and "auto" allowed).
+bool checkTable(const ClassTable& table, std::string& error);
+
+/// "<STAR_DIR>/refs_<12 hex digits of a hash of the table>.star"
+std::string tableStarNameFor(const ClassTable& table);
+
+/// Write the table as a --ref STAR file (creating its directory; an identical file is left alone).
+bool writeTable(const std::string& fn_star, const ClassTable& table, std::string& error);
 
 } // namespace reflist
 

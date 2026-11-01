@@ -229,10 +229,20 @@ public:
 	// Helical rise (in Angstroms)
 	std::vector<RFLOAT> helical_rise;
 
-	// Helical twist and rise of each reference in a --ref STAR file (rlnHelicalTwist, rlnHelicalRise; NaN when not given)
-	std::vector<RFLOAT> ref_helical_twist, ref_helical_rise;
-	// and its point group (rlnSymmetryGroup; empty when not given)
-	std::vector<std::string> ref_sym;
+	// Per-class settings from the columns of a --ref STAR file, one entry per class; a vector is empty when
+	// its column is absent. Kept in model.star (table model_class_settings) for --continue.
+	struct ClassSettings
+	{
+		std::vector<RFLOAT> twist, rise;                  // starting helical twist (deg) and rise (A)
+		std::vector<RFLOAT> twist_min, twist_max, rise_min, rise_max; // their search ranges
+		std::vector<RFLOAT> inner_diameter, outer_diameter; // helical tube (A); < 0: the job's
+		std::vector<std::string> mask;                    // reference mask: "None", "auto" or a file
+		std::vector<std::string> sym;                     // point group of the reconstruction
+		bool empty() const;
+		void read(MetaDataTable &MD);                     // all rows of MD
+		void write(std::ostream &fo) const;               // as table model_class_settings, if not empty
+	};
+	ClassSettings class_settings;
 
 	// Self-organizing map
 	SomGraph som;

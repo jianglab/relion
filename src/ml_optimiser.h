@@ -362,6 +362,8 @@ public:
 
 	// The automatic masks of the classes (one shared by the two half-maps); empty until made
 	std::vector<MultidimArray<RFLOAT> > auto_masks;
+	// Each class's own reference mask from the --ref STAR file (empty: none)
+	std::vector<MultidimArray<RFLOAT> > class_masks;
 
 	// Filename for a user-provided second solvent mask
 	// This solvent mask will have its own average density and may be useful for example to fill the interior of an icosahedral virus
@@ -694,10 +696,9 @@ public:
 	// Initial helical twist in degrees
 	RFLOAT helical_twist_initial;
 
-	// Each class's starting helical twist and rise when the --ref STAR file gives them (empty otherwise): the
-	// local symmetry search then stays within the --helical_twist/rise_min/max range width around each class's start
-	std::vector<RFLOAT> helical_class_twist_start, helical_class_rise_start;
+	// Helical symmetry search range of a class (mymodel.class_settings, else the run's range)
 	void helicalSearchRange(int iclass, RFLOAT &rise_min, RFLOAT &rise_max, RFLOAT &twist_min, RFLOAT &twist_max) const;
+	RFLOAT classTubeDiameter(int iclass, bool outer) const;
 
 	// Initial helical rise in Angstroms
 	RFLOAT helical_rise_initial;

@@ -23,6 +23,8 @@
 #include "src/reference_list.h"
 #include <FL/Fl_Check_Browser.H>
 #include <FL/Fl_Double_Window.H>
+#include <FL/Fl_Output.H>
+#include <FL/Fl_Scroll.H>
 #include <cstdlib>
 #include <memory>
 #include <set>
@@ -204,6 +206,148 @@ static void cb_choose_excluded(Fl_Widget *, void *data)
 		if (std::none_of(nodes.begin(), nodes.end(), [&](const slurmscript::Node &n) { return n.name == name; }))
 			value += (value.empty() ? "" : ",") + name;
 	exclude.setValue(value);
+}
+
+// "Per-class settings...": a table with one row per reference map, saved as the --ref STAR file
+static void cb_class_settings(Fl_Widget *, void *data)
+{
+	JobWindow *win = (JobWindow *)data;
+	GuiEntry &ref = win->guientries["fn_ref"];
+	reflist::Resolved r;
+	std::string error;
+	if (!reflist::resolve(ref.inp->value(), r, error) || r.maps.empty() || !r.star_readable)
+	{
+		fl_message("Give the reference maps first (%s).", error.empty() ? "a map, a list of maps or a STAR file" : error.c_str());
+		return;
+	}
+	auto value = [win](const char *key) { return std::string(win->guientries[key].inp->value()); };
+	const bool helix = value("do_helix") == "Yes", search = helix && value("do_local_search_helical_symmetry") == "Yes";
+	std::vector<std::string> labels, headings;
+	std::map<std::string, std::string> defaults;
+	reflist::ClassTable given;
+	if (r.is_star && !reflist::readTable(r.ref_argument, given, error))
+	{
+		fl_message("%s", error.c_str());
+		return;
+	}
+	for (const reflist::TableColumn &c : reflist::tableColumns())
+	{
+		defaults[c.label] = c.job_option[0] ? value(c.job_option) : (value("do_auto_mask") == "Yes" ? "auto" : "None");
+		const bool range = strstr(c.label, "Min") || strstr(c.label, "Max");  // used only by local symmetry searches
+		if ((!c.helical || (helix && (search || !range))) || given.column(c.label) >= 0)
+		{
+			labels.push_back(c.label);
+			headings.push_back(c.heading);
+		}
+	}
+	// columns of the user's STAR file that the table does not offer are shown as they are
+	for (const std::string &l : given.labels)
+		if (std::find(labels.begin(), labels.end(), l) == labels.end())
+		{
+			labels.push_back(l);
+			headings.push_back(l);
+		}
+	reflist::ClassTable t = reflist::completeTable(given, r.maps, labels, defaults);
+	// as relion_refine does: a class without its own search range gets the job's range centred on its start
+	for (const std::string g : {"rlnHelicalTwist", "rlnHelicalRise"})
+	{
+		const int lo = t.column(g + "Min"), hi = t.column(g + "Max"), mid = t.column(g);
+		if (lo < 0 || hi < 0 || mid < 0 || given.column(g + "Min") >= 0)
+			continue;
+		const double half = 0.5 * (atof(defaults[g + "Max"].c_str()) - atof(defaults[g + "Min"].c_str()));
+		for (std::vector<std::string> &row : t.cells)
+		{
+			const double m = atof(row[mid].c_str());
+			char s[32];
+			snprintf(s, sizeof(s), "%.10g", m - half);
+			row[lo] = s;
+			snprintf(s, sizeof(s), "%.10g", m + half);
+			row[hi] = s;
+		}
+	}
+
+	const int name_w = 180, cell_w = 70, mask_w = 110, row_h = STEPY + 2;
+	const int table_w = name_w + mask_w + cell_w * ((int)labels.size() - 1);
+	const int rows_h = std::min((int)r.maps.size(), 15) * row_h;
+	const int dialog_w = std::max(table_w + 36, 460), help_h = 60;
+	Fl_Double_Window dialog(dialog_w, rows_h + help_h + 85, "Per-class settings");
+	std::vector<Fl_Box *> boxes;  // headings and help, owned by the dialog
+	auto cell_x = [&](size_t c) { return 10 + name_w + (c == 0 ? 0 : cell_w + (c == 1 ? 0 : mask_w + cell_w * ((int)c - 2))); };
+	auto cell_width = [&](size_t c) { return labels[c] == "rlnSolventMaskName" ? mask_w : cell_w; };
+	boxes.push_back(new Fl_Box(10, 10, name_w, row_h, "Reference map"));
+	for (size_t c = 0; c < labels.size(); c++)
+		boxes.push_back(new Fl_Box(cell_x(c), 10, cell_width(c), row_h, headings[c].c_str()));
+	for (Fl_Box *b : boxes)
+	{
+		b->labelsize(ENTRY_FONTSIZE);
+		b->align(FL_ALIGN_INSIDE | FL_ALIGN_LEFT);
+	}
+	Fl_Scroll scroll(10, 10 + row_h, table_w + 16, rows_h);
+	scroll.type(Fl_Scroll::VERTICAL);
+	std::vector<std::vector<Fl_Input *> > cells(r.maps.size());
+	for (size_t i = 0; i < r.maps.size(); i++)
+	{
+		const int y = 10 + row_h * (int)(i + 1);
+		Fl_Output *name = new Fl_Output(10, y, name_w, STEPY);
+		name->value(r.maps[i].c_str());
+		name->textsize(ENTRY_FONTSIZE);
+		name->tooltip(name->value());
+		for (size_t c = 0; c < labels.size(); c++)
+		{
+			Fl_Input *in = new Fl_Input(cell_x(c), y, cell_width(c), STEPY);
+			in->value(t.cells[i][c].c_str());
+			in->textsize(ENTRY_FONTSIZE);
+			in->color(GUI_INPUT_COLOR);
+			cells[i].push_back(in);
+		}
+	}
+	scroll.end();
+	Fl_Box help(10, 20 + row_h + rows_h, dialog_w - 20, help_h,
+	            "Filled in with the job's values; a column that is the job's value for every map is not written. "
+	            "Mask: None, auto (made from the class) or a mask file. A symmetry other than C1 needs "
+	            "Symmetry C1 on the Reference tab (all classes share one orientation search).");
+	help.labelsize(ENTRY_FONTSIZE - 1);
+	help.align(FL_ALIGN_INSIDE | FL_ALIGN_LEFT | FL_ALIGN_TOP | FL_ALIGN_WRAP);
+	Fl_Button ok(dialog_w - 170, rows_h + help_h + 50, 75, 30, "OK"), cancel(dialog_w - 85, rows_h + help_h + 50, 75, 30, "Cancel");
+	dialog.end();
+	int done = 0;  // 1: OK, 2: cancelled or closed
+	ok.callback([](Fl_Widget *, void *d) { *(int *)d = 1; }, &done);
+	cancel.callback([](Fl_Widget *, void *d) { *(int *)d = 2; }, &done);
+	dialog.callback([](Fl_Widget *, void *d) { *(int *)d = 2; }, &done);
+	dialog.set_modal();
+	dialog.show();
+	for (;;)
+	{
+		while (done == 0 && dialog.shown())
+			Fl::wait();
+		if (done != 1)
+			return;
+		for (size_t i = 0; i < cells.size(); i++)
+			for (size_t c = 0; c < labels.size(); c++)
+				t.cells[i][c] = cells[i][c]->value();
+		if (reflist::checkTable(t, error))
+			break;
+		fl_alert("%s", error.c_str());
+		done = 0;
+	}
+	dialog.hide();
+
+	reflist::dropDefaultColumns(t, defaults);
+	std::string field;
+	if (t.labels.empty())
+		field = r.maps.size() == 1 ? r.maps[0] : reflist::joinList(r.maps);
+	else
+	{
+		field = reflist::tableStarNameFor(t);
+		if (!reflist::writeTable(field, t, error))
+		{
+			fl_alert("%s", error.c_str());
+			return;
+		}
+	}
+	ref.setValue(field);
+	if (ref.on_change)
+		ref.on_change();
 }
 
 // A "Choose" button in the column of the Browse buttons
@@ -1921,6 +2065,17 @@ void JobWindow::initialiseClass3DWindow()
     current_y += STEPY/2;
 
     place("fn_ref", TOGGLE_DEACTIVATE);
+	{
+		// Per-class symmetry, helical parameters, tube diameters and masks, written beside the maps
+		Fl_Button *b = new Fl_Button(XCOL2, current_y, WCOL2, STEPY, "Per-class settings...");
+		b->color(GUI_BUTTON_COLOR);
+		b->labelsize(ENTRY_FONTSIZE);
+		b->callback(cb_class_settings, this);
+		guientries["fn_ref"].extra = b;  // greyed out with the field (continue, finished jobs)
+		b->tooltip("A table with one row per reference map: its own symmetry, helical twist and rise with their search ranges, "
+		           "tube diameters and mask. Saved as the STAR file given as reference map(s).");
+		current_y += STEPY + 2;
+	}
     place("fn_mask");
 
     // Automatic masks instead of a reference mask

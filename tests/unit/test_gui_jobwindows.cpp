@@ -255,6 +255,15 @@ TEST_CASE("GUI: Class3D several reference maps set the number of classes", "[gui
 	REQUIRE(ref.add_button->y() == ref.browse->y());
 	// Other file fields keep their single Browse button
 	REQUIRE(window.guientries["fn_img"].add_button == nullptr);
+	// "Per-class settings..." sits under the reference row, above the mask
+	const Fl_Group *io = ref.inp->parent();
+	const Fl_Widget *settings = nullptr;
+	for (int i = 0; i < io->children(); i++)
+		if (io->child(i)->label() && std::string(io->child(i)->label()) == "Per-class settings...")
+			settings = io->child(i);
+	REQUIRE(settings != nullptr);
+	REQUIRE(settings->y() >= ref.inp->y() + ref.inp->h());
+	REQUIRE(settings->y() + settings->h() <= window.guientries["fn_mask"].inp->y());
 
 	const std::string one_class = classes.inp->value();
 	REQUIRE(classes.inp->active());

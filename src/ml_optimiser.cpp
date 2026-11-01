@@ -2485,21 +2485,16 @@ void MlOptimiser::initialiseGeneral(int rank)
 
         // Each class starts from the helical twist and rise of its --ref STAR row when given, else from the command line
         // (MlModel::initialise() gives classes beyond --K a twist and rise of 0)
+        MlModel::ClassSettings &cs = mymodel.class_settings;
         if (do_helical_refine && !ignore_helical_symmetry && mymodel.ref_dim == 3)
         {
-            bool from_refs = false;
             for (int k = 0; k < mymodel.nr_classes; k++)
             {
-                const bool has_t = k < (int)mymodel.ref_helical_twist.size() && !std::isnan(mymodel.ref_helical_twist[k]);
-                const bool has_r = k < (int)mymodel.ref_helical_rise.size() && !std::isnan(mymodel.ref_helical_rise[k]);
-                mymodel.helical_twist[k] = has_t ? mymodel.ref_helical_twist[k] : helical_twist_initial;
-                mymodel.helical_rise[k] = has_r ? mymodel.ref_helical_rise[k] : helical_rise_initial;
-                from_refs = from_refs || has_t || has_r;
+                mymodel.helical_twist[k] = (k < (int)cs.twist.size()) ? cs.twist[k] : helical_twist_initial;
+                mymodel.helical_rise[k] = (k < (int)cs.rise.size()) ? cs.rise[k] : helical_rise_initial;
             }
-            if (from_refs)
+            if (!cs.twist.empty() || !cs.rise.empty())
             {
-                helical_class_twist_start = mymodel.helical_twist;
-                helical_class_rise_start = mymodel.helical_rise;
                 // the translations along the helical axis must cover the largest rise
                 helical_rise_initial = *std::max_element(mymodel.helical_rise.begin(), mymodel.helical_rise.end());
                 if (rank == 0)
@@ -2507,6 +2502,25 @@ void MlOptimiser::initialiseGeneral(int rank)
                         std::cout << " Class " << k + 1 << " starts with helical twist " << mymodel.helical_twist[k]
                                   << " deg and rise " << mymodel.helical_rise[k] << " A (from the reference STAR file)" << std::endl;
             }
+        }
+        if (do_helical_refine && mymodel.ref_dim == 3)
+        {
+            // A class that falls back to the job's tube (diameter < 0) gets the job's value written in, so that
+            // widening the job's tube below (and saving it) does not change that class's tube
+            for (RFLOAT &d : cs.outer_diameter)
+                if (d <= 0.) d = helical_tube_outer_diameter;
+            for (RFLOAT &d : cs.inner_diameter)
+                if (d < 0.) d = helical_tube_inner_diameter;
+            // The particle images are masked with the job's tube, so it must hold every class's tube:
+            // the widest outer diameter, and the smallest inner one (none if any class has none)
+            for (RFLOAT d : cs.outer_diameter)
+                helical_tube_outer_diameter = std::max(helical_tube_outer_diameter, d);
+            if (!cs.inner_diameter.empty())
+                helical_tube_inner_diameter = *std::min_element(cs.inner_diameter.begin(), cs.inner_diameter.end());
+            if (rank == 0 && (!cs.inner_diameter.empty() || !cs.outer_diameter.empty()))
+                std::cout << " Particle images masked with a tube of "
+                          << (helical_tube_inner_diameter > 0. ? floatToString(helical_tube_inner_diameter) + " to " : std::string("up to "))
+                          << helical_tube_outer_diameter << " A diameter (all classes); each class's reference with its own" << std::endl;
         }
     }
 
@@ -2910,22 +2924,26 @@ void MlOptimiser::initialiseGeneral(int rank)
 
     // Each class's point group from its --ref STAR row (rlnSymmetryGroup), applied when reconstructing it; the
     // orientations are still sampled in the run's --sym, which must then be C1
-    // shortcut: not saved, so a --continue run reconstructs every class in --sym again
+    const std::vector<std::string> &class_sym = mymodel.class_settings.sym;
+    auto upper = [](std::string s) { for (char &c : s) c = toupper(c); return s; };
+    const std::string run_sym = upper(sampling.symmetryGroup());
     bool class_syms = false;
-    for (const std::string &s : mymodel.ref_sym) class_syms = class_syms || !s.empty();
-    if (class_syms && mymodel.ref_dim == 3)
+    for (const std::string &s : class_sym)
     {
-        if (sampling.symmetryGroup() != "C1" && sampling.symmetryGroup() != "c1")
+        if (run_sym != "C1" && upper(s) != run_sym)
             REPORT_ERROR("ERROR: point groups per reference (rlnSymmetryGroup in the --ref STAR file) need --sym C1");
+        class_syms = class_syms || upper(s) != "C1";
+    }
+    if (class_syms && run_sym == "C1" && mymodel.ref_dim == 3)
+    {
         if (wsum_model.pseudo_halfsets || mymodel.nr_bodies > 1)
             REPORT_ERROR("ERROR: point groups per reference are not supported with pseudo half-sets or multiple bodies");
-        for (int k = 0; k < mymodel.nr_classes && k < (int)mymodel.ref_sym.size(); k++)
+        for (int k = 0; k < mymodel.nr_classes && k < (int)class_sym.size(); k++)
         {
-            if (mymodel.ref_sym[k].empty()) continue;
             wsum_model.BPref[k].SL = SymList();
-            wsum_model.BPref[k].SL.read_sym_file(mymodel.ref_sym[k]);
+            wsum_model.BPref[k].SL.read_sym_file(class_sym[k]);
             if (verb > 0)
-                std::cout << " Class " << k + 1 << " is reconstructed with point group " << mymodel.ref_sym[k] << " (from the reference STAR file)" << std::endl;
+                std::cout << " Class " << k + 1 << " is reconstructed with point group " << class_sym[k] << " (from the reference STAR file)" << std::endl;
         }
     }
 
@@ -2997,17 +3015,23 @@ void MlOptimiser::initialiseGeneral(int rank)
     if (fn_mask != "None") checkMask(fn_mask, 1, rank);
     if (fn_mask2 != "None") checkMask(fn_mask2, 2, rank);
 
+    // An "auto" mask in --ref asks for automatic masks of that class; a continuation keeps what was saved
+    // (so that --dont_auto_mask still switches them off)
+    const bool auto_in_ref = std::count(mymodel.class_settings.mask.begin(), mymodel.class_settings.mask.end(), "auto") > 0;
+    if (iter == 0 && auto_in_ref)
+        do_auto_mask = true;
+    const std::string asked_by = auto_in_ref ? "automatic masks (\"auto\" in the --ref STAR file)" : "--auto_mask";
     if (do_auto_mask)
     {
         // Multi-body refinement masks each body with its own mask (also when it continues an auto-masked refinement)
         if (mymodel.nr_bodies > 1 || do_initialise_bodies)
             do_auto_mask = false;
         else if (mymodel.ref_dim != 3)
-            REPORT_ERROR("ERROR: --auto_mask is only for 3D references (3D classification and auto-refinement)");
+            REPORT_ERROR("ERROR: " + asked_by + " work only with 3D references (3D classification and auto-refinement)");
         else if (fn_mask != "None")
-            REPORT_ERROR("ERROR: give either a --solvent_mask or --auto_mask, not both (--dont_auto_mask switches automatic masks off in a continuation)");
+            REPORT_ERROR("ERROR: give either a --solvent_mask or " + asked_by + ", not both (--dont_auto_mask switches automatic masks off in a continuation)");
         else if (!do_solvent)
-            REPORT_ERROR("ERROR: --auto_mask needs --flatten_solvent");
+            REPORT_ERROR("ERROR: " + asked_by + " needs --flatten_solvent");
         auto_masks.resize(mymodel.nr_classes);
     }
 
@@ -6440,14 +6464,29 @@ void MlOptimiser::applyLocalSymmetryForEachRef()
 
 void MlOptimiser::helicalSearchRange(int iclass, RFLOAT &rise_min, RFLOAT &rise_max, RFLOAT &twist_min, RFLOAT &twist_max) const
 {
+    // A class's own range (rlnHelicalTwistMin/Max, rlnHelicalRiseMin/Max in --ref), else the run's range moved
+    // to be centred on the class's own start (rlnHelicalTwist/Rise), else the run's range
+    const MlModel::ClassSettings &cs = mymodel.class_settings;
     rise_min = mymodel.helical_rise_min; rise_max = mymodel.helical_rise_max;
     twist_min = mymodel.helical_twist_min; twist_max = mymodel.helical_twist_max;
-    // shortcut: the per-class starts are not saved, so a --continue run searches the global range again
-    if (iclass >= (int)helical_class_twist_start.size())
-        return;
     const RFLOAT rh = 0.5 * (rise_max - rise_min), th = 0.5 * (twist_max - twist_min);
-    rise_min = helical_class_rise_start[iclass] - rh; rise_max = helical_class_rise_start[iclass] + rh;
-    twist_min = helical_class_twist_start[iclass] - th; twist_max = helical_class_twist_start[iclass] + th;
+    if (iclass < (int)cs.rise_min.size())
+        rise_min = cs.rise_min[iclass], rise_max = cs.rise_max[iclass];
+    else if (iclass < (int)cs.rise.size())
+        rise_min = cs.rise[iclass] - rh, rise_max = cs.rise[iclass] + rh;
+    if (iclass < (int)cs.twist_min.size())
+        twist_min = cs.twist_min[iclass], twist_max = cs.twist_max[iclass];
+    else if (iclass < (int)cs.twist.size())
+        twist_min = cs.twist[iclass] - th, twist_max = cs.twist[iclass] + th;
+}
+
+RFLOAT MlOptimiser::classTubeDiameter(int iclass, bool outer) const
+{
+    // A class's own tube (rlnHelicalMaskTubeInner/OuterDiameter in --ref), else the job's
+    const std::vector<RFLOAT> &d = outer ? mymodel.class_settings.outer_diameter : mymodel.class_settings.inner_diameter;
+    if (iclass < (int)d.size() && (outer ? d[iclass] > 0. : d[iclass] >= 0.))
+        return d[iclass];
+    return outer ? helical_tube_outer_diameter : helical_tube_inner_diameter;
 }
 
 void MlOptimiser::makeGoodHelixForEachRef()
@@ -6474,8 +6513,8 @@ void MlOptimiser::makeGoodHelixForEachRef()
                             mymodel.Iref[ith_recons],
                             mymodel.pixel_size,
                             (particle_diameter / 2.),
-                            (helical_tube_inner_diameter / 2.),
-                            (helical_tube_outer_diameter / 2.),
+                            (classTubeDiameter(iclass, false) / 2.),
+                            (classTubeDiameter(iclass, true) / 2.),
                             helical_z_percentage,
                             rmin,
                             rmax,
@@ -6492,8 +6531,8 @@ void MlOptimiser::makeGoodHelixForEachRef()
                         mymodel.Iref[ith_recons],
                         mymodel.pixel_size,
                         (particle_diameter / 2.),
-                        (helical_tube_inner_diameter / 2.),
-                        (helical_tube_outer_diameter / 2.),
+                        (classTubeDiameter(iclass, false) / 2.),
+                        (classTubeDiameter(iclass, true) / 2.),
                         helical_z_percentage,
                         mymodel.helical_rise[iclass],
                         mymodel.helical_twist[iclass],
@@ -7502,6 +7541,44 @@ void MlOptimiser::solventFlatten()
             REPORT_ERROR("MlOptimiser::solventFlatten: ERROR solvent mask should contain values between 0 and 1 only...");
     }
 
+    // Each class's own mask from --ref, inside the one above: a mask file (rlnSolventMaskName), or a tube with its
+    // own diameters (rlnHelicalMaskTubeInner/OuterDiameter). "None" and "auto" (automatic masks) add nothing here.
+    const MlModel::ClassSettings &cs = mymodel.class_settings;
+    if (class_masks.empty() && mymodel.ref_dim == 3 && (!cs.mask.empty() || !cs.inner_diameter.empty() || !cs.outer_diameter.empty()))
+    {
+        class_masks.resize(mymodel.nr_classes);
+        for (int k = 0; k < mymodel.nr_classes; k++)
+        {
+            const bool has_file = k < (int)cs.mask.size() && cs.mask[k] != "None" && cs.mask[k] != "auto";
+            const bool has_in = k < (int)cs.inner_diameter.size() && cs.inner_diameter[k] >= 0.;
+            const bool has_out = k < (int)cs.outer_diameter.size() && cs.outer_diameter[k] > 0.;
+            std::string what;  // for the message
+            if (has_file)
+            {
+                Image<RFLOAT> Imask;
+                Imask.read(cs.mask[k]);
+                Imask().setXmippOrigin();
+                if (!Imask().sameShape(Isolvent()))
+                    REPORT_ERROR("ERROR: the mask of class " + integerToString(k + 1) + " (" + cs.mask[k] + ") is not of the size of the references");
+                if (Imask().computeMin() < 0. || Imask().computeMax() > 1.)
+                    REPORT_ERROR("ERROR: the mask of class " + integerToString(k + 1) + " (" + cs.mask[k] + ") must have values between 0 and 1");
+                class_masks[k] = Imask();
+                what = cs.mask[k];
+            }
+            else if (do_helical_refine && (has_in || has_out))
+            {
+                const RFLOAT din = classTubeDiameter(k, false), dout = classTubeDiameter(k, true);
+                class_masks[k].resize(Isolvent());
+                class_masks[k].setXmippOrigin();
+                createCylindricalReference(class_masks[k], XSIZE(mymodel.Iref[0]), din / mymodel.pixel_size,
+                                           dout / mymodel.pixel_size, width_mask_edge, ZSIZE(mymodel.Iref[0]));
+                what = "a tube of " + (din > 0. ? floatToString(din) + " to " : std::string("up to ")) + floatToString(dout) + " A diameter";
+            }
+            if (verb > 0 && !what.empty())
+                std::cout << " Class " << k + 1 << " reference masked with " << what << " (from the reference STAR file)" << std::endl;
+        }
+    }
+
     // Also read a second solvent mask if necessary
     if (fn_mask2 != "None")
     {
@@ -7538,6 +7615,9 @@ void MlOptimiser::solventFlatten()
         // And the automatic mask, inside the spherical one
         if (iclass < (int)auto_masks.size() && auto_masks[iclass].sameShape(mymodel.Iref[iclass], true))
             mymodel.Iref[iclass] *= auto_masks[iclass];
+        // And the class's own mask from --ref (a file or its own tube diameters)
+        if (iclass < (int)class_masks.size() && class_masks[iclass].sameShape(mymodel.Iref[iclass], true))
+            mymodel.Iref[iclass] *= class_masks[iclass];
 
         if (fn_lowpass_mask != "None")
             mymodel.Iref[iclass] += Itmp;
@@ -7584,7 +7664,10 @@ bool MlOptimiser::autoMaskClassResolution(int iclass, RFLOAT &resolution, RFLOAT
     lowpass = autoMaskResolutionAtFsc(fsc, 0.8, mymodel.ori_size, mymodel.pixel_size);
     if (lowpass < 0.)
         lowpass = 2. * mymodel.pixel_size;
-    return mymodel.pdf_class[iclass] > 0. && resolution <= auto_mask_start_res;
+    // With a mask column in --ref, only the classes marked "auto" get automatic masks
+    const std::vector<std::string> &class_mask = mymodel.class_settings.mask;
+    const bool wanted = class_mask.empty() || (iclass < (int)class_mask.size() && class_mask[iclass] == "auto");
+    return wanted && mymodel.pdf_class[iclass] > 0. && resolution <= auto_mask_start_res;
 }
 
 void MlOptimiser::calculateAutoMaskOfClass(int iclass, RFLOAT resolution, RFLOAT lowpass, AutoMaskReport &report)

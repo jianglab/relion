@@ -53,3 +53,43 @@ Not covered: Refine3D, MultiBody, Class2D (each has its own reference field).
 
 Tests: `tests/unit/test_reference_list.cpp`, the greying and layout test in
 `tests/unit/test_gui_jobwindows.cpp`.
+
+## Per-class settings
+
+A reference STAR file may also carry settings for each class. A row's value
+replaces the job value for that class only; an empty or missing column means
+"as the job".
+
+| Column | Table heading | Meaning |
+|---|---|---|
+| `rlnSymmetryGroup` | Symmetry | point group, applied at reconstruction (needs job symmetry C1, or the same group) |
+| `rlnSolventMaskName` | Mask | `None`, `auto` (automask this class) or a mask file |
+| `rlnHelicalTwist`, `rlnHelicalRise` | Twist, Rise | start values of this class |
+| `rlnHelicalTwistMin/Max`, `rlnHelicalRiseMin/Max` | Twist min ... | local symmetry search window of this class |
+| `rlnHelicalMaskTubeInnerDiameter`, `...OuterDiameter` | Tube inner, Tube outer | helical tube of this class |
+
+- The settings are saved in `run_itNNN_model.star` (table
+  `model_class_settings`) and kept by `--continue`.
+- `auto` turns on automasking only at iteration 0, so `--dont_auto_mask` still
+  works on a continued run.
+- The job tube is the widest of the classes (inner: the narrowest, none if any
+  class has none); each class is masked and symmetrised with its own tube.
+
+GUI: **Per-class settings...** on the I/O tab of Class3D (greyed out until
+reference maps are given) opens a table with one row per map. It starts from the
+job values (and from the STAR file, if one was given), offers the twist/rise
+range columns only when local symmetry search is on (or the STAR file has
+them), and writes `References/refs_<hash>.star`. Errors name the table headings
+("class 1: Twist lies outside Twist min to Twist max").
+
+**What helped** (a test mix of three helical filament types, 14,000 segments each,
+`--keep_full_filaments`): starting each class from its own twist raised plain
+purity from about 0.91-0.94 (shared twist) to about 0.95. Per-class point groups
+helped only once the rows matched the types: seed round 2 from the class maps
+of a first run (twist from that run's model, point group measured from the map).
+That two-round protocol gave purity of at least 0.95 in 16 of 16 seeds without
+using labels. Searching twist per class (+-0.1 degree) made it worse (classes
+drift).
+
+Tests: `[class_settings]` and `[reference_list]` unit tests, the GUI layout test,
+`tests/integration/test_class_settings.py`.

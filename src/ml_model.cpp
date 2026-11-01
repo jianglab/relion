@@ -18,7 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 
-#include <limits>
+#include <algorithm>
 #include "src/ml_model.h"
 #include "src/async_file_writer.h"
 #include <memory>
@@ -387,6 +387,13 @@ void MlModel::read(FileName fn_in, int nr_optics_groups_from_mydata, bool _do_gr
 		}
 
 		iclass++;
+	}
+
+	// Per-class settings from a --ref STAR file (absent in older model.star files)
+	{
+		MetaDataTable MDsettings;
+		MDsettings.readStar(in, "model_class_settings");
+		class_settings.read(MDsettings);
 	}
 
 	// Read group stuff
@@ -814,6 +821,7 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 		}
 	}
 	MDclass.write(fo);
+	class_settings.write(fo);
 
 	// Write radial_average of tau2_class and data_vs_prior_class for each reference
 	for (int iclass = 0; iclass < nr_classes_bodies; iclass++)
@@ -923,6 +931,72 @@ void  MlModel::readTauSpectrum(FileName fn_tau, int verb)
 
 }
 
+namespace
+{
+template <class T> void readSettingsColumn(MetaDataTable &MD, EMDLabel label, std::vector<T> &v)
+{
+	v.clear();
+	if (!MD.containsLabel(label))
+		return;
+	for (long int i = 0; i < MD.numberOfObjects(); i++)
+	{
+		T x;
+		MD.getValue(label, x, i);
+		v.push_back(x);
+	}
+}
+template <class T> void writeSettingsColumn(MetaDataTable &MD, EMDLabel label, const std::vector<T> &v)
+{
+	for (size_t i = 0; i < v.size(); i++)
+		MD.setValue(label, v[i], (long int)i);
+}
+}
+
+bool MlModel::ClassSettings::empty() const
+{
+	return twist.empty() && rise.empty() && twist_min.empty() && twist_max.empty() && rise_min.empty() &&
+	       rise_max.empty() && inner_diameter.empty() && outer_diameter.empty() && mask.empty() && sym.empty();
+}
+
+void MlModel::ClassSettings::read(MetaDataTable &MD)
+{
+	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST, twist);
+	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE, rise);
+	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST_MIN, twist_min);
+	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST_MAX, twist_max);
+	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_MIN, rise_min);
+	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_MAX, rise_max);
+	readSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, inner_diameter);
+	readSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, outer_diameter);
+	readSettingsColumn(MD, EMDL_OPTIMISER_SOLVENT_MASK_NAME, mask);
+	readSettingsColumn(MD, EMDL_SAMPLING_SYMMETRY, sym);
+	if ((twist_min.empty() != twist_max.empty()) || (rise_min.empty() != rise_max.empty()))
+		REPORT_ERROR("ERROR: per-class search ranges need both rlnHelicalTwistMin and rlnHelicalTwistMax (rlnHelicalRiseMin and rlnHelicalRiseMax)");
+}
+
+void MlModel::ClassSettings::write(std::ostream &fo) const
+{
+	if (empty())
+		return;
+	size_t n = std::max({twist.size(), rise.size(), twist_min.size(), rise_min.size(), inner_diameter.size(),
+	                     outer_diameter.size(), mask.size(), sym.size()});
+	MetaDataTable MD;
+	MD.setName("model_class_settings");
+	for (size_t i = 0; i < n; i++)
+		MD.addObject();
+	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST, twist);
+	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE, rise);
+	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST_MIN, twist_min);
+	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST_MAX, twist_max);
+	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_MIN, rise_min);
+	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_MAX, rise_max);
+	writeSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, inner_diameter);
+	writeSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, outer_diameter);
+	writeSettingsColumn(MD, EMDL_OPTIMISER_SOLVENT_MASK_NAME, mask);
+	writeSettingsColumn(MD, EMDL_SAMPLING_SYMMETRY, sym);
+	MD.write(fo);
+}
+
 // Reading images from disc
 void MlModel::initialiseFromImages(
 	FileName fn_ref, bool _is_3d_model, Experiment &_mydata,
@@ -962,9 +1036,7 @@ void MlModel::initialiseFromImages(
 			do_generate_seeds = false;
 			// ignore nr_classes from the command line, use number of entries in STAR file
 			nr_classes = 0;
-			ref_helical_twist.clear();
-			ref_helical_rise.clear();
-			ref_sym.clear();
+			class_settings.read(MDref);
 			Iref.clear();
 			Igrad1.clear();
 			Igrad2.clear();
@@ -972,11 +1044,6 @@ void MlModel::initialiseFromImages(
 			FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDref)
 			{
 				MDref.getValue(EMDL_MLMODEL_REF_IMAGE, fn_tmp);
-				RFLOAT ref_twist, ref_rise;
-				ref_helical_twist.push_back(MDref.getValue(EMDL_MLMODEL_HELICAL_TWIST, ref_twist) ? ref_twist : std::numeric_limits<RFLOAT>::quiet_NaN());
-				ref_helical_rise.push_back(MDref.getValue(EMDL_MLMODEL_HELICAL_RISE, ref_rise) ? ref_rise : std::numeric_limits<RFLOAT>::quiet_NaN());
-				std::string ref_symmetry;
-				ref_sym.push_back(MDref.getValue(EMDL_SAMPLING_SYMMETRY, ref_symmetry) ? ref_symmetry : std::string());
 				img.read(fn_tmp);
 				img().setXmippOrigin();
 				if (_ref_angpix > 0.)

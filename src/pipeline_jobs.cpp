@@ -5254,6 +5254,19 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 					return false;
 				}
 			}
+			// Per-class point groups only apply at reconstruction: the shared orientation search must be C1
+			reflist::ClassTable settings;
+			std::string ignored;
+			const int sym_col = (refs.is_star && reflist::readTable(refs.ref_argument, settings, ignored)) ? settings.column("rlnSymmetryGroup") : -1;
+			auto upper = [](std::string s) { for (char &c : s) c = toupper(c); return s; };
+			const std::string job_sym = upper(joboptions["sym_name"].getString());
+			if (sym_col >= 0 && job_sym != "C1")
+				for (const std::vector<std::string> &row : settings.cells)
+					if (upper(row[sym_col]) != job_sym)
+					{
+						error_message = "ERROR: the reference STAR file gives each class its own symmetry; set Symmetry on the Reference tab to C1.";
+						return false;
+					}
 			command += " --ref " + refs.ref_argument;
 			if (refs.ref_argument != "None")
             {
