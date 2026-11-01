@@ -204,7 +204,8 @@ void GuiEntry::initialise(int x, int y, Fl_Group * deactivate_this_group, bool _
 		{
 			int floatwidth = 50;
 			// Slider is shorter than wcol2, so that underlying input field becomes visible
-			slider = new HintWidget<Fl_Slider>(XCOL2 + floatwidth, y, wcol2 - floatwidth, height);
+			// next to its own input box, so that two or three fields can share a row (place2, place3)
+			slider = new HintWidget<Fl_Slider>(x + floatwidth, y, wcol2 - floatwidth, height);
 			slider->type(1);
 			slider->callback(cb_slider, this);
 			slider->minimum(joboption.min_value);

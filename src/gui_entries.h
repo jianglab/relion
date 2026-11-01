@@ -87,10 +87,13 @@ extern bool create_scheduler_gui;
 #define MENUHEIGHT 30
 #define TABHEIGHT 25
 #define GUIWIDTH 800
-#define GUIHEIGHT_OLD 460+GUIEXTRA
-#define GUIHEIGHT_EXT_START 435+GUIEXTRA
+// Three rows taller than upstream's job tabs, so that the fullest tabs (Class3D Helix and
+// Optimisation, Extract) fit; everything below the tabs moves down with them
+#define GUI_TABS_EXTRA (3 * STEPY)
+#define GUIHEIGHT_OLD 460+GUI_TABS_EXTRA+GUIEXTRA
+#define GUIHEIGHT_EXT_START 435+GUI_TABS_EXTRA+GUIEXTRA
 #define GUIHEIGHT_EXT_START2 (GUIHEIGHT_EXT_START+MENUHEIGHT+10)
-#define GUIHEIGHT_EXT 870+GUIEXTRA
+#define GUIHEIGHT_EXT 870+GUI_TABS_EXTRA+GUIEXTRA
 #define XCOL0 200
 #define WCOL0 200
 #define XCOL1 ( (XCOL0) + 10  )

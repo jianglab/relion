@@ -367,6 +367,7 @@ TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while
 		REQUIRE(w->x() + w->w() <= helix->x() + helix->w());
 		REQUIRE(w->y() >= helix->y());
 		REQUIRE(w->y() + w->h() <= helix->y() + helix->h());
+		REQUIRE(w->y() + w->h() <= window.tabs->y() + window.tabs->h());   // and above the bottom of the window
 	}
 
 	REQUIRE_FALSE(window.group_filctx->active());
