@@ -845,6 +845,10 @@ public:
 	// Is this a continuation job?
 	bool is_continue;
 
+	// Set by the GUI's command preview: a queue job's submission script goes to script_text, not to disc
+	bool preview_script = false;
+	std::string script_text;
+
 	// Activate custom stuff for tomo
 	bool is_tomo;
 

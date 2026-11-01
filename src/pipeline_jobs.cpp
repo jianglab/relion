@@ -834,8 +834,11 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 	}
 	std::istream &fh = *template_in;
 
-	std::ofstream fo;
-	fo.open(newfilename.c_str(), std::ios::out);
+	std::ofstream ffile;
+	std::ostringstream ftext;
+	if (!preview_script)
+		ffile.open(newfilename.c_str(), std::ios::out);
+	std::ostream &fo = preview_script ? static_cast<std::ostream &>(ftext) : ffile;
 	if (!template_ok)
 	{
 		error_message = "Error reading template submission script in: " + fn_qsub;
@@ -848,7 +851,7 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 	}
 	else
 	{
-		std::string dispatcher;
+		std::string dispatcher, dispatcher_text;
 		if (nr_parallel_runs > 1)
 		{
 			if ((int)commands.size() != nr_parallel_runs)
@@ -858,12 +861,7 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 			}
 
 			dispatcher = outputname + "run_replicas.sh";
-			std::ofstream fd(dispatcher.c_str(), std::ios::out);
-			if (!fd)
-			{
-				error_message = "Error writing Class2D replica dispatcher: " + dispatcher;
-				return false;
-			}
+			std::ostringstream fd;
 			fd << "#!/bin/sh\n"
 			   << "task_id=${SLURM_ARRAY_TASK_ID:-}\n"
 			   << "rank=${SLURM_PROCID:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}\n"
@@ -884,7 +882,16 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 			   << "    exit 2\n"
 			   << "    ;;\n"
 			   << "esac\n";
-			fd.close();
+			dispatcher_text = fd.str();
+			if (!preview_script)
+			{
+				std::ofstream fdisc(dispatcher.c_str(), std::ios::out);
+				if (!(fdisc << dispatcher_text))
+				{
+					error_message = "Error writing Class2D replica dispatcher: " + dispatcher;
+					return false;
+				}
+			}
 		}
 
 		int nmpi = (joboptions.find("nr_mpi") != joboptions.end()) ? joboptions["nr_mpi"].getNumber(error_message) : 1;
@@ -991,7 +998,10 @@ bool RelionJob::saveJobSubmissionScript(std::string newfilename, std::string out
 
 		fo << std::endl;
 
-		fo.close();
+		ffile.close();
+		script_text = ftext.str();
+		if (preview_script && !dispatcher_text.empty())  // the replicas' commands
+			script_text += "# " + dispatcher + " (written when the job runs):\n" + dispatcher_text;
 	}
 
 	return true;
@@ -1123,7 +1133,7 @@ bool RelionJob::prepareFinalCommand(std::string &outputname, std::vector<std::st
 	}
 
 	// Prepare full mpi commands or save jobsubmission script to disc
-	if (joboptions["do_queue"].getBoolean() && do_makedir)
+	if (joboptions["do_queue"].getBoolean() && (do_makedir || preview_script))
 	{
 		// Make the submission script and write it to disc
 		std::string output_script = outputname + "run_submit.script";

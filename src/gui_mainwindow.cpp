@@ -1828,8 +1828,13 @@ void GuiMainWindow::cb_print_cl_i()
 	else
 	{
 		std::string error_message;
-		if (!pipeline.getCommandLineJob(gui_jobwindows[iwin]->myjob, current_job, preview_is_continue, preview_is_overwrite,
-				DONT_MKDIR, commands, final_command, error_message))
+		RelionJob &job = gui_jobwindows[iwin]->myjob;
+		job.preview_script = true;  // the submission script as the fields are now, nothing written
+		job.script_text.clear();
+		const bool ok = pipeline.getCommandLineJob(job, current_job, preview_is_continue, preview_is_overwrite,
+				DONT_MKDIR, commands, final_command, error_message);
+		job.preview_script = false;
+		if (!ok)
 		{
 			fl_message("%s",error_message.c_str());
 		}
@@ -1841,36 +1846,10 @@ void GuiMainWindow::cb_print_cl_i()
 			bool use_queue = gui_jobwindows[iwin]->myjob.joboptions.count("do_queue") &&
 			                 gui_jobwindows[iwin]->myjob.joboptions["do_queue"].getBoolean();
 
-			if (use_queue)
+			if (use_queue && !job.script_text.empty())
 			{
-				// The submit script path is always <outputName>run_submit.script.
-				// Try to read an already-existing one (post-run); if absent, generate it now.
-				std::string script_path = gui_jobwindows[iwin]->myjob.outputName + "run_submit.script";
-
-				std::ifstream ifs(script_path.c_str());
-				if (!ifs.good())
-				{
-					// Generate the script by re-running getCommandLineJob with do_makedir=true
-					std::string err2;
-					std::vector<std::string> cmds2;
-					std::string fc2;
-					pipeline.getCommandLineJob(gui_jobwindows[iwin]->myjob, current_job,
-					                           preview_is_continue, preview_is_overwrite, true /*do_makedir*/,
-					                           cmds2, fc2, err2);
-					ifs.open(script_path.c_str());
-				}
-
-				if (ifs.good())
-				{
-					display_content = std::string((std::istreambuf_iterator<char>(ifs)),
-					                               std::istreambuf_iterator<char>());
-					title = "Submit script: " + script_path;
-				}
-				else
-				{
-					display_content = "Submit script not yet generated.\nRun the job first, or switch to local execution to preview the command.\n\nFinal queue command:\n" + final_command;
-					title = "Queue submission command";
-				}
+				display_content = job.script_text;
+				title = "Submit script: " + job.outputName + "run_submit.script";
 			}
 			else
 			{

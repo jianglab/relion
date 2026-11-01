@@ -914,6 +914,23 @@ TEST_CASE("Class2D: queued replicas use one Slurm array dispatcher",
 	REQUIRE(submission.find("slurm_%A_%a.out") != std::string::npos);
 	REQUIRE(submission.find("srun -n 1") != std::string::npos);
 
+	// the GUI's preview of a new job: the site template as it is now, nothing written
+	std::ofstream ft2(templ.c_str());
+	ft2 << "#!/bin/sh\n#SBATCH --output=XXXoutfileXXX\n#SBATCH --account=edited\nsrun -n XXXmpinodesXXX XXXcommandXXX\n";
+	ft2.close();
+	const std::string preview_name = stem + "_preview/";
+	job.preview_script = true;
+	REQUIRE(generateCommands(job, commands, final_command, error_message, false, preview_name));
+	job.preview_script = false;
+	CHECK(final_command.find("sbatch --array=1-3 " + preview_name + "run_submit.script") == 0);
+	CHECK(job.script_text.find("#SBATCH --account=edited\n") != std::string::npos);
+	CHECK(job.script_text.find("srun -n 1 sh " + preview_name + "run_replicas.sh") != std::string::npos);
+	CHECK(job.script_text.find(preview_name + "slurm_%A_%a.out") != std::string::npos);
+	CHECK(job.script_text.find("--random_seed 702") != std::string::npos);  // the replicas' commands are shown too
+	struct stat st;
+	CHECK(stat(preview_name.c_str(), &st) != 0);
+	CHECK(stat((preview_name + "run_replicas.sh").c_str(), &st) != 0);
+
 	std::remove((outputname + "run_replicas.sh").c_str());
 	std::remove((outputname + "run_submit.script").c_str());
 	std::remove(templ.c_str());
@@ -1516,6 +1533,24 @@ TEST_CASE("Queued jobs: an empty submission-script field means RELION's own Slur
 		CHECK(hand.find("relion_launch") == std::string::npos);
 	}
 	job.joboptions["auto_parallel"].setString("Yes");
+
+	// the GUI's preview: the script as the fields are now, with nothing written (not the job's
+	// existing script, no new folder)
+	job.preview_script = true;
+	job.joboptions["slurm_time"].setString("2:00:00");
+	REQUIRE(generateCommands(job, commands, final_command, error_message, false, outputname));
+	CHECK(job.script_text.find("#SBATCH --time=2:00:00\n") != std::string::npos);
+	{
+		std::ifstream fh((outputname + "run_submit.script").c_str());
+		const std::string on_disc((std::istreambuf_iterator<char>(fh)), std::istreambuf_iterator<char>());
+		CHECK(on_disc.find("#SBATCH --time=2:00:00") == std::string::npos);
+	}
+	REQUIRE(generateCommands(job, commands, final_command, error_message, false, stem + "_new/"));
+	CHECK(job.script_text.find("#SBATCH --output=" + stem + "_new/run.out") != std::string::npos);
+	struct stat st;
+	CHECK(stat((stem + "_new").c_str(), &st) != 0);
+	job.preview_script = false;
+	job.joboptions["slurm_time"].setString("1-00:00:00");
 
 	// no GPUs asked for when the job does not use them; a bad memory value is refused
 	job.joboptions["use_gpu"].setString("No");
