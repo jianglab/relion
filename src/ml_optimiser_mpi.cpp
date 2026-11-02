@@ -5311,6 +5311,13 @@ void MlOptimiserMpi::iterate()
         // Re-calculate the current resolution, do this before writing to get the correct values in the output files
         updateCurrentResolution();
 		sclock.mark("update_resolution", iter, node->rank);
+		if (do_sort_classes && iter == nr_iter && mymodel.ref_dim == 2)
+		{
+			// every rank renumbers the same way: rank 1's class sizes (the model it writes); the
+			// resolutions come from data_vs_prior_class, which every rank has, and the types from the leader
+			node->relion_MPI_Bcast(&mymodel.pdf_class[0], mymodel.nr_classes, MY_MPI_DOUBLE, 1, MPI_COMM_WORLD);
+			sortClasses();
+		}
 #ifdef TIMING
         timer.toc(TIMING_UPDATERES);
         timer.tic(TIMING_ITER_WRITE);

@@ -652,6 +652,16 @@ public:
 	// default; parsed the same way in both parse paths
 	void parseKeepAllIterations();
 
+	// Class2D: renumber the classes after the last iteration, by helical type, then size, junk last
+	// (--sort_classes, or RELION_SORT_CLASSES=1 as the default); junk: resolution worse than
+	// sort_classes_junk x the median class
+	bool do_sort_classes = false;
+	RFLOAT sort_classes_junk = 1.5;
+	// The options above; parsed the same way in both parse paths
+	void parseSortClasses();
+	// Renumber the classes in the model and the particles (see do_sort_classes)
+	void sortClasses();
+
 	// Delete the files of iterations before `iter` (except it000 when
 	// keep_first_iteration), once iteration `iter` has been written
 	void pruneOldIterations(int iter);

@@ -585,6 +585,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
+    parseSortClasses();
     parseCoarseEarly();
     parseFilamentContext();
     parseHelicalTiltWeight();
@@ -851,6 +852,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
+    parseSortClasses();
     parseCoarseEarly();
     parseFilamentContext();
     parseHelicalTiltWeight();
@@ -4807,6 +4809,8 @@ void MlOptimiser::iterate()
 #endif
         // Re-calculate the current resolution, do this before writing to get the correct values in the output files
         updateCurrentResolution();
+        if (do_sort_classes && iter == nr_iter)
+            sortClasses();
 
 #ifdef TIMING
         timer.toc(TIMING_UPDATERES);
@@ -13897,6 +13901,71 @@ void MlOptimiser::parseKeepAllIterations()
         keep_all_iterations = true;
     if (parser.checkOption("--dont_keep_all_iterations", "Delete each iteration's files once the next has been written (the default, unless RELION_KEEP_ALL_ITERATIONS=1)"))
         keep_all_iterations = false;
+}
+
+void MlOptimiser::sortClasses()
+{
+    const int K = mymodel.nr_classes;
+    if (mymodel.ref_dim != 2 || K < 2 || mymodel.nr_bodies != 1)
+        return;
+    mymodel.calculateTotalFourierCoverage();  // the class resolutions of this iteration
+    std::string rule;
+    const std::vector<int> order = MlModel::sortedClassOrder(mymodel.pdf_class, mymodel.estimated_resolution,
+                                                              mymodel.helical_type_class, sort_classes_junk, rule);
+    std::vector<int> new_of_old(K);
+    for (int i = 0; i < K; i++)
+        new_of_old[order[i]] = i;
+    // and the helical types by abundance (type 1: the most segments), in the classes and the particles
+    int T = 0;
+    for (int t : mymodel.helical_type_class) T = std::max(T, t);
+    const bool have_types = mydata.MDimg.containsLabel(EMDL_PARTICLE_HELICAL_TYPE);
+    if (have_types)
+        FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
+        {
+            int t;
+            mydata.MDimg.getValue(EMDL_PARTICLE_HELICAL_TYPE, t);
+            T = std::max(T, t);
+        }
+    const std::vector<int> new_type = MlModel::typeNumbersFromClassOrder(order, mymodel.helical_type_class, T);
+    mymodel.reorderClasses(order);
+    for (int &t : mymodel.helical_type_class)
+        t = new_type[t];
+    FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
+    {
+        int c, t;
+        if (mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, c) && c >= 1 && c <= K)
+            mydata.MDimg.setValue(EMDL_PARTICLE_CLASS, new_of_old[c - 1] + 1);
+        if (have_types && mydata.MDimg.getValue(EMDL_PARTICLE_HELICAL_TYPE, t) && t >= 1 && t <= T)
+            mydata.MDimg.setValue(EMDL_PARTICLE_HELICAL_TYPE, new_type[t]);
+    }
+    if (verb > 0)
+    {
+        std::cout << " Sorting the classes " << rule << " (--sort_classes). New class: old class" << std::endl;
+        for (int i = 0; i < K; i++)
+            std::cout << (i % 10 ? " " : (i ? "\n  " : "  ")) << i + 1 << ":" << order[i] + 1;
+        std::cout << std::endl;
+        if (T > 0)
+        {
+            std::cout << " Helical types renumbered by abundance. New type: old type";
+            std::vector<int> old_of_new(T + 1);
+            for (int t = 1; t <= T; t++) old_of_new[new_type[t]] = t;
+            for (int t = 1; t <= T; t++) std::cout << " " << t << ":" << old_of_new[t];
+            std::cout << std::endl;
+        }
+    }
+}
+
+void MlOptimiser::parseSortClasses()
+{
+    const char *env = getenv("RELION_SORT_CLASSES");
+    std::string v = (env == NULL) ? "" : env;
+    for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+    do_sort_classes = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+    if (parser.checkOption("--sort_classes", "Class2D: after the last iteration, renumber the classes by helical type (with --helical_context), then by size, junk last (RELION_SORT_CLASSES=1 makes this the default)"))
+        do_sort_classes = true;
+    if (parser.checkOption("--dont_sort_classes", "Keep the classes in their original order (the default, unless RELION_SORT_CLASSES=1)"))
+        do_sort_classes = false;
+    sort_classes_junk = textToFloat(parser.getOption("--sort_classes_junk", "With --sort_classes: classes with a resolution worse than this times the median class are junk (sorted last)", "1.5"));
 }
 
 static void pruneOldIterationsNow(const FileName fn_out, int iter, bool keep_first_iteration);

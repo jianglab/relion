@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <sstream>
 #include "src/ml_model.h"
 #include "src/async_file_writer.h"
 #include <memory>
@@ -955,6 +956,118 @@ template <class T> void writeSettingsColumn(MetaDataTable &MD, EMDLabel label, c
 	for (size_t i = 0; i < v.size(); i++)
 		MD.setValue(label, v[i], (long int)i);
 }
+template <class T> void permuteClasses(std::vector<T> &v, const std::vector<int> &order)
+{
+	if (v.size() != order.size())
+		return;  // not set (or not per class)
+	std::vector<T> out;
+	out.reserve(v.size());
+	for (int k : order)
+		out.push_back(std::move(v[k]));
+	v.swap(out);
+}
+}
+
+void MlModel::reorderClasses(const std::vector<int> &order)
+{
+	if (nr_bodies != 1 || (int)order.size() != nr_classes)
+		REPORT_ERROR("BUG: MlModel::reorderClasses needs one body and one entry per class");
+	permuteClasses(Iref, order);
+	permuteClasses(Igrad1, order);
+	permuteClasses(Igrad2, order);
+	permuteClasses(ref_names, order);
+	permuteClasses(tau2_class, order);
+	permuteClasses(sigma2_class, order);
+	permuteClasses(fsc_halves_class, order);
+	permuteClasses(data_vs_prior_class, order);
+	permuteClasses(fourier_coverage_class, order);
+	permuteClasses(pdf_class, order);
+	permuteClasses(class_age, order);
+	permuteClasses(pdf_direction, order);
+	permuteClasses(prior_offset_class, order);
+	permuteClasses(acc_rot, order);
+	permuteClasses(acc_trans, order);
+	permuteClasses(estimated_resolution, order);
+	permuteClasses(total_fourier_coverage, order);
+	permuteClasses(orientability_contrib, order);
+	permuteClasses(helical_twist, order);
+	permuteClasses(helical_rise, order);
+	permuteClasses(helical_type_class, order);
+	permuteClasses(helical_type_class_frac, order);
+	permuteClasses(class_settings.twist, order);
+	permuteClasses(class_settings.rise, order);
+	permuteClasses(class_settings.twist_min, order);
+	permuteClasses(class_settings.twist_max, order);
+	permuteClasses(class_settings.rise_min, order);
+	permuteClasses(class_settings.rise_max, order);
+	permuteClasses(class_settings.inner_diameter, order);
+	permuteClasses(class_settings.outer_diameter, order);
+	permuteClasses(class_settings.mask, order);
+	permuteClasses(class_settings.sym, order);
+}
+
+std::vector<int> MlModel::sortedClassOrder(const std::vector<RFLOAT> &pdf, const std::vector<RFLOAT> &resolution,
+                                           const std::vector<int> &type, RFLOAT junk_factor, std::string &rule)
+{
+	const int K = pdf.size();
+	std::vector<RFLOAT> res;
+	for (int k = 0; k < K; k++)
+		if (pdf[k] > 0. && k < (int)resolution.size() && resolution[k] > 0. && std::isfinite(resolution[k]))
+			res.push_back(resolution[k]);
+	RFLOAT median = 0.;
+	if (!res.empty())
+	{
+		std::sort(res.begin(), res.end());
+		median = (res.size() % 2) ? res[res.size() / 2] : 0.5 * (res[res.size() / 2 - 1] + res[res.size() / 2]);
+	}
+	const RFLOAT limit = (junk_factor > 0. && median > 0.) ? junk_factor * median : 0.;
+	std::vector<char> junk(K);
+	std::vector<int> group(K);  // type, 0: none
+	int T = 0, nr_junk = 0;
+	for (int k = 0; k < K; k++)
+	{
+		const RFLOAT r = k < (int)resolution.size() ? resolution[k] : 0.;
+		junk[k] = pdf[k] <= 0. || (limit > 0. && !(r <= limit));
+		nr_junk += junk[k];
+		group[k] = (k < (int)type.size() && type[k] > 0) ? type[k] : 0;
+		T = std::max(T, group[k]);
+	}
+	// types by their particles (outside junk), larger first; no type after all types
+	std::vector<RFLOAT> weight(T + 1, 0.);
+	for (int k = 0; k < K; k++)
+		if (!junk[k]) weight[group[k]] += pdf[k];
+	std::vector<int> types(T);
+	for (int t = 1; t <= T; t++) types[t - 1] = t;
+	std::stable_sort(types.begin(), types.end(), [&](int a, int b) { return weight[a] > weight[b]; });
+	std::vector<int> rank(T + 1, T);  // no type: after the types
+	for (int i = 0; i < T; i++) rank[types[i]] = i;
+	std::vector<int> order(K);
+	for (int k = 0; k < K; k++) order[k] = k;
+	std::stable_sort(order.begin(), order.end(), [&](int a, int b)
+	{
+		if (junk[a] != junk[b]) return !junk[a];
+		if (!junk[a] && rank[group[a]] != rank[group[b]]) return rank[group[a]] < rank[group[b]];
+		return pdf[a] > pdf[b];
+	});
+	std::ostringstream os;
+	os << (T > 0 ? "by helical type, then size" : "by size") << "; junk (" << nr_junk << " classes): empty";
+	if (limit > 0.)
+		os << " or resolution worse than " << limit << " A (" << junk_factor << " x the median " << median << " A)";
+	rule = os.str();
+	return order;
+}
+
+std::vector<int> MlModel::typeNumbersFromClassOrder(const std::vector<int> &order, const std::vector<int> &type, int nr_types)
+{
+	std::vector<int> new_type(nr_types + 1, 0);
+	int next = 1;
+	for (int k : order)
+		if (k < (int)type.size() && type[k] >= 1 && type[k] <= nr_types && !new_type[type[k]])
+			new_type[type[k]] = next++;
+	for (int t = 1; t <= nr_types; t++)
+		if (!new_type[t])
+			new_type[t] = next++;
+	return new_type;
 }
 
 bool MlModel::ClassSettings::empty() const

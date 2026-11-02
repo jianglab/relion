@@ -463,6 +463,20 @@ public:
 	void write(FileName fn_out, HealpixSampling &sampling,
 			bool do_write_bild = true, bool do_only_write_images = false, bool allow_async = false);
 
+	// Renumber the classes (one body): new class i is old class order[i]. The projectors are left
+	// alone (they are made from Iref again before the next expectation).
+	void reorderClasses(const std::vector<int> &order);
+
+	// The order for reorderClasses: helical types by their number of particles (type: 1-based, 0 or empty =
+	// none, after the types), within a type the classes by size; junk last: empty classes and classes whose
+	// resolution (A) is worse than junk_factor x the median class (0: only empty ones). `rule` says which.
+	static std::vector<int> sortedClassOrder(const std::vector<RFLOAT> &pdf, const std::vector<RFLOAT> &resolution,
+	                                         const std::vector<int> &type, RFLOAT junk_factor, std::string &rule);
+	// The new number of each type (index: old type 1..nr_types; 0 stays 0) for a class order from
+	// sortedClassOrder: types in the order their classes come, so type 1 is the most abundant; types
+	// without classes last, in their old order
+	static std::vector<int> typeNumbersFromClassOrder(const std::vector<int> &order, const std::vector<int> &type, int nr_types);
+
 	//Read a tau-spectrum from a STAR file
 	void readTauSpectrum(FileName fn_tau, int verb);
 

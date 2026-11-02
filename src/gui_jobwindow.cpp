@@ -1767,6 +1767,10 @@ void JobWindow::initialiseClass2DWindow()
 
 	place("fn_cont", TOGGLE_REACTIVATE);
 
+	current_y += STEPY/2;
+
+	place("do_sort_classes");
+
 	tab1->end();
 
 	tab2->begin();

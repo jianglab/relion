@@ -67,5 +67,28 @@ either was changed in between. Loading a job changes nothing.
 
 Not yet tested: other data (junk filaments, more types), fewer EM iterations.
 
+## Sorting the classes (`--sort_classes`)
+
+After the last iteration, Class2D can renumber its classes (any Class2D, helical
+or not): with helical types, the type with the most segments first, each type's
+classes by size; otherwise by size. Junk comes last: empty classes and classes
+whose resolution is worse than `--sort_classes_junk` (1.5) times the median
+class. The helical types are renumbered too, by abundance (type 1 has the most
+segments), so type numbers mean the same in every run. Class images,
+`model_classes`, each particle's `rlnClassNumber` and `rlnHelicalType`, and the
+per-type files are renumbered together; the output prints the rule, the
+threshold and the new and old number of each class and type. Opt-in:
+`--sort_classes` / `--dont_sort_classes` (both parse paths),
+`RELION_SORT_CLASSES=1` as the default; GUI "Sort the classes?" on the Class2D
+I/O tab. Code: `MlModel::sortedClassOrder()`, `MlModel::reorderClasses()`,
+`MlOptimiser::sortClasses()` (MPI: rank 1's class sizes are broadcast, so every
+rank renumbers the same way).
+
+Checked on the 3-type mix (K = 50, MPI): types in contiguous blocks
+(11 + 15 + 15 classes), 9 junk classes last, each class's type the majority of
+its particles. A sorted and an unsorted single-process run with the same seed
+differ only by the renumbering (class images, model rows, particles).
+Not tested: `--continue` from a sorted last iteration.
+
 Tests: Class2D filament context tests in `tests/unit/test_pipeline_jobs.cpp` and
 `tests/unit/test_gui_jobwindows.cpp`.

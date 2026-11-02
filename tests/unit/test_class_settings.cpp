@@ -3,12 +3,14 @@
  *
  * Per-class settings of a --ref STAR file (MlModel::ClassSettings): the columns
  * that are present are read for every class, written to model.star as table
- * model_class_settings and read back for --continue.
+ * model_class_settings and read back for --continue. Also the class order of
+ * --sort_classes.
  */
 
 #include <catch2/catch.hpp>
 #include <cstdio>
 #include <fstream>
+#include <limits>
 
 #include "src/metadata_table.h"
 #include "src/ml_model.h"
@@ -85,4 +87,46 @@ TEST_CASE("class settings: nothing written without settings, half a range is ref
     MD.setValue(EMDL_MLMODEL_HELICAL_TWIST_MIN, (RFLOAT)-1.2, 0);
     MlModel::ClassSettings cs;
     REQUIRE_THROWS_AS(cs.read(MD), RelionError);
+}
+
+// --sort_classes: the order (MlModel::sortedClassOrder) and the renumbering (MlModel::reorderClasses)
+TEST_CASE("class order: by helical type, then size, junk last", "[class_order]")
+{
+    const RFLOAT inf = std::numeric_limits<RFLOAT>::infinity();
+    const std::vector<RFLOAT> pdf = {0.1, 0.3, 0.0, 0.2, 0.25, 0.15}, res = {8., 7., inf, 9., 30., 8.};
+    std::string rule;
+    // median 8 A: 30 A is junk at 1.5 x, as is the empty class 3; type 2 has more particles than type 1
+    CHECK(MlModel::sortedClassOrder(pdf, res, {2, 1, 0, 2, 1, 2}, 1.5, rule) == std::vector<int>({3, 5, 0, 1, 4, 2}));
+    CHECK(rule.find("by helical type") != std::string::npos);
+    CHECK(rule.find("12 A") != std::string::npos);
+    // no types: by size, junk last; junk factor 0: only empty classes are junk
+    CHECK(MlModel::sortedClassOrder(pdf, res, {}, 1.5, rule) == std::vector<int>({1, 3, 5, 0, 4, 2}));
+    CHECK(MlModel::sortedClassOrder(pdf, res, {}, 0., rule) == std::vector<int>({1, 4, 3, 5, 0, 2}));
+    // types renumbered in the order of their classes (type 2 first); type 3 has no class: last
+    CHECK(MlModel::typeNumbersFromClassOrder({3, 5, 0, 1, 4, 2}, {2, 1, 0, 2, 1, 2}, 3) == std::vector<int>({0, 2, 1, 3}));
+}
+
+TEST_CASE("class order: reorderClasses moves every per-class value together", "[class_order]")
+{
+    MlModel m;
+    m.nr_classes = 3;
+    m.nr_bodies = 1;
+    m.pdf_class = {0.2, 0.5, 0.3};
+    m.estimated_resolution = {9., 7., 8.};
+    m.helical_type_class = {1, 2, 1};
+    m.Iref.resize(3);
+    for (int k = 0; k < 3; k++)
+    {
+        m.Iref[k].initZeros(4, 4);
+        m.Iref[k].initConstant(k + 1.);
+    }
+    m.class_settings.sym = {"C1", "C2", "C3"};
+    m.reorderClasses({1, 2, 0});
+    CHECK(m.pdf_class == std::vector<RFLOAT>({0.5, 0.3, 0.2}));
+    CHECK(m.estimated_resolution == std::vector<RFLOAT>({7., 8., 9.}));
+    CHECK(m.helical_type_class == std::vector<int>({2, 1, 1}));
+    CHECK(DIRECT_MULTIDIM_ELEM(m.Iref[0], 0) == 2.);
+    CHECK(DIRECT_MULTIDIM_ELEM(m.Iref[2], 5) == 1.);
+    CHECK(m.class_settings.sym == std::vector<std::string>({"C2", "C3", "C1"}));
+    CHECK(m.class_settings.twist.empty());  // absent settings stay absent
 }

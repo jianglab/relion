@@ -1830,3 +1830,23 @@ TEST_CASE("Reconstruct3D: the tube diameter goes to relion_reconstruct for symme
 	CHECK(command.find("--helical_z_percentage") == std::string::npos);
 	CHECK(command.find("--fused_helical_diameter") == std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Class order
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Class2D: sort-classes checkbox emits a flag either way", "[pipeline][class2d][class_order]")
+{
+	unsetenv("RELION_SORT_CLASSES");
+	RelionJob job = makeClass2DJob();
+	REQUIRE_FALSE(job.joboptions["do_sort_classes"].getBoolean());
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+	REQUIRE(generateCommands(job, commands, final_command, error_message));
+	CHECK(commands[0].find(" --dont_sort_classes") != std::string::npos);
+	job.joboptions["do_sort_classes"].setString("Yes");
+	REQUIRE(generateCommands(job, commands, final_command, error_message));
+	CHECK(commands[0].find(" --sort_classes") != std::string::npos);
+	CHECK(commands[0].find(" --dont_sort_classes") == std::string::npos);
+}
+

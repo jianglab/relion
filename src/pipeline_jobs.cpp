@@ -35,12 +35,16 @@
 
 // Default of the "Keep all iterations?" option of refinement jobs: No, unless
 // RELION_KEEP_ALL_ITERATIONS is set to a true value (as relion_refine reads it)
-static bool keepAllIterationsDefault()
+static bool envFlagDefault(const char *name)
 {
-	const char *env = getenv("RELION_KEEP_ALL_ITERATIONS");
+	const char *env = getenv(name);
 	std::string v = (env == NULL) ? "" : env;
 	for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
 	return !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+}
+static bool keepAllIterationsDefault()
+{
+	return envFlagDefault("RELION_KEEP_ALL_ITERATIONS");
 }
 static std::string appendPathComponent(std::string path, const std::string &component)
 {
@@ -4338,6 +4342,10 @@ Provided this directory is on a fast local drive (e.g. an SSD drive), processing
 		default_cache = "";
 	joboptions["cache_dir"] = JobOption("Local SSD cache directory:", std::string(default_cache), "If a directory is provided here, particle stacks will be cached in subdirectory relion_cache/ for reuse across multiple jobs. The default can be set via the RELION_CACHE_DIRECTORY environment variable. Unlike --scratch_dir, cached data persists after the job finishes and is reused on cache hit in subsequent jobs.");
 	joboptions["cache_copy_threads"] = JobOption("Cache copy threads:", std::string("4"), "Number of parallel threads for cache file copy.");
+	joboptions["do_sort_classes"] = JobOption("Sort the classes?", envFlagDefault("RELION_SORT_CLASSES"), "If set to Yes, the classes are renumbered after the last iteration: \
+with Helical types (Helix tab) by type, the type with the most segments first, then each type's classes by size; otherwise by size. \
+Junk comes last: empty classes and classes whose resolution is worse than 1.5 times the median class (relion_refine --sort_classes_junk). \
+The output lists the new and the old number of each class. The default can be set with the environment variable RELION_SORT_CLASSES.");
 	joboptions["keep_all_iter"] = JobOption("Keep all iterations?", keepAllIterationsDefault(), "If set to No (the default), the files of each iteration are deleted once the next iteration has been written, keeping only the last iteration, plus iteration 0 (the prepared initial reference) of a job that starts from a reference. This saves most of the disk space of a classification or refinement. Set to Yes to keep every iteration, e.g. to continue from an earlier one. The default can be set with the environment variable RELION_KEEP_ALL_ITERATIONS.");
 	joboptions["do_combine_thru_disc"] = JobOption("Combine iterations through disc?", false, "If set to Yes, at the end of every iteration all MPI followers will write out a large file with their accumulated results. The MPI leader will read in all these files, combine them all, and write out a new file with the combined results. \
 All MPI salves will then read in the combined results. This reduces heavy load on the network, but increases load on the disc I/O. \
@@ -4482,6 +4490,7 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 		command_after_output += " --dont_combine_weights_via_disc";
 	// Emitted either way, so that the job does what the GUI shows whatever RELION_KEEP_ALL_ITERATIONS says
 	command_after_output += joboptions["keep_all_iter"].getBoolean() ? " --keep_all_iterations" : " --dont_keep_all_iterations";
+	command_after_output += joboptions["do_sort_classes"].getBoolean() ? " --sort_classes" : " --dont_sort_classes";
 	if (!joboptions["do_parallel_discio"].getBoolean())
 		command_after_output += " --no_parallel_disc_io";
 	if (joboptions["do_preread_images"].getBoolean())
