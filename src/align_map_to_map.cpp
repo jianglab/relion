@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "src/align_map_to_map.h"
+#include "src/exact_map3d.h"
 #include "src/fftw.h"
 #include "src/transformations.h"
 
@@ -448,6 +449,19 @@ void applyMapTransformation(
 {
     bool do_rot = (fabs(best_rot) > 1e-6 || fabs(best_tilt) > 1e-6 || fabs(best_psi) > 1e-6);
     bool do_trans = (fabs(best_dx) > 1e-6 || fabs(best_dy) > 1e-6 || fabs(best_dz) > 1e-6);
+
+#ifdef RELION_USE_FINUFFT
+    // RELION_MAP_INTERPOLATION=nufft: rotation and shift as one exact resampling (the same transform as below)
+    if ((do_rot || do_trans) && ExactMap3D::use(vol_align, "class and half-map alignment"))
+    {
+        Matrix2D<RFLOAT> R, T;
+        Euler_rotation3DMatrix(best_rot, best_tilt, best_psi, R);
+        translation3DMatrix(best_dx / angpix, best_dy / angpix, best_dz / angpix, T);
+        const ExactMap3D em(vol_align, omp_get_max_threads());
+        em.applyGeometry(vol_align, T * R, false, omp_get_max_threads());
+        return;
+    }
+#endif
 
     if (do_rot)
     {

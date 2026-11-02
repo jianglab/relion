@@ -24,6 +24,7 @@
 
 #include "src/motioncorr_runner.h"
 #include "src/async_file_writer.h"
+#include "src/exact_map3d.h"
 #ifdef _CUDA_ENABLED
 #include "src/acc/cuda/cuda_mem_utils.h"
 #elif _HIP_ENABLED
@@ -158,6 +159,19 @@ void MotioncorrRunner::read(int argc, char **argv, int rank)
 		reproducible = (m != vmovies::OFF);
 		virtual_averages = (m == vmovies::VIRTUAL);
 	}
+
+#ifdef RELION_USE_FINUFFT
+	{
+		// the default comes from RELION_MOTIONCORR_INTERP; the GUI always passes the option
+		const char *v = getenv("RELION_MOTIONCORR_INTERP");
+		const std::string choice = parser.getOption("--local_interpolation", "How the local (patch) motion is applied: linear (bilinear, as before) or nufft (exact, the frames' Fourier series at the shifted positions; slower). Default: from RELION_MOTIONCORR_INTERP, else linear", v ? v : "linear");
+		if (choice == "nufft") local_nufft = 5; // tolerance about 1e-4
+		else if (choice != "linear" && choice != "bilinear")
+			REPORT_ERROR("--local_interpolation (RELION_MOTIONCORR_INTERP) must be linear or nufft, not " + choice);
+		if (local_nufft && !do_own)
+			REPORT_ERROR("--local_interpolation nufft applies to RELION's own motion correction (--use_own) only.");
+	}
+#endif
 
 	if ((!do_motioncor2 && !do_own) || (do_motioncor2 && do_own))
 		REPORT_ERROR("You have to choose either UCSF MotionCor2 or RELION's own implementation.");
@@ -1841,7 +1855,12 @@ skip_fitting:
 
 		RCTIC(TIMING_REAL_SPACE_INTERPOLATION);
 		logfile << "Summing frames before dose weighting: ";
-		realSpaceInterpolation_withoutsum(Irefframes, Iframes, mic.model, logfile);
+#ifdef RELION_USE_FINUFFT
+		if (local_nufft && mic.model != NULL && mic.model->getModelVersion() == MOTION_MODEL_THIRD_ORDER_POLYNOMIAL)
+			nufftLocalShifts(Fframes, nx, ny, *(ThirdOrderPolynomialModel*)mic.model, local_nufft, NULL, &Irefframes, logfile);
+		else
+#endif
+			realSpaceInterpolation_withoutsum(Irefframes, Iframes, mic.model, logfile);
 		logfile << " done" << std::endl;
 		RCTOC(TIMING_REAL_SPACE_INTERPOLATION);
 
@@ -1939,7 +1958,12 @@ skip_fitting:
 		Iref().initZeros(Iframes[0]());
 		RCTIC(TIMING_REAL_SPACE_INTERPOLATION);
 		logfile << "Summing frames after dose weighting: ";
-		realSpaceInterpolation(Iref, Iframes, mic.model, logfile);
+#ifdef RELION_USE_FINUFFT
+		if (local_nufft && mic.model != NULL && mic.model->getModelVersion() == MOTION_MODEL_THIRD_ORDER_POLYNOMIAL)
+			nufftLocalShifts(Fframes, nx, ny, *(ThirdOrderPolynomialModel*)mic.model, local_nufft, &Iref, NULL, logfile);
+		else
+#endif
+			realSpaceInterpolation(Iref, Iframes, mic.model, logfile);
 		logfile << " done" << std::endl;
 		logfile << "Used dose: " << dose_per_frame_to_use <<std::endl;
 		RCTOC(TIMING_REAL_SPACE_INTERPOLATION);
@@ -1979,6 +2003,8 @@ skip_fitting:
 		recipe.early_binning = early_binning;
 		recipe.fix_defects = !skip_defect;
 		recipe.float16 = write_float16;
+		// only a local model is applied differently; without one the record stays readable by older builds
+		recipe.local_nufft = mic.model != NULL ? local_nufft : 0;
 		// nx, ny are already binned with early binning
 		const bool late_bin = !early_binning && std::fabs(bin_factor - 1) >= 0.01;
 		recipe.nx = late_bin ? (int)(nx / bin_factor) : nx;
@@ -2564,6 +2590,131 @@ bool MotioncorrRunner::alignPatch(std::vector<MultidimArray<fComplex> > &Fframes
 	return converged;
 }
 
+#ifdef RELION_USE_FINUFFT
+void MotioncorrRunner::nufftLocalShifts(const std::vector<MultidimArray<fComplex> > &Fframes, int nx, int ny, const ThirdOrderPolynomialModel &model,
+                                        int w, Image<float> *Isum, std::vector<Image<float> > *Ialigned, std::ostream &logfile)
+{
+	// Type-2 NUFFT: modes divided by the kernel's transform on a 2x grid, inverse FFT, then each output pixel is the
+	// w x w kernel-weighted sum of the grid around its shifted position. Tolerance about 10^-(w-1).
+	const int n_frames = Fframes.size();
+	const int n1x = exactmap::smoothEvenSize(2 * nx), n1y = exactmap::smoothEvenSize(2 * ny);
+	const double beta = 2.30 * w;
+	std::vector<float> dx(nx / 2 + 1), dy(ny / 2 + 1);
+	for (int k = 0; k <= nx / 2; k++) dx[k] = 1. / exactmap::esKernelFT(2 * PI * k / n1x, w, beta);
+	for (int k = 0; k <= ny / 2; k++) dy[k] = 1. / exactmap::esKernelFT(2 * PI * k / n1y, w, beta);
+	// kernel by distance d in [0, w] from the first tap, tabulated: linear interpolation in it is ~1e-6 accurate
+	const int L = 2048;
+	std::vector<float> tab(w * L + 2);
+	for (int i = 0; i < (int)tab.size(); i++)
+	{
+		const double t = std::min(1., 2. * i / (w * L) - 1.);
+		tab[i] = std::exp(beta * (std::sqrt(std::max(0., 1. - t * t)) - 1.));
+	}
+
+	// frames in parallel, one thread each (plans by size: the same bits on any thread count), as many as half the
+	// free memory holds
+	const size_t frame_bytes = (size_t)n1y * (n1x / 2 + 1) * sizeof(fComplex) + (size_t)n1y * n1x * sizeof(float)
+	                         + (size_t)ny * nx * sizeof(float);
+	int nconc = std::max(1, std::min(n_threads, n_frames));
+	const long long avail = asyncwrite::memoryAvailableBytes();
+	if (avail > 0) nconc = std::max(1, std::min(nconc, (int)(avail / 2 / frame_bytes)));
+	logfile << "Exact local shifts (NUFFT, kernel width " << w << ", " << n1x << " x " << n1y << " grid, "
+	        << nconc << " frames at a time): ";
+	NewFFT::FloatPlan plan(n1x, n1y, 1, FFTW_ESTIMATE);
+	const double sx = (double)n1x / nx, sy = (double)n1y / ny;
+	const Matrix1D<RFLOAT> &cX = model.coeffX, &cY = model.coeffY;
+
+	for (int b0 = 0; b0 < n_frames; b0 += nconc)
+	{
+		const int nb = std::min(nconc, n_frames - b0);
+		std::vector<MultidimArray<float> > out(nb);
+		#pragma omp parallel for num_threads(nb)
+		for (int ib = 0; ib < nb; ib++)
+		{
+			const int iframe = b0 + ib;
+			const MultidimArray<fComplex> &F = Fframes[iframe];
+			MultidimArray<fComplex> G(n1y, n1x / 2 + 1);
+			G.initZeros();
+			for (int y = 0; y < ny; y++)
+			{
+				const int ly = y > ny / 2 ? y - ny : y;
+				// a Nyquist row or column is split in halves between +N/2 and -N/2 (the real interpolant)
+				const float fy = dy[std::abs(ly)] * (2 * ly == ny ? 0.5f : 1.f);
+				for (int x = 0; x <= nx / 2; x++)
+				{
+					const float f = fy * dx[x] * (2 * x == nx ? 0.5f : 1.f);
+					const fComplex v = DIRECT_A2D_ELEM(F, y, x);
+					DIRECT_A2D_ELEM(G, (ly + n1y) % n1y, x) = fComplex(v.real * f, v.imag * f);
+					if (2 * ly == ny) DIRECT_A2D_ELEM(G, n1y - ly, x) = fComplex(v.real * f, v.imag * f);
+				}
+			}
+			MultidimArray<float> g(n1y, n1x);
+			NewFFT::inverseFourierTransform(G, g, plan, NewFFT::FwdOnly, false);
+			G.clear();
+
+			// the shift at (x, y), as in realSpaceInterpolation_ThirdOrderPolynomial
+			const RFLOAT z = iframe, z2 = z * z, z3 = z2 * z;
+			RFLOAT xc[6], yc[6];
+			for (int c = 0; c < 6; c++)
+			{
+				xc[c] = cX(3 * c) * z + cX(3 * c + 1) * z2 + cX(3 * c + 2) * z3;
+				yc[c] = cY(3 * c) * z + cY(3 * c + 1) * z2 + cY(3 * c + 2) * z3;
+			}
+			MultidimArray<float> &o = out[ib];
+			o.resize(ny, nx);
+			for (int iy = 0; iy < ny; iy++)
+			{
+				const RFLOAT y = (RFLOAT)iy / ny - 0.5;
+				for (int ix = 0; ix < nx; ix++)
+				{
+					const RFLOAT x = (RFLOAT)ix / nx - 0.5;
+					const RFLOAT x_fitted = xc[0] + (xc[1] + xc[2] * x) * x + (xc[3] + xc[4] * y + xc[5] * x) * y;
+					const RFLOAT y_fitted = yc[0] + (yc[1] + yc[2] * x) * x + (yc[3] + yc[4] * y + yc[5] * x) * y;
+					// outside the frame: its edge, like the bilinear code
+					const double u = std::min((double)nx - 1, std::max(0., ix - x_fitted)) * sx - 0.5 * w;
+					const double v = std::min((double)ny - 1, std::max(0., iy - y_fitted)) * sy - 0.5 * w;
+					const int i0 = (int)std::ceil(u), j0 = (int)std::ceil(v);
+					float wx[16], wy[16];
+					int cx[16];
+					for (int j = 0; j < w; j++)
+					{
+						const double ex = (i0 + j - u) * L, ey = (j0 + j - v) * L;
+						const int kx = (int)ex, ky = (int)ey;
+						wx[j] = tab[kx] + (float)(ex - kx) * (tab[kx + 1] - tab[kx]);
+						wy[j] = tab[ky] + (float)(ey - ky) * (tab[ky + 1] - tab[ky]);
+						cx[j] = (i0 + j + n1x) % n1x;
+					}
+					float val = 0;
+					for (int jy = 0; jy < w; jy++)
+					{
+						const float *row = &DIRECT_A2D_ELEM(g, (j0 + jy + n1y) % n1y, 0);
+						float r = 0;
+						for (int jx = 0; jx < w; jx++) r += wx[jx] * row[cx[jx]];
+						val += wy[jy] * r;
+					}
+					DIRECT_A2D_ELEM(o, iy, ix) = val;
+				}
+			}
+		}
+
+		// in frame order, as the bilinear sum
+		for (int ib = 0; ib < nb; ib++)
+		{
+			logfile << "." << std::flush;
+			if (Isum != NULL)
+			{
+				#pragma omp parallel for num_threads(n_threads)
+				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY((*Isum)())
+					DIRECT_MULTIDIM_ELEM((*Isum)(), n) += DIRECT_MULTIDIM_ELEM(out[ib], n);
+			}
+			else
+				(*Ialigned)[b0 + ib]() = out[ib];
+		}
+	}
+}
+
+#endif // RELION_USE_FINUFFT
+
 int MotioncorrRunner::findGoodSize(int request) {
 	// numbers that do not contain large prime numbers
 	const int good_numbers[] = {192, 216, 256, 288, 324,
@@ -2783,9 +2934,11 @@ void MotioncorrRunner::fillDefectMask(MultidimArray<bool> &bBad, FileName fn_def
 std::string MotioncorrRunner::SumRecipe::str() const
 {
 	std::ostringstream o;
-	o << "version=" << version << " dose_weighted=" << dose_weighted
+	// version 2 (exact local motion) is refused by builds that only know version 1, instead of being summed differently
+	o << "version=" << (local_nufft > 0 ? 2 : 1) << " dose_weighted=" << dose_weighted
 	  << " early_binning=" << early_binning << " fix_defects=" << fix_defects
 	  << " float16=" << float16 << " nx=" << nx << " ny=" << ny;
+	if (local_nufft > 0) o << " local_nufft=" << local_nufft;
 	return o.str();
 }
 
@@ -2800,11 +2953,13 @@ bool MotioncorrRunner::SumRecipe::parse(const std::string &text, SumRecipe &out)
 		if (eq == std::string::npos) return false;
 		kv[tok.substr(0, eq)] = textToInteger(tok.substr(eq + 1));
 	}
-	if (kv.count("version") == 0 || kv["version"] != 1) return false;
+	if (kv.count("version") == 0 || (kv["version"] != 1 && kv["version"] != 2)) return false;
+	if ((kv["version"] == 2) != (kv.count("local_nufft") && kv["local_nufft"] > 0)) return false;
 	const char* keys[] = {"dose_weighted", "early_binning", "fix_defects", "float16", "nx", "ny"};
 	for (int k = 0; k < 6; k++)
 		if (kv.count(keys[k]) == 0) return false;
-	out.version = 1;
+	out.version = kv["version"];
+	out.local_nufft = out.version == 2 ? kv["local_nufft"] : 0;
 	out.dose_weighted = kv["dose_weighted"];
 	out.early_binning = kv["early_binning"];
 	out.fix_defects = kv["fix_defects"];
@@ -3017,19 +3172,31 @@ void MotioncorrRunner::sumFromRecord(const Micrograph &mic, const SumRecipe &rec
 		doseWeighting(Fframes, doses, mic.angpix * prescaling);
 	}
 
-	#pragma omp parallel for num_threads(n_threads)
-	for (int iframe = 0; iframe < n_frames; iframe++)
+	const bool exact = recipe.local_nufft > 0 && mic.model != NULL && mic.model->getModelVersion() == MOTION_MODEL_THIRD_ORDER_POLYNOMIAL;
+	if (!exact)
 	{
-		Iframes[iframe]().reshape(wny, wnx);
-		NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe](), plan_work);
-		Fframes[iframe].clear();
+		#pragma omp parallel for num_threads(n_threads)
+		for (int iframe = 0; iframe < n_frames; iframe++)
+		{
+			Iframes[iframe]().reshape(wny, wnx);
+			NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe](), plan_work);
+			Fframes[iframe].clear();
+		}
 	}
 
 	Isum().reshape(wny, wnx);
 	Isum().initZeros();
 	std::ostringstream quiet;
-	realSpaceInterpolation(Isum, Iframes, mic.model, quiet);
+	if (exact)
+#ifdef RELION_USE_FINUFFT
+		nufftLocalShifts(Fframes, wnx, wny, *(ThirdOrderPolynomialModel*)mic.model, recipe.local_nufft, &Isum, NULL, quiet);
+#else
+		REPORT_ERROR("sumFromRecord: " + fn_mic + " was made with exact (NUFFT) local shifts, which need a RELION build with RELION_USE_FINUFFT=ON.");
+#endif
+	else
+		realSpaceInterpolation(Isum, Iframes, mic.model, quiet);
 	Iframes.clear();
+	Fframes.clear();
 
 	if (!early && std::fabs(bin - 1) >= 0.01)
 	{

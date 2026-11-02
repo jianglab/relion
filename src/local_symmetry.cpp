@@ -20,6 +20,9 @@
 
 #include "src/rect_refusal.h"
 #include "src/local_symmetry.h"
+#include "src/exact_map3d.h"
+#include <memory>
+#include <omp.h>
 
 //#define DEBUG
 #define NEW_APPLY_SYMMETRY_METHOD
@@ -1195,11 +1198,29 @@ void applyLocalSymmetry(MultidimArray<RFLOAT>& sym_map,
 	vol1.clear();
 	vol2.clear(); // Use vol2 only as the output from 'applyGeometry()'
 
+#ifdef RELION_USE_FINUFFT
+	// RELION_MAP_INTERPOLATION=nufft: the copies are moved by exact resampling, not trilinear interpolation
+	const int threads = omp_get_max_threads();
+	std::unique_ptr<ExactMap3D> em_ori;
+	if (ExactMap3D::use(ori_map, "local symmetry"))
+		em_ori.reset(new ExactMap3D(ori_map, threads));
+#endif
+
 	// Loop over all the masks
 	for (int imask = 0; imask < fn_masks.size(); imask++)
 	{
 		vol1 = ori_map;
         RFLOAT sumweight = 1.;
+
+		// Load this mask
+		if (!exists(fn_masks[imask]))
+			REPORT_ERROR("ERROR: mask " + std::string(fn_masks[imask]) + " does not exist!");
+		mask.clear();
+		mask.read(fn_masks[imask]);
+		if ((NSIZE(ori_map) != NSIZE(mask())) || (ZSIZE(ori_map) != ZSIZE(mask())) || (YSIZE(ori_map) != YSIZE(mask())) || (XSIZE(ori_map) != XSIZE(mask())))
+			REPORT_ERROR("ERROR: sizes of input and masks do not match!");
+		// Masks and the original map may not have the same origin!
+		mask().copyShape(ori_map); // VERY IMPORTANT!
 
 		// Loop over all operators for this mask
 		RFLOAT nr_ops = RFLOAT(ops[imask].size());
@@ -1210,6 +1231,16 @@ void applyLocalSymmetry(MultidimArray<RFLOAT>& sym_map,
 			// A0 op(--rot--> --trans-->) A1
 			// Now we want A1 op'(?) A0
 			// Transform A1 to A0 (original) position, then superimpose with the original
+#ifdef RELION_USE_FINUFFT
+			if (em_ori)
+			{
+				// both methods below are this one transform, here as a single exact resampling inside the mask
+				Localsym_operator2matrix(ops[imask][iop], op_mat, LOCALSYM_OP_DO_INVERT);
+				em_ori->applyGeometry(vol2, op_mat, IS_NOT_INV, threads, &mask());
+			}
+			else
+#endif
+			{
 #ifdef NEW_APPLY_SYMMETRY_METHOD
 			Localsym_operator2matrix(ops[imask][iop], op_mat, LOCALSYM_OP_DO_INVERT);
 
@@ -1221,22 +1252,13 @@ void applyLocalSymmetry(MultidimArray<RFLOAT>& sym_map,
 			translate(ori_map, vol2, trans_vec, DONT_WRAP);
 			selfApplyGeometry(vol2, op_mat, IS_NOT_INV, DONT_WRAP);
 #endif
+			}
 			if (weights[imask][iop] > 0.)
             {
                 vol1 += weights[imask][iop] * vol2;
                 sumweight += weights[imask][iop];
             }
 		}
-
-		// Load this mask
-		if (!exists(fn_masks[imask]))
-			REPORT_ERROR("ERROR: mask " + std::string(fn_masks[imask]) + " does not exist!");
-		mask.clear();
-		mask.read(fn_masks[imask]);
-		if ((NSIZE(ori_map) != NSIZE(mask())) || (ZSIZE(ori_map) != ZSIZE(mask())) || (YSIZE(ori_map) != YSIZE(mask())) || (XSIZE(ori_map) != XSIZE(mask())))
-			REPORT_ERROR("ERROR: sizes of input and masks do not match!");
-		// Masks and the original map may not have the same origin!
-		mask().copyShape(ori_map); // VERY IMPORTANT!
 
 		// 'Vol1' contains one symmetrised subunit, make it into perfect "mask-weighted sum"
 		FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY3D(vol1)
@@ -1262,6 +1284,23 @@ void applyLocalSymmetry(MultidimArray<RFLOAT>& sym_map,
 		// Make various copies of vol1 and mask to wsum and w
 		sym_map += vol1;
 		w += mask();
+#ifdef RELION_USE_FINUFFT
+		if (em_ori)
+		{
+			// each copy of the subunit as one exact resampling, where its (trilinearly moved) mask is
+			const ExactMap3D em1(vol1, threads);
+			MultidimArray<RFLOAT> wmask;
+			for (int iop = 0; iop < ops[imask].size(); iop++)
+			{
+				Localsym_operator2matrix(ops[imask][iop], op_mat);
+				applyGeometry(mask(), wmask, op_mat, IS_NOT_INV, DONT_WRAP);
+				w += wmask;
+				em1.applyGeometry(vol2, op_mat, IS_NOT_INV, threads, &wmask);
+				sym_map += vol2;
+			}
+		}
+		else
+#endif
 		for (int iop = 0; iop < ops[imask].size(); iop++)
 		{
 #ifdef NEW_APPLY_SYMMETRY_METHOD

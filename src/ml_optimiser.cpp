@@ -48,6 +48,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "src/ml_optimiser.h"
+#include "src/exact_map3d.h"
 #include "src/helix_report.h"
 #include "src/parallel_hint.h"
 #include <thread>
@@ -6871,8 +6872,21 @@ void MlOptimiser::centerClasses()
             my_com.module() < XMIPP_MAX(0.01 * particle_diameter / mymodel.pixel_size, 2))
             continue;
 
+#ifdef RELION_USE_FINUFFT
+        // RELION_MAP_INTERPOLATION=nufft: the same shift, exact
+        if (ExactMap3D::use(mymodel.Iref[iclass], "class centring"))
+        {
+            Matrix2D<RFLOAT> T;
+            translation3DMatrix(XX(my_com), YY(my_com), mymodel.Iref[iclass].getDim() == 3 ? ZZ(my_com) : 0., T);
+            const ExactMap3D em(mymodel.Iref[iclass], nr_threads);
+            em.applyGeometry(mymodel.Iref[iclass], T, IS_NOT_INV, nr_threads);
+        }
+        else
+#endif
+        {
         MultidimArray<RFLOAT> aux = mymodel.Iref[iclass];
         translate(aux, mymodel.Iref[iclass], my_com, DONT_WRAP, (RFLOAT)0.);
+        }
 
 //		std::cout << "CENTER CLASS " << iclass << " " << XX(my_com) << " " << YY(my_com) << " " << ZZ(my_com) << std::endl;
 

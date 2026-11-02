@@ -220,14 +220,20 @@ public:
 	bool reproducible = false;     // either value
 	bool virtual_averages = false; // =1
 
+	// --local_interpolation nufft (default from RELION_MOTIONCORR_INTERP; FINUFFT builds only): apply the local motion
+	// exactly (each frame's Fourier series at the shifted positions) instead of bilinearly, which loses signal near
+	// Nyquist. Kernel width, 0 = bilinear.
+	int local_nufft = 0;
+
 	struct SumRecipe
 	{
 		int version;
 		bool dose_weighted, early_binning, fix_defects;
 		bool float16;   // the micrograph is stored (or would be) in float16
 		int nx, ny;     // size of the micrograph
+		int local_nufft; // 0: bilinear local motion (version 1); else exact, with this kernel width (version 2)
 		SumRecipe() : version(1), dose_weighted(true), early_binning(false), fix_defects(true),
-		              float16(false), nx(0), ny(0) {}
+		              float16(false), nx(0), ny(0), local_nufft(0) {}
 		std::string str() const;
 		// False if the text is not a recipe this build knows how to follow
 		static bool parse(const std::string &text, SumRecipe &out);
@@ -245,6 +251,13 @@ public:
 
 	// The recipe of a record, or false for a legacy one
 	static bool readRecipe(const FileName &fn_record, SumRecipe &recipe, Micrograph *mic_out = NULL);
+
+#ifdef RELION_USE_FINUFFT
+	// Exact local motion: each frame's Fourier series (Fframes, nx x ny) evaluated at the positions the model shifts its
+	// pixels to, by a 2D type-2 NUFFT of kernel width w. Summed into Isum, or one aligned frame each in Ialigned.
+	void nufftLocalShifts(const std::vector<MultidimArray<fComplex> > &Fframes, int nx, int ny, const ThirdOrderPolynomialModel &model,
+	                      int w, Image<float> *Isum, std::vector<Image<float> > *Ialigned, std::ostream &logfile);
+#endif
 
 private:
 	// Replace each bad pixel in every frame by a neighbour chosen by a hash of

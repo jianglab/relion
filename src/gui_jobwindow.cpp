@@ -995,6 +995,9 @@ void JobWindow::initialiseMotioncorrWindow()
 	place("gain_rot", TOGGLE_DEACTIVATE);
 	place("gain_flip", TOGGLE_DEACTIVATE);
 	place("fn_defect", TOGGLE_DEACTIVATE);
+#ifdef RELION_USE_FINUFFT
+	place("do_nufft_local", TOGGLE_DEACTIVATE);
+#endif
 
 	current_y += STEPY/2;
 	group4 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");

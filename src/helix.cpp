@@ -27,6 +27,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <memory>
+#include "src/exact_map3d.h"
 
 // Wider search ranges for helical twist and rise
 #define WIDE_HELICAL_TWIST_AND_RISE_SEARCHES
@@ -1039,8 +1041,15 @@ void imposeHelicalSymmetryInRealSpace(
 		SINCOS(DEG2RAD(((RFLOAT)(id)) * twist_deg), &sin_rec[id], &cos_rec[id]);
 #endif
 
+#ifdef RELION_USE_FINUFFT
+	// RELION_MAP_INTERPOLATION=nufft: each copy is read from the map's exact interpolant, not trilinearly
+	const bool exact = ExactMap3D::use(v, "helical symmetry");
+#else
+	const bool exact = false;
+#endif
+
 	// On the GPU (RELION_GPU_RECONSTRUCT, with --gpu): the same loop, one thread per voxel
-	if (!cuboid && gpurec::requested() && gpurec::gpuRequested())
+	if (!exact && !cuboid && gpurec::requested() && gpurec::gpuRequested())
 	{
 		gpurec::HelixRealSpaceInput g;
 		g.zdim = ZSIZE(v); g.ydim = YSIZE(v); g.xdim = XSIZE(v);
@@ -1088,6 +1097,18 @@ void imposeHelicalSymmetryInRealSpace(
 				if ( outside_sphere || (d < d_min) || (d > D_max) )
 					outside[(k - STARTINGZ(v)) * vxy + (i - STARTINGY(v)) * vx + (j - STARTINGX(v))] = 1;
 			}
+
+#ifdef RELION_USE_FINUFFT
+	// the map with the voxels outside the mask set to zero
+	std::unique_ptr<ExactMap3D> em;
+	if (exact)
+	{
+		MultidimArray<RFLOAT> masked = v;
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(masked)
+			if (outside[n]) DIRECT_MULTIDIM_ELEM(masked, n) = 0.;
+		em.reset(new ExactMap3D(masked, threads));
+	}
+#endif
 
 	bool bad = false;
 	#pragma omp parallel for schedule(dynamic) reduction(||:bad) num_threads(threads)
@@ -1149,6 +1170,15 @@ void imposeHelicalSymmetryInRealSpace(
 			RFLOAT zp = zi + ((RFLOAT)(id)) * rise_pix;
 			RFLOAT yp = xi * sin_val + yi * cos_val;
 			RFLOAT xp = xi * cos_val - yi * sin_val;
+
+#ifdef RELION_USE_FINUFFT
+			if (exact)
+			{
+				pix_sum += em->value(xp, yp, zp);
+				pix_weight += 1.;
+				continue;
+			}
+#endif
 
 			// Trilinear interpolation (with physical coords)
 			// Subtract STARTINGY and STARTINGZ to accelerate access to data (STARTINGX=0)

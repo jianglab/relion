@@ -81,6 +81,8 @@ set(RELION_UNIT_TEST_SOURCES
     test_pair_list.cpp
     test_lazy_cache.cpp
     test_vmovie_read_ahead.cpp
+    test_motioncorr_nufft.cpp
+    test_exact_map3d.cpp
 )
 
 if (CUDA_FOUND)

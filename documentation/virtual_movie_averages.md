@@ -58,7 +58,11 @@ next to it:
   made by size with `FFTW_UNALIGNED`.
 
 The recipe (`rlnMicrographSumRecipe`) also records the micrograph's size and
-whether it is stored in float16, so a header-only read needs no movie.
+whether it is stored in float16, so a header-only read needs no movie. A micrograph made with
+exact local shifts (`--local_interpolation nufft`, see `exact_resampling.md`)
+has a version 2 recipe with `local_nufft=<kernel width>`: builds that only know
+version 1 refuse it rather than sum it differently, and a build without FINUFFT
+reports that it needs one.
 
 ### Reading a virtual movie average
 

@@ -2100,6 +2100,17 @@ void RelionJob::initialiseMotioncorrJob()
 When running on 4k x 4k movies and using 6 to 12 threads, the speeds should be similar. Note that Takanori's program uses the same model as the UCSF program and gives results that are almost identical.\n\
 Whichever program you use, 'Motion Refinement' is highly recommended to get the most of your dataset.");
 	joboptions["fn_motioncor2_exe"] = JobOption("MOTIONCOR2 executable:", std::string(default_location), "*.*", ".", "Location of the MOTIONCOR2 executable. You can control the default of this field by setting environment variable RELION_MOTIONCOR2_EXECUTABLE, or by editing the first few lines in src/gui_jobwindow.h and recompile the code.");
+#ifdef RELION_USE_FINUFFT
+	{
+		const char *v = getenv("RELION_MOTIONCORR_INTERP");
+		joboptions["do_nufft_local"] = JobOption("Exact local shifts (NUFFT)?", v != NULL && std::string(v) == "nufft",
+			"RELION's own implementation only. If set to Yes, the local (patch) motion is applied exactly, by evaluating each frame's Fourier series "
+			"at the shifted positions, instead of by bilinear interpolation, which damps the signal near Nyquist. "
+			"It keeps about 5% more signal-to-noise at 0.7 Nyquist and 15-20% near Nyquist, which matters only for data that reach close to "
+			"the micrographs' Nyquist before Bayesian polishing; it adds several seconds per micrograph. "
+			"The default comes from the environment variable RELION_MOTIONCORR_INTERP (nufft).");
+	}
+#endif
 	joboptions["fn_defect"] = JobOption("Defect file:", "", "*", ".", "Location of a UCSF MotionCor2-style defect text file or a defect map that describe the defect pixels on the detector. Each line of a defect text file should contain four numbers specifying x, y, width and height of a defect region. A defect map is an image (MRC or TIFF), where 0 means good and 1 means bad pixels. The coordinate system is the same as the input movie before application of binning, rotation and/or flipping.\nNote that the format of the defect text is DIFFERENT from the defect text produced by SerialEM! One can convert a SerialEM-style defect file into a defect map using IMOD utilities e.g. \"clip defect -D defect.txt -f tif movie.mrc defect_map.tif\". See explanations in the SerialEM manual.\n\nLeave empty if you don't have any defects, or don't want to correct for defects on your detector.");
 	joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string("0"), "Provide a list of which GPUs (0,1,2,3, etc) to use. MPI-processes are separated by ':'. For example, to place one rank on device 0 and one rank on device 1, provide '0:1'.\n\
 Note that multiple MotionCor2 processes should not share a GPU; otherwise, it can lead to crash or broken outputs (e.g. black images) .");
@@ -2195,6 +2206,10 @@ bool RelionJob::getCommandsMotioncorrJob(std::string &outputname, std::vector<st
 
 		command += " --use_own ";
 		command += " --j " + joboptions["nr_threads"].getString();
+#ifdef RELION_USE_FINUFFT
+		// always explicit, so the job does what the box shows whatever RELION_MOTIONCORR_INTERP says where it runs
+		command += std::string(" --local_interpolation ") + (joboptions["do_nufft_local"].getBoolean() ? "nufft" : "linear");
+#endif
 		if (joboptions["do_float16"].getBoolean())
 		{
 			if (!joboptions["do_save_ps"].getBoolean())
@@ -2211,6 +2226,13 @@ bool RelionJob::getCommandsMotioncorrJob(std::string &outputname, std::vector<st
 		label += ".motioncor2";
 
 		command += " --use_motioncor2 ";
+#ifdef RELION_USE_FINUFFT
+		if (joboptions["do_nufft_local"].getBoolean())
+		{
+			error_message = "ERROR: exact local shifts (NUFFT) need RELION's own implementation of motion correction.";
+			return false;
+		}
+#endif
 		command += " --motioncor2_exe " + joboptions["fn_motioncor2_exe"].getString();
 
 		if (joboptions["do_float16"].getBoolean())

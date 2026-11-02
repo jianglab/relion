@@ -504,6 +504,31 @@ TEST_CASE("MotionCorr: RELION_VIRTUAL_MOVIE_AVERAGES sets the default choice", "
 	unsetenv("RELION_VIRTUAL_MOVIE_AVERAGES");
 }
 
+#ifdef RELION_USE_FINUFFT
+TEST_CASE("MotionCorr: exact local shifts emit a flag either way", "[pipeline][motioncorr]")
+{
+	unsetenv("RELION_MOTIONCORR_INTERP");
+	RelionJob job;
+	setUpMotioncorrJob(job);
+	REQUIRE(job.joboptions["do_nufft_local"].getString() == "No");   // off by default
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --local_interpolation linear") != std::string::npos);
+	job.joboptions["do_nufft_local"].setString("Yes");
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --local_interpolation nufft") != std::string::npos);
+	job.joboptions["do_own_motioncor"].setString("No");
+	job.joboptions["do_float16"].setString("No");
+	job.joboptions["do_save_ps"].setString("No");
+	REQUIRE_FALSE(generateCommand(job, command));          // MotionCor2 has no such option
+
+	setenv("RELION_MOTIONCORR_INTERP", "nufft", 1);
+	setUpMotioncorrJob(job);
+	REQUIRE(job.joboptions["do_nufft_local"].getString() == "Yes");
+	unsetenv("RELION_MOTIONCORR_INTERP");
+}
+#endif
+
 static bool generateCommands(RelionJob &job, std::vector<std::string> &commands,
 		std::string &final_command, std::string &error_message,
 		bool do_makedir = false, std::string outputname = "")
