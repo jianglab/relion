@@ -657,8 +657,10 @@ public:
 	// sort_classes_junk x the median class
 	bool do_sort_classes = false;
 	RFLOAT sort_classes_junk = 1.5;
+	// Low-pass filter the references to this resolution (A) before the first iteration, if coarser than --ini_high
+	RFLOAT ref_lowpass = -1.;
 	// The options above; parsed the same way in both parse paths
-	void parseSortClasses();
+	void parseSortClassesAndRefLowpass();
 	// Renumber the classes in the model and the particles (see do_sort_classes)
 	void sortClasses();
 
@@ -1286,7 +1288,8 @@ public:
 	/* Perform an initial low-pass filtering of the references
 	 * Note that because of the MAP estimation, this is not necessary inside the refinement
 	 */
-	void initialLowPassFilterReferences();
+	// to `lowpass` A (<= 0: --ini_high)
+	void initialLowPassFilterReferences(RFLOAT lowpass = -1.);
 
 	/** ========================== EM-Iteration  ================================= */
 

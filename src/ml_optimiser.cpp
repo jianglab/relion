@@ -585,7 +585,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
-    parseSortClasses();
+    parseSortClassesAndRefLowpass();
     parseCoarseEarly();
     parseFilamentContext();
     parseHelicalTiltWeight();
@@ -852,7 +852,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
-    parseSortClasses();
+    parseSortClassesAndRefLowpass();
     parseCoarseEarly();
     parseFilamentContext();
     parseHelicalTiltWeight();
@@ -3267,7 +3267,9 @@ void MlOptimiser::initialiseReferences()
         }
 
         // Low-pass filter the initial references
-        initialLowPassFilterReferences();
+        if (ref_lowpass > ini_high && fn_ref != "None" && verb > 0)
+            std::cout << " Low-pass filtering the references to " << ref_lowpass << " A (--ref_lowpass)" << std::endl;
+        initialLowPassFilterReferences(fn_ref != "None" ? std::max(ini_high, ref_lowpass) : -1.);
 
         if (do_init_blobs && !do_fix_classes && fn_ref == "None" && !(mydata.is_tomo || mymodel.data_dim == 3))
         {
@@ -4093,14 +4095,16 @@ void MlOptimiser::setSigmaNoiseEstimatesAndSetAverageImage(MultidimArray<RFLOAT>
 
 }
 
-void MlOptimiser::initialLowPassFilterReferences()
+void MlOptimiser::initialLowPassFilterReferences(RFLOAT lowpass)
 {
-    if (ini_high > 0.)
+    if (lowpass <= 0.)
+        lowpass = ini_high;
+    if (lowpass > 0.)
     {
 
         // Make a soft (raised cosine) filter in Fourier space to prevent artefacts in real-space
         // The raised cosine goes through 0.5 at the filter frequency and has a width of width_mask_edge fourier pixels
-        RFLOAT radius = mymodel.ori_size * mymodel.pixel_size / ini_high;
+        RFLOAT radius = mymodel.ori_size * mymodel.pixel_size / lowpass;
         radius -= WIDTH_FMASK_EDGE / 2.;
         RFLOAT radius_p = radius + WIDTH_FMASK_EDGE;
         FourierTransformer transformer;
@@ -13955,7 +13959,7 @@ void MlOptimiser::sortClasses()
     }
 }
 
-void MlOptimiser::parseSortClasses()
+void MlOptimiser::parseSortClassesAndRefLowpass()
 {
     const char *env = getenv("RELION_SORT_CLASSES");
     std::string v = (env == NULL) ? "" : env;
@@ -13966,6 +13970,7 @@ void MlOptimiser::parseSortClasses()
     if (parser.checkOption("--dont_sort_classes", "Keep the classes in their original order (the default, unless RELION_SORT_CLASSES=1)"))
         do_sort_classes = false;
     sort_classes_junk = textToFloat(parser.getOption("--sort_classes_junk", "With --sort_classes: classes with a resolution worse than this times the median class are junk (sorted last)", "1.5"));
+    ref_lowpass = textToFloat(parser.getOption("--ref_lowpass", "Low-pass filter the references to this resolution (A) before the first iteration, when coarser than --ini_high (e.g. 20 for class maps of an earlier run)", "-1"));
 }
 
 static void pruneOldIterationsNow(const FileName fn_out, int iter, bool keep_first_iteration);

@@ -93,3 +93,43 @@ drift).
 
 Tests: `[class_settings]` and `[reference_list]` unit tests, the GUI layout test,
 `tests/integration/test_class_settings.py`.
+
+## Two rounds
+
+GUI "Two rounds?" (Class3D, Reference tab; opt-in) runs the classification
+twice in one job. Round 1 is the job as set, written as `run_round1_*`. Round 2
+is the same job started from round 1's last model:
+`--ref run_round1_itNNN_model.star --ref_lowpass 20`, and `--ini_high 20` when
+the job's initial low-pass filter is coarser than that (or not set).
+
+- A `model.star` as `--ref` gives one class per row of `model_classes`, each
+  starting with that row's helical twist and rise (the refined values), and
+  also takes the run's saved per-class settings (`model_class_settings`: ranges,
+  tube diameters, masks, point groups).
+- `--ref_lowpass` filters only the starting maps (not again after the first
+  cross-correlation iteration): round 1's maps keep what tells the types apart
+  but lose the detail fitted to round 1's assignment, so round 2 sorts the
+  segments again from scratch.
+- Only round 2 carries `--pipeline_control`, so the job ends with round 2; a
+  failed round 1 stops the job before round 2.
+
+Why it helps: one round depends on its start. Early mistakes reinforce
+themselves (a class that takes in wrong segments looks like them and keeps
+them), and more iterations do not undo them. Round 2 starts with a
+type-specific map per class, so the segments are sorted by real differences
+from the first iteration.
+
+Measured (3-type mix, 42,000 segments, K = 3, 25 + 25 iterations,
+`--keep_full_filaments`, 4 seeds):
+
+| start | round 1 | round 2 |
+|---|---|---|
+| single reference, random seeds | 0.9303-0.9462 (mean 0.937) | 0.9479-0.9502 (mean 0.949) |
+| one reference per class with its own twist | 0.9444-0.9538 (8 seeds, mean 0.950) | 0.9516-0.9542 (mean 0.953; from one round-1 run) |
+
+The built-in round 2 gives the same as the earlier manual protocol (class maps
+filtered with `relion_image_handler --lowpass 20`, 0.9520-0.9567, mean 0.954).
+Seeding round 1 from Class2D helical types (each segment's first-iteration
+class = its `rlnHelicalType`) was tried and removed: 0.936 after round 1 and
+0.949 after round 2, the same as random seeds. It costs twice the time. The remaining errors are mostly short filaments
+(10 segments or fewer), which no variant gets much better than 75% right.

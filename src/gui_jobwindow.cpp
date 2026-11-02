@@ -2120,6 +2120,10 @@ void JobWindow::initialiseClass3DWindow()
 
 	place("sym_name", TOGGLE_DEACTIVATE);
 
+	current_y += STEPY/2;
+
+	place("do_two_rounds", TOGGLE_DEACTIVATE);
+
 	tab2->end();
 	tab3->begin();
 	tab3->label("CTF");

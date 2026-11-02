@@ -1832,7 +1832,7 @@ TEST_CASE("Reconstruct3D: the tube diameter goes to relion_reconstruct for symme
 }
 
 // ---------------------------------------------------------------------------
-// Class order
+// Class order, two rounds
 // ---------------------------------------------------------------------------
 
 TEST_CASE("Class2D: sort-classes checkbox emits a flag either way", "[pipeline][class2d][class_order]")
@@ -1850,3 +1850,61 @@ TEST_CASE("Class2D: sort-classes checkbox emits a flag either way", "[pipeline][
 	CHECK(commands[0].find(" --dont_sort_classes") == std::string::npos);
 }
 
+TEST_CASE("Class3D: two rounds", "[pipeline][class3d][class_order]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_3DCLASS);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_img"].setString("particles.star");
+	job.joboptions["fn_ref"].setString("ref.mrc");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["scratch_dir"].setString("");
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+
+	SECTION("default: one round")
+	{
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands.size() == 1);
+		CHECK(commands[0].find("_round1") == std::string::npos);
+	}
+	SECTION("two rounds: the second from the first's last model, low-passed to 20 A")
+	{
+		job.joboptions["do_two_rounds"].setString("Yes");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands.size() == 2);
+		const std::string &r1 = commands[0], &r2 = commands[1];
+		CHECK(r1.find("run_round1 ") != std::string::npos);
+		CHECK(r1.find(" --ref ref.mrc") != std::string::npos);
+		CHECK(r1.find("--pipeline_control") == std::string::npos);  // only the second round ends the job
+		CHECK(r2.find("run_round1_it025_model.star") != std::string::npos);
+		CHECK(r2.find(" --ref ref.mrc") == std::string::npos);
+		CHECK(r2.find("run_round1 ") == std::string::npos);
+		CHECK(r2.find(" --ref_lowpass 20") != std::string::npos);
+		CHECK(r2.find(" --ini_high 20") != std::string::npos);  // the default 60 is too coarse for round 2
+		CHECK(r2.find(" --ini_high 60") == std::string::npos);
+		CHECK(r2.find("--pipeline_control") != std::string::npos);
+		CHECK(final_command.find(" && ") != std::string::npos);
+	}
+	SECTION("two rounds keep a finer initial low-pass filter")
+	{
+		job.joboptions["do_two_rounds"].setString("Yes");
+		job.joboptions["ini_high"].setString("10");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands.size() == 2);
+		CHECK(commands[1].find(" --ini_high 10") != std::string::npos);
+		CHECK(commands[1].find(" --ini_high 20") == std::string::npos);
+	}
+	SECTION("a continuation runs once")
+	{
+		job.is_continue = true;
+		job.joboptions["fn_cont"].setString("Class3D/job007/run_it025_optimiser.star");
+		job.joboptions["do_two_rounds"].setString("Yes");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands.size() == 1);
+		CHECK(commands[0].find("_round1") == std::string::npos);
+	}
+}

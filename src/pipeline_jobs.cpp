@@ -4994,6 +4994,10 @@ Therefore, if in doubt it is recommended to set this option to No.");
 	joboptions["ini_high"] = JobOption("Initial low-pass filter (A):", 60, 0, 200, 5, "It is recommended to strongly low-pass filter your initial reference map. \
 If it has not yet been low-pass filtered, it may be done internally using this option. \
 If set to 0, no low-pass filter will be applied to the initial reference(s).");
+	joboptions["do_two_rounds"] = JobOption("Two rounds?", false, "If set to Yes, the job runs the classification twice. The second round starts from the class maps \
+of the first (low-pass filtered to 20 A, and the initial low-pass filter at most 20 A), with each class's helical twist and rise and its per-class settings. \
+On a helical test mix this made the classes purer and more consistent between random seeds than one round. \
+It takes twice as long; the first round's files are called run_round1_*.");
 	joboptions["sym_name"] = JobOption("Symmetry:", std::string("C1"), "If the molecule is asymmetric, \
 set Symmetry group to C1. Note their are multiple possibilities for icosahedral symmetry: \n \
 * I1: No-Crowther 222 (standard in Heymann, Chagoyen & Belnap, JSB, 151 (2005) 196–207) \n \
@@ -5569,9 +5573,34 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	// Other arguments
 	command += " " + joboptions["other_args"].getString();
 
-	commands.push_back(command);
+	// Two rounds: the first with its own output root, the second from its last class maps
+	const bool two_rounds = !is_continue && joboptions["do_two_rounds"].getBoolean();
+	if (two_rounds)
+	{
+		const std::string out = " --o " + outputname + fn_run, ref = " --ref " + refs.ref_argument;
+		const std::string out1 = " --o " + outputname + fn_run + "_round1";
+		std::string round1 = command, round2 = command;
+		round1.replace(round1.find(out), out.size(), out1);
+		std::string fn_model = outputname + fn_run + "_round1_it" + integerToString(my_iter, 3) + "_model.star";
+		round2.replace(round2.find(ref), ref.size(), " --ref " + fn_model);
+		const RFLOAT ini_high = joboptions["ini_high"].getNumber(error_message);
+		if (error_message != "") return false;
+		if (ini_high <= 0. || ini_high > 20.)
+		{
+			const std::string ini = " --ini_high " + joboptions["ini_high"].getString();
+			const size_t pos = round2.find(ini);
+			if (pos != std::string::npos)
+				round2.erase(pos, ini.size());
+			round2 += " --ini_high 20";
+		}
+		round2 += " --ref_lowpass 20";
+		commands.push_back(round1);
+		commands.push_back(round2);
+	}
+	else
+		commands.push_back(command);
 
-	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
+	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message, false, 1, two_rounds);
 }
 
 void RelionJob::initialiseAutorefineJob()

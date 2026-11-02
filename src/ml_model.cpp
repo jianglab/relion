@@ -1155,6 +1155,25 @@ void MlModel::initialiseFromImages(
 			// ignore nr_classes from the command line, use number of entries in STAR file
 			nr_classes = 0;
 			class_settings.read(MDref);
+			// The model.star of an earlier run: also its saved per-class settings (twist and rise stay those of
+			// model_classes, the refined values)
+			{
+				MetaDataTable MDsaved;
+				if (MDsaved.read(fn_ref, "model_class_settings") == MDref.numberOfObjects())
+				{
+					ClassSettings saved;
+					saved.read(MDsaved);
+					auto take = [](auto &mine, const auto &theirs) { if (mine.empty()) mine = theirs; };
+					take(class_settings.twist_min, saved.twist_min);
+					take(class_settings.twist_max, saved.twist_max);
+					take(class_settings.rise_min, saved.rise_min);
+					take(class_settings.rise_max, saved.rise_max);
+					take(class_settings.inner_diameter, saved.inner_diameter);
+					take(class_settings.outer_diameter, saved.outer_diameter);
+					take(class_settings.mask, saved.mask);
+					take(class_settings.sym, saved.sym);
+				}
+			}
 			Iref.clear();
 			Igrad1.clear();
 			Igrad2.clear();
