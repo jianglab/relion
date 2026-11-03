@@ -164,9 +164,10 @@ MultidimArray<Complex> exactCentralSlice(const MultidimArray<RFLOAT>& vol,
 }
 
 /// Relative L2 difference over the pixels inside r_max_out
-double relativeError(const MultidimArray<Complex>& a, const MultidimArray<Complex>& ref)
+double relativeError(const MultidimArray<Complex>& a, const MultidimArray<Complex>& ref, int r_max_out = -1)
 {
-	const int r_max_out = XSIZE(ref) - 1;
+	if (r_max_out < 0)
+		r_max_out = XSIZE(ref) - 1;
 	const int r_max_out_2 = r_max_out * r_max_out;
 
 	double num = 0.0, den = 0.0;
@@ -397,6 +398,47 @@ TEST_CASE("FINUFFT projector beats trilinear against the exact central slice", "
 	CHECK(err_nuf < 0.1 * err_tri);
 }
 
+// A map with power up to Nyquist (noise), as real references have: the slices must still be the exact
+// transform of the map, at padding 1 and 2.  When the mode array was made from `data` (cut to its
+// sphere, then to the box) the error was 1e-2 at padding 1 and 0.1 at padding 2.
+TEST_CASE("FINUFFT projector is exact for a map that is not band-limited, at any padding", "[finufft_projector]")
+{
+	if (!haveFinufftSupport())
+	{
+		WARN("built without FINUFFT support - skipping");
+		return;
+	}
+
+	FinufftConfigGuard guard;
+	Projector::finufft_mode_crop = 1.0f;
+	Projector::finufft_tol = 1e-8;
+
+	const int ori_size = 32;
+	MultidimArray<RFLOAT> vol = makeBlobVolume(ori_size, 1.0);
+	Lcg rng(12345);
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(vol)
+		DIRECT_MULTIDIM_ELEM(vol, n) += 0.05 * rng.next();
+	vol.setXmippOrigin();
+
+	Matrix2D<RFLOAT> A;
+	Euler_angles2matrix(37.0, 61.0, 23.0, A, false);
+	const MultidimArray<Complex> f_gt = exactCentralSlice(vol, A, ori_size);
+
+	for (int pad = 1; pad <= 2; pad++)
+	{
+		MultidimArray<RFLOAT> v = vol, dummy;
+		Projector proj(ori_size, FINUFFT, (float)pad);
+		proj.computeFourierTransformMap(v, dummy, -1, 1);
+		MultidimArray<Complex> f(ori_size, ori_size/2 + 1);
+		f.initZeros();
+		proj.project(f, A);
+		// below r_max: at r_max itself a rotated position can round to just outside and is then skipped
+		const double err = relativeError(f, f_gt, ori_size/2 - 1);
+		INFO("padding " << pad << ": relative error " << err);
+		CHECK(err < 1e-5);
+	}
+}
+
 TEST_CASE("FINUFFT rotate2D is interpolatory at grid nodes", "[finufft_projector]")
 {
 	if (!haveFinufftSupport())
@@ -552,21 +594,9 @@ TEST_CASE("Central-slice interpolation benchmark", "[.finufft_bench]")
 			Euler_angles2matrix(180.0 * (ang.next() + 1.0), 90.0 * (ang.next() + 1.0),
 			                    180.0 * (ang.next() + 1.0), As[n], false);
 
-		// RELION's model of the object has no power beyond the sphere of radius
-		// ori_size/2 (Projector::data is zero outside it), so that is what both
-		// interpolators are scored against: the object with the corners of
-		// Fourier space removed.
+		// Both interpolators are scored against the exact transform of the map at the slice
+		// positions (inside r_max), which is what a projection of the reference should be
 		MultidimArray<RFLOAT> vol_gt = vol;
-		{
-			FourierTransformer ft;
-			MultidimArray<Complex> F;
-			ft.FourierTransform(vol_gt, F, false);
-			const int R = ori_size / 2;
-			FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(F)
-				if (kp*kp + ip*ip + jp*jp > R*R)
-					DIRECT_A3D_ELEM(F, k, i, j) = Complex(0., 0.);
-			ft.inverseFourierTransform();
-		}
 		vol_gt.setXmippOrigin();
 		std::vector<MultidimArray<Complex> > gt(n_truth);
 		for (int n = 0; n < n_truth; n++)
@@ -596,7 +626,7 @@ TEST_CASE("Central-slice interpolation benchmark", "[.finufft_bench]")
 
 			double err = 0.0;
 			for (int n = 0; n < n_truth; n++)
-				err = XMIPP_MAX(err, relativeError(f[n], gt[n]));
+				err = XMIPP_MAX(err, relativeError(f[n], gt[n], ori_size/2 - 1));
 
 			const double mem_mb = ((double)MULTIDIM_SIZE(proj.data) * sizeof(Complex)
 			                       + (double)proj.finufft_modes.memoryBytes()) / 1048576.0;

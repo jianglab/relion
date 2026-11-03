@@ -259,7 +259,7 @@ command line (per job, and the command line wins):
 | Environment | Option | Default | Meaning |
 |---|---|---|---|
 | `RELION_FINUFFT_MODE_CROP` | `--finufft_mode_crop` | `1.0` | mode-array size as a multiple of the box size (§3) |
-| `RELION_FINUFFT_TOL` | `--finufft_tol` | `1e-6` | requested relative accuracy |
+| `RELION_FINUFFT_TOL` | `--finufft_tol` | `1e-4` | requested relative accuracy; 1e-4 is still about 800x more accurate than trilinear at padding 2 |
 | `RELION_FINUFFT_UPSAMPFAC` | - | `1.25` | FINUFFT internal upsampling factor; `0` lets FINUFFT choose |
 | `RELION_FINUFFT_BATCH_MB` | `--finufft_batch_mb` | `512` | per-thread memory budget for the pre-projected slice batch (§4) |
 | `RELION_FINUFFT_CACHE_MB` | `--finufft_cache_mb` | `4096` | budget for the shared once-per-iteration projection cache (§4); `0` disables it |
@@ -388,6 +388,13 @@ do not change inside the search loop at all; that projection is now done once pe
 `(class, particle, image)` and copied out.  This is a pure saving with no change
 in results (verified: the trilinear path reports the same accuracies to the last
 digit).
+
+It now goes further and projects with a trilinear copy of the reference instead
+of the NUFFT one: it asks for one slice at a time, and each single-slice FINUFFT
+call costs a whole 3D transform (about 200 s per iteration on the tutorial, on
+one thread). The estimate only steers the angular sampling and the reported
+accuracies, so trilinear is accurate enough, and the copy also lets it use
+threads again.
 
 ### Per-particle batching (the fallback)
 

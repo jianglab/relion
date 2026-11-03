@@ -1809,6 +1809,19 @@ void MlModel::writeBildFileBodies(FileName fn_bild)
 }
 
 
+MultidimArray<RFLOAT> MlModel::projectorMap(int iclass) const
+{
+	if (nr_bodies == 1)
+		return Iref[iclass];
+	// ibody deals with overlapping bodies here, as iclass can be larger than nr_bodies when bodies overlap,
+	// but there are only nr_bodies Iref; ibody is the number of the original body (max nr_bodies)
+	int ibody = pointer_body_overlap_inv[iclass];
+	MultidimArray<RFLOAT> Irefp = Iref[ibody] * masks_bodies[iclass];
+	// Place each body with its center-of-mass in the center of the box
+	selfTranslate(Irefp, -com_bodies[ibody], DONT_WRAP);
+	return Irefp;
+}
+
 void MlModel::setFourierTransformMaps(bool update_tau2_spectra, int nr_threads, RFLOAT strict_lowres_exp,
 		   const MultidimArray<RFLOAT> *fourier_mask)
 {
@@ -1857,20 +1870,7 @@ void MlModel::setFourierTransformMaps(bool update_tau2_spectra, int nr_threads, 
 	for (int iclass = 0; iclass < PPref.size(); iclass++)
 	{
 
-		MultidimArray<RFLOAT> Irefp;
-		if (nr_bodies > 1)
-		{
-			// ibody deals with overlapping bodies here, as iclass can be larger than nr_bodies when bodies overlap,
-			// but there are only nr_bodies Iref; ibody is the number of the original body (max nr_bodies)
-			int ibody = pointer_body_overlap_inv[iclass];
-			Irefp = Iref[ibody] * masks_bodies[iclass];
-			// Place each body with its center-of-mass in the center of the box
-			selfTranslate(Irefp, -com_bodies[ibody], DONT_WRAP);
-		}
-		else
-		{
-			Irefp = Iref[iclass];
-		}
+		MultidimArray<RFLOAT> Irefp = projectorMap(iclass);
 
 		if(PPrefRank.size() > 1)
 			do_heavy = PPrefRank[iclass];

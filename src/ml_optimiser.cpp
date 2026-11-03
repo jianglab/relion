@@ -47,6 +47,7 @@
 #include "src/error.h"
 #include <dirent.h>
 #include <sys/stat.h>
+#include <memory>
 #include "src/ml_optimiser.h"
 #include "src/exact_map3d.h"
 #include "src/helix_report.h"
@@ -11940,7 +11941,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
     int nr_particles = (my_last_part_id - my_first_part_id + 1);
     init_progress_bar( nr_particles * mymodel.nr_classes * mymodel.nr_bodies);
 
-    // Threads (see ExpAccRng): not with a negative seed (time-based) or the NUFFT projector
+    // Threads (see ExpAccRng): not with a negative seed (time-based)
     long int acc_last_part_id = -1;
 #ifdef RELION_ACCERR_THREADS
     // Only one MPI rank (or the single process) does this and the GPUs wait meanwhile, so it may use all the cores
@@ -11969,7 +11970,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                       << "; the other ranks wait meanwhile; RELION_ACCURACY_THREADS overrides)" << std::endl;
         }
     }
-    const bool acc_parallel = acc_threads > 1 && random_seed >= 0 && mymodel.projector_interpolator != FINUFFT && nr_particles > 1;
+    const bool acc_parallel = acc_threads > 1 && random_seed >= 0 && nr_particles > 1;
     std::vector<ExpAccRng> acc_rngs(acc_parallel ? acc_threads : 0);
     if (acc_parallel)
         relionFftwPlanThreads(1);
@@ -11997,6 +11998,21 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
         }
 #endif
         (mymodel.orientability_contrib)[iclass].initZeros(mymodel.ori_size/2 + 1);
+
+        // With RELION_INTERPOLATION=nufft the estimate projects with a trilinear copy of the reference, made as without
+        // NUFFT: it asks for one slice at a time on the CPU, and each FINUFFT call costs a whole 3D transform (minutes per
+        // iteration, on one thread). The estimate only steers the angular sampling and the reported accuracies.
+        Projector *accProj = &mymodel.PPref[iclass];
+        std::unique_ptr<Projector> accTrilinear;
+        if (accProj->interpolator == FINUFFT)
+        {
+            accTrilinear.reset(new Projector(mymodel.ori_size, mymodel.interpolator, mymodel.padding_factor, mymodel.r_min_nn, mymodel.data_dim));
+            MultidimArray<RFLOAT> map = mymodel.projectorMap(iclass), dummy;
+            const int min_ires = (strict_lowres_exp > 0) ? ROUND(mymodel.pixel_size * mymodel.ori_size / strict_lowres_exp) : -1;
+            accTrilinear->computeFourierTransformMap(map, dummy, mymodel.current_size, nr_threads, true, true, min_ires,
+                    (XSIZE(helical_fourier_mask) > 0) ? &helical_fourier_mask : NULL, mymodel.do_gpu);
+            accProj = accTrilinear.get();
+        }
 
         RFLOAT acc_rot_class = 0.;
         RFLOAT acc_trans_class = 0.;
@@ -12216,7 +12232,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                             if (mydata.is_tomo) A1 = mydata.getRotationMatrix(part_id, img_id) * A1;
                             A1 = mydata.obsModel.applyAnisoMag(A1, optics_group);
                             A1 = mydata.obsModel.applyScaleDifference(A1, optics_group, mymodel.ori_size, mymodel.pixel_size);
-                            (mymodel.PPref[iclass]).get2DFourierTransform(F1c, A1);
+                            accProj->get2DFourierTransform(F1c, A1);
                         }
                         F1 = F1_cache[img_id];
 
@@ -12281,7 +12297,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                             if (mydata.is_tomo) A2 = mydata.getRotationMatrix(part_id, img_id) * A2;
                             A2 = mydata.obsModel.applyAnisoMag(A2, optics_group);
                             A2 = mydata.obsModel.applyScaleDifference(A2, optics_group, mymodel.ori_size, mymodel.pixel_size);
-                            (mymodel.PPref[iclass]).get2DFourierTransform(F2, A2);
+                            accProj->get2DFourierTransform(F2, A2);
                         }
                         else
                         {

@@ -523,6 +523,10 @@ public:
 	/** Write out a Bild file with the COMs and directions or rotation for each body */
 	void writeBildFileBodies(FileName fn_bild);
 
+	// The map that goes into PPref[iclass]: the reference, or for multi-body refinement the (overlapping) body,
+	// masked and centred on its centre of mass
+	MultidimArray<RFLOAT> projectorMap(int iclass) const;
+
 	// Set FourierTransforms in Projector of each class
 	// current_size will determine the size of the transform (in number of Fourier shells) to be held in the projector ( thisClass == -1  => do all classes this call)
 	void setFourierTransformMaps(bool update_tau2_spectra, int nr_threads = 1, RFLOAT strict_lowres_exp = -1,

@@ -70,7 +70,7 @@ using namespace gravis;
 // Static configuration of the FINUFFT projector; overridden from the environment
 // and then from the command line.
 float Projector::finufft_mode_crop = 1.0f;
-double Projector::finufft_tol = 1e-6;
+double Projector::finufft_tol = 1e-4;
 double Projector::finufft_upsampfac = 1.25;
 
 void Projector::applyFinufftEnvDefaults()
@@ -987,9 +987,16 @@ void Projector::computeFourierTransformMap(
 		fprintf(stderr, " ms\n");
 	}
 
-	// Build the conjugate-domain mode array that the FINUFFT interpolator evaluates
+	// Build the conjugate-domain mode array that the FINUFFT interpolator evaluates: from the map
+	// (vol_in is not changed above when interpolator == FINUFFT), unless a Fourier mask or a minimum
+	// resolution made `data` differ from the map's transform
 	if (do_heavy && interpolator == FINUFFT)
-		prepareFinufft();
+	{
+		if (!do_fourier_mask && min_ires <= 0)
+			prepareFinufft(&vol_in, normfft);
+		else
+			prepareFinufft();
+	}
 
 #ifdef PROJ_TIMING
 	proj_timer.printTimes(false);
@@ -1252,7 +1259,7 @@ void evaluateAndScatter(const Projector& proj, FinufftQueryPoints& pts)
 
 } // anonymous namespace
 
-void Projector::prepareFinufft()
+void Projector::prepareFinufft(const MultidimArray<RFLOAT> *map, RFLOAT map_scale)
 {
 	if (rect && interpolator == FINUFFT)
 		REPORT_ERROR("RELION_INTERPOLATION=nufft is not supported for rectangular boxes yet.");
@@ -1292,6 +1299,35 @@ void Projector::prepareFinufft()
 	finufft_modes.dim = ref_dim;
 	finufft_modes.mode_size = M;
 	finufft_modes.padded_size = P;
+
+	if (map != NULL)
+	{
+		// V = map_scale * map: the inverse DFT of `data` before its cut to the sphere of r_max, so the
+		// slices are the exact transform of the map (the cut to r_max is made per pixel when projecting)
+		if (map->getDim() != ref_dim)
+			REPORT_ERROR("Projector::prepareFinufft: the map does not have the dimension of the reference.");
+		const MultidimArray<RFLOAT> &V = *map;
+		finufft_modes.modes.assign((size_t)M * M * (ref_dim == 3 ? M : 1), std::complex<RFLOAT>(0, 0));
+		const int M3 = (ref_dim == 3) ? M : 1;
+		for (int t3 = 0; t3 < M3; t3++)
+		{
+			const int r3 = (ref_dim == 3) ? t3 - M/2 : 0;
+			if (ref_dim == 3 && (r3 < STARTINGZ(V) || r3 > FINISHINGZ(V))) continue;
+			for (int t2 = 0; t2 < M; t2++)
+			{
+				const int r2 = t2 - M/2;
+				if (r2 < STARTINGY(V) || r2 > FINISHINGY(V)) continue;
+				for (int t1 = 0; t1 < M; t1++)
+				{
+					const int r1 = t1 - M/2;
+					if (r1 < STARTINGX(V) || r1 > FINISHINGX(V)) continue;
+					const RFLOAT v = (ref_dim == 3) ? A3D_ELEM(V, r3, r2, r1) : A2D_ELEM(V, r2, r1);
+					finufft_modes.modes[((size_t)t3 * M + t2) * M + t1] = std::complex<RFLOAT>(map_scale * v, (RFLOAT)0);
+				}
+			}
+		}
+		return;
+	}
 
 	FourierTransformer transformer;
 

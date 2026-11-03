@@ -423,12 +423,15 @@ public:
 	void project(MultidimArray<Complex > &img_out, Matrix2D<RFLOAT> &A);
 
 	/*
-	* Build the FINUFFT mode array from the current contents of `data`.
+	* Build the FINUFFT mode array from the current contents of `data`, or, with
+	* `map`, from the real-space map that `data` was made from (times map_scale,
+	* the normalisation of `data`): then the slices are the exact Fourier transform
+	* of the map at any padding, not of `data` cut to its sphere and to the box.
 	* A no-op unless interpolator == FINUFFT.  Called at the end of
 	* computeFourierTransformMap(); call it explicitly after filling `data`
 	* by any other route.
 	*/
-	void prepareFinufft();
+	void prepareFinufft(const MultidimArray<RFLOAT> *map = NULL, RFLOAT map_scale = 1.);
 
 	/*
 	* Batched equivalent of calling get2DFourierTransform() once per entry of A.
