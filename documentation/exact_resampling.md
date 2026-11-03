@@ -58,8 +58,23 @@ symmetry imposed with `relion_helix_toolbox --impose`, FSC between the halves:
 | trilinear | 0.543 | 0.367 | 2.29 A | 4 s |
 | exact | 0.546 | 0.375 | 2.29 A | 17 s |
 
-A small gain where there is signal; the resolution is unchanged. Local symmetry,
-class alignment and centring are checked by unit tests only.
+A small gain where there is signal; the resolution is unchanged.
+
+Local symmetry on the same C1 half maps (`relion_localsym --apply`, 17 helical
+operators k x twist, k x rise inside a central slab mask), FSC inside the mask
+at 0.5 / 0.6 / 0.7 of Nyquist: between the symmetrised halves 0.902 / 0.601 /
+0.324 (trilinear) and 0.898 / 0.589 / 0.337 (exact); against the other,
+unprocessed half (independent noise, so it follows agreement with the true
+map) 0.669 / 0.269 / 0.112 and 0.670 / 0.268 / 0.116. No real difference;
+about 38 s (trilinear) and 31 s (exact) per map.
+
+Class alignment and centring move a map once. A move there and back with the
+same rotation and a fractional shift keeps, at 0.5 / 0.9 of Nyquist, 0.16 /
+0.002 (alignment) and 0.29 / 0.01 (centring) of the power with trilinear
+interpolation, and all of it (FSC 1.000 with the original) when exact. The
+half-map FSC after one move is the same both ways: trilinear damps signal and
+noise alike, so exact resampling gives sharper maps, not more resolution.
+About 5 s per 384^3 map, against 0.7-1.6 s.
 
 Code: `src/exact_map3d.{h,cpp}` (`ExactMap3D`), `MotioncorrRunner::nufftLocalShifts`.
 Tests: `relion_unit_tests "[exact_map3d]"` and `"[motioncorr_nufft]"`.
