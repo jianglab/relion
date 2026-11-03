@@ -181,3 +181,53 @@ TEST_CASE("extraction: rotated defocus angle gives the same CTF in the rotated f
 				}
 		}
 }
+
+TEST_CASE("extraction: offsets and psi move into a turned box and back", "[rectangular]")
+{
+	const double angles[] = {-170., -90., -37.5, 0., 12.25, 45., 90., 133.}; // box angle, degrees
+	for (double a : angles)
+	{
+		const double ar = a * M_PI / 180.;
+		// A vector v in the micrograph is box pixel offset (dx, dy) with
+		// v = dx * (cos a, sin a) + dy * (-sin a, cos a) (resample_rotate.h)
+		for (double vx : {-7.5, 0., 3.25})
+			for (double vy : {-2., 0., 11.})
+			{
+				double x = vx, y = vy;
+				extractrect::rotatedOffset(x, y, a);
+				REQUIRE(x * cos(ar) - y * sin(ar) == Approx(vx).margin(1e-9));
+				REQUIRE(x * sin(ar) + y * cos(ar) == Approx(vy).margin(1e-9));
+				extractrect::rotatedOffset(x, y, -a);
+				REQUIRE(x == Approx(vx).margin(1e-9));
+				REQUIRE(y == Approx(vy).margin(1e-9));
+			}
+
+		for (double psi : {-179., -60., 0., 27.5, 180.})
+		{
+			// A tube with psi (prior) psi runs along -psi in the micrograph (helix.cpp:
+			// prior = -atan2(dy, dx)); in the box it must run along -rotatedPsi(psi, a)
+			const double p2 = extractrect::rotatedPsi(psi, a);
+			REQUIRE(p2 > -180. - 1e-9);
+			REQUIRE(p2 <= 180. + 1e-9);
+			double x = cos(-psi * M_PI / 180.), y = sin(-psi * M_PI / 180.);
+			extractrect::rotatedOffset(x, y, a);
+			REQUIRE(x == Approx(cos(-p2 * M_PI / 180.)).margin(1e-9));
+			REQUIRE(y == Approx(sin(-p2 * M_PI / 180.)).margin(1e-9));
+			// back to the micrograph (up to the wrap of 180 onto -180)
+			const double back = extractrect::rotatedPsi(p2, -a);
+			REQUIRE(cos((back - psi) * M_PI / 180.) == Approx(1.).margin(1e-12));
+		}
+
+		// Turning a tube by minus its prior leaves a prior of exactly zero, and the stored
+		// box angle turns it back to the micrograph's prior
+		const double prior = -a;
+		REQUIRE(extractrect::rotatedPsi(prior, -prior) == 0.);
+		REQUIRE(cos((extractrect::rotatedPsi(0., prior) - prior) * M_PI / 180.) == Approx(1.).margin(1e-12));
+
+		for (double d : {-80., 0., 33., 89.})
+		{
+			const double back = extractrect::rotatedDefocusAngle(extractrect::rotatedDefocusAngle(d, a), -a);
+			REQUIRE(cos(2. * (back - d) * M_PI / 180.) == Approx(1.).margin(1e-12));
+		}
+	}
+}

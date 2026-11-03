@@ -25,6 +25,30 @@
 #include "src/virtual_particles.h"
 #include "src/virtual_movie_averages.h"
 
+// Move the in-plane metadata of the current particle of MD (psi, its prior, the defocus angle and the
+// origin offsets) into the frame of a box turned by box_angle; minus the angle the box was turned by
+// moves them back to the micrograph (see extract_rect.h)
+static void turnInPlaneMetadata(MetaDataTable &MD, double box_angle)
+{
+	RFLOAT v;
+	if (MD.containsLabel(EMDL_ORIENT_PSI_PRIOR) && MD.getValue(EMDL_ORIENT_PSI_PRIOR, v))
+		MD.setValue(EMDL_ORIENT_PSI_PRIOR, (RFLOAT)extractrect::rotatedPsi(v, box_angle));
+	if (MD.containsLabel(EMDL_ORIENT_PSI) && MD.getValue(EMDL_ORIENT_PSI, v))
+		MD.setValue(EMDL_ORIENT_PSI, (RFLOAT)extractrect::rotatedPsi(v, box_angle));
+	if (MD.containsLabel(EMDL_CTF_DEFOCUS_ANGLE) && MD.getValue(EMDL_CTF_DEFOCUS_ANGLE, v))
+		MD.setValue(EMDL_CTF_DEFOCUS_ANGLE, (RFLOAT)extractrect::rotatedDefocusAngle(v, box_angle));
+	if (MD.containsLabel(EMDL_ORIENT_ORIGIN_X_ANGSTROM) && MD.containsLabel(EMDL_ORIENT_ORIGIN_Y_ANGSTROM))
+	{
+		RFLOAT ox = 0., oy = 0.;
+		MD.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, ox);
+		MD.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, oy);
+		double x = ox, y = oy;
+		extractrect::rotatedOffset(x, y, box_angle);
+		MD.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, (RFLOAT)x);
+		MD.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, (RFLOAT)y);
+	}
+}
+
 //#define PREP_TIMING
 #ifdef PREP_TIMING
 	Timer timer;
@@ -1164,8 +1188,9 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	const bool geom = do_rect || do_rotate_to_horizontal;
 	const int box_x = do_rect ? extract_size_x : my_extract_size;
 	const int box_y = do_rect ? extract_size_y : my_extract_size;
-	if (geom && MD.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE))
-		REPORT_ERROR("Preprocessing::extractParticlesFromOneMicrograph ERROR: the input particles were extracted with a turned box (rlnParticleExtractionAngle); re-extracting them with rectangular or turned boxes is not supported.");
+	// Re-extracted particles from a turned box were moved back to the micrograph frame (getCoordinateMetaDataTable)
+	if (MD.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE))
+		REPORT_ERROR("Preprocessing::extractParticlesFromOneMicrograph BUG: the particles still carry rlnParticleExtractionAngle from a turned box.");
 
 	TIMING_TIC(TIMING_READ_IMG);
 
@@ -1475,14 +1500,10 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		if (do_rotate_to_horizontal)
 		{
 			// The particle image is the micrograph turned by box_angle: directions turn by -box_angle
+			// (psi and the offsets too, when re-extracting refined particles)
 			MD.setValue(EMDL_PARTICLE_EXTRACTION_ANGLE, box_angle);
+			turnInPlaneMetadata(MD, box_angle);
 			MD.setValue(EMDL_ORIENT_PSI_PRIOR, (RFLOAT)0.);
-			if (MD.containsLabel(EMDL_CTF_DEFOCUS_ANGLE))
-			{
-				RFLOAT defocus_angle;
-				MD.getValue(EMDL_CTF_DEFOCUS_ANGLE, defocus_angle);
-				MD.setValue(EMDL_CTF_DEFOCUS_ANGLE, (RFLOAT)extractrect::rotatedDefocusAngle(defocus_angle, box_angle));
-			}
 		}
 
 		TIMING_TOC(TIMING_REST);
@@ -1692,6 +1713,21 @@ MetaDataTable Preprocessing::getCoordinateMetaDataTable(FileName fn_mic)
 		MDimg.getValue(EMDL_MICROGRAPH_NAME, fn_mic_in_particle_star);
 		if (fn_mic_in_particle_star.contains(fn_post))
 			MDresult.addObject(MDimg.getObject(current_object));
+	}
+
+	// Particles from a turned extraction (rlnParticleExtractionAngle) have psi, its prior, the defocus
+	// angle and the offsets in the frame of their box. Move them back to the micrograph first, so that
+	// re-centring works in the micrograph, an unturned box gets the micrograph's values, and a turned
+	// box follows the restored psi prior: that gives the same angle again, unless the prior was refined.
+	if (MDresult.numberOfObjects() > 0 && MDresult.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE))
+	{
+		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDresult)
+		{
+			RFLOAT angle = 0.;
+			MDresult.getValue(EMDL_PARTICLE_EXTRACTION_ANGLE, angle);
+			turnInPlaneMetadata(MDresult, -(double)angle);
+		}
+		MDresult.deactivateLabel(EMDL_PARTICLE_EXTRACTION_ANGLE);
 	}
 
 	RFLOAT mag2, dstep2, particle_angpix, rescale_fndata = 1.0;

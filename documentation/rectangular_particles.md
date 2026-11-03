@@ -369,6 +369,15 @@ Suggested use during development:
   so the tube is horizontal. The output `rlnAnglePsiPrior` is then 0, the box angle goes
   in `rlnParticleExtractionAngle`, and `rlnDefocusAngle` is rotated with the box
   (a direction at angle t in the micrograph appears at t - a in the particle).
+  When re-extracting refined particles, `rlnAnglePsi` and `rlnOriginX/YAngst` are turned
+  into the box frame as well (psi grows by a; an offset v becomes R(-a) v).
+- Re-extracting turned particles (`--reextract_data_star` with `rlnParticleExtractionAngle`),
+  for example with a new box size or downscaling: psi, its prior, the defocus angle and the
+  offsets are first moved back to the micrograph frame and `rlnParticleExtractionAngle` is
+  dropped. With `--rotate_to_horizontal` the box then follows the restored prior, which is
+  the stored angle again (plus any change of the prior refined in the turned frame). Without
+  it the particles come out unturned with consistent micrograph-frame metadata, and
+  `--recenter` works on them.
 - `--interpolation linear|cubic|nufft` (default from `RELION_EXTRACT_INTERPOLATION`).
 - Not supported: 3D, CTF phase flip/premultiply, scale/window, recentering.
 - Beam tilt and Zernike aberrations are not rotated; a warning says so.

@@ -23,7 +23,9 @@
  * Rotation convention: a box turned by `angle` (degrees) has its horizontal
  * axis along the direction (cos angle, sin angle) in micrograph coordinates
  * (x to the right, y down); see resample_rotate.h. To lay a helical tube with
- * psi prior `psi` horizontal, turn the box by -psi.
+ * psi prior `psi` horizontal, turn the box by -psi. Psi, its prior, the defocus
+ * angle and the origin offsets of a particle in a turned box are in the box's
+ * frame; the rotated*() functions below move them between the two frames.
  */
 
 #include <algorithm>
@@ -105,6 +107,30 @@ inline double rotatedDefocusAngle(double defocus_angle, double box_angle)
 	if (a <= -90.0) a += 180.0;
 	if (a > 90.0) a -= 180.0;
 	return a;
+}
+
+/// In-plane angle psi (or its prior; degrees, in (-180, 180]) of a particle in a
+/// box turned by `box_angle`: a tube with psi prior P lies horizontal in a box
+/// turned by -P, so psi grows by box_angle. With -box_angle it turns back.
+inline double rotatedPsi(double psi, double box_angle)
+{
+	double a = std::fmod(psi + box_angle, 360.0);
+	if (a <= -180.0) a += 360.0;
+	if (a > 180.0) a -= 360.0;
+	return a;
+}
+
+/// Origin offset (x, y) of a particle in a box turned by `box_angle`. The box's
+/// axes are (cos a, sin a) and (-sin a, cos a) in the micrograph (resample_rotate.h),
+/// so a vector v in the micrograph is R(-a) v in the box. With -box_angle it turns back.
+inline void rotatedOffset(double& x, double& y, double box_angle)
+{
+	const double a = DEG2RAD(box_angle);
+	const double c = std::cos(a), s = std::sin(a);
+	const double xr =  c * x + s * y;
+	const double yr = -s * x + c * y;
+	x = xr;
+	y = yr;
 }
 
 } // namespace extractrect
