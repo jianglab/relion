@@ -32,6 +32,8 @@ foreach(tag reconstruction ewald reconstruct_crash cryosparc_import cryosparc_pr
     set_property(TEST integration_${tag} PROPERTY ENVIRONMENT
         "RELION_BIN_DIR=${CMAKE_BINARY_DIR}/bin;PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 endforeach()
+# Six small 3D classifications take about an hour on 8 cores, more than ctest's default 1500 s
+set_property(TEST integration_mpi_align_classes PROPERTY TIMEOUT 7200)
 
 # Aggregate test to run all integration tests
 add_test(
@@ -40,6 +42,8 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_property(TEST integration_all PROPERTY LABELS integration)
+# The whole suite takes about 1.5 h on one RTX 4090
+set_property(TEST integration_all PROPERTY TIMEOUT 14400)
 set_property(TEST integration_all PROPERTY ENVIRONMENT
     "RELION_BIN_DIR=${CMAKE_BINARY_DIR}/bin;PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 
