@@ -317,8 +317,11 @@ __global__ void cuda_kernel_diff2_coarse(
 
 	// Chunk: the threads tid, tid + translation_num, ... (the groups that took part,
 	// tid / translation_num < block_sz / translation_num) hold sums for the same
-	// translation; add them in group order and store the block's sum
-	__shared__ XFLOAT s_sum[block_sz];
+	// translation; add them in group order and store the block's sum.
+	// s_sum reuses s_corr (block_sz floats, no longer read once the pixel loop is done; the
+	// __syncthreads() before the first write below waits for its last readers). Its own
+	// array would take the 8x REF3D block (block_sz 1024) past the 48 KB static limit.
+	XFLOAT *s_sum = s_corr;
 	const int groups = block_sz / translation_num;
 	XFLOAT *out = &g_partial[blockIdx.y * chunk_stride + (size_t) (orient_offset + orient0) * translation_num];
 	#pragma unroll
