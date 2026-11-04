@@ -164,7 +164,7 @@ void resampleRotatedRectangle(const MultidimArray<RFLOAT> &src, MultidimArray<RF
 		} stream_state;
 		FinufftPlanGuard guard;
 		finufft_opts opts;
-		finufft_default_opts(&opts);
+		relionFinufftOpts(&opts);
 		opts.modeord = 0;
 		opts.nthreads = 1;
 		int64_t n_modes[3] = {Nx, Ny, 1};

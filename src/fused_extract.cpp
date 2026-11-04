@@ -119,7 +119,7 @@ void fourierTransform(const Samples& s, const Geometry& g, MultidimArray<Complex
 	{
 		FinufftPlanGuard guard;
 		finufft_opts opts;
-		finufft_default_opts(&opts);
+		relionFinufftOpts(&opts);
 		opts.modeord = 0;
 		opts.nthreads = 1;
 		int64_t modes[2] = {N1, N2};

@@ -37,6 +37,9 @@ typedef finufft_plan FinufftPlanHandle;
 // setpts) and destroys them in destroy, under a mutex of its own that does not cover the plans that
 // FourierTransformer creates in other threads. Every such call therefore runs in the named critical
 // section that all of RELION's own FFTW plan creation uses.
+// Types 1 and 2 plan in makeplan only if opts.upsampfac is set: FINUFFT >= 2.4 otherwise picks it from
+// the point density in setpts and plans there (again whenever the density changes), outside that
+// section. Make their options with relionFinufftOpts() below so setpts never plans.
 struct FinufftPlanGuard
 {
         FinufftPlanHandle plan;
@@ -64,6 +67,15 @@ struct FinufftPlanGuard
                 return *this;
         }
 };
+
+// FINUFFT defaults for a type 1 or 2 plan, with the upsampling factor fixed so that the FFTW plan is
+// made in makeplan (see above). upsampfac <= 0 means 2.0, FINUFFT's standard factor, which reaches any
+// tolerance; 1.25 is cheaper but only reaches about 1e-9.
+inline void relionFinufftOpts(finufft_opts* opts, double upsampfac = 0.0)
+{
+	finufft_default_opts(opts);
+	opts->upsampfac = (upsampfac > 0.0) ? upsampfac : 2.0;
+}
 
 void handleFinufftError(int status, const std::string& context);
 

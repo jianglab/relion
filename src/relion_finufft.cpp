@@ -240,7 +240,7 @@ void evaluateNonuniformFourierSamples2D(
 	{
 	FinufftPlanGuard guard;
 	finufft_opts opts;
-	finufft_default_opts(&opts);
+	relionFinufftOpts(&opts);
 	const double tol = 1e-6;
 	opts.modeord = 0;
 	opts.nthreads = tls_finufft_nthreads;
@@ -383,10 +383,9 @@ void evaluateNonuniformFourierSamplesFromFourierVolume3D(
 	{
 		FinufftPlanGuard guard;
 		finufft_opts opts;
-		finufft_default_opts(&opts);
+		relionFinufftOpts(&opts, upsampfac);
 		opts.modeord = 0;                     // CMCL order: index 0 == mode -M/2
 		opts.nthreads = tls_finufft_nthreads; // avoid nesting inside RELION's OpenMP
-		if (upsampfac > 0.0) opts.upsampfac = upsampfac;
 
 		int64_t n_modes[3] = {M, M, (dim == 3) ? M : 1};
 
