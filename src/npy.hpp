@@ -516,19 +516,20 @@ inline std::string read_header(std::istream& istream) {
     uint32_t header_length;
     if( version == version_t{1, 0}){
 
-      char header_len_le16[2];
-      istream.read(header_len_le16, 2);
-      header_length = (header_len_le16[0] << 0) | (header_len_le16[1] << 8);
+      // unsigned: with (signed) char a length byte >= 0x80 sign-extends to a ~4 GB length
+      unsigned char header_len_le16[2];
+      istream.read(reinterpret_cast<char*>(header_len_le16), 2);
+      header_length = (uint32_t(header_len_le16[0]) << 0) | (uint32_t(header_len_le16[1]) << 8);
 
       if((magic_string_length + 2 + 2 + header_length) % 16 != 0) {
           // TODO: display warning
       }
     }else if( version == version_t{2, 0}) {
-      char header_len_le32[4];
-      istream.read(header_len_le32, 4);
+      unsigned char header_len_le32[4];
+      istream.read(reinterpret_cast<char*>(header_len_le32), 4);
 
-      header_length = (header_len_le32[0] <<  0) | (header_len_le32[1] <<  8)
-                    | (header_len_le32[2] << 16) | (header_len_le32[3] <<  24);
+      header_length = (uint32_t(header_len_le32[0]) <<  0) | (uint32_t(header_len_le32[1]) <<  8)
+                    | (uint32_t(header_len_le32[2]) << 16) | (uint32_t(header_len_le32[3]) << 24);
 
       if((magic_string_length + 2 + 4 + header_length) % 16 != 0) {
         // TODO: display warning
@@ -537,8 +538,8 @@ inline std::string read_header(std::istream& istream) {
        throw std::runtime_error("unsupported file format version");
     }
 
-    auto buf_v = std::vector<char>();
-    buf_v.reserve(header_length);
+    // sized, not just reserved: reading into reserved-only storage is undefined behaviour
+    std::vector<char> buf_v(header_length);
     istream.read(buf_v.data(), header_length);
     std::string header(buf_v.data(), header_length);
 
