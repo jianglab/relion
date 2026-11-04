@@ -46,6 +46,14 @@ void apply(MultidimArray<RFLOAT> &img, double angle_deg, double offset);
 /// moves to 0: the centre of mass in 2D, turned into the frame of the axis.
 double offsetAcross(const MultidimArray<RFLOAT> &img, double angle_deg);
 
+/// The diameter (pixels) of a tube centred on the axis that holds a class average whose axis lies along X
+/// through the centre (as after apply()). Profile across the axis: the mean over the central 70% along it,
+/// lightly smoothed, less a straight background fitted to the outer 15% on each side (outliers left out).
+/// From its peak (in the central 60%) each edge is where the profile stays below frac of the peak for gap_px
+/// pixels, so that dark stripes inside a filament do not end it. Diameter: twice the farther edge, widened by
+/// pad of it on each side. The box height if there is no peak.
+double classDiameter(const MultidimArray<RFLOAT> &img, double gap_px, double frac = 0.1, double pad = 0.1);
+
 }
 
 #endif /* HELICAL_CLASS_ALIGN_H_ */

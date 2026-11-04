@@ -587,7 +587,7 @@ TEST_CASE("Class2D: filament context options reach the command line",
 		job.joboptions["do_grad"].setString("No");
 		job.joboptions["nr_classes"].setString("50");
 		REQUIRE(generateCommands(job, commands, final_command, error_message));
-		REQUIRE(commands[0].find(" --filament_context off --helical_context --helical_context_types 2 --helical_context_types_max 6") != std::string::npos);
+		REQUIRE(commands[0].find(" --filament_context off --helical_context --helical_context_types 2 --helical_context_types_max 10") != std::string::npos);
 		REQUIRE(commands[0].find("--filament_temper") == std::string::npos);
 		job.joboptions["nr_classes"].setString("4");
 		REQUIRE(generateCommands(job, commands, final_command, error_message));
@@ -1133,6 +1133,39 @@ TEST_CASE("Class2DConsensus: generates preparation and configurable frozen-class
 	REQUIRE(job.outputNodes[0].name.find("consensus_data.star") != std::string::npos);
 	REQUIRE(job.outputNodes[1].name.find("run_it" + iteration_suffix + "_data.star") != std::string::npos);
 	REQUIRE(job.outputNodes[2].name.find("run_it" + iteration_suffix + "_optimiser.star") != std::string::npos);
+
+	removeConsensusSourceModel(directory);
+	std::remove((directory + "job.star").c_str());
+	::rmdir(directory.c_str());
+}
+
+TEST_CASE("Class2DConsensus: the helical types choice emits a flag either way", "[pipeline][consensus]")
+{
+	const std::string directory = "class2d_consensus_types_" + integerToString((int)std::clock()) + "/";
+	REQUIRE(::mkdir(directory.c_str(), 0700) == 0);
+	bool helix = true, types = true, expect = true;
+	SECTION("helical source, Yes") {}
+	SECTION("helical source, No") { types = false; expect = false; }
+	SECTION("source not helical") { helix = false; expect = false; }
+	RelionJob source = makeClass2DJob();
+	source.joboptions["nr_parallel_runs"].setString("2");
+	source.joboptions["do_helix"].setString(helix ? "Yes" : "No");
+	source.write(directory);
+	writeConsensusSourceModel(directory, 4);
+
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_CLASS2D_CONSENSUS);
+	job.joboptions["fn_optimiser"].setString(directory + "run001_it025_optimiser.star");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	job.joboptions["do_helical_types"].setString(types ? "Yes" : "No");
+	std::vector<std::string> commands;
+	std::string final_command, error_message;
+	REQUIRE(generateCommands(job, commands, final_command, error_message));
+	REQUIRE((commands[0].find(" --helical_types") != std::string::npos) == expect);
+	REQUIRE((commands[0].find(" --dont_helical_types") != std::string::npos) == !expect);
+	REQUIRE(commands[1].find("helical_types") == std::string::npos);
 
 	removeConsensusSourceModel(directory);
 	std::remove((directory + "job.star").c_str());
@@ -1792,6 +1825,24 @@ TEST_CASE("Helical refinement jobs: cylindrical-mask choice emits a flag either 
 		REQUIRE(generateCommand(job, command));
 		CHECK(command.find("helical_cylindrical_mask") == std::string::npos);
 	}
+}
+
+TEST_CASE("Class2D: the per-class tube diameter choice emits a flag either way", "[pipeline][helix]")
+{
+	RelionJob job;
+	setUpRefineJob(job, PROC_2DCLASS);
+	REQUIRE(job.joboptions.find("helical_auto_diameter") != job.joboptions.end());
+	job.joboptions["do_helix"].setString("Yes");
+	std::string command;
+	job.joboptions["helical_auto_diameter"].setString("Yes");
+	REQUIRE(generateCommand(job, command));
+	CHECK(command.find(" --helical_auto_diameter") != std::string::npos);
+	job.joboptions["helical_auto_diameter"].setString("No");
+	REQUIRE(generateCommand(job, command));
+	CHECK(command.find(" --dont_helical_auto_diameter") != std::string::npos);
+	job.joboptions["do_helix"].setString("No");
+	REQUIRE(generateCommand(job, command));
+	CHECK(command.find("helical_auto_diameter") == std::string::npos);
 }
 
 TEST_CASE("Helical refinement jobs: jobs saved before the cylindrical mask keep their mask", "[pipeline][helix]")

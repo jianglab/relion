@@ -73,3 +73,33 @@ TEST_CASE("helical class alignment: apply moves the axis onto X through the cent
 			CHECK(max_diff < 0.06);  // bilinear interpolation of strands 2 pixels wide
 		}
 }
+
+TEST_CASE("helical class alignment: the diameter of a class across its axis", "[helical_class_align]")
+{
+	// A band along X of half-width h, with a dark stripe along its axis (2 pixels either side of it, as in two
+	// protofilaments), on a sloped background, and another filament near the edge of the box
+	auto band = [](int n, int h)
+	{
+		MultidimArray<RFLOAT> img(n, n);
+		img.setXmippOrigin();
+		FOR_ALL_ELEMENTS_IN_ARRAY2D(img)
+		{
+			const double inside = (ABS(i) <= h && ABS(i) > 1) ? 1. : 0.;
+			const double other = (i >= 52 && i <= 58) ? 1. : 0.;
+			A2D_ELEM(img, i, j) = 0.3 + 0.002 * i + inside + other;
+		}
+		return img;
+	};
+	// Edge: the last row above 10% of the peak after smoothing (h + 1), plus half a pixel; padded by 10% each side
+	for (int h : {10, 30})
+	{
+		INFO("half-width " << h);
+		CHECK(helixalign::classDiameter(band(128, h), 4.) == Approx(2. * (h + 1.5) * 1.2).margin(1.5));
+	}
+	// without the gap rule, the dark stripe would end the filament: a stripe narrower than the gap does not
+	CHECK(helixalign::classDiameter(band(128, 10), 4.) > 20.);
+	// nothing there: the box
+	MultidimArray<RFLOAT> flat(128, 128);
+	flat.initConstant(0.5);
+	CHECK(helixalign::classDiameter(flat, 4.) == 128.);
+}

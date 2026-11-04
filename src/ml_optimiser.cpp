@@ -518,7 +518,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     helical_context.nr_types = textToInteger(parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", "4"));
     helical_context_types_max = textToInteger(parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", "-1"));
     helical_context_types_tol = textToFloat(parser.getOption("--helical_context_types_tol", "With --helical_context_types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
-    helical_context_types_agree = textToFloat(parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", "0.9"));
+    helical_context_types_agree = textToFloat(parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", "0.75"));
     helical_context_types_every = textToInteger(parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now)", "5"));
     helical_context_types_min = helical_context.nr_types;
     helical_context.nr_bw_iter = textToInteger(parser.getOption("--helical_context_bw_iter", "Baum-Welch iterations of the filament chain per iteration", "3"));
@@ -541,6 +541,11 @@ void MlOptimiser::parseContinue(int argc, char **argv)
         helical_cylindrical_mask = true;
     if (parser.checkOption("--dont_helical_cylindrical_mask", "Mask helical segments with the tube within a sphere of the mask diameter"))
         helical_cylindrical_mask = false;
+    // Without either, the setting of the run that is continued
+    if (parser.checkOption("--helical_auto_diameter", "2D classes of helical segments: mask each class's reference with a tube as wide as its own average, measured every iteration; the tube of the job is then the mask diameter"))
+        helical_auto_diameter = true;
+    if (parser.checkOption("--dont_helical_auto_diameter", "Mask all classes with the tube of the job"))
+        helical_auto_diameter = false;
     fnt = parser.getOption("--perturb", "Perturbation factor for the angular sampling (0=no perturb; 0.5=perturb)", "OLD");
     if (fnt != "OLD")
     {
@@ -1010,6 +1015,17 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     parser.checkOption("--helical_cylindrical_mask", "Mask helical segments with a cylinder as wide as the tube and as long as the mask diameter (the default)");
     if (parser.checkOption("--dont_helical_cylindrical_mask", "Mask helical segments with the tube within a sphere of the mask diameter, as before"))
         helical_cylindrical_mask = false;
+    {
+        // Opt-in until validated: RELION_HELICAL_AUTO_DIAMETER=1 makes it the default
+        const char *env = getenv("RELION_HELICAL_AUTO_DIAMETER");
+        std::string v = (env == NULL) ? "" : env;
+        for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+        helical_auto_diameter = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+    }
+    if (parser.checkOption("--helical_auto_diameter", "2D classes of helical segments: mask each class's reference with a tube as wide as its own average, measured every iteration; the tube of the job is then the mask diameter (RELION_HELICAL_AUTO_DIAMETER=1 makes this the default)"))
+        helical_auto_diameter = true;
+    if (parser.checkOption("--dont_helical_auto_diameter", "Mask all classes with the tube of the job (the default, unless RELION_HELICAL_AUTO_DIAMETER=1)"))
+        helical_auto_diameter = false;
     do_helical_symmetry_local_refinement = parser.checkOption("--helical_symmetry_search", "Perform local refinement of helical symmetry?");
     helical_sigma_distance_A = textToFloat(parser.getOption("--helical_sigma_distance_A", "Sigma of distance along the helical tracks (Angstroms; the persistence length of the filament, independent of box size and pixel size)", "-1."));
     helical_sigma_distance = textToFloat(parser.getOption("--helical_sigma_distance", "OLD: sigma of distance along the helical tracks as a fraction of the box size (use --helical_sigma_distance_A)", "-1."));
@@ -1023,7 +1039,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     helical_context.nr_types = textToInteger(parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", "4"));
     helical_context_types_max = textToInteger(parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", "-1"));
     helical_context_types_tol = textToFloat(parser.getOption("--helical_context_types_tol", "With --helical_context_types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
-    helical_context_types_agree = textToFloat(parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", "0.9"));
+    helical_context_types_agree = textToFloat(parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", "0.75"));
     helical_context_types_every = textToInteger(parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now)", "5"));
     helical_context_types_min = helical_context.nr_types;
     helical_context.nr_bw_iter = textToInteger(parser.getOption("--helical_context_bw_iter", "Baum-Welch iterations of the filament chain per iteration", "3"));
@@ -1450,6 +1466,8 @@ void MlOptimiser::read(FileName fn_in, int rank, bool do_prevent_preread)
         helical_tube_outer_diameter = -1.;
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CYLINDRICAL_MASK, helical_cylindrical_mask))
         helical_cylindrical_mask = false;   // runs from before the option
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_AUTO_TUBE_DIAMETER, helical_auto_diameter))
+        helical_auto_diameter = false;
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT, do_helical_symmetry_local_refinement))
         do_helical_symmetry_local_refinement = false;
     // The Angstrom value written by this version wins; otherwise the older fraction of the box size
@@ -1792,6 +1810,7 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
         MD.setValue(EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, helical_tube_inner_diameter);
         MD.setValue(EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, helical_tube_outer_diameter);
         MD.setValue(EMDL_OPTIMISER_HELICAL_CYLINDRICAL_MASK, helical_cylindrical_mask);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_AUTO_TUBE_DIAMETER, helical_auto_diameter);
         MD.setValue(EMDL_OPTIMISER_HELICAL_SYMMETRY_LOCAL_REFINEMENT, do_helical_symmetry_local_refinement);
         if (helical_sigma_distance_A < 0. && helical_sigma_distance >= 0.)
             MD.setValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, helical_sigma_distance);   // older run, still a fraction of the box
@@ -2774,6 +2793,15 @@ void MlOptimiser::initialiseGeneral(int rank)
     {
         if (do_helical_symmetry_local_refinement)
             REPORT_ERROR("ERROR: cannot do local refinement of helical parameters for non-helical segments!");
+    }
+    // Automatic class diameters: the job's tube only limits them, so it is the mask diameter (it also masks the images)
+    if (helical_auto_diameter && mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0. && particle_diameter > 0. &&
+        helical_tube_outer_diameter != particle_diameter && !rectMaskAlongLength())
+    {
+        if (verb > 0)
+            std::cout << " Helical tube diameter set to the mask diameter, " << particle_diameter << " A (was " << helical_tube_outer_diameter
+                      << " A): with --helical_auto_diameter each class's reference gets a tube as wide as its own average" << std::endl;
+        helical_tube_outer_diameter = particle_diameter;
     }
     // (with --rect_mask_length: checkRectangularMask() checks the tube against the short axis of the elliptical mask)
     if ( (mymodel.ref_dim == 2) && (helical_tube_outer_diameter > 0.) && (particle_diameter < helical_tube_outer_diameter) && !rectMaskAlongLength() )
@@ -4469,6 +4497,48 @@ void MlOptimiser::updateHelicalContext()
     // type switches), unless asked to continue from the last one after the prior is in use
     if (!helical_context_warm || iter + 1 < helical_context_start_iter)
         helical_context.initialised_model = false;
+    long int nr_parts = helical_context_rows.size();
+    std::vector<RFLOAT> psi(nr_parts), psi_prior(nr_parts);
+    std::vector<int> cls(nr_parts);
+    bool has_psi_prior = mydata.MDimg.containsLabel(EMDL_ORIENT_PSI_PRIOR);
+    for (long int i = 0; i < nr_parts; i++)
+    {
+        mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi[i], helical_context_rows[i]);
+        psi_prior[i] = psi[i];
+        if (has_psi_prior)
+            mydata.MDimg.getValue(EMDL_ORIENT_PSI_PRIOR, psi_prior[i], helical_context_rows[i]);
+        mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, cls[i], helical_context_rows[i]);
+        cls[i]--;
+    }
+    double t_read = omp_get_wtime();
+    // Junk classes (no type, no type evidence; helixtypes::junkClasses): resolution worse than --sort_classes_junk x
+    // the median, wider than 80% of the box (helical_class_diameter), or not continuing the helix along the filaments
+    // (helixtypes::classContinuity: carbon edges, ice, blobs)
+    {
+        const int K = mymodel.nr_classes;
+        mymodel.calculateTotalFourierCoverage();
+        std::vector<RFLOAT> res(mymodel.estimated_resolution.begin(), mymodel.estimated_resolution.begin() + K), track(nr_parts);
+        std::vector<long int> chain(nr_parts);
+        std::vector<char> flipped(nr_parts);
+        for (long int i = 0; i < nr_parts; i++)
+        {
+            chain[i] = helical_context.seg_chain[i];
+            track[i] = helical_context.seg_pos[i] * helical_context.step;
+            flipped[i] = fabs(remainder(psi[i] - psi_prior[i], 360.)) > 90.;
+        }
+        std::string note;
+        const std::vector<RFLOAT> cont = helixtypes::classContinuity(mymodel.Iref, mymodel.pixel_size, chain, track, cls, flipped, note);
+        helical_context.junk_class = helixtypes::junkClasses(res, helical_class_diameter, YSIZE(mymodel.Iref[0]) * mymodel.pixel_size,
+                                                             sort_classes_junk > 0. ? sort_classes_junk : 1.5, cont);
+        if (verb > 0)
+        {
+            int nj = 0, nc = 0;
+            for (int k = 0; k < K; k++) nj += helical_context.junk_class[k], nc += (cont[k] < 0.6);
+            std::cout << " Filament context: " << nj << " junk classes, " << nc << " of them not continuing the helix (overlap with the class of a segment further along the filament below 0.6; "
+                      << note << ")" << std::endl;
+        }
+    }
+    double t_junk = omp_get_wtime();
     // Number of types: chosen first in the iteration before the prior is used (full range), then again as the classes
     // mature (near the current number; a full-range choice at the end could still jump to a split or merge)
     if (helical_context_types_max > helical_context_types_min && iter + 1 >= helical_context_start_iter)
@@ -4492,21 +4562,6 @@ void MlOptimiser::updateHelicalContext()
     }
     helical_context.update();
     double t_update = omp_get_wtime();
-
-    long int nr_parts = helical_context_rows.size();
-    std::vector<RFLOAT> psi(nr_parts), psi_prior(nr_parts);
-    std::vector<int> cls(nr_parts);
-    bool has_psi_prior = mydata.MDimg.containsLabel(EMDL_ORIENT_PSI_PRIOR);
-    for (long int i = 0; i < nr_parts; i++)
-    {
-        mydata.MDimg.getValue(EMDL_ORIENT_PSI, psi[i], helical_context_rows[i]);
-        psi_prior[i] = psi[i];
-        if (has_psi_prior)
-            mydata.MDimg.getValue(EMDL_ORIENT_PSI_PRIOR, psi_prior[i], helical_context_rows[i]);
-        mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, cls[i], helical_context_rows[i]);
-        cls[i]--;
-    }
-    double t_read = omp_get_wtime();
     helical_context.fitPeriods(psi, psi_prior);
     double t_periods = omp_get_wtime();
     helical_context.writeLabels(mydata.MDimg, helical_context_rows, &cls);
@@ -4520,7 +4575,7 @@ void MlOptimiser::updateHelicalContext()
         mymodel.helical_type_class.assign(K, 0);
         mymodel.helical_type_class_frac.assign(K, 0.);
         for (int k = 0; k < K; k++)
-            for (int t = 0; t < T; t++)
+            for (int t = 0; t < T && !helical_context.junk_class[k]; t++)  // junk classes: type 0
                 if (count[(size_t)k * T + t] > 0 && (mymodel.helical_type_class[k] == 0 || count[(size_t)k * T + t] > count[(size_t)k * T + mymodel.helical_type_class[k] - 1]))
                 {
                     mymodel.helical_type_class[k] = t + 1;
@@ -4541,8 +4596,9 @@ void MlOptimiser::updateHelicalContext()
                       << helical_context.type_period[t] << " A (score " << helical_context.type_period_R[t] << ")" << std::endl;
         if (iter + 1 >= helical_context_start_iter)
             std::cout << " The filament context prior will be used in the next iteration" << std::endl;
-        std::cout << " Filament context: update took " << omp_get_wtime() - t_start << " s (chain model " << t_update - t_start
-                  << ", reading psi/classes " << t_read - t_update << ", periods " << t_periods - t_read << ", labels and filament table " << t_write - t_periods << ")" << std::endl;
+        std::cout << " Filament context: update took " << omp_get_wtime() - t_start << " s (reading psi/classes " << t_read - t_start
+                  << ", junk classes " << t_junk - t_read << ", chain model " << t_update - t_junk << ", periods " << t_periods - t_update
+                  << ", labels and filament table " << t_write - t_periods << ")" << std::endl;
     }
 }
 
@@ -7641,6 +7697,10 @@ void MlOptimiser::solventFlatten()
         }
     }
 
+    // 2D classes of helical segments: measure each class's diameter (and with --helical_auto_diameter mask it with its own tube)
+    if (mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0. && helical_cylindrical_mask && fn_mask == "None" && !mydata.is_tomo)
+        updateHelicalClassDiameters(class_masks);
+
     // Also read a second solvent mask if necessary
     if (fn_mask2 != "None")
     {
@@ -7695,6 +7755,61 @@ void MlOptimiser::solventFlatten()
     std::cerr << "Leaving MlOptimiser::solventFlatten" << std::endl;
 #endif
 
+}
+
+void MlOptimiser::updateHelicalClassDiameters(std::vector<MultidimArray<RFLOAT> > &masks)
+{
+    const int K = mymodel.nr_classes;
+    const RFLOAT apix = mymodel.pixel_size;
+    // Dark stripes inside a filament are narrower than this
+    const RFLOAT gap_px = 15. / apix;
+    helical_class_diameter.assign(K, -1.);
+    for (int k = 0; k < K; k++)
+        if (mymodel.pdf_class[k] > 0.)
+            helical_class_diameter[k] = apix * helixalign::classDiameter(mymodel.Iref[k], gap_px);
+    if (!helical_auto_diameter)
+        return;
+
+    // A class's tube: its measured diameter, between 6 pixels and the job's tube; it narrows to at most half per
+    // iteration (the average is measured before masking, so a narrow tube does not narrow the next one), widens at
+    // once. Not before iteration 2: the first class averages are mostly noise.
+    std::vector<RFLOAT> &d = mymodel.class_settings.outer_diameter;
+    if ((int)d.size() != K)
+        d.assign(K, helical_tube_outer_diameter);
+    if (iter < 2)
+        return;
+    const RFLOAT dmax = helical_tube_outer_diameter, dmin = std::min(dmax, 6. * apix);
+    std::vector<RFLOAT> used;
+    for (int k = 0; k < K; k++)
+    {
+        const RFLOAT prev = (d[k] > 0.) ? std::min(d[k], dmax) : dmax;
+        if (helical_class_diameter[k] > 0.)
+        {
+            const RFLOAT target = std::max(dmin, std::min(dmax, helical_class_diameter[k]));
+            d[k] = (target < prev) ? std::max(target, 0.5 * prev) : target;
+        }
+        else
+            d[k] = prev;
+        if (mymodel.pdf_class[k] > 0.)
+            used.push_back(d[k]);
+    }
+    // The class's tube across the axis (Y), inside the job's mask, which is as long as the mask diameter
+    masks.resize(K);
+    for (int k = 0; k < K; k++)
+    {
+        masks[k].resize(mymodel.Iref[k]);
+        masks[k].setXmippOrigin();
+        const RFLOAT half_width = d[k] / (2. * apix);
+        FOR_ALL_ELEMENTS_IN_ARRAY2D(masks[k])
+            A2D_ELEM(masks[k], i, j) = softStep(ABS(i), half_width, width_mask_edge);
+    }
+    if (verb > 0 && !used.empty())
+    {
+        std::sort(used.begin(), used.end());
+        std::cout << " Helical class tubes (--helical_auto_diameter): median " << ROUND(used[used.size() / 2]) << " A, "
+                  << ROUND(used.front()) << " to " << ROUND(used.back()) << " A over " << used.size() << " classes (at most "
+                  << ROUND(dmax) << " A)" << std::endl;
+    }
 }
 
 bool MlOptimiser::autoMaskThisIteration() const
@@ -13945,7 +14060,8 @@ void MlOptimiser::sortClasses()
     mymodel.calculateTotalFourierCoverage();  // the class resolutions of this iteration
     std::string rule;
     const std::vector<int> order = MlModel::sortedClassOrder(mymodel.pdf_class, mymodel.estimated_resolution,
-                                                              mymodel.helical_type_class, sort_classes_junk, rule);
+                                                              mymodel.helical_type_class, sort_classes_junk, rule,
+                                                              do_helical_context ? helical_context.junk_class : std::vector<char>());
     std::vector<int> new_of_old(K);
     for (int i = 0; i < K; i++)
         new_of_old[order[i]] = i;

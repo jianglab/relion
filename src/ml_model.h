@@ -471,7 +471,8 @@ public:
 	// none, after the types), within a type the classes by size; junk last: empty classes and classes whose
 	// resolution (A) is worse than junk_factor x the median class (0: only empty ones). `rule` says which.
 	static std::vector<int> sortedClassOrder(const std::vector<RFLOAT> &pdf, const std::vector<RFLOAT> &resolution,
-	                                         const std::vector<int> &type, RFLOAT junk_factor, std::string &rule);
+	                                         const std::vector<int> &type, RFLOAT junk_factor, std::string &rule,
+	                                         const std::vector<char> &also_junk = std::vector<char>());
 	// The new number of each type (index: old type 1..nr_types; 0 stays 0) for a class order from
 	// sortedClassOrder: types in the order their classes come, so type 1 is the most abundant; types
 	// without classes last, in their old order

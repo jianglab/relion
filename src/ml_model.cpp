@@ -1007,7 +1007,8 @@ void MlModel::reorderClasses(const std::vector<int> &order)
 }
 
 std::vector<int> MlModel::sortedClassOrder(const std::vector<RFLOAT> &pdf, const std::vector<RFLOAT> &resolution,
-                                           const std::vector<int> &type, RFLOAT junk_factor, std::string &rule)
+                                           const std::vector<int> &type, RFLOAT junk_factor, std::string &rule,
+                                           const std::vector<char> &also_junk)
 {
 	const int K = pdf.size();
 	std::vector<RFLOAT> res;
@@ -1023,11 +1024,12 @@ std::vector<int> MlModel::sortedClassOrder(const std::vector<RFLOAT> &pdf, const
 	const RFLOAT limit = (junk_factor > 0. && median > 0.) ? junk_factor * median : 0.;
 	std::vector<char> junk(K);
 	std::vector<int> group(K);  // type, 0: none
-	int T = 0, nr_junk = 0;
+	int T = 0, nr_junk = 0, nr_also = 0;
 	for (int k = 0; k < K; k++)
 	{
 		const RFLOAT r = k < (int)resolution.size() ? resolution[k] : 0.;
 		junk[k] = pdf[k] <= 0. || (limit > 0. && !(r <= limit));
+		if (!junk[k] && k < (int)also_junk.size() && also_junk[k]) junk[k] = 1, nr_also++;
 		nr_junk += junk[k];
 		group[k] = (k < (int)type.size() && type[k] > 0) ? type[k] : 0;
 		T = std::max(T, group[k]);
@@ -1053,6 +1055,8 @@ std::vector<int> MlModel::sortedClassOrder(const std::vector<RFLOAT> &pdf, const
 	os << (T > 0 ? "by helical type, then size" : "by size") << "; junk (" << nr_junk << " classes): empty";
 	if (limit > 0.)
 		os << " or resolution worse than " << limit << " A (" << junk_factor << " x the median " << median << " A)";
+	if (nr_also > 0)
+		os << ", or junk for the helical types (" << nr_also << ": wider than 80% of the box or not a filament)";
 	rule = os.str();
 	return order;
 }

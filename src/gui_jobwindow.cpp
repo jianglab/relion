@@ -1728,6 +1728,8 @@ void JobWindow::initialiseClass2DConsensusWindow()
 	place("nr_classes");
 	place("random_seed");
 	place("nr_iter");
+	current_y += STEPY/2;
+	place("do_helical_types");
 	tab2->end();
 
 	tab3->begin();
@@ -1892,6 +1894,7 @@ void JobWindow::initialiseClass2DWindow()
 
 	place("helical_tube_outer_diameter");
 	place("helical_cylindrical_mask", TOGGLE_DEACTIVATE);
+	place("helical_auto_diameter");
 	place("do_bimodal_psi");
 	place("range_psi");
 
