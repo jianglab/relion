@@ -760,6 +760,13 @@ public:
 	// the intersection of the tube with a sphere of the mask diameter
 	bool helical_cylindrical_mask;
 
+	// 2D classes of helical segments: each class's reference masked with a tube as wide as its own average
+	// (helixalign::classDiameter, every iteration), up to the job's tube, which is then the mask diameter
+	bool helical_auto_diameter;
+	// The diameters (A) of the class averages, measured whenever 2D classes of helical segments have a tube
+	// (also without helical_auto_diameter: classes wider than most of the box are junk for the types)
+	std::vector<RFLOAT> helical_class_diameter;
+
 	// Flag whether to do local refinement of helical parameters
 	bool do_helical_symmetry_local_refinement;
 
@@ -1076,7 +1083,7 @@ public:
             do_helical_context(0),
             helical_context_types_max(-1),
             helical_context_types_tol(0.01),
-            helical_context_types_agree(0.9),
+            helical_context_types_agree(0.75),
             helical_context_types_min(4),
             helical_context_types_every(5),
             helical_context_types_last_iter(-1),
@@ -1126,6 +1133,7 @@ public:
             helical_tube_inner_diameter(0),
             helical_tube_outer_diameter(0),
             helical_cylindrical_mask(false),
+            helical_auto_diameter(false),
             do_helical_symmetry_local_refinement(0),
             helical_sigma_distance_A(-1.),
             helical_sigma_distance(-1.),
@@ -1435,6 +1443,10 @@ public:
 	/* Apply a solvent flattening to a map
 	 */
 	void solventFlatten();
+
+	// 2D classes of helical segments: measure the diameters of the class averages (helical_class_diameter) and,
+	// with helical_auto_diameter, update each class's tube (class_settings.outer_diameter) and its mask
+	void updateHelicalClassDiameters(std::vector<MultidimArray<RFLOAT> > &masks);
 
 	/* Whether the automatic masks are made in this iteration (the resolution is good enough)
 	 */

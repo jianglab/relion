@@ -2,6 +2,8 @@
 #include "src/error.h"
 #include "src/macros.h"
 #include "src/image.h"
+#include "src/fftw.h"
+#include <sstream>
 #include <map>
 #include <cmath>
 #include <algorithm>
@@ -304,8 +306,11 @@ void HelicalContext::writeLabels(MetaDataTable &MD, const std::vector<long int> 
 	for (long int i = 0; i < N; i++)
 	{
 		long int r = seg_rows[i];
-		MD.setValue(EMDL_PARTICLE_HELICAL_TYPE, seg_type[i] + 1, r);
-		MD.setValue(EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY, (RFLOAT)seg_type_prob[i], r);
+		// a segment in a junk class has no type (0)
+		const bool junk = assigned_class != NULL && !junk_class.empty() && (*assigned_class)[i] >= 0 && (*assigned_class)[i] < K &&
+		                  junk_class[(*assigned_class)[i]];
+		MD.setValue(EMDL_PARTICLE_HELICAL_TYPE, junk ? 0 : seg_type[i] + 1, r);
+		MD.setValue(EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY, junk ? (RFLOAT)0. : (RFLOAT)seg_type_prob[i], r);
 		MD.setValue(EMDL_PARTICLE_HELICAL_SECTION_ID, seg_section[i] + 1, r);
 		RFLOAT p = 0.;
 		if (assigned_class != NULL && (*assigned_class)[i] >= 0 && (*assigned_class)[i] < K && seg_chain[i] >= 0)
@@ -474,6 +479,17 @@ void HelicalContext::update()
 		}
 	if (tpost.size() != (size_t)(N * T))
 		tpost.assign(N * T, 0.f);
+	// Segments whose most likely class is junk say nothing about the type (missing data in the chain) and get no type
+	std::vector<char> seg_junk(N, 0);
+	if (!junk_class.empty())
+		for (long int i = 0; i < N; i++)
+		{
+			if (std::isnan(loglik[i * K])) continue;
+			int best = 0;
+			for (int k = 1; k < K; k++)
+				if (loglik[i * K + k] > loglik[i * K + best]) best = k;
+			seg_junk[i] = junk_class[best];
+		}
 	if (!initialised_model)
 		initialiseModel();
 
@@ -522,7 +538,7 @@ void HelicalContext::update()
 				long int i = grid[s];
 				for (int k = 0; k < K; k++)
 				{
-					float l = (i >= 0) ? loglik[i * K + k] : std::numeric_limits<float>::quiet_NaN();
+					float l = (i >= 0 && !seg_junk[i]) ? loglik[i * K + k] : std::numeric_limits<float>::quiet_NaN();
 					e[s * K + k] = std::isnan(l) ? 1. : exp(temper * l);
 				}
 			}
@@ -683,8 +699,9 @@ void HelicalContext::update()
 						tmp[k] = p;
 						mx = std::max(mx, p);
 					}
+					// the context neither favours nor penalises junk classes: their likelihood decides
 					for (int k = 0; k < K; k++)
-						prior[i * K + k] = (mx > 0.) ? (float)std::max(prior_floor, tmp[k] / mx) : 1.f;
+						prior[i * K + k] = (mx > 0. && (junk_class.empty() || !junk_class[k])) ? (float)std::max(prior_floor, tmp[k] / mx) : 1.f;
 				}
 			}
 		}
@@ -735,7 +752,7 @@ void HelicalContext::update()
 	type_mass.assign(T, 0.);
 	for (long int i = 0; i < N; i++)
 	{
-		if (seg_chain[i] < 0) continue;
+		if (seg_chain[i] < 0 || seg_junk[i]) continue;
 		int b = 0;
 		for (int t = 0; t < T; t++)
 		{
@@ -988,8 +1005,10 @@ void HelicalContext::resetEvidence()
 	std::fill(pol_llr.begin(), pol_llr.end(), std::numeric_limits<float>::quiet_NaN());
 }
 
-// Adjusted Rand index of two labellings (labels >= 0; segments with a negative label in either are left out)
-static double adjustedRand(const std::vector<int> &a, const std::vector<int> &b)
+namespace helixtypes
+{
+// Adjusted Rand index of two labellings (labels >= 0; entries with a negative label in either are left out)
+double adjustedRand(const std::vector<int> &a, const std::vector<int> &b)
 {
 	std::map<std::pair<int, int>, double> nab;
 	std::map<int, double> na, nb;
@@ -1006,8 +1025,384 @@ static double adjustedRand(const std::vector<int> &a, const std::vector<int> &b)
 	return (top > expected) ? (sab - expected) / (top - expected) : 1.;
 }
 
+// Mixture of multinomials over the class counts of filaments (sparse rows), for choosing the number of types
+struct Mixture
+{
+	std::vector<double> logp;  // T x C
+	std::vector<double> logw;  // T
+};
+
+// log sum exp of T values
+static double lse(const double *a, int T)
+{
+	double m = a[0];
+	for (int t = 1; t < T; t++) m = std::max(m, a[t]);
+	double s = 0.;
+	for (int t = 0; t < T; t++) s += exp(a[t] - m);
+	return m + log(s);
+}
+
+static void mixtureLogLik(const FilamentCounts &X, const Mixture &M, int T, long int f, double *L)
+{
+	for (int t = 0; t < T; t++)
+	{
+		double l = M.logw[t];
+		for (const auto &e : X.rows[f]) l += e.second * M.logp[t * X.C + e.first];
+		L[t] = l;
+	}
+}
+
+// EM from `restarts` random starts (each a random training filament plus a pseudo-count); the best by log-likelihood
+static Mixture fitMixture(const FilamentCounts &X, const std::vector<long int> &train, int T, unsigned seed, int restarts = 6, int max_iter = 300)
+{
+	std::vector<Mixture> fits(restarts);
+	std::vector<double> fit_ll(restarts, -std::numeric_limits<double>::infinity());
+	#pragma omp parallel for schedule(dynamic)
+	for (int r = 0; r < restarts; r++)
+	{
+		std::mt19937 rng(seed * 7919u + (unsigned)r * 104729u + (unsigned)T);
+		std::uniform_int_distribution<long int> pick(0, (long int)train.size() - 1);
+		Mixture M;
+		M.logp.assign((size_t)T * X.C, 0.);
+		M.logw.assign(T, -log((double)T));
+		for (int t = 0; t < T; t++)
+		{
+			std::vector<double> p(X.C, 1.);
+			for (const auto &e : X.rows[train[pick(rng)]]) p[e.first] += e.second;
+			double s = 0.;
+			for (double v : p) s += v;
+			for (int c = 0; c < X.C; c++) M.logp[t * X.C + c] = log(p[c] / s);
+		}
+		std::vector<double> L(T), num((size_t)T * X.C), wsum(T);
+		double last = -std::numeric_limits<double>::infinity(), ll = last;
+		for (int it = 0; it < max_iter; it++)
+		{
+			std::fill(num.begin(), num.end(), 0.1);
+			std::fill(wsum.begin(), wsum.end(), 0.);
+			ll = 0.;
+			for (long int f : train)
+			{
+				mixtureLogLik(X, M, T, f, L.data());
+				const double z = lse(L.data(), T);
+				ll += z;
+				for (int t = 0; t < T; t++)
+				{
+					const double g = exp(L[t] - z);
+					wsum[t] += g;
+					for (const auto &e : X.rows[f]) num[t * X.C + e.first] += g * e.second;
+				}
+			}
+			for (int t = 0; t < T; t++)
+			{
+				double s = 0.;
+				for (int c = 0; c < X.C; c++) s += num[t * X.C + c];
+				for (int c = 0; c < X.C; c++) M.logp[t * X.C + c] = log(num[t * X.C + c] / s);
+				M.logw[t] = log(std::max(1e-12, wsum[t] / train.size()));
+			}
+			if (ll - last < 1e-7 * std::fabs(ll))
+				break;
+			last = ll;
+		}
+		fits[r] = M;
+		fit_ll[r] = ll;
+	}
+	int best = 0;
+	for (int r = 1; r < restarts; r++)
+		if (fit_ll[r] > fit_ll[best]) best = r;
+	return fits[best];
+}
+
+void scan(const FilamentCounts &X, int tmin, int tmax, int nfold, int nsplit, std::vector<double> &score, std::vector<double> &agree)
+{
+	score.assign(tmax + 1, 0.);
+	agree.assign(tmax + 1, 0.);
+	std::vector<long int> used;
+	for (long int f = 0; f < (long int)X.rows.size(); f++)
+		if (!X.rows[f].empty()) used.push_back(f);
+	const long int F = used.size();
+	if (F < 3 * nfold || X.C < 2 || nsplit < 1)
+		return;
+	for (int split = 0; split < nsplit; split++)
+	{
+		// folds by a shuffle, not by f % nfold: filaments come in micrograph order, which can follow the types
+		std::vector<int> fold_of(F);
+		for (long int i = 0; i < F; i++) fold_of[i] = i % nfold;
+		std::shuffle(fold_of.begin(), fold_of.end(), std::mt19937(12345u + 7919u * split));
+		for (int T = tmin; T <= tmax; T++)
+		{
+			std::vector<std::vector<int> > labels(nfold, std::vector<int>(F));
+			double test_ll = 0., test_segments = 0.;
+			for (int fold = 0; fold < nfold; fold++)
+			{
+				std::vector<long int> train;
+				for (long int i = 0; i < F; i++)
+					if (fold_of[i] != fold) train.push_back(used[i]);
+				const Mixture M = fitMixture(X, train, T, 1u + fold + nfold * split);
+				std::vector<double> L(T);
+				for (long int i = 0; i < F; i++)
+				{
+					mixtureLogLik(X, M, T, used[i], L.data());
+					labels[fold][i] = std::max_element(L.begin(), L.end()) - L.begin();
+					if (fold_of[i] == fold)
+						test_ll += lse(L.data(), T), test_segments += X.total[used[i]];
+				}
+			}
+			score[T] += test_ll / std::max(1., test_segments) / nsplit;
+			double a = 0.;
+			int npair = 0;
+			for (int f1 = 0; f1 < nfold; f1++)
+				for (int f2 = f1 + 1; f2 < nfold; f2++, npair++)
+					a += adjustedRand(labels[f1], labels[f2]);
+			agree[T] += a / std::max(1, npair) / nsplit;
+		}
+	}
+}
+
+std::vector<int> fitTypes(const FilamentCounts &X, int T, unsigned seed)
+{
+	std::vector<long int> train;
+	for (long int f = 0; f < (long int)X.rows.size(); f++)
+		if (!X.rows[f].empty()) train.push_back(f);
+	std::vector<int> type(X.rows.size(), 0);
+	if (train.empty() || T < 2)
+		return type;
+	const Mixture M = fitMixture(X, train, T, seed);
+	std::vector<double> L(T);
+	for (long int f = 0; f < (long int)X.rows.size(); f++)
+	{
+		mixtureLogLik(X, M, T, f, L.data());
+		type[f] = std::max_element(L.begin(), L.end()) - L.begin();
+	}
+	return type;
+}
+
+int choose(const std::vector<double> &score, const std::vector<double> &agree, int tmin, int tmax, double tol,
+           double agree_min, int current, std::string &why)
+{
+	// More types than the held-out log-likelihood asks for only split real types (the folds can still agree on
+	// such splits): at most the fewest types within tol (nats per segment) of the best
+	int top = tmin, tll = tmin;
+	for (int T = tmin; T <= tmax; T++)
+		if (score[T] > score[top]) top = T;
+	for (int T = tmax; T >= tmin; T--)
+		if (score[T] >= score[top] - tol) tll = T;
+	int best = -1;
+	for (int T = tmin; T <= tll; T++)
+		if (agree[T] >= agree_min)
+			best = T;
+	if (best < 0 && current >= tmin && current <= tmax)
+		best = current, why = "none agrees to " + floatToString(agree_min) + ": keeping the current number";
+	else if (best < 0)
+	{
+		best = tmin;
+		for (int T = tmin; T <= tll; T++)
+			if (agree[T] > agree[best]) best = T;
+		why = "none agrees to " + floatToString(agree_min) + ": the best agreement";
+	}
+	else
+		why = "the most with agreement of at least " + floatToString(agree_min);
+	why += "; at most " + integerToString(tll) + ", the fewest within " + floatToString(tol) + " of the best log-likelihood";
+	return best;
+}
+
+std::vector<double> typeJaccard(const std::vector<std::vector<int> > &labels, int T)
+{
+	const int R = labels.size();
+	std::vector<double> out;
+	for (int a = 0; a < R; a++)
+		for (int t = 0; t < T; t++)
+		{
+			double sum = 0.;
+			bool any = false;
+			for (int b = 0; b < R; b++)
+			{
+				if (b == a) continue;
+				// filaments labelled in both: of type t in a, of each type in b, and in both
+				std::vector<long int> nb(T, 0), both(T, 0);
+				long int na = 0;
+				for (size_t f = 0; f < labels[a].size(); f++)
+				{
+					const int la = labels[a][f], lb = labels[b][f];
+					if (la < 0 || lb < 0 || lb >= T) continue;
+					nb[lb]++;
+					if (la == t) na++, both[lb]++;
+				}
+				if (na == 0) continue;
+				double best = 0.;
+				for (int u = 0; u < T; u++)
+					best = std::max(best, (double)both[u] / (na + nb[u] - both[u]));
+				sum += best;
+				any = true;
+			}
+			if (any) out.push_back(sum / (R - 1));
+		}
+	return out;
+}
+
+std::vector<RFLOAT> classContinuity(const std::vector<MultidimArray<RFLOAT> > &refs, RFLOAT apix, const std::vector<long int> &filament,
+                                    const std::vector<RFLOAT> &track_angst, const std::vector<int> &cls,
+                                    const std::vector<char> &flipped, std::string &note)
+{
+	const int K = refs.size();
+	std::vector<RFLOAT> cont(K, std::numeric_limits<RFLOAT>::quiet_NaN());
+	note = "no pairs of segments";
+	if (K == 0 || YSIZE(refs[0]) < 8 || ZSIZE(refs[0]) != 1) return cont;
+	const int ny = YSIZE(refs[0]), nx = XSIZE(refs[0]), max_shift = (int)(0.4 * nx), dy_max = 2;
+	auto flip = [&](long int i) { return !flipped.empty() && flipped[i]; };
+
+	// segments in track order per filament; each paired with the one lag segments further (about 15% of the box)
+	std::vector<long int> seg;
+	for (size_t i = 0; i < cls.size(); i++)
+		if (filament[i] >= 0 && cls[i] >= 0 && cls[i] < K) seg.push_back(i);
+	std::sort(seg.begin(), seg.end(), [&](long int a, long int b)
+	          { return filament[a] != filament[b] ? filament[a] < filament[b] : track_angst[a] < track_angst[b]; });
+	std::vector<RFLOAT> steps;
+	for (size_t j = 1; j < seg.size(); j++)
+		if (filament[seg[j]] == filament[seg[j - 1]] && track_angst[seg[j]] > track_angst[seg[j - 1]])
+			steps.push_back(track_angst[seg[j]] - track_angst[seg[j - 1]]);
+	if (steps.empty()) return cont;
+	std::nth_element(steps.begin(), steps.begin() + steps.size() / 2, steps.end());
+	const RFLOAT step = steps[steps.size() / 2];
+	const int lag = std::max(1, (int)ROUND(0.15 * nx * apix / step));
+	struct Pair { int a, b; RFLOAT d; };  // classes of the earlier and the later segment, distance (pixels, sign of the polarity)
+	std::vector<Pair> pairs;
+	for (size_t j = 0; j + lag < seg.size(); j++)
+	{
+		const long int s = seg[j], t = seg[j + lag];
+		if (filament[s] == filament[t] && flip(s) == flip(t))
+			pairs.push_back({cls[s], cls[t], (flip(s) ? -1. : 1.) * (track_angst[t] - track_angst[s]) / apix});
+	}
+	if (pairs.empty()) return cont;
+
+	// class averages: low-passed, zero mean inside the circle, zero outside
+	const double r2max = 0.45 * 0.45 * nx * nx;
+	std::vector<char> inside(ny * nx);
+	for (int i = 0; i < ny; i++)
+		for (int j = 0; j < nx; j++)
+			inside[i * nx + j] = (i - ny / 2) * (i - ny / 2) + (j - nx / 2) * (j - nx / 2) < r2max;
+	std::vector<std::vector<double> > img(K, std::vector<double>(ny * nx, 0.));
+	for (int k = 0; k < K; k++)
+	{
+		MultidimArray<RFLOAT> f = refs[k];
+		lowPassFilterMap(f, 25., apix);
+		double sum = 0.;
+		long int n = 0;
+		for (int p = 0; p < ny * nx; p++)
+			if (inside[p]) sum += DIRECT_MULTIDIM_ELEM(f, p), n++;
+		for (int p = 0; p < ny * nx; p++)
+			img[k][p] = inside[p] ? DIRECT_MULTIDIM_ELEM(f, p) - sum / n : 0.;
+	}
+	// overlap of a and b shifted by sx: sum a(r) b(r + s) / sqrt(energies in the overlap), best over dy
+	auto overlap = [&](int a, int b, int sx)
+	{
+		double best = -1.;
+		for (int dy = -dy_max; dy <= dy_max; dy++)
+		{
+			double ab = 0., aa = 0., bb = 0.;
+			for (int i = std::max(0, -dy); i < std::min(ny, ny - dy); i++)
+				for (int j = std::max(0, -sx); j < std::min(nx, nx - sx); j++)
+				{
+					const int p = i * nx + j, q = (i + dy) * nx + j + sx;
+					if (!inside[p] || !inside[q]) continue;
+					const double va = img[a][p], vb = img[b][q];
+					ab += va * vb, aa += va * va, bb += vb * vb;
+				}
+			if (aa > 0. && bb > 0.) best = std::max(best, ab / sqrt(aa * bb));
+		}
+		return best;
+	};
+	const long long W = 2 * max_shift + 1;
+	std::map<long long, double> cache;
+	auto shiftOf = [&](const Pair &pr, int sign) { return (int)ROUND(sign * pr.d); };
+	auto keyOf = [&](const Pair &pr, int s) { return ((long long)pr.a * K + pr.b) * W + s + max_shift; };
+	auto fill = [&](const std::vector<long long> &keys)
+	{
+		std::vector<double> val(keys.size());
+		#pragma omp parallel for schedule(dynamic, 16)
+		for (long int n = 0; n < (long int)keys.size(); n++)
+		{
+			const long long kk = keys[n];
+			val[n] = overlap((int)(kk / W / K), (int)(kk / W % K), (int)(kk % W) - max_shift);
+		}
+		for (size_t n = 0; n < keys.size(); n++) cache[keys[n]] = val[n];
+	};
+	auto need = [&](const std::vector<size_t> &which, int sign)
+	{
+		std::vector<long long> keys;
+		for (size_t n : which)
+		{
+			const int s = shiftOf(pairs[n], sign);
+			if (abs(s) <= max_shift && !cache.count(keyOf(pairs[n], s))) keys.push_back(keyOf(pairs[n], s));
+		}
+		std::sort(keys.begin(), keys.end());
+		keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+		fill(keys);
+	};
+	auto median = [](std::vector<double> v)
+	{
+		if (v.empty()) return std::numeric_limits<double>::quiet_NaN();
+		std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+		return v[v.size() / 2];
+	};
+	// the direction of the track in the class frame: the one with the higher median overlap, on a sample of pairs
+	std::vector<size_t> sample;
+	for (size_t n = 0; n < pairs.size(); n += std::max((size_t)1, pairs.size() / 3000)) sample.push_back(n);
+	double med[2];
+	for (int si = 0; si < 2; si++)
+	{
+		need(sample, si ? 1 : -1);
+		std::vector<double> v;
+		for (size_t n : sample)
+		{
+			const int s = shiftOf(pairs[n], si ? 1 : -1);
+			if (abs(s) <= max_shift) v.push_back(cache[keyOf(pairs[n], s)]);
+		}
+		med[si] = median(v);
+	}
+	const int sign = (med[1] > med[0]) ? 1 : -1;
+	std::vector<size_t> all(pairs.size());
+	for (size_t n = 0; n < pairs.size(); n++) all[n] = n;
+	need(all, sign);
+	std::vector<std::vector<double> > per(K);
+	for (const Pair &pr : pairs)
+	{
+		const int s = shiftOf(pr, sign);
+		if (abs(s) > max_shift) continue;
+		const double v = cache[keyOf(pr, s)];
+		per[pr.a].push_back(v);
+		if (pr.b != pr.a) per[pr.b].push_back(v);
+	}
+	for (int k = 0; k < K; k++)
+		if (per[k].size() >= 20) cont[k] = median(per[k]);
+	std::ostringstream os;
+	os << pairs.size() << " pairs of segments " << lag << " apart (" << ROUND(lag * step) << " A), the track along "
+	   << (sign > 0 ? "+x" : "-x") << " in the class frame (median overlap " << std::setprecision(3) << std::max(med[0], med[1])
+	   << ", the other way " << std::min(med[0], med[1]) << ")";
+	note = os.str();
+	return cont;
+}
+
+std::vector<char> junkClasses(const std::vector<RFLOAT> &res, const std::vector<RFLOAT> &diam, RFLOAT box_angst, RFLOAT res_factor,
+                              const std::vector<RFLOAT> &cont)
+{
+	std::vector<RFLOAT> ok;
+	for (RFLOAT r : res)
+		if (r > 0. && std::isfinite(r)) ok.push_back(r);
+	std::sort(ok.begin(), ok.end());
+	const RFLOAT junk_res = ok.empty() ? 0. : res_factor * ok[ok.size() / 2];
+	std::vector<char> junk(res.size(), 0);
+	for (size_t k = 0; k < res.size(); k++)
+		junk[k] = (junk_res > 0. && !(res[k] <= junk_res)) || (k < diam.size() && diam[k] > 0.8 * box_angst) ||
+		          (k < cont.size() && cont[k] < 0.6);  // NaN (too few pairs): not decided by continuity
+	return junk;
+}
+}
+using helixtypes::adjustedRand;
+
 int HelicalContext::selectNrTypes(int tmin, int tmax, int nfold, RFLOAT tol, RFLOAT agree_min, bool keep)
 {
+	if (agree_min > 0.)
+		return selectNrTypesByMixture(tmin, tmax, nfold, tol, agree_min, keep);
 	const int current = nr_types;
 	const int nch = chains.size();
 	int verb_save = verb;
@@ -1083,6 +1478,64 @@ int HelicalContext::selectNrTypes(int tmin, int tmax, int nfold, RFLOAT tol, RFL
 		std::cout << " Filament context: held-out log-likelihood per segment by number of types (" << nfold << "-fold over filaments):";
 		for (int T = tmin; T <= tmax; T++)
 			std::cout << " " << T << ": " << std::setprecision(5) << score[T] / N;
+		std::cout << std::endl << " Filament context: agreement of the types between the folds (adjusted Rand index) by number of types:";
+		for (int T = tmin; T <= tmax; T++)
+			std::cout << " " << T << ": " << std::setprecision(4) << agree[T];
+		std::cout << std::endl << " Filament context: using " << best << " types (" << why << ")" << std::endl;
+	}
+	nr_types = best;
+	initialised_model = false;
+	return best;
+}
+
+int HelicalContext::selectNrTypesByMixture(int tmin, int tmax, int nfold, RFLOAT tol, RFLOAT agree_min, bool keep)
+{
+	// Filaments as counts of their segments' most likely classes (junk classes left out). The chain model fitted per
+	// fold (the other rule) starts once from NMF and its segment types agreed only about 0.6-0.7 between folds even
+	// for 2 types on real data; this mixture, from several starts, finds the same types again (about 0.95).
+	const int nfil = filament_name.size();
+	std::vector<int> col(K, -1);
+	helixtypes::FilamentCounts X;
+	for (int k = 0; k < K; k++)
+		if (junk_class.empty() || !junk_class[k])
+			col[k] = X.C++;
+	std::vector<std::map<int, double> > cnt(nfil);
+	for (long int i = 0; i < N; i++)
+	{
+		if (seg_chain[i] < 0 || std::isnan(loglik[i * K]))
+			continue;
+		int best = 0;
+		for (int k = 1; k < K; k++)
+			if (loglik[i * K + k] > loglik[i * K + best]) best = k;
+		if (col[best] >= 0)
+			cnt[filament_of_chain[seg_chain[i]]][col[best]] += 1.;
+	}
+	for (int f = 0; f < nfil; f++)
+	{
+		if (cnt[f].empty())
+			continue;
+		X.rows.emplace_back(cnt[f].begin(), cnt[f].end());
+		double n = 0.;
+		for (auto &e : cnt[f]) n += e.second;
+		X.total.push_back(n);
+	}
+	// one split's fold agreement for the same number of types went from 0.64 to 0.82 between checks on real data
+	const int nsplit = 4;
+	const double t0 = omp_get_wtime();
+	std::vector<double> score, agree;
+	helixtypes::scan(X, tmin, tmax, nfold, nsplit, score, agree);
+	std::string why;
+	const int best = helixtypes::choose(score, agree, tmin, tmax, tol, agree_min, keep ? nr_types : 0, why);
+	if (verb > 0)
+	{
+		long int njunk = 0;
+		for (int k = 0; k < K; k++) njunk += (col[k] < 0);
+		std::cout << " Filament context: choosing the number of types from " << X.rows.size() << " filaments as counts over " << X.C
+		          << " classes (" << njunk << " junk classes left out), a mixture fitted to " << nfold << " folds, "
+		          << nsplit << " random splits (" << std::setprecision(3) << omp_get_wtime() - t0 << " s)" << std::endl;
+		std::cout << " Filament context: held-out log-likelihood per segment by number of types:";
+		for (int T = tmin; T <= tmax; T++)
+			std::cout << " " << T << ": " << std::setprecision(5) << score[T];
 		std::cout << std::endl << " Filament context: agreement of the types between the folds (adjusted Rand index) by number of types:";
 		for (int T = tmin; T <= tmax; T++)
 			std::cout << " " << T << ": " << std::setprecision(4) << agree[T];

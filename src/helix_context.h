@@ -43,6 +43,56 @@
 #include <vector>
 #include <string>
 #include "src/metadata_table.h"
+#include "src/multidim_array.h"
+
+// Helical types from the class counts of filaments (a mixture of multinomials): how the filament context chooses the
+// number of types, and how relion_class2d_consensus finds the types again across parallel replicas
+namespace helixtypes
+{
+struct FilamentCounts
+{
+	std::vector<std::vector<std::pair<int, double> > > rows;  // per filament: (column, count); empty: no segment counted
+	std::vector<double> total;                               // segments per filament
+	int C = 0;                                               // columns (classes that are not junk)
+};
+
+// For T = tmin..tmax (indexed by T): the held-out log-likelihood per segment (score) and the agreement of the types
+// from the fits to the different folds (adjusted Rand index over the filaments), averaged over nsplit random splits
+// of the non-empty filaments into nfold folds
+void scan(const FilamentCounts &X, int tmin, int tmax, int nfold, int nsplit, std::vector<double> &score, std::vector<double> &agree);
+
+// The type (0..T-1) of every filament, from a fit to all non-empty filaments
+std::vector<int> fitTypes(const FilamentCounts &X, int T, unsigned seed);
+
+// The most types whose agreement is at least agree_min, but at most the fewest within tol of the best score; if none:
+// current (if within tmin..tmax) or the best agreement. why says which.
+int choose(const std::vector<double> &score, const std::vector<double> &agree, int tmin, int tmax, double tol,
+           double agree_min, int current, std::string &why);
+
+// Adjusted Rand index of two labellings (entries with a negative label in either are left out)
+double adjustedRand(const std::vector<int> &a, const std::vector<int> &b);
+
+// Per type of each replica (labels[replica][filament], 0..T-1, negative: left out): the mean over the other replicas of
+// its best Jaccard index (filaments labelled in both) with one of their types; types without filaments are left out
+std::vector<double> typeJaccard(const std::vector<std::vector<int> > &labels, int T);
+
+// Helical continuity of each class: two segments of one filament, d apart along the track, show the same helix shifted
+// by d, so the class average of the later one should continue the class average of the earlier one at that shift
+// along the axis (x). Each segment (filament >= 0, class >= 0) is paired with the one about 15% of the box further
+// along its filament; the overlap of their class averages (low-passed to 25 A, inside a circle of 0.9 x the box,
+// normalised by the energies in the overlap, best over +-2 pixels across the axis) is taken at the predicted shift.
+// The direction of the track in the class frame is the one with the higher median overlap; pairs with opposite
+// polarity (flipped: psi turned by 180 from its prior) are left out. Returns per class the median over its pairs
+// (NaN: fewer than 20); note says what was used. Helical classes: 0.7 and more; ice, carbon edges and blobs much less.
+std::vector<RFLOAT> classContinuity(const std::vector<MultidimArray<RFLOAT> > &refs, RFLOAT apix, const std::vector<long int> &filament,
+                                    const std::vector<RFLOAT> &track_angst, const std::vector<int> &cls,
+                                    const std::vector<char> &flipped, std::string &note);
+
+// Junk classes: resolution worse than res_factor x the median (or none), wider than 80% of the box (diam: per class,
+// may be empty), or not continuing the helix (cont: classContinuity, may be empty; below 0.6)
+std::vector<char> junkClasses(const std::vector<RFLOAT> &res, const std::vector<RFLOAT> &diam, RFLOAT box_angst, RFLOAT res_factor,
+                              const std::vector<RFLOAT> &cont = std::vector<RFLOAT>());
+}
 
 class HelicalContext
 {
@@ -135,11 +185,21 @@ public:
 	// Learn the model, compute posteriors, priors, types and sections
 	void update();
 
-	// Choose the number of types (tmin..tmax) by nfold-fold cross-validation over the filaments: with agree_min > 0
-	// the most types whose folds agree on the segment types (adjusted Rand index) to agree_min (none: the best
-	// agreement, or with keep the current nr_types), else the smallest number within tol (nats per segment) of the
-	// best held-out log-likelihood; sets nr_types and returns it
-	int selectNrTypes(int tmin, int tmax, int nfold = 3, RFLOAT tol = 0.01, RFLOAT agree_min = 0.9, bool keep = false);
+	// Choose the number of types (tmin..tmax) by nfold-fold cross-validation over the filaments. With agree_min > 0:
+	// each filament is its counts of segments per class (the most likely class of each segment, junk_class left out),
+	// a mixture of T multinomials is fitted to the filaments outside each fold, and the most types whose fits agree on
+	// the types of all filaments (adjusted Rand index, averaged over several random fold splits) to agree_min are used
+	// (none: the best agreement, or with keep the current nr_types), but no more than the fewest within tol of the best
+	// held-out log-likelihood (helixtypes::choose). Else (agree_min <= 0) the chain model itself is fitted per fold and the smallest number
+	// within tol (nats per segment) of the best held-out log-likelihood is used. Sets nr_types and returns it.
+	int selectNrTypes(int tmin, int tmax, int nfold = 3, RFLOAT tol = 0.01, RFLOAT agree_min = 0.75, bool keep = false);
+
+	// Junk classes (K entries, 1: junk; empty: none): left out when choosing the number of types, no type evidence in
+	// the chain model, no context prior, and their segments get no type (0)
+	std::vector<char> junk_class;
+
+	// selectNrTypes with agree_min > 0
+	int selectNrTypesByMixture(int tmin, int tmax, int nfold, RFLOAT tol, RFLOAT agree_min, bool keep);
 
 	// Prior factor for class k of segment i (1 before the first update)
 	inline RFLOAT getPrior(long int i, int k) const

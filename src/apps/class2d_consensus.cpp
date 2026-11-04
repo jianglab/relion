@@ -6,6 +6,8 @@
 #include "src/class2d_consensus.h"
 #include "src/class2d_consensus_metadata.h"
 #include "src/filename.h"
+#include "src/helix_context.h"
+#include "src/image.h"
 #include "src/jaz/single_particle/obs_model.h"
 #include "src/macros.h"
 #include "src/metadata_table.h"
@@ -13,7 +15,9 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <map>
 #include <regex>
 #include <climits>
 #include <numeric>
@@ -30,6 +34,9 @@ public:
 	int nr_runs, nr_threads, verb, requested_classes;
 	std::string method;
 	Class2DConsensusNmfOptions nmf_options;
+	bool helical_types;
+	int types_max, types_splits;
+	double types_jaccard, types_tol;
 
 	static int positiveInteger(const std::string &value, const std::string &option)
 	{
@@ -84,11 +91,214 @@ public:
 			std::cout << "Legacy keep-alignments setting ignored: fresh initialization always resets fitted poses." << std::endl;
 		// Accepted for scripts from older versions. Fresh preparation always resets poses.
 		parser.checkOption("--reset_alignments", "Legacy option: fresh initialization always resets fitted poses");
+		{
+			// Opt-in until validated: RELION_CONSENSUS_HELICAL_TYPES=1 makes it the default
+			const char *env = getenv("RELION_CONSENSUS_HELICAL_TYPES");
+			std::string v = (env == NULL) ? "" : env;
+			for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+			helical_types = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+		}
+		if (parser.checkOption("--helical_types", "Helical segments: find the helical types of the filaments again across the replicas (the number of types: the most on which the replicas agree) and write them as rlnHelicalType (RELION_CONSENSUS_HELICAL_TYPES=1 makes this the default)"))
+			helical_types = true;
+		if (parser.checkOption("--dont_helical_types", "Write no helical types (rlnHelicalType of a replica is left out, as it belongs to that replica only)"))
+			helical_types = false;
+		types_max = textToInteger(parser.getOption("--types_max", "With --helical_types: at most this many types", "10"));
+		types_jaccard = textToFloat(parser.getOption("--types_jaccard", "With --helical_types: the most types of which every type of every replica is found again in the other replicas with at least this Jaccard index (filaments; mean over the other replicas)", "0.6"));
+		types_tol = textToFloat(parser.getOption("--types_tol", "With --helical_types: but no more than the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
+		types_splits = textToInteger(parser.getOption("--types_splits", "With --helical_types: random fold splits per replica for the held-out log-likelihood", "4"));
 		verb = textToInteger(parser.getOption("--verb", "Verbosity", "1"));
 		if (parser.checkForErrors(verb))
 			REPORT_ERROR("Errors encountered on the command line");
 		if (nr_runs < 2) REPORT_ERROR("Class2D consensus requires at least two replicas");
 		if (nr_threads < 1) REPORT_ERROR("Number of threads must be positive");
+		if (helical_types && (types_max < 2 || types_splits < 1)) REPORT_ERROR("--types_max must be at least 2 and --types_splits at least 1");
+	}
+
+	// Junk classes of a replica, as in the filament context: resolution worse than 1.5 x the median, (with per-class
+	// tubes) wider than 80% of the box, or not continuing the helix along its filaments (helixtypes::classContinuity)
+	std::vector<char> replicaJunk(const FileName &optimiser, const FileName &model, const FileName &data, int K)
+	{
+		MetaDataTable general, classes, settings, opt, parts;
+		general.read(model, "model_general");
+		RFLOAT pixel = 0.;
+		int size = 0;
+		general.getValue(EMDL_MLMODEL_PIXEL_SIZE, pixel);
+		general.getValue(EMDL_MLMODEL_ORIGINAL_SIZE, size);
+		classes.read(model, "model_classes");
+		std::vector<RFLOAT> res(K, 0.), diam;
+		std::vector<MultidimArray<RFLOAT> > refs(K);
+		for (int k = 0; k < K && k < (int)classes.numberOfObjects(); k++)
+		{
+			classes.getValue(EMDL_MLMODEL_ESTIM_RESOL_REF, res[k], k);
+			FileName image;
+			if (!classes.getValue(EMDL_MLMODEL_REF_IMAGE, image, k))
+				REPORT_ERROR("--helical_types: no rlnReferenceImage in " + model);
+			Image<RFLOAT> img;
+			img.read(image);
+			refs[k] = img();
+		}
+		opt.read(optimiser, "optimiser_general");
+		bool auto_diameter = false;
+		if (opt.getValue(EMDL_OPTIMISER_HELICAL_AUTO_TUBE_DIAMETER, auto_diameter) && auto_diameter)
+		{
+			settings.read(model, "model_class_settings");
+			diam.assign(K, 0.);
+			for (int k = 0; k < K && k < (int)settings.numberOfObjects(); k++)
+				settings.getValue(EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, diam[k], k);
+		}
+		std::vector<RFLOAT> cont;
+		parts.read(data, "particles");
+		if (parts.containsLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM))
+		{
+			const long int n = parts.numberOfObjects();
+			const bool has_prior = parts.containsLabel(EMDL_ORIENT_PSI_PRIOR);
+			std::vector<long int> fil(n);
+			std::vector<RFLOAT> track(n);
+			std::vector<int> cls(n);
+			std::vector<char> flipped(n);
+			std::unordered_map<std::string, long int> id;
+			for (long int i = 0; i < n; i++)
+			{
+				FileName mic;
+				int tube;
+				RFLOAT psi = 0., prior = 0.;
+				parts.getValue(EMDL_MICROGRAPH_NAME, mic, i);
+				parts.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube, i);
+				parts.getValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, track[i], i);
+				parts.getValue(EMDL_PARTICLE_CLASS, cls[i], i);
+				cls[i]--;
+				parts.getValue(EMDL_ORIENT_PSI, psi, i);
+				prior = psi;
+				if (has_prior) parts.getValue(EMDL_ORIENT_PSI_PRIOR, prior, i);
+				flipped[i] = fabs(remainder(psi - prior, 360.)) > 90.;
+				fil[i] = id.insert(std::make_pair(mic + ":" + integerToString(tube), (long int)id.size())).first->second;
+			}
+			std::string note;
+			cont = helixtypes::classContinuity(refs, pixel, fil, track, cls, flipped, note);
+			if (verb > 0)
+			{
+				int nc = 0;
+				for (RFLOAT c : cont) nc += (c < 0.6);
+				std::cout << "Helical types: " << nc << " classes of " << data << " do not continue the helix (" << note << ")" << std::endl;
+			}
+		}
+		return helixtypes::junkClasses(res, diam, size * pixel, 1.5, cont);
+	}
+
+	// Consensus helical types: per canonical particle its type (1.., 0: its filament has no segment outside junk
+	// classes in any replica) and the probability of that type
+	void helicalTypes(const std::vector<std::vector<int> > &assignments, const std::vector<std::string> &filament_key,
+	                  const std::vector<FileName> &optimiser_files, const std::vector<FileName> &model_files,
+	                  const std::vector<FileName> &data_files, int source_classes,
+	                  std::vector<int> &type, std::vector<double> &probability)
+	{
+		std::unordered_map<std::string, int> fil_id;
+		std::vector<int> fil(filament_key.size());
+		for (size_t i = 0; i < filament_key.size(); i++)
+			fil[i] = fil_id.insert(std::make_pair(filament_key[i], (int)fil_id.size())).first->second;
+		const int F = fil_id.size();
+		std::vector<helixtypes::FilamentCounts> X(nr_runs);
+		std::vector<char> used(F, 0);
+		for (int run = 0; run < nr_runs; run++)
+		{
+			const std::vector<char> junk = replicaJunk(optimiser_files[run], model_files[run], data_files[run], source_classes);
+			std::vector<int> col(source_classes, -1);
+			for (int k = 0; k < source_classes; k++)
+				if (!junk[k]) col[k] = X[run].C++;
+			std::vector<std::map<int, double> > cnt(F);
+			for (size_t i = 0; i < fil.size(); i++)
+				if (col[assignments[run][i]] >= 0) cnt[fil[i]][col[assignments[run][i]]] += 1.;
+			X[run].rows.resize(F);
+			X[run].total.assign(F, 0.);
+			for (int f = 0; f < F; f++)
+			{
+				X[run].rows[f].assign(cnt[f].begin(), cnt[f].end());
+				for (auto &e : cnt[f]) X[run].total[f] += e.second;
+				used[f] |= !cnt[f].empty();
+			}
+			if (verb > 0)
+				std::cout << "Helical types: replica run" << integerToString(run + 1, 3) << ": " << source_classes - X[run].C
+				          << " junk classes left out" << std::endl;
+		}
+		// Held-out log-likelihood (mean over replicas) caps the number of types, as in the filament context. The number
+		// of types: the most of which every type is found again in the other replicas (which also redo the
+		// classification); one overall agreement (adjusted Rand index) is pulled down by types that the replicas split
+		// differently, and by junk
+		const int tmin = 2, tmax = types_max;
+		std::vector<double> score(tmax + 1, 0.), within(tmax + 1, 0.), between(tmax + 1, 0.), lowest(tmax + 1, 0.), found(tmax + 1, 0.);
+		for (int run = 0; run < nr_runs; run++)
+		{
+			std::vector<double> s, a;
+			helixtypes::scan(X[run], tmin, tmax, 3, types_splits, s, a);
+			for (int T = tmin; T <= tmax; T++) score[T] += s[T] / nr_runs, within[T] += a[T] / nr_runs;
+		}
+		std::vector<std::vector<std::vector<int> > > labels(tmax + 1);
+		for (int T = tmin; T <= tmax; T++)
+		{
+			labels[T].resize(nr_runs);
+			std::vector<std::vector<int> > seen(nr_runs);
+			for (int run = 0; run < nr_runs; run++)
+			{
+				labels[T][run] = helixtypes::fitTypes(X[run], T, 1u);  // empty rows: the most common type
+				seen[run] = labels[T][run];
+				for (int f = 0; f < F; f++)
+					if (X[run].rows[f].empty()) seen[run][f] = -1;  // left out of the agreement
+			}
+			int npair = 0;
+			for (int a = 0; a < nr_runs; a++)
+				for (int b = a + 1; b < nr_runs; b++, npair++)
+					between[T] += helixtypes::adjustedRand(seen[a], seen[b]);
+			between[T] /= npair;
+			const std::vector<double> jac = helixtypes::typeJaccard(seen, T);
+			lowest[T] = jac.empty() ? 0. : *std::min_element(jac.begin(), jac.end());
+			for (double j : jac) found[T] += (j >= types_jaccard) / (double)nr_runs;
+		}
+		std::string why;
+		const int T = helixtypes::choose(score, lowest, tmin, tmax, types_tol, types_jaccard, 0, why);
+		if (verb > 0)
+		{
+			std::cout << "Helical types by number of types: held-out log-likelihood per segment; agreement within the replicas (folds) and between them (adjusted Rand index); "
+			          << "the lowest Jaccard index of a type with the other replicas, and the types per replica with at least " << types_jaccard << std::endl;
+			for (int t = tmin; t <= tmax; t++)
+				std::cout << "  " << t << ": " << std::setprecision(5) << score[t] << "  " << std::setprecision(3) << within[t] << "  " << between[t]
+				          << "  " << lowest[t] << "  " << std::setprecision(2) << found[t] << std::endl;
+			std::cout << "Helical types: using " << T << " (" << why << ", the lowest Jaccard index of a type)" << std::endl;
+		}
+		// The consensus of the replicas' filament types (only filaments with segments outside junk classes; a filament
+		// without such segments in one replica takes that replica's most common type)
+		std::vector<int> kept;
+		for (int f = 0; f < F; f++)
+			if (used[f]) kept.push_back(f);
+		std::vector<std::vector<int> > runs(nr_runs, std::vector<int>(kept.size()));
+		for (int run = 0; run < nr_runs; run++)
+			for (size_t j = 0; j < kept.size(); j++) runs[run][j] = labels[T][run][kept[j]];
+		const Class2DConsensusResult result = Class2DConsensus::fitWithClassCount(runs, T, T, 200, 1.e-6, 1.0, nr_threads);
+		// types numbered by segments, most first
+		std::vector<long int> segments(T, 0);
+		std::vector<int> fil_type(F, -1);
+		std::vector<double> fil_prob(F, 0.);
+		for (size_t j = 0; j < kept.size(); j++)
+			fil_type[kept[j]] = result.assignment[j], fil_prob[kept[j]] = result.probability[j];
+		for (size_t i = 0; i < fil.size(); i++)
+			if (fil_type[fil[i]] >= 0) segments[fil_type[fil[i]]]++;
+		std::vector<int> order(T), rank(T);
+		std::iota(order.begin(), order.end(), 0);
+		std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return segments[a] > segments[b]; });
+		for (int t = 0; t < T; t++) rank[order[t]] = t + 1;
+		type.assign(fil.size(), 0);
+		probability.assign(fil.size(), 0.);
+		for (size_t i = 0; i < fil.size(); i++)
+			if (fil_type[fil[i]] >= 0)
+				type[i] = rank[fil_type[fil[i]]], probability[i] = fil_prob[fil[i]];
+		if (verb > 0)
+		{
+			std::cout << "Helical types: segments per consensus type:";
+			for (int t = 0; t < T; t++) std::cout << " " << t + 1 << ": " << segments[order[t]];
+			std::cout << " (" << F - (long int)kept.size() << " filaments only in junk classes: type 0)" << std::endl;
+			std::cout << "Helical types: agreement of each replica with the consensus (adjusted Rand index over filaments):";
+			for (int run = 0; run < nr_runs; run++) std::cout << " " << std::setprecision(3) << result.run_adjusted_rand[run];
+			std::cout << std::endl;
+		}
 	}
 
 	static std::string directoryOf(const std::string &path)
@@ -161,6 +371,7 @@ public:
 		std::unordered_map<std::string, long int> canonical_index;
 		std::vector<double> canonical_pixel_sizes;
 		std::vector<int> canonical_box_sizes;
+		std::vector<std::string> filament_key;  // micrograph:tube per canonical particle (with --helical_types)
 		long int nr_particles = -1;
 		for (int run = 0; run < nr_runs; ++run)
 		{
@@ -173,6 +384,20 @@ public:
 			{
 				nr_particles = particles.numberOfObjects();
 				canonical_index.reserve(nr_particles);
+				if (helical_types)
+				{
+					if (!particles.containsLabel(EMDL_MICROGRAPH_NAME) || !particles.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID))
+						REPORT_ERROR("--helical_types needs rlnMicrographName and rlnHelicalTubeID in " + data_files[run]);
+					filament_key.resize(nr_particles);
+					for (long int particle = 0; particle < nr_particles; ++particle)
+					{
+						FileName mic;
+						int tube = 0;
+						particles.getValue(EMDL_MICROGRAPH_NAME, mic, particle);
+						particles.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube, particle);
+						filament_key[particle] = mic + ":" + integerToString(tube);
+					}
+				}
 				canonical_pixel_sizes = observation.getPixelSizes();
 				std::vector<int> ignored;
 				observation.getBoxSizes(canonical_box_sizes, ignored);
@@ -243,8 +468,18 @@ public:
 				for (long int i = 0; i < nr_particles; ++i) ordered[i] = assignments[run][identities[i].second];
 				assignments[run].swap(ordered);
 			}
+			if (!filament_key.empty())
+			{
+				std::vector<std::string> ordered(nr_particles);
+				for (long int i = 0; i < nr_particles; ++i) ordered[i] = filament_key[identities[i].second];
+				filament_key.swap(ordered);
+			}
 			for (long int i = 0; i < nr_particles; ++i) canonical_index[identities[i].first] = i;
 		}
+		std::vector<int> helical_type;
+		std::vector<double> helical_type_probability;
+		if (helical_types)
+			helicalTypes(assignments, filament_key, optimiser_files, model_files, data_files, source_classes, helical_type, helical_type_probability);
 		Class2DConsensusResult result{};
 		Class2DConsensusNmfResult nmf;
 		const bool sparse_nmf = method == "sparse_nmf";
@@ -289,6 +524,10 @@ public:
 		MetaDataTable anchor_particles;
 		ObservationModel::loadSafely(data_files[result.anchor_run], anchor_observation, anchor_particles, "particles", 0);
 		setClass2DConsensusMethod(anchor_particles, sparse_nmf);
+		// The anchor replica's own types are not the consensus
+		if (!helical_types)
+			for (EMDLabel label : {EMDL_PARTICLE_HELICAL_TYPE, EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY})
+				if (anchor_particles.containsLabel(label)) anchor_particles.deactivateLabel(label);
 		for (long int row = 0; row < anchor_particles.numberOfObjects(); ++row)
 		{
 			FileName image_name;
@@ -299,6 +538,11 @@ public:
 				sparse_nmf ? nmf.membership[particle] : result.probability[particle], row);
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_ENTROPY, result.entropy[particle], row);
 			anchor_particles.setValue(EMDL_PARTICLE_CLASS2D_CONSENSUS_AGREEMENT, result.agreement[particle], row);
+			if (helical_types)
+			{
+				anchor_particles.setValue(EMDL_PARTICLE_HELICAL_TYPE, helical_type[particle], row);
+				anchor_particles.setValue(EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY, helical_type_probability[particle], row);
+			}
 		}
 		resetClass2DConsensusAlignments(anchor_particles);
 		anchor_observation.save(anchor_particles, output_root + "_data.star", "particles");

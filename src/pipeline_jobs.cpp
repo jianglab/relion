@@ -136,7 +136,7 @@ static bool addFilamentContextCommand(std::map<std::string, JobOption> &joboptio
 		if (error_message != "") return false;
 		command += " --filament_context off";
 		if (K >= 2)
-			command += " --helical_context --helical_context_types 2 --helical_context_types_max " + integerToString(std::min(6, K));
+			command += " --helical_context --helical_context_types 2 --helical_context_types_max " + integerToString(std::min(10, K));
 		return true;
 	}
 	if (choice != job_filament_context_options[1] && choice != job_filament_context_options[2])
@@ -4045,6 +4045,8 @@ void RelionJob::initialiseClass2DConsensusJob()
 		"Positive integer seed for fresh images constructed from consensus members. No upstream images or fitted poses initialize refinement; supported priors are preserved.");
 	joboptions["nr_iter"] = JobOption("Number of refinement iterations:", 25, 1, 50, 1,
 		"Number of EM iterations to refine consensus class averages, keeping every particle in its assigned consensus class. Any positive integer is accepted, including values above the slider range.");
+	joboptions["do_helical_types"] = JobOption("Consensus helical types?", envFlagDefault("RELION_CONSENSUS_HELICAL_TYPES"),
+		"Helical Class2D replicas only: if set to Yes, the helical types of the filaments are found again across the replicas from their classes, using the most types on which the replicas agree (at most 10), and written as rlnHelicalType. The types of a single run are checked only on parts of the same classification; replicas redo the classification. If set to No, no types are written. The default can be set with the environment variable RELION_CONSENSUS_HELICAL_TYPES.");
 	joboptions["do_reset_alignments"] = JobOption("Legacy reset alignments (ignored):", true,
 		"Accepted for old job files. Fresh initialization always resets fitted poses and preserves supported priors.");
 
@@ -4171,6 +4173,9 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 	commands.push_back("`which relion_class2d_consensus` --i " + optimiser +
 		" --nr_runs " + integerToString(nr_runs) + " --K " + integerToString(nr_classes) + " --o " + outputname + "consensus --j " + joboptions["nr_threads"].getString());
 	commands.back() += " --method " + method;
+	// Emitted either way, so that the job does what the GUI shows whatever RELION_CONSENSUS_HELICAL_TYPES says
+	commands.back() += (joboptions["do_helical_types"].getBoolean() && source_job.joboptions["do_helix"].getBoolean()) ?
+		" --helical_types" : " --dont_helical_types";
 	if (!joboptions["do_reset_alignments"].getBoolean())
 		commands.back() += " --legacy_keep_alignments";
 
@@ -4330,6 +4335,10 @@ If negative value is provided, this option is disabled and ordinary circular mas
 	joboptions["helical_cylindrical_mask"] = JobOption("Use cylindrical mask?", true, "If set to Yes, helical segments are masked with a cylinder: as wide as the tube diameter \
 and as long as the mask diameter (Optimisation tab) along the helical axis, with soft edges in both directions. \
 If set to No, the tube is masked within a circle (sphere) of the mask diameter, as before.");
+	joboptions["helical_auto_diameter"] = JobOption("Measure tube diameter per class?", envFlagDefault("RELION_HELICAL_AUTO_DIAMETER"), "If set to Yes, each class gets its own tube: \
+from iteration 2 on, its width is measured across the axis of the class average (where the profile falls to 10% of its peak, plus 10% on each side), \
+and the class is masked with a tube that wide. The tube diameter above is then ignored: the mask diameter (Optimisation tab) is the widest tube. \
+Useful when the types in the data set have very different widths. The default can be set with the environment variable RELION_HELICAL_AUTO_DIAMETER.");
 	joboptions["do_bimodal_psi"] = JobOption("Do bimodal angular searches?", true, "Do bimodal search for psi angles? \
 Set to Yes if you want to classify 2D helical segments with priors of psi angles. The priors should be bimodal due to unknown polarities of the segments. \
 Set to No if the 3D helix looks the same when rotated upside down. If it is set to No, ordinary angular searches will be performed.\n\nThis option will be invalid if you choose not to perform image alignment on 'Sampling' tab.");
@@ -4594,6 +4603,7 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 
 		command_after_scratch += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
 		command_after_scratch += joboptions["helical_cylindrical_mask"].getBoolean() ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
+		command_after_scratch += joboptions["helical_auto_diameter"].getBoolean() ? " --helical_auto_diameter" : " --dont_helical_auto_diameter";
         command_after_scratch += " --no_init_blobs";
 
 		if (joboptions["dont_skip_align"].getBoolean())

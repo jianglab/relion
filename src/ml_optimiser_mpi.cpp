@@ -5498,6 +5498,9 @@ void MlOptimiserMpi::updateHelicalContextMpi()
 		mymodel.helical_type_class_frac.resize(mymodel.nr_classes, 0.);
 		node->relion_MPI_Bcast(&mymodel.helical_type_class[0], mymodel.nr_classes, MPI_INT, 0, MPI_COMM_WORLD);
 		node->relion_MPI_Bcast(&mymodel.helical_type_class_frac[0], mymodel.nr_classes, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+		// and the junk classes, which --sort_classes puts last on every rank
+		helical_context.junk_class.resize(mymodel.nr_classes, 0);
+		node->relion_MPI_Bcast(&helical_context.junk_class[0], mymodel.nr_classes, MPI_CHAR, 0, MPI_COMM_WORLD);
 	}
 	MPI_Barrier(MPI_COMM_WORLD);
 }
