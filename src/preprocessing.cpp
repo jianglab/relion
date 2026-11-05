@@ -271,6 +271,25 @@ void Preprocessing::initialise()
 			ObservationModel::loadSafely(fn_data, obsModelPart, MDimg, "particles", verb);
 			data_star_has_ctf = MDimg.containsLabel(EMDL_CTF_DEFOCUSU);
 
+			// Re-extraction cuts the boxes from the micrographs along the psi priors: check that these follow the tubes.
+			// They do not for particles of a turned extraction that lost rlnParticleExtractionAngle (e.g. when joined
+			// with an unturned extraction by an older RELION): their prior of 0 is in the frame of their turned box.
+			if (verb > 0)
+			{
+				const PsiPriorTubeCheck check = checkPsiPriorsAgainstTubeDirections(MDimg);
+				if (check.nr_bad > XMIPP_MAX(10L, check.nr_checked / 20))
+				{
+					std::cout << " + WARNING: the psi priors of " << check.nr_bad << " of " << check.nr_checked << " helical segments are more than 30 degrees"
+					          << " off the direction of their tube (to the nearest segment with the same rlnHelicalTubeID on the micrograph)";
+					if (check.nr_bad_zero > check.nr_bad / 2)
+						std::cout << ", and " << check.nr_bad_zero << " of these priors are exactly 0. That is what particles from an extraction with"
+						          << " 'Rotate helical segments to horizontal' look like once rlnParticleExtractionAngle has been lost, e.g. by joining them"
+						          << " with an unturned extraction: their psi prior, psi, offsets and defocus angle are still in the frame of their turned box."
+						          << " Re-extract each extraction job separately (or put rlnParticleExtractionAngle back from its particles.star) and join afterwards";
+					std::cout << ". Their re-extracted boxes and priors will not follow the tubes, so 2D classes will not come out horizontal." << std::endl;
+				}
+			}
+
 			if (do_recenter && ref_angpix <= 0)
 			{
 				if (!obsModelPart.allPixelSizesIdentical())

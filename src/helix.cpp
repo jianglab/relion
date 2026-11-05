@@ -4825,6 +4825,64 @@ void setPsiFlipRatioInStarFile(MetaDataTable& MD, RFLOAT ratio)
 	}
 }
 
+PsiPriorTubeCheck checkPsiPriorsAgainstTubeDirections(const MetaDataTable& MD, RFLOAT max_deg, RFLOAT min_dist_pix)
+{
+	PsiPriorTubeCheck result;
+	if (!MD.containsLabel(EMDL_IMAGE_COORD_X) || !MD.containsLabel(EMDL_IMAGE_COORD_Y) || !MD.containsLabel(EMDL_ORIENT_PSI_PRIOR)
+			|| !MD.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID) || !MD.containsLabel(EMDL_MICROGRAPH_NAME))
+		return result;
+	const bool turned = MD.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE);
+
+	const long int n = MD.numberOfObjects();
+	std::vector<RFLOAT> x(n), y(n), prior(n), prior_mic(n);
+	std::map<std::pair<std::string, int>, std::vector<long int> > tubes;
+	for (long int i = 0; i < n; i++)
+	{
+		std::string mic;
+		int tube = 0;
+		RFLOAT angle = 0.;
+		MD.getValue(EMDL_MICROGRAPH_NAME, mic, i);
+		MD.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube, i);
+		MD.getValue(EMDL_IMAGE_COORD_X, x[i], i);
+		MD.getValue(EMDL_IMAGE_COORD_Y, y[i], i);
+		MD.getValue(EMDL_ORIENT_PSI_PRIOR, prior[i], i);
+		if (turned)
+			MD.getValue(EMDL_PARTICLE_EXTRACTION_ANGLE, angle, i);
+		prior_mic[i] = prior[i] - angle; // the box was turned by angle: the prior in the micrograph is prior - angle
+		tubes[std::make_pair(mic, tube)].push_back(i);
+	}
+
+	const RFLOAT min_d2 = min_dist_pix * min_dist_pix;
+	for (const auto &tube : tubes)
+	{
+		const std::vector<long int> &seg = tube.second;
+		for (long int a : seg)
+		{
+			long int nearest = -1;
+			RFLOAT best = 0.;
+			for (long int b : seg)
+			{
+				const RFLOAT d2 = (x[b] - x[a]) * (x[b] - x[a]) + (y[b] - y[a]) * (y[b] - y[a]);
+				if (b != a && d2 >= min_d2 && (nearest < 0 || d2 < best))
+					nearest = b, best = d2;
+			}
+			if (nearest < 0)
+				continue;
+			// a tube along (dx, dy) in the micrograph has the psi prior -atan2(dy, dx)
+			const RFLOAT expected = -RAD2DEG(atan2(y[nearest] - y[a], x[nearest] - x[a]));
+			const RFLOAT off = fabs(remainder(prior_mic[a] - expected, (RFLOAT)180.));
+			result.nr_checked++;
+			if (off > max_deg)
+			{
+				result.nr_bad++;
+				if (prior[a] == 0.)
+					result.nr_bad_zero++;
+			}
+		}
+	}
+	return result;
+}
+
 void plotLatticePoints(MetaDataTable& MD,
 		int x1, int y1, int x2, int y2)
 {

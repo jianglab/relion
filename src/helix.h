@@ -512,6 +512,18 @@ void testDataFileTransformXY(MetaDataTable& MD);
 
 void setPsiFlipRatioInStarFile(MetaDataTable& MD, RFLOAT ratio = 0.);
 
+// Compare the psi prior of each helical segment with the direction from it to the nearest other segment of
+// the same tube on the same micrograph (rlnMicrographName + rlnHelicalTubeID; modulo 180, as the polarity is
+// unknown). Priors of particles from a turned extraction (rlnParticleExtractionAngle) are taken back to the
+// micrograph first. Segments closer than min_dist_pix to their neighbour, or alone in their tube, are not checked.
+struct PsiPriorTubeCheck
+{
+	long int nr_checked = 0;   // segments with a neighbour in their tube
+	long int nr_bad = 0;       // ... whose prior is more than max_deg off the tube direction
+	long int nr_bad_zero = 0;  // ... of which the prior is exactly 0
+};
+PsiPriorTubeCheck checkPsiPriorsAgainstTubeDirections(const MetaDataTable& MD, RFLOAT max_deg = 30., RFLOAT min_dist_pix = 1.);
+
 void plotLatticePoints(MetaDataTable& MD,
 		int x1, int y1, int x2, int y2);
 

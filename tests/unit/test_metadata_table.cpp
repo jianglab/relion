@@ -249,3 +249,59 @@ TEST_CASE("MDT: a bad row is reported by the threaded reader as by the serial on
     REQUIRE(!msg0.empty());
     REQUIRE(msg4 == msg0);
 }
+
+// ---------------------------------------------------------------------------
+// combineMetaDataTables: rlnParticleExtractionAngle is filled in, not dropped
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MDT: combining turned and unturned extractions keeps rlnParticleExtractionAngle", "[metadata]")
+{
+    std::vector<MetaDataTable> in(2);
+    for (int i = 0; i < 2; i++)
+    {
+        in[0].addObject();
+        in[0].setValue(EMDL_IMAGE_COORD_X, (RFLOAT)(10 * i));
+        in[0].setValue(EMDL_ORIENT_PSI_PRIOR, (RFLOAT)0.);
+        in[0].setValue(EMDL_PARTICLE_EXTRACTION_ANGLE, (RFLOAT)25.);
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        in[1].addObject();
+        in[1].setValue(EMDL_IMAGE_COORD_X, (RFLOAT)(100 + 10 * i));
+        in[1].setValue(EMDL_ORIENT_PSI_PRIOR, (RFLOAT)-40.);
+        in[1].setValue(EMDL_CTF_FOM, (RFLOAT)0.5); // only in one table: still dropped
+    }
+
+    for (int order = 0; order < 2; order++)
+    {
+        std::vector<MetaDataTable> tables = order == 0 ? in : std::vector<MetaDataTable>{in[1], in[0]};
+        MetaDataTable out = MetaDataTable::combineMetaDataTables(tables);
+        REQUIRE(out.numberOfObjects() == 5);
+        REQUIRE(out.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE));
+        REQUIRE(!out.containsLabel(EMDL_CTF_FOM));
+        int nr_turned = 0, nr_zero = 0;
+        for (long int i = 0; i < out.numberOfObjects(); i++)
+        {
+            RFLOAT x = 0., angle = -1.;
+            REQUIRE(out.getValue(EMDL_IMAGE_COORD_X, x, i));
+            REQUIRE(out.getValue(EMDL_PARTICLE_EXTRACTION_ANGLE, angle, i));
+            if (x < 100.) { REQUIRE(angle == Approx(25.)); nr_turned++; }
+            else          { REQUIRE(angle == Approx(0.));  nr_zero++; }
+        }
+        REQUIRE(nr_turned == 2);
+        REQUIRE(nr_zero == 3);
+    }
+}
+
+TEST_CASE("MDT: combining tables without rlnParticleExtractionAngle does not add it", "[metadata]")
+{
+    std::vector<MetaDataTable> in(2);
+    for (int j = 0; j < 2; j++)
+    {
+        in[j].addObject();
+        in[j].setValue(EMDL_IMAGE_COORD_X, (RFLOAT)j);
+    }
+    MetaDataTable out = MetaDataTable::combineMetaDataTables(in);
+    REQUIRE(out.numberOfObjects() == 2);
+    REQUIRE(!out.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE));
+}

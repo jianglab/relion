@@ -2254,6 +2254,31 @@ MetaDataTable MetaDataTable::combineMetaDataTables(std::vector<MetaDataTable> &M
 	}
 	else
 	{
+		// Labels whose absence has a known value are filled in rather than dropped. A particle without
+		// rlnParticleExtractionAngle was cut from an unturned box, i.e. at angle 0. Dropping the label when
+		// turned and unturned extractions are joined would leave the psi prior, psi, offsets and defocus
+		// angle of the turned particles in the frame of their box, with nothing left to take them back to
+		// the micrograph: re-extraction then cuts unturned boxes for them with a psi prior of 0.
+		const EMDLabel fill_with_zero[] = { EMDL_PARTICLE_EXTRACTION_ANGLE };
+		for (EMDLabel label : fill_with_zero)
+		{
+			bool in_any = false;
+			for (size_t j = 0; j < MDin.size() && !in_any; j++)
+				in_any = MDin[j].containsLabel(label);
+			if (!in_any)
+				continue;
+			for (size_t j = 0; j < MDin.size(); j++)
+			{
+				if (MDin[j].containsLabel(label))
+					continue;
+				MDin[j].addLabel(label);
+				for (long int i = 0; i < MDin[j].numberOfObjects(); i++)
+					MDin[j].setValue(label, (RFLOAT)0., i);
+				std::cout << " + " << EMDL::label2Str(label) << " is not in the " << j+1 << "th STAR file: set to 0 for its "
+				          << MDin[j].numberOfObjects() << " entries (boxes not turned)" << std::endl;
+			}
+		}
+
 		// Find which taTable combineMetaDataTables
 		MetaDataTable commonLabels;
 
