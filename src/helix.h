@@ -378,6 +378,11 @@ void mergeStarFiles(FileName& fn_in);
 
 void sortHelicalTubeID(MetaDataTable& MD);
 
+// Give the helical segments of one micrograph rlnHelicalFilamentLengthAngst, if they do not have it yet:
+// the distance along the track (rlnHelicalTrackLengthAngst) between the first and last segments of each
+// filament (rlnHelicalTubeID). Does nothing without rlnHelicalTubeID and rlnHelicalTrackLengthAngst.
+void addHelicalFilamentLengthFromTrack(MetaDataTable& MD);
+
 void simulateHelicalSegments(
 		bool is_3d_tomo,
 		FileName& fn_vol_in,

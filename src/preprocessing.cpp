@@ -921,7 +921,9 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
     MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR);
     MD_out.addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM);
     MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO);
+    MD_out.addLabel(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM);
     RFLOAT psi_prior_flip_ratio = (bimodal_angular_priors) ? BIMODAL_PSI_PRIOR_FLIP_RATIO : UNIMODAL_PSI_PRIOR_FLIP_RATIO;
+    std::vector<RFLOAT> line_len_pix; // picked length of each filament (index filament_id - 1)
 
     int filament_id=0;
     RFLOAT filament_length = 0.;
@@ -951,6 +953,7 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
             filament_length = 0.;
             remaining_step = 0.;
             filament_id++;
+            line_len_pix.push_back(0.);
             total_tubes++;
             total_segments++;
             //std::cerr << "is_first= "<<is_first << " x,y= " << my_xcoord << " , " << my_ycoord<< " id= " << filament_id<< " l= "<<filament_length<< std::endl;
@@ -961,6 +964,7 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
         {
             // grow a filament
             RFLOAT dist = sqrt((my_xcoord-prev_xcoord)*(my_xcoord-prev_xcoord) + (my_ycoord-prev_ycoord)*(my_ycoord-prev_ycoord));
+            line_len_pix.back() += dist;
             RFLOAT added = -remaining_step;
             while (added < dist)
             {
@@ -985,6 +989,12 @@ void Preprocessing::convertHelicalLineCoordsToMetaDataTable(
         my_prev_type = my_type;
     }
 
+    FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD_out)
+    {
+        int id;
+        MD_out.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, id);
+        MD_out.setValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, line_len_pix[id - 1] * pixel_size_A);
+    }
 }
 
 void Preprocessing::readHelicalCoordinates(FileName fn_mic, FileName fn_coord, MetaDataTable &MD)
@@ -1090,6 +1100,10 @@ bool Preprocessing::extractParticlesFromFieldOfView(FileName fn_mic, long int im
 		else
 			readCoordinates(fn_coord, MDin);
 	}
+	// Segments picked as start-end or line coordinates already have the picked length of their filament;
+	// others (segment coordinates, re-extraction of particles without it) get the span of their segments
+	if (do_extract_helix)
+		addHelicalFilamentLengthFromTrack(MDin);
 	TIMING_TOC(TIMING_READ_COORD);
 
     // If a selection type was given, then only select this type

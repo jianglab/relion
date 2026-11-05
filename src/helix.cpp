@@ -2105,6 +2105,7 @@ void convertHelicalTubeCoordsToMetaDataTable(
     MD_out.addLabel(EMDL_ORIENT_TILT_PRIOR);
     MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR);
     MD_out.addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM);
+    MD_out.addLabel(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM);
     MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO);
 
     if (MDin_has_id)
@@ -2128,6 +2129,7 @@ void convertHelicalTubeCoordsToMetaDataTable(
 
     	psi_rad = atan2(y2 - y1, x2 - x1);
     	psi_deg = RAD2DEG(psi_rad);
+    	RFLOAT filament_len_A = pixel_size_A * sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)); // picked length of this tube
 		dx = step_pix * cos(psi_rad);
 		dy = step_pix * sin(psi_rad);
 
@@ -2140,6 +2142,7 @@ void convertHelicalTubeCoordsToMetaDataTable(
 	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
 	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
 	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, 0.);
+	        MD_out.setValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, filament_len_A);
 	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
 
 			if (MDin_has_id)
@@ -2185,6 +2188,7 @@ void convertHelicalTubeCoordsToMetaDataTable(
     	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
     	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
     	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, pixel_size_A * len_pix);
+    	        MD_out.setValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, filament_len_A);
     	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
 
     			if (MDin_has_id)
@@ -2728,6 +2732,7 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
 	MD_out.addLabel(EMDL_ORIENT_TILT_PRIOR);
 	MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR);
     MD_out.addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH);
+    MD_out.addLabel(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM);
     MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO);
 
 	x.resize(4);
@@ -2776,6 +2781,7 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
 		y2 = (y[2] + y[3]) * 0.5;
 		psi_rad = atan2(y2 - y1, x2 - x1);
 		psi_deg = RAD2DEG(psi_rad);
+		RFLOAT filament_len_A = pixel_size_A * sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)); // picked length of this tube
 		dx = step_pix * cos(psi_rad);
 		dy = step_pix * sin(psi_rad);
 
@@ -2788,6 +2794,7 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
 	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
 	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
 	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, 0.);
+	        MD_out.setValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, filament_len_A);
 	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
 
 			continue;
@@ -2828,6 +2835,7 @@ void convertXimdispHelicalTubeCoordsToMetaDataTable(
     	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
     	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
     	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, pixel_size_A * len_pix);
+    	        MD_out.setValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, filament_len_A);
     	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
 
     			nr_segments++;
@@ -2995,6 +3003,7 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
 	MD_out.addLabel(EMDL_ORIENT_TILT_PRIOR);
 	MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR);
     MD_out.addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM);
+    MD_out.addLabel(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM);
     MD_out.addLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO);
 
 	half_box_size_pix = box_size_pix * 0.5;
@@ -3054,6 +3063,7 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
 
 		psi_rad = atan2(y2 - y1, x2 - x1);
 		psi_deg = RAD2DEG(psi_rad);
+		RFLOAT filament_len_A = pixel_size_A * sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)); // picked length of this tube
 		dx = step_pix * cos(psi_rad);
 		dy = step_pix * sin(psi_rad);
 
@@ -3073,6 +3083,7 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
 	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
 	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
 	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, 0.);
+	        MD_out.setValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, filament_len_A);
 	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
 
 			continue;
@@ -3113,6 +3124,7 @@ void convertEmanHelicalTubeCoordsToMetaDataTable(
     	    	MD_out.setValue(EMDL_ORIENT_TILT_PRIOR, 90.);
     	    	MD_out.setValue(EMDL_ORIENT_PSI_PRIOR, -psi_deg);
     	        MD_out.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, pixel_size_A * len_pix);
+    	        MD_out.setValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, filament_len_A);
     	        MD_out.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, psi_prior_flip_ratio);
 
     			nr_segments++;
@@ -3715,6 +3727,39 @@ void mergeStarFiles(FileName& fn_in)
 	std::cout << " Done!" << std::endl;
 
 	return;
+}
+
+void addHelicalFilamentLengthFromTrack(MetaDataTable& MD)
+{
+	if ( (MD.numberOfObjects() < 1)
+			|| MD.containsLabel(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM)
+			|| (!MD.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID))
+			|| (!MD.containsLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM)) )
+		return;
+
+	std::map<int, std::pair<RFLOAT, RFLOAT> > track_range; // tube ID -> (min, max) track position
+	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
+	{
+		int id;
+		RFLOAT track;
+		MD.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, id);
+		MD.getValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, track);
+		auto it = track_range.find(id);
+		if (it == track_range.end())
+			track_range[id] = std::make_pair(track, track);
+		else
+		{
+			it->second.first = XMIPP_MIN(it->second.first, track);
+			it->second.second = XMIPP_MAX(it->second.second, track);
+		}
+	}
+	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
+	{
+		int id;
+		MD.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, id);
+		const std::pair<RFLOAT, RFLOAT>& range = track_range[id];
+		MD.setValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, range.second - range.first);
+	}
 }
 
 void sortHelicalTubeID(MetaDataTable& MD)

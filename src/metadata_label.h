@@ -509,6 +509,7 @@ enum EMDLabel
 	EMDL_PARTICLE_HELICAL_TUBE_PITCH,
 	EMDL_PARTICLE_HELICAL_TRACK_LENGTH, //deprecated
 	EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM,
+	EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM,
 	EMDL_PARTICLE_HELICAL_TYPE,
 	EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY,
 	EMDL_PARTICLE_HELICAL_SECTION_ID,
@@ -1318,6 +1319,7 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TUBE_PITCH, EMDL_DOUBLE, "rlnHelicalTubePitch", "Cross-over distance for a helical segment (A)");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH, EMDL_DOUBLE, "rlnHelicalTrackLength", "Distance (in pix) from the position of this helical segment to the starting point of the tube");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, EMDL_DOUBLE, "rlnHelicalTrackLengthAngst", "Distance (in A) from the position of this helical segment to the starting point of the tube");
+		EMDL::addLabel(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, EMDL_DOUBLE, "rlnHelicalFilamentLengthAngst", "Length (in A) of the filament this helical segment was extracted from: the picked length for start-end or line coordinates, otherwise the distance between the first and last segments of the filament");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TYPE, EMDL_INT, "rlnHelicalType", "Helical type of a segment from the filament context of 2D classification (0: none)");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY, EMDL_DOUBLE, "rlnHelicalTypeProbability", "Posterior probability of rlnHelicalType given the whole filament");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_SECTION_ID, EMDL_INT, "rlnHelicalSectionID", "Section of a filament with one helical type (unique over the data set; 0: none)");
