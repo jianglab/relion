@@ -596,6 +596,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     parseCoarseEarly();
     parseFilamentContext();
     parseHelicalTiltWeight();
+    parseHelicalEndWeight();
 
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
@@ -863,6 +864,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     parseCoarseEarly();
     parseFilamentContext();
     parseHelicalTiltWeight();
+    parseHelicalEndWeight();
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
     // so existing job.star files and scripts keep working; --dont_align_halves is
@@ -3162,6 +3164,7 @@ void MlOptimiser::initialiseGeneral(int rank)
     }
 
     initialiseFilamentContext();
+    initialiseHelicalEndWeight();
 
 #ifdef DEBUG
     std::cerr << "Leaving initialiseGeneral" << std::endl;
@@ -11663,7 +11666,16 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
                                     Fweight *= tilt_weight;
                                 }
 
+                                // --helical_end_weight: down-weight segments at the ends of their filaments, also in the reconstruction only
+                                const RFLOAT end_weight = helicalEndWeight(part_id);
+                                if (end_weight != 1.)
+                                {
+                                    Fimg *= Complex(end_weight, 0.);
+                                    Fweight *= end_weight;
+                                }
+
                                 // Perform this inside a mutex
+                                if (end_weight > 0.)
                                 {
                                     int my_mutex = exp_iclass % NR_CLASS_MUTEXES;
                                     omp_set_lock(&global_mutex2[my_mutex]);
@@ -13297,6 +13309,55 @@ void MlOptimiser::parseFilamentContext()
 void MlOptimiser::parseHelicalTiltWeight()
 {
     helical_tilt_weight_sigma = textToFloat(parser.getOption("--helical_tilt_weight_sigma", "Down-weight orientations with a tilt away from 90 degrees in the reconstruction (not in the alignment) by a Gaussian of this sigma (in degrees; <= 0: off)", "-1"));
+}
+
+void MlOptimiser::parseHelicalEndWeight()
+{
+    helical_end_weight = textToFloat(parser.getOption("--helical_end_weight", "Weight in the reconstruction (not in the alignment) of helical segments whose box reaches beyond the start or end of their filament, from rlnHelicalTrackLengthAngst and rlnHelicalFilamentLengthAngst (1: off; 0: leave them out of the reconstruction)", "1"));
+}
+
+void MlOptimiser::initialiseHelicalEndWeight()
+{
+    helical_end_segment.clear();
+    if (helical_end_weight == 1.)
+        return;
+    if (helical_end_weight < 0. || helical_end_weight > 1.)
+        REPORT_ERROR("ERROR: --helical_end_weight should be between 0 and 1.");
+    if (mydata.is_tomo || mymodel.nr_bodies > 1)
+        REPORT_ERROR("ERROR: --helical_end_weight is for helical segments in 2D classification, 3D classification and 3D refinement (not for subtomograms or multi-body refinement).");
+
+    const MetaDataTable &MD = mydata.MDimg;
+    if (!MD.containsLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM) || !MD.containsLabel(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM))
+        REPORT_ERROR("ERROR: --helical_end_weight needs rlnHelicalTrackLengthAngst and rlnHelicalFilamentLengthAngst in the particle STAR file. Re-extract the segments to get rlnHelicalFilamentLengthAngst.");
+    const long int nr_parts = mydata.numberOfParticles();
+    if (MD.numberOfObjects() != nr_parts)
+        REPORT_ERROR("BUG: --helical_end_weight: the particle table does not have one row per particle.");
+
+    // A segment's box covers [track - box/2, track + box/2] along its filament, which runs from 0 to its
+    // length (track 0 is the start of a filament picked by its start and end, or its first segment otherwise).
+    // Allow half a pixel for rounding
+    helical_end_segment.assign(nr_parts, false);
+    long int nr_end = 0;
+    for (long int part_id = 0; part_id < nr_parts; part_id++)
+    {
+        const int optics_group = mydata.getOpticsGroup(part_id);
+        const RFLOAT angpix = mydata.getOpticsPixelSize(optics_group);
+        const RFLOAT half_box = 0.5 * mydata.getOpticsImageSizeX(optics_group) * angpix;
+        const RFLOAT tolerance = 0.5 * angpix;
+        RFLOAT track, length;
+        MD.getValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, track, part_id);
+        MD.getValue(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, length, part_id);
+        if (track - half_box < -tolerance || track + half_box > length + tolerance)
+        {
+            helical_end_segment[part_id] = true;
+            nr_end++;
+        }
+    }
+
+    if (verb > 0)
+        std::cout << " Helical end segments: " << nr_end << " of " << nr_parts
+                  << " segments reach beyond an end of their filament; their weight in the reconstruction is "
+                  << helical_end_weight << std::endl;
 }
 
 void MlOptimiser::initialiseFilamentContext()

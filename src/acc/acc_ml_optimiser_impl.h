@@ -4758,11 +4758,21 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 								BACKPROJECTION
 			======================================================*/
 
+			// --helical_end_weight: down-weight segments at the ends of their filaments in the reconstruction
+			// only. The back-projection kernels divide the weights by the sum of weights: dividing that by the
+			// end weight scales the whole particle. With a weight of 0 the back-projection is skipped
+			const RFLOAT end_weight = baseMLO->helicalEndWeight(op.part_id);
+			const bool do_backproject = (end_weight > 0.);
+			const RFLOAT bp_sum_weight = do_backproject ? op.sum_weight / end_weight : op.sum_weight;
+			if (do_backproject && end_weight != 1.)
+				for (int iclass = 0; iclass < nr_classes; iclass++)
+					class_sum_weight[iclass] /= end_weight;
+
 			// --helical_tilt_weight_sigma: down-weight each orientation in the reconstruction only. The
 			// weighted sums above have used the unscaled map; the significant weights are scaled here
 			// and the others dropped, so the kernels below take all positive weights
 			XFLOAT bp_significant_weight = (XFLOAT) op.significant_weight;
-			if (baseMLO->doHelicalTiltWeight())
+			if (baseMLO->doHelicalTiltWeight() && do_backproject)
 			{
 		#ifdef _HIP_ENABLED
 				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
@@ -4837,7 +4847,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			// there, which the batched version would not reproduce.
 			bool bpBatched = false;
 			AccPtr<char> bpTable = ptrFactory.make<char>();
-			if (!bpBatched && gpuClassBatching() && !baseMLO->do_grad && !baseMLO->is_som_iter)
+			if (!bpBatched && do_backproject && gpuClassBatching() && !baseMLO->do_grad && !baseMLO->is_som_iter)
 			{
 				int iproj_offset = 0;
 				if (baseMLO->grad_pseudo_halfsets)
@@ -4868,7 +4878,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 						~eulers[iclass],
 						&(~sorted_weights)[my_pos],
 						BP.d_mdlReal, BP.d_mdlImag, BP.d_mdlWeight,
-						(XFLOAT) (baseMLO->is_som_iter ? class_sum_weight[iclass] : op.sum_weight) };
+						(XFLOAT) (baseMLO->is_som_iter ? class_sum_weight[iclass] : bp_sum_weight) };
 					jobs.push_back(job);
 					nums.push_back(orientation_num);
 				}
@@ -4927,7 +4937,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			}
 			// The gradient (VDAM) 2D backprojection, all classes in one launch as above: it
 			// needs each class's projector for the reference it subtracts
-			if (!bpBatched && gpuClassBatching() && baseMLO->do_grad && !baseMLO->is_som_iter &&
+			if (!bpBatched && do_backproject && gpuClassBatching() && baseMLO->do_grad && !baseMLO->is_som_iter &&
 					!accMLO->dataIs3D && baseMLO->mymodel.nr_bodies == 1)
 			{
 				int iproj_offset = 0;
@@ -4964,7 +4974,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 						~eulers[iclass],
 						&(~sorted_weights)[my_pos],
 						BP.d_mdlReal, BP.d_mdlImag, BP.d_mdlWeight,
-						(XFLOAT) op.sum_weight };
+						(XFLOAT) bp_sum_weight };
 					jobs.push_back(job);
 					nums.push_back(orientation_num);
 				}
@@ -4989,7 +4999,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			}
 			if (!bpBatched)
 #endif
-			for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+			for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max && do_backproject; iclass++)
 			{
 
 				int iproj;
@@ -5036,7 +5046,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					~ctfs,
 					translation_num,
 					bp_significant_weight,
-					(XFLOAT) (baseMLO->is_som_iter ? class_sum_weight[iclass] : op.sum_weight),
+					(XFLOAT) (baseMLO->is_som_iter ? class_sum_weight[iclass] : bp_sum_weight),
 					~eulers[iclass],
 					op.local_Minvsigma2.xdim,
 					op.local_Minvsigma2.ydim,

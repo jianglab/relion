@@ -1984,3 +1984,58 @@ TEST_CASE("Class3D: two rounds", "[pipeline][class3d][class_order]")
 		CHECK(commands[0].find("_round1") == std::string::npos);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Down-weighting of filament-end segments (Class2D, Class3D, Refine3D)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Helical jobs: the weight of filament-end segments reaches the command line only when below 1",
+          "[pipeline][class2d][class3d][refine3d][helical_end_weight]")
+{
+	RelionJob refine;
+	refine.clear();
+	refine.initialise(PROC_3DAUTO);
+	refine.label = get_proc_label(refine.type);
+	refine.joboptions["fn_img"].setString("particles.star");
+	refine.joboptions["fn_ref"].setString("ref.mrc");
+	refine.joboptions["nr_mpi"].setString("3");
+	refine.joboptions["nr_threads"].setString("1");
+	refine.joboptions["do_queue"].setString("No");
+	refine.joboptions["scratch_dir"].setString("");
+
+	std::vector<RelionJob> jobs = {makeClass2DJob(), makeClass3DJob(), refine};
+	for (RelionJob &job : jobs)
+	{
+		INFO("job type " << job.type);
+		REQUIRE(job.joboptions.find("helical_end_weight") != job.joboptions.end());
+		std::vector<std::string> commands;
+		std::string final_command, error_message;
+		REQUIRE(job.joboptions["helical_end_weight"].getNumber(error_message) == 1.);
+		REQUIRE(error_message == "");
+
+		// Not a helical job: nothing, whatever the weight
+		job.joboptions["helical_end_weight"].setString("0.5");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		CHECK(commands[0].find("--helical_end_weight") == std::string::npos);
+
+		job.joboptions["do_helix"].setString("Yes");
+		job.joboptions["helical_tube_outer_diameter"].setString("200");
+
+		job.joboptions["helical_end_weight"].setString("1");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		CHECK(commands[0].find("--helical_end_weight") == std::string::npos);
+
+		job.joboptions["helical_end_weight"].setString("0.5");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		CHECK(commands[0].find(" --helical_end_weight 0.5") != std::string::npos);
+
+		job.joboptions["helical_end_weight"].setString("0");
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		CHECK(commands[0].find(" --helical_end_weight 0") != std::string::npos);
+
+		job.joboptions["helical_end_weight"].setString("1.5");
+		error_message = "";
+		REQUIRE_FALSE(generateCommands(job, commands, final_command, error_message));
+		CHECK(error_message.find("between 0 and 1") != std::string::npos);
+	}
+}

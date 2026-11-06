@@ -120,6 +120,26 @@ A negative value (the default) uses the distance between consecutive segments di
 	joboptions_["filctx_alpha"] = JobOption("Global class weight:", 1., 0., 100., 1., "Only for 'Per filament': how strongly the overall class distribution counts against the evidence from the other segments of the filament. Larger values make filaments with few segments follow the overall distribution more.");
 }
 
+// Down-weighting of helical segments at the ends of their filaments, shared by Class2D, Class3D and Refine3D
+static void addHelicalEndWeightOption(std::map<std::string, JobOption> &joboptions_, const char *reconstruction)
+{
+	joboptions_["helical_end_weight"] = JobOption("Weight of filament-end segments:", 1., 0., 1., 0.1, "A segment near the start or end of its filament has a box that reaches beyond the end: part of the box is empty, which blurs the ends of the " + std::string(reconstruction) + ". Such segments still take part in the alignment and classification as usual, but their contribution to the " + std::string(reconstruction) + " is multiplied by this weight. 1 switches the down-weighting off; 0 leaves these segments out of the " + std::string(reconstruction) + ". A segment counts as an end segment when its position along the filament (rlnHelicalTrackLengthAngst) is less than half the box size from 0 or from the filament length (rlnHelicalFilamentLengthAngst), which helical extraction writes. Can be changed when continuing a run.");
+}
+
+static bool addHelicalEndWeightCommand(std::map<std::string, JobOption> &joboptions_, std::string &command, std::string &error_message)
+{
+	RFLOAT end_weight = joboptions_["helical_end_weight"].getNumber(error_message);
+	if (error_message != "") return false;
+	if (end_weight < 0. || end_weight > 1.)
+	{
+		error_message = "ERROR: the weight of filament-end segments should be between 0 and 1.";
+		return false;
+	}
+	if (end_weight < 1.)
+		command += " --helical_end_weight " + joboptions_["helical_end_weight"].getString();
+	return true;
+}
+
 // One of --filament_context off / chain / filament is always emitted, so that an environment variable cannot decide behind the window's back
 static bool addFilamentContextCommand(std::map<std::string, JobOption> &joboptions_, std::string &command, std::string &error_message)
 {
@@ -4348,6 +4368,7 @@ A range of 15 degrees is the same as sigma = 5 degrees. Note that the ranges of 
 \n\nThis option will be invalid if you choose not to perform image alignment on 'Sampling' tab.");
 	joboptions["do_restrict_xoff"] = JobOption("Restrict helical offsets to rise:", true, "Set to Yes if you want to restrict the translational offsets along the helices to the rise of the helix given below. Set to No to allow free (conventional) translational offsets.");
 	joboptions["helical_rise"] = JobOption("Helical rise (A):", 4.75, -1, 100, 1, "The helical rise (in Angstroms). Translational offsets along the helical axis will be limited from -rise/2 to +rise/2, with a flat prior.");
+	addHelicalEndWeightOption(joboptions, "class averages");
 
 	addFilamentContextOptions(joboptions, "along a twisted filament the 2D classes (views) follow each other in a fixed order", true);
 
@@ -4624,6 +4645,7 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 			}
 		}
 
+		if (!addHelicalEndWeightCommand(joboptions, command_after_scratch, error_message)) return false;
 		if (!addFilamentContextCommand(joboptions, command_after_scratch, error_message)) return false;
 	}
 
@@ -5189,6 +5211,7 @@ Values of ~ 100 Angstroms are recommended for the range. Set the range to negati
 Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
     joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
 	joboptions["helical_tilt_weight_sigma"] = JobOption("Tilt down-weighting sigma (deg):", std::string("-1"), "If positive, the contribution of each orientation to the reconstruction (not to the alignment) is multiplied by a Gaussian of this width (in degrees) centred at a tilt of 90 degrees. This counteracts the build-up of out-of-plane tilts at the edges of the tilt search range from one iteration to the next. Set to a negative value to switch it off. Can be changed when continuing a run.");
+	addHelicalEndWeightOption(joboptions, "reconstruction");
 
 	joboptions["do_keep_full_filaments"] = JobOption("Keep full filaments during classification?", true, "If set to Yes, then all segments from the same filament (i.e. same micrograph and same helical tube ID) will be assigned to the same 3D class at each iteration during classification. This helps ensure that entire filaments are classified consistently.");
 	addFilamentContextOptions(joboptions, "the 3D classes of neighbouring segments are strongly correlated");
@@ -5582,6 +5605,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 		if (error_message != "") return false;
 		if (tilt_weight_sigma > 0.)
 			command += " --helical_tilt_weight_sigma " + joboptions["helical_tilt_weight_sigma"].getString();
+		if (!addHelicalEndWeightCommand(joboptions, command, error_message)) return false;
 		if (!addFilamentContextCommand(joboptions, command, error_message)) return false;
 	}
 
@@ -5829,6 +5853,7 @@ Values of ~ 100 Angstroms are recommended for the range. Set the range to negati
 Values of ~ 2.0 are recommended for the range. Set the range to negative to disable local averaging (in which case the Nstart number is also ignored).");
 	joboptions["keep_tilt_prior_fixed"] = JobOption("Keep tilt-prior fixed:", true, "If set to yes, the tilt prior will not change during the optimisation. If set to No, at each iteration the tilt prior will move to the optimal tilt value for that segment from the previous iteration.");
 	joboptions["helical_tilt_weight_sigma"] = JobOption("Tilt down-weighting sigma (deg):", std::string("-1"), "If positive, the contribution of each orientation to the reconstruction (not to the alignment) is multiplied by a Gaussian of this width (in degrees) centred at a tilt of 90 degrees. This counteracts the build-up of out-of-plane tilts at the edges of the tilt search range from one iteration to the next. Set to a negative value to switch it off. Can be changed when continuing a run.");
+	addHelicalEndWeightOption(joboptions, "reconstruction");
 
 	joboptions["do_parallel_discio"] = JobOption("Use parallel disc I/O?", true, "If set to Yes, all MPI followers will read their own images from disc. \
 Otherwise, only the leader will read images and send them through the network to the followers. Parallel file systems like gluster of fhgfs are good at parallel disc I/O. NFS may break with many followers reading in parallel. If your datasets contain particles with different box sizes, you have to say Yes.");
@@ -6175,6 +6200,7 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 		if (error_message != "") return false;
 		if (tilt_weight_sigma > 0.)
 			command += " --helical_tilt_weight_sigma " + joboptions["helical_tilt_weight_sigma"].getString();
+		if (!addHelicalEndWeightCommand(joboptions, command, error_message)) return false;
 	}
 
 	if (joboptions["relax_sym"].getString().length() > 0)

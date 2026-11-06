@@ -1897,6 +1897,7 @@ void JobWindow::initialiseClass2DWindow()
 	place("helical_auto_diameter");
 	place("do_bimodal_psi");
 	place("range_psi");
+	place("helical_end_weight");
 
 	group7 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group7->end();
@@ -2289,7 +2290,8 @@ void JobWindow::initialiseClass3DWindow()
     place2("helical_range_distance", "helical_nstart", "Local averaging - range (Å), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
 	place("do_keep_full_filaments", TOGGLE_DEACTIVATE);
-	place("helical_tilt_weight_sigma");
+	// The two down-weightings of the reconstruction share a row (the Helix tab of Class3D is full)
+	place2("helical_tilt_weight_sigma", "helical_end_weight", "Tilt sigma (deg), end-segment weight:");
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -2525,7 +2527,8 @@ void JobWindow::initialiseAutorefineWindow()
 	place3("range_rot", "range_tilt", "range_psi", "Angular search range - rot, tilt, psi (deg):", TOGGLE_DEACTIVATE);
     place2("helical_range_distance", "helical_nstart", "Local averaging - range (Å), N-start:", TOGGLE_DEACTIVATE);
 	place("keep_tilt_prior_fixed", TOGGLE_DEACTIVATE);
-	place("helical_tilt_weight_sigma");
+	// The two down-weightings of the reconstruction share a row (the Helix tab of Class3D is full)
+	place2("helical_tilt_weight_sigma", "helical_end_weight", "Tilt sigma (deg), end-segment weight:");
 
 	// Add a little spacer
 	current_y += STEPY/2;

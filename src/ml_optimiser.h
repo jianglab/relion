@@ -790,6 +790,14 @@ public:
 	// exp(-(tilt-90)^2 / (2 sigma^2)). Sigma in degrees; <= 0 switches it off
 	RFLOAT helical_tilt_weight_sigma;
 
+	// Down-weight helical segments at the ends of their filaments in the reconstruction only:
+	// a segment whose box (its x size, in A) reaches beyond the start or end of its filament
+	// (rlnHelicalTrackLengthAngst against [0, rlnHelicalFilamentLengthAngst]) contributes to the
+	// back-projection with this weight. 1 switches it off, 0 leaves these segments out
+	RFLOAT helical_end_weight;
+	// For each particle (part_id): is it such an end segment? Empty when switched off
+	std::vector<bool> helical_end_segment;
+
 	// Apply fourier_mask for helical refinements
 	std::string helical_fourier_mask_resols;
 	FileName fn_fourier_mask;
@@ -1139,6 +1147,7 @@ public:
             helical_sigma_distance(-1.),
             helical_keep_tilt_prior_fixed(0),
             helical_tilt_weight_sigma(-1.),
+            helical_end_weight(1.),
             ctf3d_squared(0),
             do_skip_subtomo_correction(0),
             normalised_subtomos(0),
@@ -1683,6 +1692,17 @@ public:
 			return 1.;
 		const RFLOAT d = (tilt_deg - 90.) / helical_tilt_weight_sigma;
 		return exp(-0.5 * d * d);
+	}
+	// --helical_end_weight, parsed the same in both parse paths so that --continue can switch it
+	void parseHelicalEndWeight();
+	// Finds the end segments (helical_end_segment) from the particle STAR file
+	void initialiseHelicalEndWeight();
+	// The factor on the back-projection of this particle (1 when switched off or not an end segment)
+	RFLOAT helicalEndWeight(long int part_id) const
+	{
+		if (helical_end_segment.empty() || !helical_end_segment[part_id])
+			return 1.;
+		return helical_end_weight;
 	}
 	void initialiseFilamentContext();
 	void storeFilamentLoglik(long int part_id, const MultidimArray<RFLOAT> &Mdiff2, long int per_class, RFLOAT min_diff2);
