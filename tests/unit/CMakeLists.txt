@@ -132,7 +132,7 @@ endforeach()
 
 # GUI tests need FLTK; widgets are built but never shown, so no display is required
 if(TARGET relion_gui_lib)
-    add_executable(relion_gui_tests test_gui_jobwindows.cpp)
+    add_executable(relion_gui_tests test_gui_jobwindows.cpp test_gui_projects.cpp)
     target_include_directories(relion_gui_tests PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/tests

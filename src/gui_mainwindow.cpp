@@ -48,6 +48,14 @@ static ProjectManager project_manager;
 // Maximum number of recent projects shown in the Project menu
 #define MAX_RECENT_PROJECTS 5
 
+// Ways of getting a project folder; each registers the project it makes and
+// returns false if the user cancelled or it failed (defined further down)
+static bool createEmptyProject(std::string &pathOut);
+static bool importRelionProject(std::string &destOut, std::string &summary);
+static bool importCryosparcProject(std::string &destOut, std::string &summary);
+static std::string runProjectChooser(const char *title, const char *notice,
+                                     bool allow_create, const char *close_label, int w, int h);
+
 // The StdOutDisplay allows looking at the entire stdout or stderr file
 int StdOutDisplay::handle(int ev)
 {
@@ -335,20 +343,51 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 		}
 		else
 		{
-			int ret = fl_choice("Your current directory does not look like a RELION project directory.\nOnly run the RELION GUI from your project directory.\nDo you want to start a new project here?", "No", "Yes", 0);
-			this->begin(); // apparently fl_choice changes Fl_Group::current. Thus, we have to reclaim it.
-			if (ret == 1)
-			{
-				touch(fn_lock);
-				// make the runfile temp dir for the ccpem pipeliner
-				std::string dircom = "mkdir -p .TMP_runfiles";
-				int res = system(dircom.c_str());
-			}
+			/* Not in a project: rather than asking whether to make one right
+			 * here, show the project page, from which the user opens a project
+			 * they already have, creates a new one in a folder of their choice
+			 * or imports one. Asked to switch to a project anyway, go there. */
+			std::string chosen;
+			if (!_switch_to.empty() && exists(_switch_to))
+				chosen = _switch_to;
 			else
 			{
+				char cwd[4096];
+				std::string here = getcwd(cwd, sizeof(cwd)) ? std::string(cwd) : std::string(".");
+				std::string notice = "This folder is not a RELION project:\n" + here + "\n";
+				notice += maingui_do_read_only ?
+					"Select a project to open." :
+					"Open a project from the list, create a new empty project, or import one.";
+				chosen = runProjectChooser("RELION: choose a project", notice.c_str(),
+				                           !maingui_do_read_only, " Quit ", 800, 500);
+			}
+			this->begin(); // the dialogs change Fl_Group::current. Thus, we have to reclaim it.
+
+			if (chosen.empty() || chdir(chosen.c_str()) != 0)
+			{
+				if (!chosen.empty())
+					std::cerr << " Cannot change to the project directory " << chosen << std::endl;
 				std::cout << " Exiting ... " << std::endl;
 				exit(0);
 			}
+			if (!exists(fn_lock) && !maingui_do_read_only)
+				touch(fn_lock);
+			// Already there: a relative --switch-to would not resolve from the new folder
+			_switch_to = "";
+
+			// The title was made from the folder the GUI was started in
+			std::string title_text = label() ? label() : "RELION";
+			size_t colon = title_text.rfind(": ");
+			if (colon != std::string::npos)
+				title_text = title_text.substr(0, colon);
+			std::string base = chosen;
+			while (base.size() > 1 && base.back() == '/')
+				base.pop_back();
+			size_t slash = base.rfind('/');
+			if (slash != std::string::npos)
+				base = base.substr(slash + 1);
+			title_text += ": " + base;
+			copy_label(title_text.c_str());
 		}
 	}
 
@@ -2978,9 +3017,16 @@ void GuiMainWindow::cb_new_project(Fl_Widget* o, void* v)
 
 void GuiMainWindow::cb_new_project_i()
 {
-	const char *dirname = fl_dir_chooser("Select directory for the new project", ".");
+	std::string path;
+	if (createEmptyProject(path))
+		switchToProject(path);
+}
+
+static bool createEmptyProject(std::string &pathOut)
+{
+	const char *dirname = fl_dir_chooser("Select or create the folder for the new project", ".");
 	if (!dirname || strlen(dirname) == 0)
-		return;
+		return false;
 
 	std::string path(dirname);
 	// Remove trailing slash (macOS native dir chooser adds it)
@@ -2989,25 +3035,27 @@ void GuiMainWindow::cb_new_project_i()
 	FileName fn(path);
 	if (!exists(fn))
 	{
-		std::string cmd = "mkdir -p " + fn;
+		std::string cmd = "mkdir -p \"" + fn + "\"";
 		int res = system(cmd.c_str());
 		if (res != 0)
 		{
 			fl_alert("Failed to create directory:\n%s", fn.c_str());
-			return;
+			return false;
 		}
 	}
 
 	// Create .gui_projectdir sentinel
 	touch(fn + "/.gui_projectdir");
-	std::string dircom = "mkdir -p " + fn + "/.TMP_runfiles";
+	std::string dircom = "mkdir -p \"" + fn + "/.TMP_runfiles\"";
 	int res = system(dircom.c_str());
 
-	// Register project
+	// Register project; reload first, as another window may have changed the registry
+	project_manager.load();
 	project_manager.add(fn, fn.afterLastOf("/"));
 	project_manager.save();
 
-	switchToProject(fn);
+	pathOut = fn;
+	return true;
 }
 
 void GuiMainWindow::cb_open_project(Fl_Widget* o, void* v)
@@ -3101,26 +3149,93 @@ void GuiMainWindow::cb_manage_projects(Fl_Widget* o, void* v)
 
 void GuiMainWindow::cb_manage_projects_i()
 {
-	ManageProjectsWindow *w = new ManageProjectsWindow(800, 400);
-	w->set_modal();
-	w->show();
-
-	// Wait until dialog is closed
-	while (w->shown()) Fl::wait();
-
-	const std::string &open_path = w->getOpenPath();
+	const std::string open_path = runProjectChooser("Manage Projects", NULL, true, " Close ", 800, 450);
 	if (!open_path.empty())
-	{
-		project_manager.add(open_path, FileName(open_path).afterLastOf("/"));
-		project_manager.save();
 		switchToProject(open_path);
-	}
 
 	// Reload from disk to pick up any removes/renames done inside the dialog
 	project_manager.load();
 	rebuildRecentProjectsInMenu();
+}
+
+/* Show the project page until the user picks a project to open, creates one or
+ * imports one, and return its folder; return "" if the page was closed.
+ *
+ * Creating or importing happens here rather than in the window, and if it is
+ * cancelled the page comes back, so that the user is never left with nothing. */
+static std::string runProjectChooser(const char *title, const char *notice,
+                                     bool allow_create, const char *close_label, int width, int height)
+{
+	// A window made while another window is being built would become its child
+	Fl_Group *saved_current = Fl_Group::current();
+	Fl_Group::current(NULL);
+	ManageProjectsWindow *w = new ManageProjectsWindow(width, height, title, notice,
+	                                                   allow_create, close_label);
+	Fl_Group::current(NULL);
+
+	std::string result;
+	bool done = false;
+	while (!done)
+	{
+		w->resetAction();
+		w->set_modal();
+		w->show();
+		while (w->shown()) Fl::wait();
+
+		// The page saves its removes and renames itself: don't overwrite them
+		project_manager.load();
+
+		std::string path, summary;
+		bool imported = false;
+		switch (w->getAction())
+		{
+		case ManageProjectsWindow::ACTION_NONE:
+			done = true;
+			break;
+		case ManageProjectsWindow::ACTION_OPEN:
+			path = w->getOpenPath();
+			if (!exists(FileName(path)))
+			{
+				fl_alert("The project directory no longer exists:\n%s", path.c_str());
+				break;
+			}
+			project_manager.add(path, FileName(path).afterLastOf("/"));
+			project_manager.save();
+			result = path;
+			done = true;
+			break;
+		case ManageProjectsWindow::ACTION_NEW:
+			if (createEmptyProject(path))
+			{
+				result = path;
+				done = true;
+			}
+			break;
+		case ManageProjectsWindow::ACTION_IMPORT_RELION:
+			imported = importRelionProject(path, summary);
+			break;
+		case ManageProjectsWindow::ACTION_IMPORT_CRYOSPARC:
+			imported = importCryosparcProject(path, summary);
+			break;
+		}
+
+		if (imported)
+		{
+			summary += "\nOpen the new project now?";
+			if (fl_choice("%s", "No", "Yes", NULL, summary.c_str()) == 1)
+			{
+				result = path;
+				done = true;
+			}
+		}
+
+		if (!done)
+			w->reload();   // show what was added, e.g. a project imported but not opened
+	}
 
 	delete w;
+	Fl_Group::current(saved_current);
+	return result;
 }
 
 void GuiMainWindow::cb_remove_intermediates(Fl_Widget* o, void* v)
@@ -3167,6 +3282,18 @@ void GuiMainWindow::cb_import_project(Fl_Widget* o, void* v)
 	T->cb_import_project_i();
 }
 
+void GuiMainWindow::cb_import_project_i()
+{
+	std::string dest, summary;
+	if (!importRelionProject(dest, summary))
+		return;
+	summary += "\nSwitch to the new project now?";
+	if (fl_choice("%s", "No", "Yes", NULL, summary.c_str()) == 1)
+		switchToProject(dest);
+	else
+		rebuildRecentProjectsInMenu();
+}
+
 static bool is_jobdir_name(const std::string &name)
 {
 	if (name.size() <= 3 || name.substr(0, 3) != "job") return false;
@@ -3175,11 +3302,14 @@ static bool is_jobdir_name(const std::string &name)
 	return true;
 }
 
-void GuiMainWindow::cb_import_project_i()
+/* Import a RELION project, job or job type folder into a new project, asking
+ * the user for the source and the destination. On success the new project is
+ * registered, destOut is its folder and summary says what was imported. */
+static bool importRelionProject(std::string &destOut, std::string &summary)
 {
 	// 1. Choose what to import: a project, a job, or a job type folder (e.g. Class2D)
 	const char *src = fl_dir_chooser("Select a RELION project, a job, or a job type folder (e.g. Class2D) to import", ".");
-	if (!src || strlen(src) == 0) return;
+	if (!src || strlen(src) == 0) return false;
 	std::string sourceDir(src);
 	while (sourceDir.size() > 1 && sourceDir.back() == '/')
 		sourceDir.pop_back();
@@ -3197,14 +3327,14 @@ void GuiMainWindow::cb_import_project_i()
 			 "  - a job type folder, e.g. Class2D\n"
 			 "      imports all jobs in it and the jobs they depend on\n\n"
 			 "Selected: %s", sourceDir.c_str());
-		return;
+		return false;
 	}
 	const bool whole_project = (selection.scope == relion_import::WHOLE_PROJECT);
 
 	// 2. Choose/create destination directory
 	const char *dest = fl_dir_chooser("Select or create the destination directory for the imported project",
 					  ".");
-	if (!dest || strlen(dest) == 0) return;
+	if (!dest || strlen(dest) == 0) return false;
 	std::string destDir(dest);
 	while (destDir.size() > 1 && destDir.back() == '/')
 		destDir.pop_back();
@@ -3213,7 +3343,7 @@ void GuiMainWindow::cb_import_project_i()
 	if (sourceDir == destDir)
 	{
 		fl_alert("Source and destination must be different directories.");
-		return;
+		return false;
 	}
 
 	if (exists(destFn + "/.gui_projectdir") || exists(destFn + "/default_pipeline.star"))
@@ -3225,7 +3355,7 @@ void GuiMainWindow::cb_import_project_i()
 				  "Its pipeline file (default_pipeline.star) will be replaced by one listing only the imported jobs.\n"
 				  "Continue anyway?", "Cancel", "Continue", NULL);
 		if (ret != 1)
-			return;
+			return false;
 	}
 
 	// 3. Create destination directory and sentinel files
@@ -3235,7 +3365,7 @@ void GuiMainWindow::cb_import_project_i()
 		if (system(cmd.c_str()) != 0)
 		{
 			fl_alert("Failed to create destination directory:\n%s", destDir.c_str());
-			return;
+			return false;
 		}
 	}
 
@@ -3249,9 +3379,10 @@ void GuiMainWindow::cb_import_project_i()
 		if (!result.ok)
 		{
 			fl_alert("Import failed:\n%s", result.error.c_str());
-			return;
+			return false;
 		}
 
+		project_manager.load();
 		project_manager.add(destFn, destFn.afterLastOf("/"));
 		project_manager.save();
 
@@ -3264,13 +3395,9 @@ void GuiMainWindow::cb_import_project_i()
 			msg += "  " + integerToString(result.missing) + " listed in the pipeline but with no folder in the source project\n";
 		if (!result.not_in_pipeline.empty())
 			msg += "  " + integerToString(result.not_in_pipeline.size()) + " selected job folders are not in the source pipeline and were skipped\n";
-		msg += "\nSwitch to the new project now?";
-		int ret = fl_choice("%s", "No", "Yes", NULL, msg.c_str());
-		if (ret == 1)
-			switchToProject(destDir);
-		else
-			rebuildRecentProjectsInMenu();
-		return;
+		destOut = destDir;
+		summary = msg;
+		return true;
 	}
 
 	// 4. Copy pipeline files and root-level non-directory files
@@ -3375,37 +3502,34 @@ void GuiMainWindow::cb_import_project_i()
 	}
 
 	// 7. Register the imported project
+	project_manager.load();
 	project_manager.add(destFn, destFn.afterLastOf("/"));
 	project_manager.save();
 
-	// 8. Report result and offer to switch
-	{
-		char msg[512];
-		if (failed > 0)
-			std::snprintf(msg, sizeof(msg),
-				      "Project imported.\n"
-				      "  %d job directories symlinked\n"
-				      "  %d symlinks failed (may already exist)\n\n"
-				      "Switch to the new project now?",
-				      linked, failed);
-		else
-			std::snprintf(msg, sizeof(msg),
-				      "Project imported successfully.\n"
-				      "  %d job directories symlinked\n\n"
-				      "Switch to the new project now?",
-				      linked);
-		int ret = fl_choice("%s", "No", "Yes", NULL, msg);
-		if (ret == 1)
-			switchToProject(destDir);
-		else
-			rebuildRecentProjectsInMenu();
-	}
+	// 8. Report the result
+	summary = "Project imported.\n  " + integerToString(linked) + " job directories symlinked\n";
+	if (failed > 0)
+		summary += "  " + integerToString(failed) + " symlinks failed (may already exist)\n";
+	destOut = destDir;
+	return true;
 }
 
 void GuiMainWindow::cb_import_cryosparc_project(Fl_Widget* o, void* v)
 {
 	GuiMainWindow* T = (GuiMainWindow*)v;
 	T->cb_import_cryosparc_project_i();
+}
+
+void GuiMainWindow::cb_import_cryosparc_project_i()
+{
+	std::string dest, summary;
+	if (!importCryosparcProject(dest, summary))
+		return;
+	summary += "\nSwitch to the new project now?";
+	if (fl_choice("%s", "No", "Yes", NULL, summary.c_str()) == 1)
+		switchToProject(dest);
+	else
+		rebuildRecentProjectsInMenu();
 }
 
 /// True if `name` is a CryoSPARC job directory name: J followed by digits.
@@ -3447,7 +3571,9 @@ static bool looks_like_cryosparc_job(const std::string &dir, std::string &job)
 	return true;
 }
 
-void GuiMainWindow::cb_import_cryosparc_project_i()
+/* Import a CryoSPARC project, or one job and the jobs it depends on, into a new
+ * RELION project. Same contract as importRelionProject(). */
+static bool importCryosparcProject(std::string &destOut, std::string &summary)
 {
 	// 1. Choose what to import. The chosen directory decides the scope on its
 	//    own: a project root imports the whole project, a single JNN directory
@@ -3456,7 +3582,7 @@ void GuiMainWindow::cb_import_cryosparc_project_i()
 	const char *src = fl_dir_chooser("Select a CryoSPARC project directory (imports all of it) "
 					 "or a single job directory (imports that job and the jobs "
 					 "it depends on)", ".");
-	if (!src || strlen(src) == 0) return;
+	if (!src || strlen(src) == 0) return false;
 	std::string chosenDir(src);
 	while (chosenDir.size() > 1 && chosenDir.back() == '/')
 		chosenDir.pop_back();
@@ -3481,13 +3607,13 @@ void GuiMainWindow::cb_import_cryosparc_project_i()
 			 "Select the project directory (the one containing J1, J2, ...) to import all of "
 			 "it, or one of its JNN job directories to import just that job and the jobs it "
 			 "depends on.", chosenDir.c_str());
-		return;
+		return false;
 	}
 
 	// 2. Choose/create the destination
 	const char *dest = fl_dir_chooser("Select or create the destination directory for the "
 					  "imported project", ".");
-	if (!dest || strlen(dest) == 0) return;
+	if (!dest || strlen(dest) == 0) return false;
 	std::string destDir(dest);
 	while (destDir.size() > 1 && destDir.back() == '/')
 		destDir.pop_back();
@@ -3496,7 +3622,7 @@ void GuiMainWindow::cb_import_cryosparc_project_i()
 	if (sourceDir == destDir || chosenDir == destDir)
 	{
 		fl_alert("Source and destination must be different directories.");
-		return;
+		return false;
 	}
 
 	if (exists(destFn + "/.gui_projectdir") || exists(destFn + "/default_pipeline.star"))
@@ -3504,7 +3630,7 @@ void GuiMainWindow::cb_import_cryosparc_project_i()
 		int ret = fl_choice("The destination already contains a RELION project.\n"
 				    "Importing will add jobs to it and overwrite its pipeline.\n"
 				    "Continue anyway?", "Cancel", "Continue", NULL);
-		if (ret != 1) return;
+		if (ret != 1) return false;
 	}
 
 	if (!exists(destFn))
@@ -3513,7 +3639,7 @@ void GuiMainWindow::cb_import_cryosparc_project_i()
 		if (system(cmd.c_str()) != 0)
 		{
 			fl_alert("Failed to create destination directory:\n%s", destDir.c_str());
-			return;
+			return false;
 		}
 	}
 
@@ -3532,29 +3658,20 @@ void GuiMainWindow::cb_import_cryosparc_project_i()
 	{
 		fl_alert("Importing the CryoSPARC project failed.\n"
 			 "See %s for details.", logfile.c_str());
-		return;
+		return false;
 	}
 
 	touch(destFn + "/.gui_projectdir");
 	system(("mkdir -p " + destFn + "/.TMP_runfiles").c_str());
 
-	// 4. Register it and offer to switch
+	// 4. Register it
+	project_manager.load();
 	project_manager.add(destFn, destFn.afterLastOf("/"));
 	project_manager.save();
 
-	{
-		char msg[1024];
-		std::snprintf(msg, sizeof(msg),
-			      "Imported %s.\n\n"
-			      "Details were written to:\n%s\n\n"
-			      "Switch to the new project now?",
-			      what.c_str(), logfile.c_str());
-		int ret = fl_choice("%s", "No", "Yes", NULL, msg);
-		if (ret == 1)
-			switchToProject(destDir);
-		else
-			rebuildRecentProjectsInMenu();
-	}
+	summary = "Imported " + what + ".\n\nDetails were written to:\n" + logfile + "\n";
+	destOut = destDir;
+	return true;
 }
 
 void GuiMainWindow::rebuildRecentProjectsInMenu()

@@ -94,12 +94,34 @@ private:
 class ManageProjectsWindow : public Fl_Window
 {
 public:
-    ManageProjectsWindow(int w, int h, const char *title = "Manage Projects");
+    /* What the user asked for when the window was closed. The window only
+     * records the choice and hides: creating and importing projects is done by
+     * the caller, which may show the window again if that is cancelled. */
+    enum Action
+    {
+        ACTION_NONE,             ///< closed (or Quit at startup)
+        ACTION_OPEN,             ///< open getOpenPath()
+        ACTION_NEW,              ///< create a new, empty project
+        ACTION_IMPORT_RELION,    ///< import a RELION project, job or job type folder
+        ACTION_IMPORT_CRYOSPARC  ///< import a CryoSPARC project or job
+    };
+
+    /* notice:       if not NULL, a message shown above the buttons
+     * allow_create: show the New project / Import buttons
+     * close_label:  label of the button that closes the window */
+    ManageProjectsWindow(int w, int h, const char *title = "Manage Projects",
+                         const char *notice = NULL, bool allow_create = true,
+                         const char *close_label = " Close ");
     ~ManageProjectsWindow();
     void refresh();
+    /// Re-read the registry from disk, e.g. after the caller added a project to it.
+    void reload();
 
     const std::vector<ProjectManager::Project>& getDisplayProjects() const { return display_projects_; }
     ProjectManager& getProjectManager() { return pm; }
+    Action getAction() const { return action_; }
+    /// Forget the previous choice before showing the window again.
+    void resetAction() { action_ = ACTION_NONE; selected_open_path_.clear(); }
     const std::string& getOpenPath() const { return selected_open_path_; }
     const std::string& currentProjectPath() const { return current_project_path_; }
     void updateButtonStates();
@@ -111,6 +133,7 @@ public:
 private:
     ProjectManager pm;
     std::vector<ProjectManager::Project> display_projects_;
+    Action action_ = ACTION_NONE;
     std::string selected_open_path_;
     std::string current_project_path_;
     ProjectTable *table;
@@ -131,6 +154,10 @@ private:
     static void cb_virtualize(Fl_Widget *, void *v);
     static void cb_close(Fl_Widget *, void *v);
     static void cb_name_input(Fl_Widget *, void *v);
+    static void cb_new(Fl_Widget *, void *v);
+    static void cb_import_relion(Fl_Widget *, void *v);
+    static void cb_import_cryosparc(Fl_Widget *, void *v);
+    void finishWith(Action a);
 
     void removeSelected();
     void renameSelected();

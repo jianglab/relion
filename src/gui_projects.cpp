@@ -20,6 +20,8 @@
 
 #include "gui_projects.h"
 #include "src/remove_intermediates.h"
+#include "src/strings.h"
+#include "src/error.h"
 #include "gui_virtualize.h"
 #include <fstream>
 #include <sstream>
@@ -121,12 +123,19 @@ bool ProjectManager::load()
         if (col_path < 0 || col_name < 0 || col_time < 0)
             continue;
 
-        // Data line: parse columns (space-separated)
+        // Data line: STAR tokens, so that a quoted path or name may contain spaces
         std::vector<std::string> tokens;
-        std::istringstream iss(line);
-        std::string token;
-        while (iss >> token)
-            tokens.push_back(token);
+        try
+        {
+            int pos = 0;
+            std::string token;
+            while (nextTokenInSTAR(line, pos, token))
+                tokens.push_back(token);
+        }
+        catch (RelionError &)
+        {
+            continue;   // unclosed quote: skip the line rather than lose the whole registry
+        }
 
         if (tokens.size() <= (size_t)std::max(col_path, std::max(col_name, col_time)))
             continue;
@@ -164,9 +173,14 @@ bool ProjectManager::save()
     fh << "_rlnProjectLastOpened #3\n";
     for (size_t i = 0; i < projects_.size(); i++)
     {
-        fh << projects_[i].path << "  "
-           << projects_[i].name << "  "
-           << projects_[i].last_opened << "\n";
+        // Quote values with spaces, as a path or a renamed project may have them
+        std::string path = projects_[i].path;
+        std::string name = projects_[i].name;
+        std::string last = projects_[i].last_opened;
+        escapeStringForSTAR(path);
+        escapeStringForSTAR(name);
+        escapeStringForSTAR(last);
+        fh << path << "  " << name << "  " << last << "\n";
     }
     fh << "\n";
     fh.close();
@@ -803,7 +817,9 @@ void ManageProjectsWindow::pollSizeScan()
     }
 }
 
-ManageProjectsWindow::ManageProjectsWindow(int w, int h, const char *title)
+ManageProjectsWindow::ManageProjectsWindow(int w, int h, const char *title,
+                                           const char *notice, bool allow_create,
+                                           const char *close_label)
     : Fl_Window(w, h, title)
 {
     pm.load();
@@ -819,12 +835,46 @@ ManageProjectsWindow::ManageProjectsWindow(int w, int h, const char *title)
     int bh = 30;
     int btn_y = h - bh - pad;
     int label_w = 50;
+    int top_y = pad;
+
+    // Optional message above everything else, e.g. why the window was shown
+    if (notice != NULL)
+    {
+        Fl_Box *nb = new Fl_Box(pad, top_y, w - 2 * pad, 2 * bh);
+        nb->copy_label(notice);
+        nb->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_WRAP);
+        nb->labelsize(13);
+        top_y += 2 * bh + pad;
+    }
+
+    // Ways to get a project that is not in the list yet
+    if (allow_create)
+    {
+        int tx = pad;
+        Fl_Button *new_btn = new Fl_Button(tx, top_y, 150, bh, " New project... ");
+        new_btn->callback(cb_new, this);
+        new_btn->tooltip("Create a new, empty project in a folder of your choice "
+                         "(the folder is created if it does not exist)");
+        tx += 150 + pad;
+
+        Fl_Button *imp_btn = new Fl_Button(tx, top_y, 200, bh, " Import RELION project... ");
+        imp_btn->callback(cb_import_relion, this);
+        imp_btn->tooltip("Make a new project that links to the jobs of an existing RELION project, "
+                         "a job (with the jobs it depends on) or a job type folder");
+        tx += 200 + pad;
+
+        Fl_Button *cs_btn = new Fl_Button(tx, top_y, 210, bh, " Import CryoSPARC project... ");
+        cs_btn->callback(cb_import_cryosparc, this);
+        cs_btn->tooltip("Convert a CryoSPARC project, or one job and the jobs it depends on, "
+                        "into a new RELION project");
+        top_y += bh + pad;
+    }
 
     // Table
     int table_x = pad;
-    int table_y = pad;
+    int table_y = top_y;
     int table_w = w - 2 * pad;
-    int table_h = btn_y - 5 * pad - 2 * bh - 8;
+    int table_h = btn_y - table_y - 4 * pad - 2 * bh - 8;
 
     table = new ProjectTable(table_x, table_y, table_w, table_h, this);
     table->type(Fl_Table_Row::SELECT_MULTI);
@@ -900,7 +950,8 @@ ManageProjectsWindow::ManageProjectsWindow(int w, int h, const char *title)
     virtualize_btn->deactivate();
     bx += 110 + pad;
 
-    Fl_Button *close_btn = new Fl_Button(w - pad - 90, btn_y, 90, bh, " Close ");
+    Fl_Button *close_btn = new Fl_Button(w - pad - 90, btn_y, 90, bh);
+    close_btn->copy_label(close_label);
     close_btn->callback(cb_close, this);
 
     refresh();
@@ -982,7 +1033,36 @@ void ManageProjectsWindow::cb_name_input(Fl_Widget *, void *v)
 
 void ManageProjectsWindow::cb_close(Fl_Widget *, void *v)
 {
-    ((ManageProjectsWindow *)v)->hide();
+    ((ManageProjectsWindow *)v)->finishWith(ACTION_NONE);
+}
+
+void ManageProjectsWindow::cb_new(Fl_Widget *, void *v)
+{
+    ((ManageProjectsWindow *)v)->finishWith(ACTION_NEW);
+}
+
+void ManageProjectsWindow::cb_import_relion(Fl_Widget *, void *v)
+{
+    ((ManageProjectsWindow *)v)->finishWith(ACTION_IMPORT_RELION);
+}
+
+void ManageProjectsWindow::cb_import_cryosparc(Fl_Widget *, void *v)
+{
+    ((ManageProjectsWindow *)v)->finishWith(ACTION_IMPORT_CRYOSPARC);
+}
+
+void ManageProjectsWindow::finishWith(Action a)
+{
+    action_ = a;
+    if (a != ACTION_OPEN)
+        selected_open_path_.clear();
+    hide();
+}
+
+void ManageProjectsWindow::reload()
+{
+    pm.load();
+    refresh();
 }
 
 void ManageProjectsWindow::onRowSelectionChanged()
@@ -1091,7 +1171,7 @@ void ManageProjectsWindow::openSelected()
     if (row < 0 || row >= (int)display_projects_.size()) return;
 
     selected_open_path_ = display_projects_[row].path;
-    hide();
+    finishWith(ACTION_OPEN);
 }
 
 void ManageProjectsWindow::cleanupSelected()
