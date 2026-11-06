@@ -104,6 +104,45 @@ std::string tableStarNameFor(const ClassTable& table);
 /// Write the table as a --ref STAR file (creating its directory; an identical file is left alone).
 bool writeTable(const std::string& fn_star, const ClassTable& table, std::string& error);
 
+/* The table of the "One reference per class" mode of the Class3D GUI: one row per class with its map
+ * and every column of tableColumns(). It is kept as text in a job option:
+ *   "rlnReferenceImage|<label>|...;<map>|<cell>|...;<map>|<cell>|..."
+ * (the first part names the columns). '|' and ';' cannot be part of a cell.
+ */
+
+/// The table as text; "" for a table without rows.
+std::string encodeTable(const ClassTable& table);
+
+/// Read the text back; "" is a table without rows. False, with a message, if it is not such a text.
+bool decodeTable(const std::string& text, ClassTable& table, std::string& error);
+
+/// The table for `nr_classes` classes with the columns `labels`: rows beyond it are dropped; a new row has
+/// no map and the settings of the row above it (the defaults for the first row). A column that `from` does
+/// not have gets the defaults, except a helical search range (rlnHelicalTwistMin, ...), which is centred on the
+/// class's twist or rise with the width of the default range (as relion_refine does without the column).
+ClassTable resizeTable(const ClassTable& from, int nr_classes, const std::vector<std::string>& labels,
+                       const std::map<std::string, std::string>& defaults);
+
+/// What a per-class table asks of relion_refine.
+struct PerClassRefs
+{
+	/// The maps, and the columns whose cells differ between classes: the --ref STAR file.
+	ClassTable table;
+	/// Job option -> value, for the job-wide options that the table decides (they are greyed out in the GUI):
+	/// a column that is the same for every class becomes that value; one that differs gives a value that
+	/// covers all classes (symmetry C1, the widest tube, the widest search range, the first class's twist and rise).
+	/// "fn_mask" and "do_auto_mask" come from the Mask column.
+	std::map<std::string, std::string> job;
+	/// Mask files named in the table (for the input nodes)
+	std::vector<std::string> mask_files;
+};
+
+/// Check the table of `nr_classes` rows and split it as above. Only the symmetry and mask columns are used,
+/// plus twist, rise and tube diameters if `helical`, plus the search ranges if `symmetry_search`.
+/// A column the table lacks leaves its job option alone. Mask files must exist.
+bool perClassRefs(const std::string& encoded, int nr_classes, bool helical, bool symmetry_search,
+                  PerClassRefs& result, std::string& error);
+
 } // namespace reflist
 
 #endif

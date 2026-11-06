@@ -20,9 +20,15 @@
 #include <catch2/catch.hpp>
 
 #include "src/gui_jobwindow.h"
+#include "src/gui_reference_table.h"
+#include "src/reference_list.h"
 #include "src/pipeline_jobs.h"
 
 #include <FL/Fl_Group.H>
+#include <FL/Fl_Input.H>
+#include <FL/Fl_Scroll.H>
+#include <FL/Fl_Slider.H>
+#include <FL/Fl_Table.H>
 #include <FL/Fl_Tabs.H>
 #include <cstdlib>
 #include <iostream>
@@ -194,7 +200,10 @@ void collectLeaves(Fl_Group *g, const std::string &where, std::vector<Leaf> &out
 		Fl_Widget *c = g->child(i);
 		if (!c->visible() || c->w() <= 0 || c->h() <= 0)
 			continue;
-		if (Fl_Group *sub = c->as_group())
+		// a table or scroll area clips its cells: it counts as one widget
+		if (dynamic_cast<Fl_Table *>(c) || dynamic_cast<Fl_Scroll *>(c))
+			out.push_back({c, where});
+		else if (Fl_Group *sub = c->as_group())
 			collectLeaves(sub, where, out);
 		else
 			out.push_back({c, where});
@@ -240,67 +249,193 @@ std::vector<std::string> layoutProblems(Fl_Group *tab)
 }
 }
 
-TEST_CASE("GUI: Class3D several reference maps set the number of classes", "[gui][layout][reference_list]")
+namespace
+{
+// As when the user picks a menu item
+void pick(GuiEntry &entry, const std::string &value)
+{
+	entry.setValue(value);
+	if (entry.on_pick)
+		entry.on_pick();
+}
+
+std::vector<std::string> layoutProblemsOfWindow(JobWindow &window)
+{
+	std::vector<std::string> all;
+	for (int k = 0; k < window.tabs->children(); k++)
+	{
+		Fl_Group *tab = window.tabs->child(k)->as_group();
+		if (!tab) continue;
+		for (const auto &p : layoutProblems(tab))
+			all.push_back(std::string(tab->label() ? tab->label() : "?") + ": " + p);
+	}
+	return all;
+}
+
+reflist::ClassTable decoded(GuiEntry &text)
+{
+	reflist::ClassTable t;
+	std::string error;
+	REQUIRE(reflist::decodeTable(text.inp->value(), t, error));
+	return t;
+}
+}
+
+TEST_CASE("GUI: Class3D one reference per class is a table of K rows on the I/O tab", "[gui][layout][reference_list]")
 {
 	JobWindow window;
 	window.initialise(PROC_3DCLASS, false);
-	REQUIRE(window.guientries.find("fn_ref") != window.guientries.end());
-	GuiEntry &ref = window.guientries["fn_ref"];
+	GuiEntry &mode = window.guientries["ref_mode"];
 	GuiEntry &classes = window.guientries["nr_classes"];
+	GuiEntry &ref = window.guientries["fn_ref"];
+	GuiEntry &text = window.guientries["ref_table"];
+	REQUIRE(window.reference_table != nullptr);
+	ReferenceTable &table = *window.reference_table;
 
-	// The '+' button sits at the end of the row, right of Browse, inside the tab
-	REQUIRE(ref.add_button != nullptr);
-	REQUIRE(ref.browse != nullptr);
-	REQUIRE(ref.add_button->x() >= ref.browse->x() + ref.browse->w());
-	REQUIRE(ref.add_button->y() == ref.browse->y());
-	// Other file fields keep their single Browse button
-	REQUIRE(window.guientries["fn_img"].add_button == nullptr);
-	// "Per-class settings..." sits under the reference row, above the mask
+	// The mode and K sit on the I/O tab with the reference; one map, without a '+' button
 	const Fl_Group *io = ref.inp->parent();
-	const Fl_Widget *settings = nullptr;
-	for (int i = 0; i < io->children(); i++)
-		if (io->child(i)->label() && std::string(io->child(i)->label()) == "Per-class settings...")
-			settings = io->child(i);
-	REQUIRE(settings != nullptr);
-	REQUIRE(settings->y() >= ref.inp->y() + ref.inp->h());
-	REQUIRE(settings->y() + settings->h() <= window.guientries["fn_mask"].inp->y());
+	CHECK(mode.inp->parent() == io);
+	CHECK(classes.inp->parent() == io);
+	CHECK(table.parent() == io);
+	CHECK(mode.inp->y() < classes.inp->y());
+	CHECK(classes.inp->y() < ref.inp->y());
+	CHECK(ref.add_button == nullptr);
 
-	const std::string one_class = classes.inp->value();
-	REQUIRE(classes.inp->active());
+	// One reference, K classes: the field, no table, the job-wide fields in use
+	CHECK(std::string(mode.inp->value()) == job_ref_mode_options[0]);
+	CHECK(ref.inp->visible());
+	CHECK_FALSE(table.visible());
+	for (const char *key : {"sym_name", "helical_twist_initial", "helical_tube_outer_diameter", "fn_mask", "do_auto_mask"})
+		CHECK(window.guientries[key].inp->active());
 
-	SECTION("a list of maps overrides and greys the field")
+	ref.setValue("x/a.mrc");
+	classes.setValue("3");
+	pick(mode, job_ref_mode_options[1]);
+
+	SECTION("one reference per class: K rows, the first from the reference field, the job-wide fields greyed out")
 	{
-		ref.setValue("x/a.mrc,x/b.mrc,x/c.mrc");
-		REQUIRE(std::string(classes.inp->value()) == "3");
-		REQUIRE_FALSE(classes.inp->active());
-
-		ref.setValue("x/a.mrc,x/b.mrc");
-		REQUIRE(std::string(classes.inp->value()) == "2");
-	}
-
-	SECTION("a single map gives the field back")
-	{
-		ref.setValue("x/a.mrc,x/b.mrc");
-		REQUIRE_FALSE(classes.inp->active());
-		ref.setValue("x/a.mrc");
-		REQUIRE(classes.inp->active());
-	}
-
-	SECTION("the tabs have no overlaps or out-of-tab widgets in either state")
-	{
-		for (const char *value : {"x/a.mrc", "x/a.mrc,x/b.mrc,x/c.mrc,x/d.mrc"})
+		CHECK_FALSE(ref.inp->visible());
+		CHECK(table.visible());
+		REQUIRE(table.rows() == 3);
+		CHECK(decoded(text).maps == std::vector<std::string>{"x/a.mrc", "", ""});
+		for (const char *key : {"sym_name", "helical_twist_initial", "helical_rise_initial", "helical_twist_min",
+		                         "helical_tube_inner_diameter", "helical_tube_outer_diameter", "fn_mask", "do_auto_mask"})
 		{
-			ref.setValue(value);
-			for (int k = 0; k < window.tabs->children(); k++)
-			{
-				Fl_Group *tab = window.tabs->child(k)->as_group();
-				if (!tab) continue;
-				const auto problems = layoutProblems(tab);
-				std::string all;
-				for (const auto &p : problems) all += "\n  " + p;
-				INFO("reference " << value << ", tab " << (tab->label() ? tab->label() : "?") << all);
-				CHECK(problems.empty());
-			}
+			INFO(key);
+			CHECK_FALSE(window.guientries[key].inp->active());
+		}
+		// automatic masks of the classes marked "auto" use their resolution
+		CHECK(window.guientries["auto_mask_start_res"].inp->active_r());
+		// options the table does not hold stay
+		CHECK(window.guientries["helical_twist_inistep"].inp->active());
+		CHECK(window.guientries["ini_high"].inp->active());
+
+		// back to one reference: as before
+		pick(mode, job_ref_mode_options[0]);
+		CHECK(ref.inp->visible());
+		CHECK_FALSE(table.visible());
+		CHECK(window.guientries["sym_name"].inp->active());
+	}
+
+	SECTION("typed cells go into the job option; rows beyond K are kept while K is smaller")
+	{
+		Fl_Input *sym = table.cell(1, "rlnSymmetryGroup");
+		REQUIRE(sym != nullptr);
+		sym->value("C3");
+		sym->do_callback();
+		Fl_Input *map = table.cell(2, "rlnReferenceImage");
+		REQUIRE(map != nullptr);
+		map->value("x/c.mrc");
+		map->do_callback();
+		reflist::ClassTable t = decoded(text);
+		CHECK(t.cells[1][t.column("rlnSymmetryGroup")] == "C3");
+
+		classes.setValue("2");
+		CHECK(table.rows() == 2);
+		CHECK(decoded(text).maps.size() == 2);
+		// typed, with the slider following
+		classes.inp->value("4");
+		classes.inp->do_callback();
+		CHECK(table.rows() == 4);
+		CHECK(classes.slider->value() == 4);
+		t = decoded(text);
+		CHECK(t.maps == std::vector<std::string>{"x/a.mrc", "", "x/c.mrc", ""});
+		// a new class starts with the settings of the class above it
+		CHECK(t.cells[3] == t.cells[2]);
+		// half-typed numbers change nothing
+		classes.inp->value("");
+		classes.inp->do_callback();
+		CHECK(table.rows() == 4);
+	}
+
+	SECTION("helical columns are shown for helical reconstruction, search ranges with symmetry searches")
+	{
+		CHECK(table.cell(0, "rlnHelicalTwist") == nullptr);
+		pick(window.guientries["do_helix"], "Yes");
+		CHECK(table.cell(0, "rlnHelicalTwist") != nullptr);
+		CHECK(table.cell(0, "rlnHelicalMaskTubeOuterDiameter") != nullptr);
+		CHECK(table.cell(0, "rlnHelicalTwistMin") == nullptr);
+		pick(window.guientries["do_local_search_helical_symmetry"], "Yes");
+		CHECK(table.cell(2, "rlnHelicalRiseMax") != nullptr);
+		CHECK(table.browseButton(2, false) != nullptr);
+		CHECK(table.browseButton(2, true) != nullptr);
+	}
+
+	SECTION("a saved job comes back with its table")
+	{
+		table.cell(1, "rlnReferenceImage")->value("x/b.mrc");
+		table.cell(1, "rlnReferenceImage")->do_callback();
+		window.updateMyJob();
+		JobWindow other;
+		other.initialise(PROC_3DCLASS, false);
+		for (auto &opt : window.myjob.joboptions)
+			other.myjob.joboptions[opt.first].value = opt.second.value;
+		other.updateMyGui();
+		CHECK(std::string(other.guientries["ref_mode"].inp->value()) == job_ref_mode_options[1]);
+		REQUIRE(other.reference_table->rows() == 3);
+		CHECK(other.reference_table->table().maps == std::vector<std::string>{"x/a.mrc", "x/b.mrc", ""});
+		CHECK(other.reference_table->visible());
+		CHECK_FALSE(other.guientries["sym_name"].inp->active());
+	}
+
+	SECTION("a job of an earlier version with several maps in the field becomes one reference per class")
+	{
+		JobWindow old;
+		old.initialise(PROC_3DCLASS, false);
+		old.myjob.joboptions["ref_mode"].value = job_ref_mode_options[0];
+		old.myjob.joboptions["ref_table"].value = "";
+		old.myjob.joboptions["fn_ref"].value = "x/a.mrc,x/b.mrc";
+		old.myjob.joboptions["nr_classes"].value = "1";
+		old.updateMyGui();
+		CHECK(std::string(old.guientries["ref_mode"].inp->value()) == job_ref_mode_options[1]);
+		CHECK(std::string(old.guientries["nr_classes"].inp->value()) == "2");
+		CHECK(old.reference_table->table().maps == std::vector<std::string>{"x/a.mrc", "x/b.mrc"});
+	}
+
+	SECTION("continuing greys out the table and keeps the per-class fields greyed")
+	{
+		window.toggle_new_continue(true);
+		CHECK_FALSE(table.active());
+		CHECK_FALSE(window.guientries["sym_name"].inp->active());
+		window.toggle_new_continue(false);
+		CHECK(table.active());
+		CHECK_FALSE(window.guientries["sym_name"].inp->active());
+		CHECK_FALSE(window.guientries["fn_mask"].inp->active());
+	}
+
+	SECTION("the tabs have no overlaps or out-of-tab widgets in either mode")
+	{
+		pick(window.guientries["do_helix"], "Yes");
+		pick(window.guientries["do_local_search_helical_symmetry"], "Yes");
+		classes.setValue("30");
+		for (const std::string &m : job_ref_mode_options)
+		{
+			pick(mode, m);
+			const auto problems = layoutProblemsOfWindow(window);
+			std::string all;
+			for (const auto &p : problems) all += "\n  " + p;
+			INFO("mode " << m << all);
+			CHECK(problems.empty());
 		}
 	}
 }

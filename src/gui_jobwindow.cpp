@@ -20,7 +20,9 @@
 #include "src/gui_jobwindow.h"
 #include "src/parallel_hint.h"
 #include "src/gui_entries.h"
+#include "src/gui_reference_table.h"
 #include "src/reference_list.h"
+#include <FL/Fl_Box.H>
 #include <FL/Fl_Check_Browser.H>
 #include <FL/Fl_Double_Window.H>
 #include <FL/Fl_Output.H>
@@ -39,6 +41,8 @@ void JobWindow::clear()
 	tabs = NULL;
 	tab1 = tab2 = tab3 = tab4 = tab5 = tab6 = tab7 = runtab = NULL;
 	group1 = group2 = group3 = group4 = group5 = group6 = group7 = group_ewald = group_filctx = queue_gpu_group = queue_group = NULL;
+	reference_table = NULL;
+	refresh = nullptr;
 	current_y = start_y = 0;
 	is_continue = false;
 	is_tomo = false;
@@ -208,146 +212,264 @@ static void cb_choose_excluded(Fl_Widget *, void *data)
 	exclude.setValue(value);
 }
 
-// "Per-class settings...": a table with one row per reference map, saved as the --ref STAR file
-static void cb_class_settings(Fl_Widget *, void *data)
+// Class3D, "One reference per class": a table with one row per class (its map and settings) instead of the
+// reference field, and greyed-out job-wide fields for the settings the table holds per class
+namespace {
+
+const char *const MASK_LABEL = "rlnSolventMaskName";
+
+// The job-wide fields whose settings the table holds for each class
+const std::vector<std::string> &perClassOptions()
 {
-	JobWindow *win = (JobWindow *)data;
-	GuiEntry &ref = win->guientries["fn_ref"];
-	reflist::Resolved r;
-	std::string error;
-	if (!reflist::resolve(ref.inp->value(), r, error) || r.maps.empty() || !r.star_readable)
-	{
-		fl_message("Give the reference maps first (%s).", error.empty() ? "a map, a list of maps or a STAR file" : error.c_str());
-		return;
-	}
-	auto value = [win](const char *key) { return std::string(win->guientries[key].inp->value()); };
-	const bool helix = value("do_helix") == "Yes", search = helix && value("do_local_search_helical_symmetry") == "Yes";
-	std::vector<std::string> labels, headings;
-	std::map<std::string, std::string> defaults;
-	reflist::ClassTable given;
-	if (r.is_star && !reflist::readTable(r.ref_argument, given, error))
-	{
-		fl_message("%s", error.c_str());
-		return;
-	}
+	static const std::vector<std::string> keys = {"sym_name", "helical_twist_initial", "helical_rise_initial",
+		"helical_twist_min", "helical_twist_max", "helical_rise_min", "helical_rise_max",
+		"helical_tube_inner_diameter", "helical_tube_outer_diameter", "fn_mask", "do_auto_mask"};
+	return keys;
+}
+
+std::vector<std::string> allTableLabels()
+{
+	std::vector<std::string> labels;
 	for (const reflist::TableColumn &c : reflist::tableColumns())
+		labels.push_back(c.label);
+	return labels;
+}
+
+// Greyed out because of continuing (or always), as toggle_new_continue() does it
+bool greyedByContinue(const GuiEntry &entry, bool is_continue)
+{
+	switch (entry.deactivate_option)
 	{
-		defaults[c.label] = c.job_option[0] ? value(c.job_option) : (value("do_auto_mask") == "Yes" ? "auto" : "None");
-		const bool range = strstr(c.label, "Min") || strstr(c.label, "Max");  // used only by local symmetry searches
-		if ((!c.helical || (helix && (search || !range))) || given.column(c.label) >= 0)
-		{
-			labels.push_back(c.label);
-			headings.push_back(c.heading);
-		}
+	case TOGGLE_DEACTIVATE: return is_continue;
+	case TOGGLE_REACTIVATE: return !is_continue;
+	case TOGGLE_ALWAYS_DEACTIVATE: return true;
+	default: return false;
 	}
-	// columns of the user's STAR file that the table does not offer are shown as they are
-	for (const std::string &l : given.labels)
-		if (std::find(labels.begin(), labels.end(), l) == labels.end())
-		{
-			labels.push_back(l);
-			headings.push_back(l);
-		}
-	reflist::ClassTable t = reflist::completeTable(given, r.maps, labels, defaults);
-	// as relion_refine does: a class without its own search range gets the job's range centred on its start
-	for (const std::string g : {"rlnHelicalTwist", "rlnHelicalRise"})
+}
+
+struct PerClassUi
+{
+	JobWindow *win = nullptr;
+	ReferenceTable *table = nullptr;
+	Fl_Box *maps_label = nullptr;
+	Fl_Button *fill = nullptr;
+	Fl_Group *auto_mask_group = nullptr;
+	reflist::ClassTable memory;  // the rows of all classes, also those beyond K while K is made smaller
+	bool hold = false;           // K is being set to fit the table: do not resize the table meanwhile
+
+	std::string value(const char *key) { return win->guientries[key].inp->value(); }
+	bool perClass() { return value("ref_mode") == job_ref_mode_options[1]; }
+	int classes() { return atoi(value("nr_classes").c_str()); }
+
+	void setClasses(int k)
 	{
-		const int lo = t.column(g + "Min"), hi = t.column(g + "Max"), mid = t.column(g);
-		if (lo < 0 || hi < 0 || mid < 0 || given.column(g + "Min") >= 0)
-			continue;
-		const double half = 0.5 * (atof(defaults[g + "Max"].c_str()) - atof(defaults[g + "Min"].c_str()));
-		for (std::vector<std::string> &row : t.cells)
+		hold = true;
+		win->guientries["nr_classes"].setValue(integerToString(k));
+		hold = false;
+	}
+
+	// What a new class starts with: the job-wide fields
+	std::map<std::string, std::string> defaults()
+	{
+		std::map<std::string, std::string> d;
+		for (const reflist::TableColumn &c : reflist::tableColumns())
+			if (c.job_option[0])
+				d[c.label] = value(c.job_option);
+		const std::string mask = value("fn_mask");
+		d[MASK_LABEL] = !mask.empty() ? mask : (value("do_auto_mask") == "Yes" ? "auto" : "None");
+		return d;
+	}
+
+	// The columns shown: the helical ones only for helical reconstruction, the search ranges only with symmetry searches
+	std::vector<std::string> shown()
+	{
+		std::vector<std::string> labels = {"rlnReferenceImage", "rlnSymmetryGroup", MASK_LABEL};
+		if (value("do_helix") == "Yes")
 		{
-			const double m = atof(row[mid].c_str());
-			char s[32];
-			snprintf(s, sizeof(s), "%.10g", m - half);
-			row[lo] = s;
-			snprintf(s, sizeof(s), "%.10g", m + half);
-			row[hi] = s;
+			for (const char *l : {"rlnHelicalTwist", "rlnHelicalRise", "rlnHelicalMaskTubeInnerDiameter", "rlnHelicalMaskTubeOuterDiameter"})
+				labels.push_back(l);
+			if (value("do_local_search_helical_symmetry") == "Yes")
+				for (const char *l : {"rlnHelicalTwistMin", "rlnHelicalTwistMax", "rlnHelicalRiseMin", "rlnHelicalRiseMax"})
+					labels.push_back(l);
+		}
+		return labels;
+	}
+
+	// What the table shows, with what was typed, into memory
+	void remember()
+	{
+		const reflist::ClassTable &now = table->table();
+		if (now.maps.empty())
+			return;
+		if (memory.maps.empty())
+			memory.labels = now.labels;
+		for (size_t r = 0; r < now.maps.size(); r++)
+		{
+			if (r >= memory.maps.size())
+			{
+				memory.maps.push_back("");
+				memory.cells.push_back(std::vector<std::string>());
+			}
+			memory.maps[r] = now.maps[r];
+			memory.cells[r] = now.cells[r];
 		}
 	}
 
-	const int name_w = 180, cell_w = 70, mask_w = 110, row_h = STEPY + 2;
-	const int table_w = name_w + mask_w + cell_w * ((int)labels.size() - 1);
-	const int rows_h = std::min((int)r.maps.size(), 15) * row_h;
-	const int dialog_w = std::max(table_w + 36, 460), help_h = 60;
-	Fl_Double_Window dialog(dialog_w, rows_h + help_h + 85, "Per-class settings");
-	std::vector<Fl_Box *> boxes;  // headings and help, owned by the dialog
-	auto cell_x = [&](size_t c) { return 10 + name_w + (c == 0 ? 0 : cell_w + (c == 1 ? 0 : mask_w + cell_w * ((int)c - 2))); };
-	auto cell_width = [&](size_t c) { return labels[c] == "rlnSolventMaskName" ? mask_w : cell_w; };
-	boxes.push_back(new Fl_Box(10, 10, name_w, row_h, "Reference map"));
-	for (size_t c = 0; c < labels.size(); c++)
-		boxes.push_back(new Fl_Box(cell_x(c), 10, cell_width(c), row_h, headings[c].c_str()));
-	for (Fl_Box *b : boxes)
+	// The first K rows of memory into the table and into the job option
+	void showTable()
 	{
-		b->labelsize(ENTRY_FONTSIZE);
-		b->align(FL_ALIGN_INSIDE | FL_ALIGN_LEFT);
-	}
-	Fl_Scroll scroll(10, 10 + row_h, table_w + 16, rows_h);
-	scroll.type(Fl_Scroll::VERTICAL);
-	std::vector<std::vector<Fl_Input *> > cells(r.maps.size());
-	for (size_t i = 0; i < r.maps.size(); i++)
-	{
-		const int y = 10 + row_h * (int)(i + 1);
-		Fl_Output *name = new Fl_Output(10, y, name_w, STEPY);
-		name->value(r.maps[i].c_str());
-		name->textsize(ENTRY_FONTSIZE);
-		name->tooltip(name->value());
-		for (size_t c = 0; c < labels.size(); c++)
+		const int k = classes();
+		if (k < 1)
+			return;  // being typed
+		const bool fresh = memory.maps.empty();
+		reflist::ClassTable t = reflist::resizeTable(memory, k, allTableLabels(), defaults());
+		if (fresh)
 		{
-			Fl_Input *in = new Fl_Input(cell_x(c), y, cell_width(c), STEPY);
-			in->value(t.cells[i][c].c_str());
-			in->textsize(ENTRY_FONTSIZE);
-			in->color(GUI_INPUT_COLOR);
-			cells[i].push_back(in);
+			// the map of the reference field, if there is one, starts the first class
+			reflist::Resolved r;
+			std::string error;
+			if (reflist::resolve(value("fn_ref"), r, error) && r.maps.size() == 1 && !r.is_star)
+				t.maps[0] = r.maps[0];
 		}
+		if ((int)memory.maps.size() < k)
+			memory = t;
+		table->setTable(t, shown());
+		win->guientries["ref_table"].inp->value(reflist::encodeTable(t).c_str());
 	}
-	scroll.end();
-	Fl_Box help(10, 20 + row_h + rows_h, dialog_w - 20, help_h,
-	            "Filled in with the job's values; a column that is the job's value for every map is not written. "
-	            "Mask: None, auto (made from the class) or a mask file. A symmetry other than C1 needs "
-	            "Symmetry C1 on the Reference tab (all classes share one orientation search).");
-	help.labelsize(ENTRY_FONTSIZE - 1);
-	help.align(FL_ALIGN_INSIDE | FL_ALIGN_LEFT | FL_ALIGN_TOP | FL_ALIGN_WRAP);
-	Fl_Button ok(dialog_w - 170, rows_h + help_h + 50, 75, 30, "OK"), cancel(dialog_w - 85, rows_h + help_h + 50, 75, 30, "Cancel");
-	dialog.end();
-	int done = 0;  // 1: OK, 2: cancelled or closed
-	ok.callback([](Fl_Widget *, void *d) { *(int *)d = 1; }, &done);
-	cancel.callback([](Fl_Widget *, void *d) { *(int *)d = 2; }, &done);
-	dialog.callback([](Fl_Widget *, void *d) { *(int *)d = 2; }, &done);
-	dialog.set_modal();
-	dialog.show();
-	for (;;)
-	{
-		while (done == 0 && dialog.shown())
-			Fl::wait();
-		if (done != 1)
-			return;
-		for (size_t i = 0; i < cells.size(); i++)
-			for (size_t c = 0; c < labels.size(); c++)
-				t.cells[i][c] = cells[i][c]->value();
-		if (reflist::checkTable(t, error))
-			break;
-		fl_alert("%s", error.c_str());
-		done = 0;
-	}
-	dialog.hide();
 
-	reflist::dropDefaultColumns(t, defaults);
-	std::string field;
-	if (t.labels.empty())
-		field = r.maps.size() == 1 ? r.maps[0] : reflist::joinList(r.maps);
-	else
+	// Which fields are shown, greyed out or filled in, for the mode
+	void apply()
 	{
-		field = reflist::tableStarNameFor(t);
-		if (!reflist::writeTable(field, t, error))
+		const bool per_class = perClass();
+		const bool is_continue = win->myjob.is_continue;
+		GuiEntry &ref = win->guientries["fn_ref"];
+		for (Fl_Widget *w : {(Fl_Widget *)ref.inp, (Fl_Widget *)ref.help, (Fl_Widget *)ref.browse, (Fl_Widget *)ref.add_button})
+			if (w)
+			{
+				if (per_class) w->hide();
+				else w->show();
+			}
+		for (Fl_Widget *w : {(Fl_Widget *)maps_label, (Fl_Widget *)fill, (Fl_Widget *)table})
 		{
-			fl_alert("%s", error.c_str());
+			if (per_class) w->show();
+			else w->hide();
+		}
+		if (per_class)
+		{
+			remember();
+			showTable();
+		}
+		for (const std::string &key : perClassOptions())
+		{
+			GuiEntry &entry = win->guientries[key];
+			entry.deactivate(per_class || greyedByContinue(entry, is_continue));
+		}
+		// automatic masks of the classes marked "auto" start from the resolution given there
+		if (per_class)
+			auto_mask_group->activate();
+		else
+			win->guientries["do_auto_mask"].cb_menu_i();
+		if (is_continue)
+		{
+			fill->deactivate();
+			table->deactivate();
+		}
+		else
+		{
+			fill->activate();
+			table->activate();
+		}
+		win->redraw();
+	}
+
+	// A job was loaded: the table from its job option
+	void load()
+	{
+		reflist::ClassTable t;
+		std::string error;
+		if (!reflist::decodeTable(value("ref_table"), t, error))
+			t = reflist::ClassTable();
+		if (!perClass() && t.maps.empty())
+		{
+			// Several maps in the reference field, as earlier versions saved them: one class each
+			reflist::Resolved r;
+			if (reflist::resolve(value("fn_ref"), r, error) && (r.is_list || (r.is_star && r.star_readable && !r.maps.empty())))
+			{
+				if (!r.is_star || !reflist::readTable(r.ref_argument, t, error))
+				{
+					t = reflist::ClassTable();
+					t.maps = r.maps;
+					t.cells.assign(t.maps.size(), std::vector<std::string>());
+				}
+				win->guientries["ref_mode"].setValue(job_ref_mode_options[1]);
+				win->guientries["fn_ref"].setValue(r.maps[0]);
+			}
+		}
+		memory = t.maps.empty() ? reflist::ClassTable() : reflist::resizeTable(t, (int)t.maps.size(), allTableLabels(), defaults());
+		table->setTable(reflist::ClassTable(), shown());  // nothing of the job shown before
+		if (perClass() && !memory.maps.empty())
+			setClasses((int)memory.maps.size());
+	}
+
+	// "Fill from STAR file...": the maps and settings of a STAR file
+	void fillFromStar()
+	{
+		JobOption star("STAR file:", std::string(""), "STAR files (*.star)", ".", "");
+		const std::vector<std::string> names = chooseFiles(star, false);
+		if (names.empty())
+			return;
+		reflist::ClassTable given;
+		std::string error;
+		if (!reflist::readTable(names[0], given, error))
+		{
+			fl_message("%s", error.c_str());
 			return;
 		}
+		if (given.maps.empty())
+		{
+			fl_message("%s lists no maps.", names[0].c_str());
+			return;
+		}
+		memory = reflist::resizeTable(given, (int)given.maps.size(), allTableLabels(), defaults());
+		table->setTable(reflist::ClassTable(), shown());
+		setClasses((int)memory.maps.size());
+		showTable();
 	}
-	ref.setValue(field);
-	if (ref.on_change)
-		ref.on_change();
+
+	// The Browse button of a row: several maps fill the rows from this one on (adding classes if needed)
+	void browse(int row, bool mask)
+	{
+		const std::vector<std::string> names = chooseFiles(win->guientries[mask ? "fn_mask" : "fn_ref"].joboption, !mask);
+		if (names.empty())
+			return;
+		remember();
+		const int need = row + (mask ? 1 : (int)names.size());
+		if ((int)memory.maps.size() < need)
+			memory = reflist::resizeTable(memory, need, allTableLabels(), defaults());
+		if (mask)
+			memory.cells[row][memory.column(MASK_LABEL)] = names[0];
+		else
+			for (size_t i = 0; i < names.size(); i++)
+				memory.maps[row + i] = names[i];
+		if (need > classes())
+			setClasses(need);
+		showTable();
+	}
+};
+
+// Number of classes typed: the table follows at once, without a message about half-typed numbers
+void cb_classes_typed(Fl_Widget *, void *data)
+{
+	GuiEntry *entry = static_cast<GuiEntry *>(data);
+	const int k = atoi(entry->inp->value());
+	if (k < 1)
+		return;
+	if (entry->slider)
+		entry->slider->value(k);
+	if (entry->on_change)
+		entry->on_change();
+}
+
 }
 
 // A "Choose" button in the column of the Browse buttons
@@ -616,6 +738,8 @@ void JobWindow::toggle_new_continue(bool _is_continue)
 		}
 		}
 	}
+	if (refresh)
+		refresh(false);
 }
 
 void JobWindow::updateScratchDirectoryForNewJob(int job_counter)
@@ -659,6 +783,8 @@ void JobWindow::updateMyGui()
 
 		(it->second).setValue((myjob.joboptions[it->first]).value);
 	}
+	if (refresh)
+		refresh(true);
 }
 
 // Update all values in the Fl_Input entries into the corresponding job_options
@@ -2087,17 +2213,25 @@ void JobWindow::initialiseClass3DWindow()
 
     current_y += STEPY/2;
 
+	// How the classes start: K classes from one map, or each class from its own map (the table below)
+	place("ref_mode", TOGGLE_DEACTIVATE);
+	place("nr_classes", TOGGLE_DEACTIVATE);
     place("fn_ref", TOGGLE_DEACTIVATE);
+	auto ui = std::make_shared<PerClassUi>();
+	ui->win = this;
 	{
-		// Per-class symmetry, helical parameters, tube diameters and masks, written beside the maps
-		Fl_Button *b = new Fl_Button(XCOL2, current_y, WCOL2, STEPY, "Per-class settings...");
-		b->color(GUI_BUTTON_COLOR);
-		b->labelsize(ENTRY_FONTSIZE);
-		b->callback(cb_class_settings, this);
-		guientries["fn_ref"].extra = b;  // greyed out with the field (continue, finished jobs)
-		b->tooltip("A table with one row per reference map: its own symmetry, helical twist and rise with their search ranges, "
-		           "tube diameters and mask. Saved as the STAR file given as reference map(s).");
-		current_y += STEPY + 2;
+		// in the row of the reference field, which the table replaces
+		const int ref_y = guientries["fn_ref"].inp->y();
+		ui->maps_label = new Fl_Box(XCOL1, ref_y, WCOL1, STEPY, "Reference maps:");
+		ui->maps_label->labelsize(ENTRY_FONTSIZE);
+		ui->maps_label->align(FL_ALIGN_INSIDE | FL_ALIGN_RIGHT);
+		ui->fill = new Fl_Button(XCOL2, ref_y, WCOL2, STEPY, "Fill from STAR file...");
+		ui->fill->color(GUI_BUTTON_COLOR);
+		ui->fill->labelsize(ENTRY_FONTSIZE);
+		ui->fill->tooltip("Fill the table below with the maps and per-class settings of a STAR file with a column _rlnReferenceImage, "
+		                  "such as run_it025_model.star of an earlier job; the number of classes becomes its number of rows");
+		// (ui lives as long as the window: refresh holds it)
+		ui->fill->callback([](Fl_Widget *, void *data) { static_cast<PerClassUi *>(data)->fillFromStar(); }, ui.get());
 	}
     place("fn_mask");
 
@@ -2109,10 +2243,32 @@ void JobWindow::initialiseClass3DWindow()
     place("auto_mask_start_res");
     group_auto_mask->end();
     guientries["do_auto_mask"].cb_menu_i(); // to make default effective
+	ui->auto_mask_group = group_auto_mask;
 
 	current_y += STEPY/2;
 
 	place("fn_cont", TOGGLE_REACTIVATE);
+
+	current_y += STEPY/2;
+
+	// The table of one map per class fills the rest of the tab; its job option is the text behind it
+	{
+		const int table_y = current_y;
+		place("ref_table", TOGGLE_DEACTIVATE);
+		current_y = table_y;
+		guientries["ref_table"].inp->hide();
+		const int left = XCOL1 - 5, bottom = tabs->y() + tabs->h() - 5;
+		reference_table = new ReferenceTable(left, table_y, XCOL5 + WCOL5 - left, bottom - table_y);
+		guientries["ref_table"].extra = reference_table;  // greyed out when continuing
+		ui->table = reference_table;
+		ReferenceTable *table = reference_table;
+		table->on_edit = [this, table]()
+		{
+			guientries["ref_table"].inp->value(reflist::encodeTable(table->table()).c_str());
+		};
+		PerClassUi *p = ui.get();
+		table->on_browse = [p](int row, bool mask) { p->browse(row, mask); };
+	}
 
 	tab1->end();
 	tab2->begin();
@@ -2158,7 +2314,7 @@ void JobWindow::initialiseClass3DWindow()
 	group2 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group2->end();
 
-	place("nr_classes", TOGGLE_DEACTIVATE);
+	// (the number of classes is on the I/O tab)
 	place("tau_fudge");
 
 	// Add a little spacer
@@ -2359,36 +2515,41 @@ void JobWindow::initialiseClass3DWindow()
 
 	tab7->end();
 
-	// Several reference maps: one class per map, so 'Number of classes' follows the list and is greyed
-	GuiEntry *ref = &guientries["fn_ref"];
-	GuiEntry *classes = &guientries["nr_classes"];
-	auto several = std::make_shared<bool>(false);
-	ref->on_change = [ref, classes, several]()
+	// One reference per class: the mode decides which fields are shown and greyed out; K, helical
+	// reconstruction and symmetry searches decide the rows and columns of the table
+	PerClassUi *p = ui.get();
+	GuiEntry &classes = guientries["nr_classes"];
+	classes.on_change = [p]()
 	{
-		reflist::Resolved r;
-		std::string error;
-		if (!reflist::resolve(ref->inp->value(), r, error))
-			return; // reported when the job is run
-		const bool now = r.is_list || (r.is_star && r.star_readable);
-		if (now)
-			classes->setValue(integerToString((int)r.maps.size()));
-		if (now != *several)
-			classes->deactivate(now);
-		*several = now;
+		if (p->hold || !p->perClass())
+			return;
+		p->remember();
+		p->showTable();
 	};
-	ref->inp->callback(GuiEntry::cb_changed, ref);
-	ref->inp->when(FL_WHEN_CHANGED);
-	ref->setHint([ref]()
+	classes.inp->callback(cb_classes_typed, &classes);
+	classes.inp->when(FL_WHEN_CHANGED);
+	guientries["ref_mode"].on_pick = [p]() { p->apply(); };
+	if (guientries["ref_mode"].menu == NULL)  // the Scheduler's window types it
 	{
-		reflist::Resolved r;
-		std::string error;
-		if (!reflist::resolve(ref->inp->value(), r, error) || r.maps.size() < 2)
-			return std::string();
-		std::string text = integerToString((int)r.maps.size()) + " classes, one from each map:";
-		for (const std::string &m : r.maps)
-			text += "\n" + m;
-		return text;
-	});
+		guientries["ref_mode"].on_change = [p]() { p->apply(); };
+		guientries["ref_mode"].inp->callback(GuiEntry::cb_changed, &guientries["ref_mode"]);
+		guientries["ref_mode"].inp->when(FL_WHEN_CHANGED);
+	}
+	for (const char *key : {"do_helix", "do_local_search_helical_symmetry"})
+		guientries[key].on_pick = [p]()
+		{
+			if (!p->perClass())
+				return;
+			p->remember();
+			p->showTable();
+		};
+	refresh = [ui](bool loaded)
+	{
+		if (loaded)
+			ui->load();
+		ui->apply();
+	};
+	refresh(false);
 }
 
 void JobWindow::initialiseAutorefineWindow()

@@ -203,6 +203,12 @@ static const std::vector<std::string> job_blush_version_options{
         "amy-v1.0"
 };
 
+// Class3D: how the classes start (the second: the table of job option "ref_table")
+static const std::vector<std::string> job_ref_mode_options{
+        "One reference, K classes",
+        "One reference per class"
+};
+
 // To have a line on the GUI to change the minimum number of dedicated in a job
 static bool do_allow_change_minimum_dedicated;
 

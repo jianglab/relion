@@ -5008,14 +5008,22 @@ from which you want to continue a previous run. \
 Note that the Output rootname of the continued run and the rootname of the previous run cannot be the same. \
 If they are the same, the program will automatically add a '_ctX' to the output rootname, \
 with X being the iteration from which one continues the previous run.");
-	joboptions["fn_ref"] = JobOption("Reference map(s):", LABEL_MAP_CPIPE, 1, "", "Image Files (*.{spi,vol,mrc})", "A 3D map in MRC/Spider format. \
+	joboptions["ref_mode"] = JobOption("Reference mode:", job_ref_mode_options, 0, "How the classes start.\n\
+\n\
+" + job_ref_mode_options[0] + ": all K classes start from the one reference map below; they are made different by dividing the data into random subsets in the first iteration (the usual 3D classification).\n\
+\n\
+" + job_ref_mode_options[1] + ": every class starts from its own map, chosen in the table at the bottom of this tab, which has one row per class (K rows). \
+Each row also has the class's symmetry and mask and, for helical reconstruction, its helical twist and rise, tube diameters and (with local searches of symmetry) twist and rise search ranges. \
+These replace the fields on the other tabs that hold the same settings for the whole job, which are greyed out. \
+The Browse button of a map takes several maps at once and puts them into consecutive rows (adding rows if needed); 'Fill from STAR file...' takes the maps and settings of a STAR file with a column _rlnReferenceImage, such as run_it025_model.star of an earlier job. \
+A mask is None, auto (an automatic mask made from the class, from the resolution given above) or a mask file. \
+All maps need the same box size and pixel size. When the job is run, RELION writes the table as a STAR file in the References directory and gives it to relion_refine as --ref; \
+a setting that is the same for every class is passed as the usual option instead. A symmetry that differs between classes is applied when reconstructing each class, while the orientations are searched in C1.");
+	joboptions["ref_table"] = JobOption("Per-class references:", std::string(""), "");
+	joboptions["fn_ref"] = JobOption("Reference map:", LABEL_MAP_CPIPE, 1, "", "Image Files (*.{spi,vol,mrc})", "A 3D map in MRC/Spider format. \
 	Make sure this map has the same dimensions and the same pixel size as your input images, or specify that one can resize the reference if needed.\n\
 \n\
-To start the classes from different maps, select several maps in the Browse window (Ctrl- or Shift-click), or press the + button to add maps to the ones already listed. \
-Each map becomes one class, so the number of classes is the number of maps and 'Number of classes' on the Optimisation tab is not used. \
-All maps need the same box size and pixel size. RELION writes the list as a STAR file in the References directory when the job is run. \
-A STAR file with a column _rlnReferenceImage, such as run_it025_model.star of an earlier job, can also be given here instead of a map.");
-	joboptions["fn_ref"].multiple_files = true;
+To start each class from its own map, choose '" + job_ref_mode_options[1] + "' as Reference mode.");
 	joboptions["do_auto_mask"] = JobOption("Use automatic masks?", false, "If set to Yes (and no reference mask is given), then once the resolution of a class is better than the value below, \
 its reference is masked at every iteration with a mask made automatically from the reference itself, as trueFSC in helicon: \
 low-pass filtered, binarised at Otsu's threshold, the regions that hold its brightest voxels kept, and a raised-cosine soft edge of 3 times the resolution of the class added. \
@@ -5072,10 +5080,9 @@ only be performed from the first peak of each CTF onward. This can be useful if 
 Still, in general using higher amplitude contrast on the CTFs (e.g. 10-20%) often yields better results. \
 Therefore, this option is not generally recommended: try increasing amplitude contrast (in your input STAR file) first!");
 
-	joboptions["nr_classes"] = JobOption("Number of classes:", 1, 1, 50, 1, "The number of classes (K) for a multi-reference refinement. \
-These classes will be made in an unsupervised manner from a single reference by division of the data into random subsets during the first iteration.\n\
-\n\
-If the Reference map field lists several maps (or a STAR file of maps), each map is one class and this number is not used.");
+	joboptions["nr_classes"] = JobOption("Number of classes (K):", 1, 1, 50, 1, "The number of classes (K) for a multi-reference refinement. \
+With '" + job_ref_mode_options[0] + "' these classes will be made in an unsupervised manner from a single reference by division of the data into random subsets during the first iteration. \
+With '" + job_ref_mode_options[1] + "' it is the number of rows of the table of reference maps.");
 	float default_T = (is_tomo) ? 1 : 4;
     joboptions["tau_fudge"] = JobOption("Regularisation parameter T:", default_T , 0.1, 10, 0.1, "Bayes law strictly determines the relative weight between \
 the contribution of the experimental data and the prior. However, in practice one may need to adjust this weight to put slightly more weight on \
@@ -5288,15 +5295,39 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	int my_classes = (int)joboptions["nr_classes"].getNumber(error_message);
 	if (error_message != "") return false;
 
-	// Several reference maps (a list, or a STAR file): one class per map, whatever K says
+	// One reference per class: the table decides the maps and the job-wide options it covers
+	const bool per_class = joboptions["ref_mode"].getString() == job_ref_mode_options[1];
+	reflist::PerClassRefs table_refs;
 	reflist::Resolved refs;
-	if (!reflist::resolve(joboptions["fn_ref"].getString(), refs, error_message))
+	if (per_class)
+	{
+		if (!is_continue && !reflist::perClassRefs(joboptions["ref_table"].getString(), my_classes,
+		        joboptions["do_helix"].getBoolean(), joboptions["do_local_search_helical_symmetry"].getBoolean(), table_refs, error_message))
+		{
+			error_message = "ERROR: " + error_message;
+			return false;
+		}
+		refs.maps = table_refs.table.maps;
+		refs.ref_argument = reflist::tableStarNameFor(table_refs.table);
+	}
+	// Otherwise the field can still hold several maps (a list, or a STAR file, as saved by earlier versions):
+	// one class per map, whatever K says
+	else if (!reflist::resolve(joboptions["fn_ref"].getString(), refs, error_message))
 	{
 		error_message = "ERROR: " + error_message;
 		return false;
 	}
-	if (refs.is_list || (refs.is_star && refs.star_readable))
+	else if (refs.is_list || (refs.is_star && refs.star_readable))
 		my_classes = (int)refs.maps.size();
+	// A job-wide option, or the value the per-class table gives it
+	auto option = [&](const std::string &key) {
+		auto it = table_refs.job.find(key);
+		return it != table_refs.job.end() ? it->second : joboptions[key].getString();
+	};
+	auto number = [&](const std::string &key) {
+		auto it = table_refs.job.find(key);
+		return it != table_refs.job.end() ? textToFloat(it->second) : joboptions[key].getNumber(error_message);
+	};
 
 	outputNodes = getOutputNodesRefine(outputname + fn_run, "Class3D", my_iter, my_classes, 3, 1, is_tomo);
 
@@ -5333,13 +5364,27 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
             }
         }
 
-        if (joboptions["fn_ref"].getString() == "")
+        if (!per_class && joboptions["fn_ref"].getString() == "")
         {
             error_message = "ERROR: empty field for reference.";
             return false;
         }
         else
 		{
+			if (per_class && do_makedir)
+			{
+				// One map may start several classes: check each once
+				std::vector<std::string> unique;
+				for (const std::string &map : refs.maps)
+					if (std::find(unique.begin(), unique.end(), map) == unique.end())
+						unique.push_back(map);
+				if (!reflist::checkMaps(unique, error_message) ||
+				    !reflist::writeTable(refs.ref_argument, table_refs.table, error_message))
+				{
+					error_message = "ERROR: " + error_message;
+					return false;
+				}
+			}
 			if (refs.is_list && do_makedir)
 			{
 				if (!reflist::checkMaps(refs.maps, error_message) ||
@@ -5366,8 +5411,12 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 			if (refs.ref_argument != "None")
             {
 				// One input node per map; a STAR file that cannot be read yet only registers itself
+				std::vector<std::string> registered;
 				for (const std::string &map : refs.maps)
 				{
+					if (std::find(registered.begin(), registered.end(), map) != registered.end())
+						continue;
+					registered.push_back(map);
 					Node node(map, joboptions["fn_ref"].node_type);
 					inputNodes.push_back(node);
 				}
@@ -5376,6 +5425,13 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 					Node node(refs.ref_argument, joboptions["fn_ref"].node_type);
 					inputNodes.push_back(node);
 				}
+				// Masks of single classes (one mask for all is the reference mask below)
+				if (table_refs.table.column("rlnSolventMaskName") >= 0)
+					for (const std::string &mask : table_refs.mask_files)
+					{
+						Node node(mask, joboptions["fn_mask"].node_type);
+						inputNodes.push_back(node);
+					}
             }
 			if (!joboptions["ref_correct_greyscale"].getBoolean())
 				command += " --firstiter_cc";
@@ -5460,16 +5516,18 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	else
 		command += " --dont_align_classes ";
 
-	if (joboptions["fn_mask"].getString().length() > 0)
+	// A continuation keeps the masks of each class from the run it continues
+	const bool masks = !(per_class && is_continue);
+	if (masks && option("fn_mask").length() > 0)
 	{
-		command += " --solvent_mask " + joboptions["fn_mask"].getString();
-		Node node(joboptions["fn_mask"].getString(), joboptions["fn_mask"].node_type);
+		command += " --solvent_mask " + option("fn_mask");
+		Node node(option("fn_mask"), joboptions["fn_mask"].node_type);
 		inputNodes.push_back(node);
 	}
 
-	if (joboptions["do_auto_mask"].getBoolean())
+	if (masks && option("do_auto_mask") == "Yes")
 	{
-		if (joboptions["fn_mask"].getString().length() > 0)
+		if (option("fn_mask").length() > 0)
 		{
 			error_message = "ERROR: give either a reference mask or use automatic masks, not both.";
 			return false;
@@ -5521,7 +5579,7 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 	// Provide symmetry, and always do norm and scale correction
 	if (!is_continue)
 	{
-		command += " --sym " + joboptions["sym_name"].getString();
+		command += " --sym " + option("sym_name");
 		command += " --norm --scale ";
 	}
 
@@ -5531,16 +5589,16 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 
 		command += " --helix";
 
-		float inner_diam = joboptions["helical_tube_inner_diameter"].getNumber(error_message);
+		float inner_diam = number("helical_tube_inner_diameter");
 		if (error_message != "") return false;
 		if (inner_diam > 0.)
-			command += " --helical_inner_diameter " + joboptions["helical_tube_inner_diameter"].getString();
+			command += " --helical_inner_diameter " + option("helical_tube_inner_diameter");
 
-		command += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
+		command += " --helical_outer_diameter " + option("helical_tube_outer_diameter");
 		command += joboptions["helical_cylindrical_mask"].getBoolean() ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
         command += " --helical_nr_asu " + joboptions["helical_nr_asu"].getString();
-        command += " --helical_twist_initial " + joboptions["helical_twist_initial"].getString();
-        command += " --helical_rise_initial " + joboptions["helical_rise_initial"].getString();
+        command += " --helical_twist_initial " + option("helical_twist_initial");
+        command += " --helical_rise_initial " + option("helical_rise_initial");
 
         float myz = joboptions["helical_z_percentage"].getNumber(error_message) / 100.;
         if (error_message != "") return false;
@@ -5549,16 +5607,16 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
         if (joboptions["do_local_search_helical_symmetry"].getBoolean())
         {
             command += " --helical_symmetry_search";
-            command += " --helical_twist_min " + joboptions["helical_twist_min"].getString();
-            command += " --helical_twist_max " + joboptions["helical_twist_max"].getString();
+            command += " --helical_twist_min " + option("helical_twist_min");
+            command += " --helical_twist_max " + option("helical_twist_max");
 
             float twist_inistep = joboptions["helical_twist_inistep"].getNumber(error_message);
             if (error_message != "") return false;
             if (twist_inistep > 0.)
                 command += " --helical_twist_inistep " + joboptions["helical_twist_inistep"].getString();
 
-            command += " --helical_rise_min " + joboptions["helical_rise_min"].getString();
-            command += " --helical_rise_max " + joboptions["helical_rise_max"].getString();
+            command += " --helical_rise_min " + option("helical_rise_min");
+            command += " --helical_rise_max " + option("helical_rise_max");
 
             float rise_inistep = joboptions["helical_rise_inistep"].getNumber(error_message);
             if (error_message != "") return false;

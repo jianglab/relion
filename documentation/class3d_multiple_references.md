@@ -2,7 +2,8 @@
 
 `relion_refine --ref maps.star` accepts a STAR file that lists several maps, and
 starts each class from its own map. This was always possible but hidden: the GUI
-only took one map. The Class3D job window now accepts several maps.
+only took one map. The Class3D job window now has a mode with one reference map
+per class, chosen in a table.
 
 ## What `relion_refine` does with a STAR file (checked with real runs)
 
@@ -22,36 +23,65 @@ only took one map. The Class3D job window now accepts several maps.
 
 ## GUI
 
-Field **Reference map(s)** on the I/O tab of Class3D:
+The I/O tab of Class3D starts with **Reference mode** and **Number of classes (K)**
+(moved here from the Optimisation tab):
 
-- **Browse** opens a chooser that selects several files (Ctrl or Shift click).
-  The names go into the field, separated by commas.
-- **+** (at the end of the row) adds the selected files to the ones already
-  listed. A map is listed once, however often it is added.
-- The field can also be typed by hand: `a.mrc,b.mrc,c.mrc`. One path (or a STAR
-  file) works as before.
-- With two or more maps, **Number of classes** is set to the number of maps and
-  greyed out. A tooltip on the field lists the maps.
+- **One reference, K classes** (the default): the usual 3D classification, with
+  one map in **Reference map**.
+- **One reference per class**: the reference field gives way to a table at the
+  bottom of the tab with K rows, one per class. Changing K adds or removes rows
+  at once; rows taken away are remembered while the window is open, so making K
+  larger again brings them back. A new row has no map and the settings of the
+  row above it (the first row: the job-wide fields, and the map of the
+  reference field).
+  - Columns: **Reference map**, **Symmetry**, **Mask** (`None`, `auto` or a mask
+    file); with helical reconstruction also **Twist**, **Rise**, **Tube inner**,
+    **Tube outer**; with local searches of helical symmetry also **Twist min/max**
+    and **Rise min/max**. Each map and mask has a **...** Browse button; the map's
+    chooser takes several maps, which fill the rows from that one on (K grows if
+    needed).
+  - **Fill from STAR file...** (in the row of the reference field) takes the maps
+    and per-class settings of a STAR file with `_rlnReferenceImage`, such as
+    `run_it025_model.star` of an earlier job; K becomes its number of rows.
+  - The job-wide fields that the table holds per class are greyed out:
+    Reference mask and Use automatic masks (I/O), Symmetry (Reference), tube
+    diameters, initial twist and rise, and the twist and rise search ranges (Helix).
+    "Automatic masks from (A)" stays active for the classes marked `auto`.
+  - The table is kept in job option `ref_table` as text
+    (`rlnReferenceImage|<label>|...;<map>|<cell>|...`), so it is saved with the
+    job and comes back when the job is loaded.
+- A job of an earlier version with several maps (or a STAR file) in the
+  reference field is shown in the second mode when loaded.
 
 ## What the job does
 
 Code: `src/reference_list.{h,cpp}` (namespace `reflist`, no FLTK), used by
-`RelionJob::getCommandsClass3DJob()` and by the GUI entry.
+`RelionJob::getCommandsClass3DJob()`; the table widget is
+`src/gui_reference_table.{h,cpp}`.
 
-- With two or more maps, the job writes `References/refs_<hash>.star` (the hash
-  is of the list, so the same list gives the same file, and the file is only
-  rewritten when its content changes) and passes it as `--ref`.
-- `--K` and the output nodes use the number of maps, so the pipeline and the
+- One reference per class: K must equal the number of rows, and every row needs
+  a map. A column that is the same for every class becomes the usual option
+  (`--sym`, `--solvent_mask`/`--auto_mask`, `--helical_twist_initial`, ...) and is
+  left out of the file; a column that differs stays in the file, and the
+  job-wide option gets a value that covers all classes (`--sym C1`, the widest
+  tube and search range, the first class's twist and rise). The job writes
+  `References/refs_<hash>.star` (the hash is of the content, so the same table
+  gives the same file, and the file is only rewritten when its content changes)
+  and passes it as `--ref`.
+- `--K` and the output nodes use the number of classes, so the pipeline and the
   command agree.
-- Each map is an input node of the job; the generated STAR file is not.
+- Each map is an input node of the job (once, even if it starts several
+  classes), and so is each mask file of the table; the generated STAR file is not.
 - The file and the map checks (existence, same box size, same pixel size) are
   done only when the job is actually started (`do_makedir`), because a Scheduler
   job may name maps that a previous job has not written yet.
-- `None` inside a list, or a STAR file inside a list, is an error.
+- The reference field still accepts a comma-separated list or a STAR file of
+  maps (one class per map, whatever K says), so that jobs and Schedules saved by
+  earlier versions keep running; `None` or a STAR file inside a list is an error.
 
 Not covered: Refine3D, MultiBody, Class2D (each has its own reference field).
 
-Tests: `tests/unit/test_reference_list.cpp`, the greying and layout test in
+Tests: `tests/unit/test_reference_list.cpp`, the table, greying and layout test in
 `tests/unit/test_gui_jobwindows.cpp`.
 
 ## Per-class settings
@@ -75,12 +105,8 @@ replaces the job value for that class only; an empty or missing column means
 - The job tube is the widest of the classes (inner: the narrowest, none if any
   class has none); each class is masked and symmetrised with its own tube.
 
-GUI: **Per-class settings...** on the I/O tab of Class3D (greyed out until
-reference maps are given) opens a table with one row per map. It starts from the
-job values (and from the STAR file, if one was given), offers the twist/rise
-range columns only when local symmetry search is on (or the STAR file has
-them), and writes `References/refs_<hash>.star`. Errors name the table headings
-("class 1: Twist lies outside Twist min to Twist max").
+GUI: the table of **One reference per class** (above) holds these columns.
+Errors name the table headings ("class 1: Twist lies outside Twist min to Twist max").
 
 **What helped** (a test mix of three helical filament types, 14,000 segments each,
 `--keep_full_filaments`): starting each class from its own twist raised plain

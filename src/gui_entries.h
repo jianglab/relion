@@ -164,6 +164,10 @@ static Fl_Menu_Item bool_options[] = {
 // A text to Float converter that raises an error window.
 float fltkTextToFloat(const char* str);
 
+// The file chooser of a file or input-node option (several files if `several`): the chosen names relative
+// to the project, without .Nodes/; empty if cancelled
+std::vector<std::string> chooseFiles(const JobOption &option, bool several);
+
 /** This class displays opens an additional window with (help) text
  *
  */
@@ -294,8 +298,8 @@ public:
     // Tooltip of the input field (and slider), worked out each time the mouse enters it
     void setHint(std::function<std::string()> hint);
 
-    // Called whenever the value changes: typed (with cb_changed as the input's callback),
-    // browsed or set
+    // Called whenever the value changes: typed (with cb_changed as the input's callback; a number
+    // with Enter), slid, browsed or set
     std::function<void()> on_change;
     // Called only when the user picks a menu item (not when a job is loaded)
     std::function<void()> on_pick;

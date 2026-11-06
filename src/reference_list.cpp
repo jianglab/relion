@@ -482,4 +482,237 @@ bool writeTable(const std::string& fn_star, const ClassTable& table, std::string
 	return writeText(fn_star, tableText(table), error);
 }
 
+namespace {
+
+const char* const MAP_LABEL = "rlnReferenceImage";
+
+// Split at `sep`, keeping empty fields ("a||" -> {"a", "", ""})
+std::vector<std::string> splitKeep(const std::string& s, char sep)
+{
+	std::vector<std::string> out;
+	size_t start = 0;
+	for (;;)
+	{
+		const size_t end = s.find(sep, start);
+		out.push_back(s.substr(start, end == std::string::npos ? std::string::npos : end - start));
+		if (end == std::string::npos) return out;
+		start = end + 1;
+	}
+}
+
+std::string cellText(const std::string& v)
+{
+	std::string t = trim(v);
+	t.erase(std::remove_if(t.begin(), t.end(), [](char c) { return c == '|' || c == ';'; }), t.end());
+	return t;
+}
+
+// The other end of a search range, and the centre it is laid around
+struct Range { const char* label; const char* centre; const char* lo; const char* hi; double sign; };
+const Range RANGES[] = {
+	{"rlnHelicalTwistMin", "rlnHelicalTwist", "rlnHelicalTwistMin", "rlnHelicalTwistMax", -1.},
+	{"rlnHelicalTwistMax", "rlnHelicalTwist", "rlnHelicalTwistMin", "rlnHelicalTwistMax", 1.},
+	{"rlnHelicalRiseMin", "rlnHelicalRise", "rlnHelicalRiseMin", "rlnHelicalRiseMax", -1.},
+	{"rlnHelicalRiseMax", "rlnHelicalRise", "rlnHelicalRiseMin", "rlnHelicalRiseMax", 1.},
+};
+
+std::string numberText(double x)
+{
+	char s[32];
+	snprintf(s, sizeof(s), "%.10g", x);
+	return s;
+}
+
+}
+
+std::string encodeTable(const ClassTable& table)
+{
+	if (table.maps.empty()) return "";
+	std::string text = MAP_LABEL;
+	for (const std::string& l : table.labels) text += "|" + l;
+	for (size_t r = 0; r < table.maps.size(); r++)
+	{
+		text += ";" + cellText(table.maps[r]);
+		for (const std::string& v : table.cells[r]) text += "|" + cellText(v);
+	}
+	return text;
+}
+
+bool decodeTable(const std::string& text, ClassTable& table, std::string& error)
+{
+	table = ClassTable();
+	if (trim(text).empty()) return true;
+	const std::vector<std::string> rows = splitKeep(trim(text), ';');
+	const std::vector<std::string> header = splitKeep(rows[0], '|');
+	if (header[0] != MAP_LABEL)
+	{
+		error = "the table of reference maps does not start with " + std::string(MAP_LABEL);
+		return false;
+	}
+	table.labels.assign(header.begin() + 1, header.end());
+	for (size_t r = 1; r < rows.size(); r++)
+	{
+		std::vector<std::string> cells = splitKeep(rows[r], '|');
+		if (cells.size() != header.size())
+		{
+			error = "row " + std::to_string(r) + " of the table of reference maps has " + std::to_string(cells.size()) +
+			        " cells instead of " + std::to_string(header.size());
+			table = ClassTable();
+			return false;
+		}
+		table.maps.push_back(trim(cells[0]));
+		table.cells.push_back(std::vector<std::string>());
+		for (size_t c = 1; c < cells.size(); c++) table.cells.back().push_back(trim(cells[c]));
+	}
+	return true;
+}
+
+ClassTable resizeTable(const ClassTable& from, int nr_classes, const std::vector<std::string>& labels,
+                       const std::map<std::string, std::string>& defaults)
+{
+	ClassTable t;
+	t.labels = labels;
+	auto deflt = [&](const std::string& label) {
+		auto d = defaults.find(label);
+		return d != defaults.end() ? d->second : std::string();
+	};
+	auto isRange = [](const std::string& label) {
+		for (const Range& g : RANGES) if (label == g.label) return true;
+		return false;
+	};
+	for (int r = 0; r < nr_classes; r++)
+	{
+		const bool kept = r < (int)from.maps.size();
+		t.maps.push_back(kept ? from.maps[r] : "");
+		std::vector<std::string> row(labels.size());
+		std::vector<bool> fill(labels.size(), false);
+		for (size_t c = 0; c < labels.size(); c++)
+		{
+			const int fc = from.column(labels[c]);
+			if (kept && fc >= 0)
+				row[c] = from.cells[r][fc];
+			else if (!kept && r > 0)
+				row[c] = t.cells[r - 1][c];  // as the row above
+			else
+				fill[c] = true;
+		}
+		for (size_t c = 0; c < labels.size(); c++)
+			if (fill[c] && !isRange(labels[c])) row[c] = deflt(labels[c]);
+		for (size_t c = 0; c < labels.size(); c++)
+		{
+			if (!fill[c] || !isRange(labels[c])) continue;
+			for (const Range& g : RANGES)
+			{
+				if (labels[c] != g.label) continue;
+				double centre, lo, hi;
+				const int cc = (int)(std::find(labels.begin(), labels.end(), g.centre) - labels.begin());
+				if (cc < (int)labels.size() && toNumber(row[cc], centre) && toNumber(deflt(g.lo), lo) && toNumber(deflt(g.hi), hi))
+					row[c] = numberText(centre + g.sign * 0.5 * std::fabs(hi - lo));
+				else
+					row[c] = deflt(labels[c]);
+			}
+		}
+		t.cells.push_back(row);
+	}
+	return t;
+}
+
+bool perClassRefs(const std::string& encoded, int nr_classes, bool helical, bool symmetry_search,
+                  PerClassRefs& result, std::string& error)
+{
+	result = PerClassRefs();
+	ClassTable all;
+	if (!decodeTable(encoded, all, error)) return false;
+	if (all.maps.empty())
+	{
+		error = "the table of reference maps is empty.";
+		return false;
+	}
+	if ((int)all.maps.size() != nr_classes)
+	{
+		error = "the table of reference maps has " + std::to_string(all.maps.size()) + " rows for " +
+		        std::to_string(nr_classes) + " classes.";
+		return false;
+	}
+	for (size_t r = 0; r < all.maps.size(); r++)
+	{
+		const std::string& m = all.maps[r];
+		const std::string where = "class " + std::to_string(r + 1) + ": ";
+		if (m.empty() || m == "None")
+		{
+			error = where + "give its reference map.";
+			return false;
+		}
+		if (endsWith(m, ".star"))
+		{
+			error = where + "a STAR file (" + m + ") cannot be the map of one class.";
+			return false;
+		}
+	}
+
+	// The columns used, in the order of tableColumns()
+	std::vector<std::string> used;
+	for (const TableColumn& c : tableColumns())
+	{
+		const std::string l = c.label;
+		const bool range = l.find("Min") != std::string::npos || l.find("Max") != std::string::npos;
+		if (all.column(l) >= 0 && (!c.helical || (helical && (!range || symmetry_search))))
+			used.push_back(l);
+	}
+	ClassTable t;
+	t.maps = all.maps;
+	t.labels = used;
+	for (size_t r = 0; r < all.maps.size(); r++)
+	{
+		t.cells.push_back(std::vector<std::string>());
+		for (const std::string& l : used) t.cells.back().push_back(all.cells[r][all.column(l)]);
+	}
+	if (!checkTable(t, error)) return false;
+
+	// Same for every class: a job-wide value, and no column
+	for (int c = (int)t.labels.size() - 1; c >= 0; c--)
+	{
+		const std::string l = t.labels[c];
+		const char* option = "";
+		for (const TableColumn& tc : tableColumns())
+			if (l == tc.label) option = tc.job_option;
+		bool same = true;
+		for (const auto& row : t.cells) same = same && sameValue(row[c], t.cells[0][c]);
+		std::vector<double> x;
+		double v;
+		for (const auto& row : t.cells) if (toNumber(row[c], v)) x.push_back(v);
+		if (l == "rlnSolventMaskName")
+		{
+			bool any_auto = false;
+			for (const auto& row : t.cells)
+			{
+				const std::string m = trim(row[c]);
+				any_auto = any_auto || m == "auto";
+				if (m != "None" && m != "auto" && std::find(result.mask_files.begin(), result.mask_files.end(), m) == result.mask_files.end())
+					result.mask_files.push_back(m);
+			}
+			const std::string first = trim(t.cells[0][c]);
+			result.job["fn_mask"] = (same && first != "None" && first != "auto") ? first : "";
+			result.job["do_auto_mask"] = any_auto ? "Yes" : "No";
+		}
+		else if (same)
+			result.job[option] = trim(t.cells[0][c]);
+		else if (l == "rlnSymmetryGroup")
+			result.job[option] = "C1";  // the orientations of all classes are searched together
+		else if (l == "rlnHelicalMaskTubeOuterDiameter" || l == "rlnHelicalTwistMax" || l == "rlnHelicalRiseMax")
+			result.job[option] = numberText(*std::max_element(x.begin(), x.end()));
+		else if (l == "rlnHelicalMaskTubeInnerDiameter" || l == "rlnHelicalTwistMin" || l == "rlnHelicalRiseMin")
+			result.job[option] = numberText(*std::min_element(x.begin(), x.end()));
+		else
+			result.job[option] = trim(t.cells[0][c]);
+		if (same)
+		{
+			t.labels.erase(t.labels.begin() + c);
+			for (auto& row : t.cells) row.erase(row.begin() + c);
+		}
+	}
+	result.table = t;
+	return true;
+}
+
 } // namespace reflist

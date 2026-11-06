@@ -375,63 +375,27 @@ void GuiEntry::setBrowsed(const std::vector<std::string> &names, bool append)
 		on_change();
 }
 
-void GuiEntry::cb_browse_i(bool append)
+std::vector<std::string> chooseFiles(const JobOption &option, bool several)
 {
-
 	Fl::scheme("gtk+");
-	Fl_File_Chooser * G_chooser = new Fl_File_Chooser("", joboption.pattern.c_str(),
-			joboption.multiple_files ? Fl_File_Chooser::MULTI : Fl_File_Chooser::SINGLE, "");
+	Fl_File_Chooser * G_chooser = new Fl_File_Chooser("", option.pattern.c_str(),
+			several ? Fl_File_Chooser::MULTI : Fl_File_Chooser::SINGLE, "");
 
-	FileName mydir = joboption.directory;
-    mydir.replaceAllSubstrings("CURRENT_ODIR", current_browse_directory);
-    G_chooser->directory(mydir.c_str());
-	G_chooser->color(GUI_BACKGROUND_COLOR);
-	G_chooser->show();
-
-	// Block until user picks something.
-	//     (The other way to do this is to use a callback())
-	//
-	while(G_chooser->shown()) {
-		Fl::wait();
-	}
-
-	// Print the results
-	if ( G_chooser->value() == NULL ) {
-		//fprintf(stderr, "(User hit 'Cancel')\n");
-		return;
-	}
-
-	std::vector<std::string> names;
-	const int nr_chosen = joboption.multiple_files ? G_chooser->count() : 1;
-	for (int i = 1; i <= nr_chosen; i++)
+	// An input node is chosen among the .Nodes/type/ links of the pipeline
+	const bool node = option.joboption_type == JOBOPTION_INPUTNODE;
+	std::string fn_dir;
+	if (node)
 	{
-		char relname[FL_PATH_MAX];
-		fl_filename_relative(relname,sizeof(relname),G_chooser->value(i));
-
-		FileName fn_pre, fn_jobnr, fn_post, fn_out;
-		decomposePipelineSymlinkName(relname, fn_pre, fn_jobnr, fn_post);
-		fn_out = fn_pre + fn_jobnr + fn_post;
-		names.push_back(fn_out);
+		FileName mylabel = option.node_type;
+		fn_dir = (option.node_type_depth == 1) ?
+			".Nodes/" + mylabel.beforeFirstOf(".") : ".Nodes/" + mylabel.beforeNthOf('.', option.node_type_depth);
 	}
-	setBrowsed(names, append);
-}
-
-
-void GuiEntry::cb_browse_node(Fl_Widget* o, void* v) {
-	GuiEntry* T=(GuiEntry*)v;
-	T->cb_browse_node_i();
-}
-
-
-void GuiEntry::cb_browse_node_i(bool append) {
-	Fl::scheme("gtk+");
-	Fl_File_Chooser * G_chooser = new Fl_File_Chooser("", joboption.pattern.c_str(),
-			joboption.multiple_files ? Fl_File_Chooser::MULTI : Fl_File_Chooser::SINGLE, "");
-
-	FileName mylabel = joboption.node_type;
-    std::string fn_dir = (joboption.node_type_depth == 1) ?
-        ".Nodes/" + mylabel.beforeFirstOf(".") : ".Nodes/" + mylabel.beforeNthOf('.', joboption.node_type_depth);
-
+	else
+	{
+		FileName mydir = option.directory;
+		mydir.replaceAllSubstrings("CURRENT_ODIR", current_browse_directory);
+		fn_dir = mydir;
+	}
 	G_chooser->directory(fn_dir.c_str());
 	G_chooser->color(GUI_BACKGROUND_COLOR);
 	G_chooser->show();
@@ -443,29 +407,43 @@ void GuiEntry::cb_browse_node_i(bool append) {
 		Fl::wait();
 	}
 
-	// Print the results
-	if ( G_chooser->value() == NULL ) {
-		//fprintf(stderr, "(User hit 'Cancel')\n");
-		return;
-	}
-
 	std::vector<std::string> names;
-	const int nr_chosen = joboption.multiple_files ? G_chooser->count() : 1;
+	if ( G_chooser->value() == NULL ) // Cancel
+		return names;
+
+	const int nr_chosen = several ? G_chooser->count() : 1;
 	for (int i = 1; i <= nr_chosen; i++)
 	{
 		char relname[FL_PATH_MAX];
 		fl_filename_relative(relname,sizeof(relname),G_chooser->value(i));
 
+		std::string name = relname;
 		// Get rid of the .Nodes/type/ directory-name again
-		std::string replace = std::string(relname);
-		std::string replace2 = (std::string::npos == replace.find(fn_dir.c_str())) ? replace : replace.substr(fn_dir.length()+1, replace.length());
+		if (node && name.find(fn_dir) != std::string::npos)
+			name = name.substr(fn_dir.length()+1);
 
 		FileName fn_pre, fn_jobnr, fn_post, fn_out;
-		decomposePipelineSymlinkName(replace2, fn_pre, fn_jobnr, fn_post);
+		decomposePipelineSymlinkName(name, fn_pre, fn_jobnr, fn_post);
 		fn_out = fn_pre + fn_jobnr + fn_post;
 		names.push_back(fn_out);
 	}
-	setBrowsed(names, append);
+	return names;
+}
+
+void GuiEntry::cb_browse_i(bool append)
+{
+	setBrowsed(chooseFiles(joboption, joboption.multiple_files), append);
+}
+
+
+void GuiEntry::cb_browse_node(Fl_Widget* o, void* v) {
+	GuiEntry* T=(GuiEntry*)v;
+	T->cb_browse_node_i();
+}
+
+
+void GuiEntry::cb_browse_node_i(bool append) {
+	setBrowsed(chooseFiles(joboption, joboption.multiple_files), append);
 }
 
 void GuiEntry::cb_menu(Fl_Widget* o, void* v) {
@@ -518,6 +496,8 @@ void GuiEntry::cb_slider(Fl_Widget* o, void* v) {
 
 	GuiEntry* T=(GuiEntry*)v;
 	T->cb_slider_i();
+	if (T->on_change)
+		T->on_change();
 }
 
 
@@ -537,6 +517,8 @@ void GuiEntry::cb_slider_i() {
 void GuiEntry::cb_input(Fl_Widget* o, void* v) {
 	GuiEntry* T=(GuiEntry*)v;
 	T->cb_input_i();
+	if (T->on_change)
+		T->on_change();
 }
 
 
