@@ -45,6 +45,11 @@ class GpMotionFit : public DifferentiableOptimization
         void grad(const std::vector<double>& x, std::vector<double>& gradDest) const;
         void grad(const std::vector<double>& x, std::vector<double>& gradDest, void* tempStorage) const;
 
+        // The correlation maps are windows around these centres (see MotionHelper::movieCC);
+        // leftWindow() says whether any evaluation since then needed a pixel outside them
+        void setWindow(const std::vector<std::vector<gravis::i2Vector>>* centres, int window);
+        bool leftWindow() const;
+
         void* allocateTempStorage() const;
         void deallocateTempStorage(void* ts) const;
 
@@ -61,11 +66,26 @@ class GpMotionFit : public DifferentiableOptimization
                 int pad;
 
                 std::vector<std::vector<gravis::d2Vector>> pos, ccg_pf;
-                std::vector<std::vector<double>> gradDestT;
-                std::vector<double> e_t;
+                std::vector<double> e_p;
         };
 
     private:
+
+        const std::vector<std::vector<gravis::i2Vector>>* centres = 0;
+        int window = 0;
+        mutable std::vector<char> outside;  // per particle, so that threads never write the same element
+
+        // whether the cubic interpolation at (x, y) reads only pixels inside the window of particle p, frame f
+        bool inWindow(int p, int f, double x, double y) const;
+
+        double energy(const std::vector<double>& x,
+                      std::vector<std::vector<gravis::d2Vector>>& pos,
+                      std::vector<double>& e_p) const;
+
+        void gradient(const std::vector<double>& x,
+                      std::vector<std::vector<gravis::d2Vector>>& pos,
+                      std::vector<std::vector<gravis::d2Vector>>& ccg_pf,
+                      std::vector<double>& gradDest) const;
 
         bool expKer;
         int pc, fc, dc, threads;

@@ -30,13 +30,16 @@ class LBFGS
 {
 	public:
 
+		// status_out and fx_out (optional): liblbfgs's return code and the final function value
 		static std::vector<double> optimize(
 				const std::vector<double>& initial,
 				const DifferentiableOptimization& opt,
 				int verbosity = 0,
 				int max_iters = 0,
 				double epsilon = 1e-5,
-				double xtol = 1e-4);
+				double xtol = 1e-4,
+				int* status_out = 0,
+				double* fx_out = 0);
 
 		static std::vector<double> optimize(
 				const std::vector<double>& initial,

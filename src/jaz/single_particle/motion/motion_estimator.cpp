@@ -19,9 +19,11 @@
  ***************************************************************************/
 
 #include "motion_estimator.h"
+#include "polish_timing.h"
 #include "motion_helper.h"
 #include "gp_motion_fit.h"
 #include "motion_refiner.h"
+#include <sstream>
 
 #include <src/jaz/single_particle/micrograph_handler.h>
 #include <src/jaz/single_particle/obs_model.h>
@@ -187,7 +189,8 @@ void MotionEstimator::init(
 }
 
 void MotionEstimator::process(
-		const std::vector<MetaDataTable>& mdts, long g_start, long g_end, bool do_update_FCC)
+		const std::vector<MetaDataTable>& mdts, long g_start, long g_end, bool do_update_FCC,
+		const MetaDataTable* afterLast)
 {
 	if (!ready)
 	{
@@ -276,6 +279,7 @@ void MotionEstimator::process(
 		std::vector<d2Vector> positions(pc);
 		std::vector<std::vector<d2Vector>> initialTracks(pc, std::vector<d2Vector>(fc));
 		std::vector<d2Vector> globComp(fc);
+		std::vector<std::vector<i2Vector>> ccCentres;
 
 		/* The following try/catch block is important! - Do not remove!
 		   Even though we have either:
@@ -292,11 +296,15 @@ void MotionEstimator::process(
 		   -- JZ, April 4th 2018 AD
 		*/
 
+		polishtiming::Scope tall("est: total");
+		micrographHandler->expectNext(g < g_end? &mdts[g+1] : afterLast,
+			g + 1 < g_end? &mdts[g+2] : g + 1 == g_end? afterLast : 0);
 		try
 		{
+			polishtiming::Scope tp("est: prep (load, CC)");
 			prepMicrograph(
 				mdts[g], fts, damageWeights[ogmg], ogmg,
-				movie, movieCC, positions, initialTracks, globComp);
+				movie, movieCC, positions, initialTracks, globComp, &ccCentres);
 		}
 		catch (const GainReferenceError &)
 		{
@@ -324,10 +332,32 @@ void MotionEstimator::process(
 
 		if (pc > 1)
 		{
+			polishtiming::Scope to("est: optimize tracks");
+			bool left = false;
+
 			tracks = optimize(
 				movieCC, initialTracks,
 				sig_vel_px, sig_acc_px, sig_div_px,
-				positions, globComp);
+				positions, globComp,
+				ccCentres.empty()? 0 : &ccCentres, ccWindowLast, &left);
+
+			if (!ccCentres.empty()) ccWindowed++;
+
+			// The fit needed pixels outside the windows: the same fit on whole maps gives the exact result
+			if (left)
+			{
+				ccFallbacks++;
+				if (!ccWindowFixed) ccWindow *= 2;
+
+				prepMicrograph(
+					mdts[g], fts, damageWeights[ogmg], ogmg,
+					movie, movieCC, positions, initialTracks, globComp);
+
+				tracks = optimize(
+					movieCC, initialTracks,
+					sig_vel_px, sig_acc_px, sig_div_px,
+					positions, globComp);
+			}
 		}
 		else
 		{
@@ -358,6 +388,7 @@ void MotionEstimator::process(
 
 		if (do_update_FCC)
 		{
+			polishtiming::Scope t("est: update FCC");
 			updateFCC(movie, tracks, mdts[g], tables, weights0, weights1);	
 			writeFCC(tables, weights0, weights1, fn_root);
 	
@@ -369,7 +400,10 @@ void MotionEstimator::process(
 			}
 		}
 		
-		writeTracks(tracks, angpix[ogmg], positions, fn_root, 30.0);
+		{
+			polishtiming::Scope t("est: write tracks");
+			writeTracks(tracks, angpix[ogmg], positions, fn_root, 30.0);
+		}
 
 		nr_done++;
 
@@ -394,7 +428,8 @@ void MotionEstimator::prepMicrograph(
 		std::vector<std::vector<Image<RFLOAT>>>& movieCC,
 		std::vector<d2Vector>& positions,
 		std::vector<std::vector<d2Vector>>& initialTracks,
-		std::vector<d2Vector>& globComp)
+		std::vector<d2Vector>& globComp,
+		std::vector<std::vector<i2Vector>>* ccCentres)
 {
 	const int pc = mdt.numberOfObjects();
 
@@ -417,7 +452,10 @@ void MotionEstimator::prepMicrograph(
 				mdt, s[ogmg], angpix[ogmg], fts,
 				positions, myInitialTracks, unregGlob, myGlobComp, 0, 0, -1); // throws exceptions*/
 	
-	movie = micrographHandler->loadMovie(mdt, s[ogmg], angpix[ogmg], fts);
+	{
+		polishtiming::Scope t("est: load movie");
+		movie = micrographHandler->loadMovie(mdt, s[ogmg], angpix[ogmg], fts);
+	}
 	micrographHandler->loadInitialTracks(mdt, angpix[ogmg], positions, myInitialTracks, unregGlob, myGlobComp);
 
 	/*const MetaDataTable &mdt, double angpix,
@@ -426,27 +464,82 @@ void MotionEstimator::prepMicrograph(
 				bool unregGlob, 
 				std::vector<d2Vector>& globalComponent_out*/
 			
-	std::vector<Image<Complex>> preds = reference->predictAll(
-				mdt, *obsModel, ReferenceMap::Own, nr_omp_threads);
+	polishtiming::Scope tpred("est: predict+whiten+CC");
+	std::vector<Image<Complex>> preds;
+	{
+		polishtiming::Scope t("est:   predict");
+		preds = reference->predictAll(mdt, *obsModel, ReferenceMap::Own, nr_omp_threads);
+	}
 
 	if (!no_whitening)
 	{
-		std::vector<double> sigma2 = StackHelper::powerSpectrum(movie);
+		polishtiming::Scope t("est:   whiten");
+		std::vector<double> sigma2;
+		{
+			polishtiming::Scope ts("est:   whiten: spectrum");
+			sigma2 = StackHelper::powerSpectrum(movie, nr_omp_threads);
+		}
+
+		// the divisor of each pixel is computed once for the images of the usual size
+		const int wf = movie[0][0]().xdim, h = movie[0][0]().ydim;
+		const std::vector<double> divisors = MotionHelper::noiseDivisors(wf, h, sigma2);
+
+		auto whiten = [&](Image<Complex>& img)
+		{
+			if (img().xdim == wf && img().ydim == h) MotionHelper::noiseNormalize(img, divisors);
+			else MotionHelper::noiseNormalize(img, sigma2, img);
+		};
 
 		#pragma omp parallel for num_threads(nr_omp_threads)
 		for (int p = 0; p < pc; p++)
 		{
-			MotionHelper::noiseNormalize(preds[p], sigma2, preds[p]);
+			whiten(preds[p]);
 
 			for (int f = 0; f < fc; f++)
 			{
-
-				MotionHelper::noiseNormalize(movie[p][f], sigma2, movie[p][f]);
+				whiten(movie[p][f]);
 			}
 		}
 	}
 
-	movieCC = MotionHelper::movieCC(movie, preds, dmgWeight, cc_pad, nr_omp_threads);
+	{
+		polishtiming::Scope t("est:   movie CC");
+		// Only the track fit reads the maps when the initial tracks come from the motion correction:
+		// it can then work on windows around them
+		const int s2 = (int)(cc_pad * movie[0][0]().ydim);
+
+		if (ccWindow < 0)
+		{
+			const char* env = getenv("RELION_POLISH_CC_WINDOW");
+			ccWindowFixed = env != 0;
+			ccWindow = env? atoi(env) : 2 * (int)std::ceil(32.0 * cc_pad);
+			ccWindow += ccWindow % 2;
+		}
+
+		const bool windowed = ccCentres && ccWindow > 0 && ccWindow + 4 <= s2
+				&& !global_init && !globOff && myInitialTracks.size() > 0;
+
+		if (ccCentres) ccCentres->clear();
+
+		if (windowed)
+		{
+			ccCentres->resize(pc, std::vector<i2Vector>(fc));
+
+			for (int p = 0; p < pc; p++)
+			for (int f = 0; f < fc; f++)
+			{
+				(*ccCentres)[p][f] = i2Vector(
+					(int) std::round(cc_pad * (myInitialTracks[p][f].x + myGlobComp[f].x)),
+					(int) std::round(cc_pad * (myInitialTracks[p][f].y + myGlobComp[f].y)));
+			}
+
+			ccWindowLast = ccWindow;
+		}
+
+		movieCC = MotionHelper::movieCC(movie, preds, dmgWeight, cc_pad, nr_omp_threads,
+				windowed? ccCentres : 0, ccWindowLast);
+	}
+	polishtiming::Scope tinit("est:   initial tracks");
 
 	if (global_init || myInitialTracks.size() == 0)
 	{
@@ -531,8 +624,11 @@ std::vector<std::vector<d2Vector>> MotionEstimator::optimize(
 		const std::vector<std::vector<gravis::d2Vector>>& inTracks,
 		double sig_vel_px, double sig_acc_px, double sig_div_px,
 		const std::vector<gravis::d2Vector>& positions,
-		const std::vector<gravis::d2Vector>& globComp) const
+		const std::vector<gravis::d2Vector>& globComp,
+		const std::vector<std::vector<gravis::i2Vector>>* ccCentres, int ccWindow,
+		bool* leftWindow) const
 {
+	if (leftWindow) *leftWindow = false;
 	if (maxIters == 0) return inTracks;
 
 	const double eps = 1e-20;
@@ -553,15 +649,40 @@ std::vector<std::vector<d2Vector>> MotionEstimator::optimize(
 
 	const int fc = inTracks[0].size();
 
+	const std::chrono::steady_clock::time_point tb = std::chrono::steady_clock::now();
 	GpMotionFit gpmf(movieCC, cc_pad, sig_vel_px, sig_div_px, sig_acc_px,
 					 maxEDs, positions, globComp, nr_omp_threads, expKer);
+	polishtiming::add("est:   fit: GP basis", std::chrono::duration<double>(std::chrono::steady_clock::now() - tb).count());
+
+	if (ccCentres) gpmf.setWindow(ccCentres, ccWindow);
 
 	std::vector<double> initialCoeffs;
 
 	gpmf.posToParams(inTracks, initialCoeffs);
 
+	int status;
+	double fx;
 	std::vector<double> optCoeffs = LBFGS::optimize(
-				initialCoeffs, gpmf, debugOpt, maxIters, optEps);
+				initialCoeffs, gpmf, debugOpt, maxIters, optEps, 1e-4, &status, &fx);
+
+	// liblbfgs gives up when its line search meets a rounding error, sometimes far from the minimum
+	// (one micrograph of a test set stopped at -4033.5 instead of -4055.4, at one thread only):
+	// start again from there, up to three times, while that lowers the function
+	for (int restart = 0; restart < 3 && status == LBFGSERR_ROUNDING_ERROR; restart++)
+	{
+		int status2;
+		double fx2;
+		std::vector<double> next = LBFGS::optimize(
+				optCoeffs, gpmf, debugOpt, maxIters, optEps, 1e-4, &status2, &fx2);
+
+		if (!(fx2 < fx)) break;
+
+		optCoeffs = next;
+		fx = fx2;
+		status = status2;
+	}
+
+	if (leftWindow) *leftWindow = gpmf.leftWindow();
 
 	std::vector<std::vector<d2Vector>> out(pc, std::vector<d2Vector>(fc));
 	gpmf.paramsToPos(optCoeffs, out);
@@ -616,6 +737,62 @@ std::vector<Image<RFLOAT>> MotionEstimator::computeDamageWeights(int opticsGroup
 		dosePerFrame, dmga, dmgb, dmgc);
 }
 
+// FscHelper::updateFscTable for one frame phase-shifted by (xshift, yshift) pixels, in one pass without a shifted copy.
+// The shift is as shiftImageInFourierTransform, but with the phase built from one factor per row and one per column
+// (2w instead of w^2/2 sines and cosines); bin[y*wh + x] is the table column of each pixel (-1: none).
+static void addShiftedToFscTable(
+		const MultidimArray<Complex>& frame, int f, const MultidimArray<Complex>& pred,
+		double oridim, double xshift, double yshift, const std::vector<int>& bin,
+		MultidimArray<RFLOAT>& table, MultidimArray<RFLOAT>& weight0, MultidimArray<RFLOAT>& weight1)
+{
+	const double xs = -xshift / oridim, ys = -yshift / oridim;
+	const bool shift = !(ABS(xs) < XMIPP_EQUAL_ACCURACY && ABS(ys) < XMIPP_EQUAL_ACCURACY);
+
+	const int wh = XSIZE(frame), h = YSIZE(frame);
+	std::vector<Complex> px(wh), py(h);
+
+	if (shift)
+	{
+		for (int x = 0; x < wh; x++)
+		{
+			double sn, cs;
+			SINCOS(2 * PI * x * xs, &sn, &cs);
+			px[x] = Complex(cs, sn);
+		}
+
+		for (int y = 0; y < h; y++)
+		{
+			double sn, cs;
+			SINCOS(2 * PI * (y < wh? y : y - h) * ys, &sn, &cs);
+			py[y] = Complex(cs, sn);
+		}
+	}
+
+	for (int y = 0; y < h; y++)
+	for (int x = 0; x < wh; x++)
+	{
+		const int idx = bin[y*wh + x];
+
+		if (idx < 0) continue;
+
+		Complex z1 = DIRECT_A2D_ELEM(frame, y, x);
+
+		if (shift)
+		{
+			const Complex ph = py[y] * px[x];
+			z1 = Complex(
+				ph.real * z1.real - ph.imag * z1.imag,
+				ph.real * z1.imag + ph.imag * z1.real);
+		}
+
+		const Complex z2 = DIRECT_A2D_ELEM(pred, y, x);
+
+		DIRECT_A2D_ELEM(table, f, idx) += z1.real * z2.real + z1.imag * z2.imag;
+		DIRECT_A2D_ELEM(weight0, f, idx) += z1.norm();
+		DIRECT_A2D_ELEM(weight1, f, idx) += z2.norm();
+	}
+}
+
 void MotionEstimator::updateFCC(
 		const std::vector<std::vector<Image<Complex>>>& movie,
 		const std::vector<std::vector<d2Vector>>& tracks,
@@ -626,28 +803,61 @@ void MotionEstimator::updateFCC(
 {
 	const int pc = mdt.numberOfObjects();
 
+	// One table per particle, added in particle order: the same FCC at any thread count
+	std::vector<Image<RFLOAT>> tab_p(pc), w0_p(pc), w1_p(pc);
+
+	// Table column of each pixel per optics group, as FscHelper::updateFscTable computes it (-1: outside the table)
+	std::vector<std::vector<int>> bin(s.size());
+
+	for (int og = 0; og < s.size(); og++)
+	{
+		const double scale = (s_ref * angpix_ref)/(s[og] * angpix[og]);
+		const long int wh = s[og]/2 + 1, h = s[og];
+
+		bin[og].resize(wh * h);
+
+		for (long int i = 0; i < h; i++)
+		for (long int j = 0; j < wh; j++)
+		{
+			const long int ip = i < wh? i : i - h;
+			const int idx = ROUND(scale * sqrt(ip*ip + j*j));
+
+			bin[og][i*wh + j] = idx >= wh? -1 : idx;
+		}
+	}
+
 	#pragma omp parallel for num_threads(nr_omp_threads)
 	for (int p = 0; p < pc; p++)
 	{
-		int threadnum = omp_get_thread_num();
 		const int og = obsModel->getOpticsGroup(mdt, p);
 
-		std::vector<Image<Complex>> obs = movie[p];
+		Image<Complex> pred;
+		{
+			polishtiming::Scope t("fcc cpu: predict");
+			pred = reference->predict(mdt, p, *obsModel, ReferenceMap::Opposite);
+		}
+
+		tab_p[p] = Image<RFLOAT>(tables[0].data.xdim, tables[0].data.ydim);
+		w0_p[p] = Image<RFLOAT>(tables[0].data.xdim, tables[0].data.ydim);
+		w1_p[p] = Image<RFLOAT>(tables[0].data.xdim, tables[0].data.ydim);
+		tab_p[p].data.initZeros();
+		w0_p[p].data.initZeros();
+		w1_p[p].data.initZeros();
+
+		polishtiming::Scope t("fcc cpu: shift + table");
 
 		for (int f = 0; f < fc; f++)
 		{
-			shiftImageInFourierTransform(obs[f](), obs[f](), s[og], -tracks[p][f].x, -tracks[p][f].y);
+			addShiftedToFscTable(movie[p][f](), f, pred(), s[og], -tracks[p][f].x, -tracks[p][f].y,
+				bin[og], tab_p[p](), w0_p[p](), w1_p[p]());
 		}
+	}
 
-		Image<Complex> pred = reference->predict(
-				mdt, p, *obsModel, ReferenceMap::Opposite);
-
-		const double scale = (s_ref * angpix_ref)/(s[og] * angpix[og]);
-
-		FscHelper::updateFscTable(
-			obs, pred, scale,
-			tables[threadnum],
-			weights0[threadnum], weights1[threadnum]);
+	for (int p = 0; p < pc; p++)
+	{
+		tables[0].data += tab_p[p].data;
+		weights0[0].data += w0_p[p].data;
+		weights1[0].data += w1_p[p].data;
 	}
 }
 
@@ -876,6 +1086,18 @@ void MotionEstimator::proposeDosePerFrame(double dpf, std::string metaFn, int ve
 					  << dosePerFrame << " e/A^2" << std::endl;
 		}
 	}
+}
+
+std::string MotionEstimator::ccWindowReport() const
+{
+	if (ccWindowed == 0) return "";
+
+	std::ostringstream os;
+	os << " + Correlation maps were cropped to " << ccWindowLast << " x " << ccWindowLast
+	   << " pixels around the initial tracks for " << ccWindowed << " micrographs";
+	if (ccFallbacks > 0) os << "; " << ccFallbacks << " needed more and were fitted again on whole maps";
+	os << (ccWindowFixed? " (size set by RELION_POLISH_CC_WINDOW)" : " (RELION_POLISH_CC_WINDOW=0 turns it off)");
+	return os.str();
 }
 
 double MotionEstimator::getCCPad()

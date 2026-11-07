@@ -25,7 +25,8 @@ std::vector<double> LBFGS::optimize(
 		const std::vector<double> &initial,
 		const DifferentiableOptimization &opt,
 		int verbosity, int max_iters,
-		double epsilon, double xtol)
+		double epsilon, double xtol,
+		int* status_out, double* fx_out)
 {
 	const int N = initial.size();
 
@@ -60,6 +61,8 @@ std::vector<double> LBFGS::optimize(
 	{
 		ret = lbfgs(N, m_x, &fx, evaluate, progress, &adapter, &param);
 	}
+	if (status_out) *status_out = ret;
+	if (fx_out) *fx_out = fx;
 
 	if (verbosity > 1)
 	{

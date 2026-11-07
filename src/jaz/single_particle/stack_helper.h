@@ -77,7 +77,7 @@ class StackHelper
 					bool circleCropped = false);
 		
 		static std::vector<double> powerSpectrum(
-					const std::vector<std::vector<Image<Complex>>>& stack);
+					const std::vector<std::vector<Image<Complex>>>& stack, int threads = 1);
 		
 		static std::vector<double> varSpectrum(
 					const std::vector<std::vector<Image<Complex>>>& stack);

@@ -27,6 +27,7 @@ void MotionRefinerMpi::read(int argc, char **argv)
 	
 	// First read in non-parallelisation-dependent variables
 	MotionRefiner::read(argc, argv);
+	readFirstMovieEarly = false;
 	
 	// Don't put any output to screen for mpi followers!
 	verb = (node->isLeader()) ? verb : 0;
@@ -182,7 +183,8 @@ void MotionRefinerMpi::runWithRecombination()
 							  << "motion: " << total2motion[m] << '(' << m << ')' << "\n";
 				}
 
-				motionEstimator.process(motionMdts, total2motion[m], total2motion[m], false);
+				motionEstimator.process(motionMdts, total2motion[m], total2motion[m], false,
+					m < my_last_total_micrograph_no_FCC? &chosenMdts[m+1] : 0);
 			}
 
 			if (recombUnfinished[m])
@@ -193,7 +195,8 @@ void MotionRefinerMpi::runWithRecombination()
 							  << "recomb: " << total2recomb[m] << '(' << m << ')' << "\n";
 				}
 
-				frameRecombiner.process(recombMdts, total2recomb[m], total2recomb[m]);
+				frameRecombiner.process(recombMdts, total2recomb[m], total2recomb[m],
+					m < my_last_total_micrograph_no_FCC? &chosenMdts[m+1] : 0);
 			}
 
 			const int nr_done = m - firstTotalMgWithoutFCC;

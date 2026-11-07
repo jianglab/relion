@@ -52,6 +52,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_helix_report.cpp
     test_helix_mask.cpp
     test_recover_full_filaments.cpp
+    test_gp_motion_fit.cpp
     test_helical_class_align.cpp
     test_helix_context_types.cpp
     test_resource_report.cpp
@@ -122,7 +123,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch pinned_pool gpu_signif_select pair_list lazy_cache rank_launcher)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch pinned_pool gpu_signif_select pair_list lazy_cache rank_launcher gp_motion_fit)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]

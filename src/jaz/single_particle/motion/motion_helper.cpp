@@ -37,7 +37,8 @@ std::vector<std::vector<Image<RFLOAT>>> MotionHelper::movieCC(
 		const std::vector<std::vector<Image<Complex>>>& movie,
 		const std::vector<Image<Complex>>& preds,
 		const std::vector<Image<RFLOAT> > &damageWeights,
-		double pad, int threads)
+		double pad, int threads,
+		const std::vector<std::vector<i2Vector>>* centres, int window)
 {
 	const int pc = movie.size();
 	const int fc = movie[0].size();
@@ -64,13 +65,19 @@ std::vector<std::vector<Image<RFLOAT>>> MotionHelper::movieCC(
 		ccsRs[t].data.yinit = 0;
 	}
 
+	// (a SIMD plan was 2 s faster here, but its rounding changed the track fit enough to take 2.5 s longer)
 	NewFFT::DoublePlan plan(s2,s2,1);
+
+	const int so = centres? window : s2;
 
 	for (int p = 0; p < pc; p++)
 	{
-		out[p] = std::vector<Image<RFLOAT>>(fc, Image<RFLOAT>(s2,s2));
+		out[p] = std::vector<Image<RFLOAT>>(fc, Image<RFLOAT>(so,so));
+	}
 
-#pragma omp parallel for num_threads(threads)
+	// All particles and frames at once: one particle has too few frames to keep every thread busy
+#pragma omp parallel for collapse(2) num_threads(threads)
+	for (int p = 0; p < pc; p++)
 		for (int f = 0; f < fc; f++)
 		{
 			int t = omp_get_thread_num();
@@ -85,15 +92,29 @@ std::vector<std::vector<Image<RFLOAT>>> MotionHelper::movieCC(
 					ccsFs[t](yy,x) = dComplex(z.real, z.imag);
 				}
 
-			NewFFT::inverseFourierTransform(ccsFs[t](), ccsRs[t](), plan);
+			// FFTW overwrites the input; it is rewritten for every image, except for the padding (s2 > s)
+			NewFFT::inverseFourierTransform(ccsFs[t](), ccsRs[t](), plan, NewFFT::FwdOnly, s2 > s);
 
-			for (int y = 0; y < s2; y++)
-				for (int x = 0; x < s2; x++)
-				{
-					out[p][f](y,x) = s * s * ccsRs[t](y,x);
-				}
+			if (centres)
+			{
+				const i2Vector c = (*centres)[p][f];
+
+				for (int ky = c.y - window/2; ky < c.y + window/2; ky++)
+					for (int kx = c.x - window/2; kx < c.x + window/2; kx++)
+					{
+						out[p][f](INTERPOL_WRAP(ky, window), INTERPOL_WRAP(kx, window)) =
+							s * s * ccsRs[t](INTERPOL_WRAP(ky, s2), INTERPOL_WRAP(kx, s2));
+					}
+			}
+			else
+			{
+				for (int y = 0; y < s2; y++)
+					for (int x = 0; x < s2; x++)
+					{
+						out[p][f](y,x) = s * s * ccsRs[t](y,x);
+					}
+			}
 		}
-	}
 
 	return out;
 }
@@ -367,6 +388,46 @@ void MotionHelper::noiseNormalize(
 			{
 				dest(y,x) = DIRECT_A2D_ELEM(img.data, y, x) / sqrt(sigma2[r]*area);
 			}
+		}
+}
+
+std::vector<double> MotionHelper::noiseDivisors(int wf, int h, const std::vector<double> &sigma2)
+{
+	const int w = 2*wf - 1;
+	const double area = 0.25*PI*w*h;
+
+	std::vector<double> out(wf*h, 0.0);
+
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < wf; x++)
+		{
+			if (x == 0 && y == 0) continue;
+
+			const double yy = y < wf? y : y - h;
+			const double xx = x;
+
+			const int r = (int) sqrt(xx*xx + yy*yy);
+
+			if (r < wf && sigma2[r] != 0.0) out[y*wf + x] = sqrt(sigma2[r]*area);
+		}
+
+	return out;
+}
+
+void MotionHelper::noiseNormalize(Image<Complex>& img, const std::vector<double> &divisors)
+{
+	const int wf = img().xdim;
+	const int h = img().ydim;
+
+	img.data.xinit = 0;
+	img.data.yinit = 0;
+
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < wf; x++)
+		{
+			const double d = divisors[y*wf + x];
+
+			DIRECT_A2D_ELEM(img.data, y, x) = d == 0.0? Complex(0.0) : DIRECT_A2D_ELEM(img.data, y, x) / d;
 		}
 }
 

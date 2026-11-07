@@ -59,7 +59,7 @@ class ReferenceMap
 
 
 		void read(IOParser& parser, int argc, char *argv[]);
-		void load(int verb, bool debug);
+		void load(int verb, bool debug, int threads = 1);
 
 		Image<RFLOAT> getHollowWeight(double kmin_ang, int s_out, double angpix_out);
 

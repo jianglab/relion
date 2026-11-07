@@ -46,7 +46,9 @@ class MotionEstimator
                   ObservationModel* obsModel,
                   MicrographHandler* micrographHandler);
 
-        void process(const std::vector<MetaDataTable> &mdts, long g_start, long g_end, bool do_update_FCC);
+        // afterLast: the micrograph whose movie will be loaded after g_end (for read-ahead), or 0
+        void process(const std::vector<MetaDataTable> &mdts, long g_start, long g_end, bool do_update_FCC,
+                     const MetaDataTable* afterLast = 0);
 
 
         // load micrograph from mdt and compute all data required for the optimization;
@@ -62,7 +64,9 @@ class MotionEstimator
             std::vector<std::vector<Image<RFLOAT>>>& movieCC,
             std::vector<gravis::d2Vector>& positions,
             std::vector<std::vector<gravis::d2Vector>>& initialTracks,
-            std::vector<gravis::d2Vector>& globComp);
+            std::vector<gravis::d2Vector>& globComp,
+            // if given, movieCC may hold only windows around these centres (cleared if it holds whole maps)
+            std::vector<std::vector<gravis::i2Vector>>* ccCentres = 0);
 
         // perform the actual optimization (also used by MotionParamEstimator)
         std::vector<std::vector<gravis::d2Vector>> optimize(
@@ -70,7 +74,9 @@ class MotionEstimator
             const std::vector<std::vector<gravis::d2Vector>>& inTracks,
             double sig_vel_px, double sig_acc_px, double sig_div_px,
             const std::vector<gravis::d2Vector>& positions,
-            const std::vector<gravis::d2Vector>& globComp) const;
+            const std::vector<gravis::d2Vector>& globComp,
+            const std::vector<std::vector<gravis::i2Vector>>* ccCentres = 0, int ccWindow = 0,
+            bool* leftWindow = 0) const;
 
         // syntactic sugar for float-valued CCs
         std::vector<std::vector<gravis::d2Vector>> optimize(
@@ -88,6 +94,9 @@ class MotionEstimator
         void proposeDosePerFrame(double dpf, std::string metaFn, int verb);
 
 		double getCCPad();
+
+		// How the correlation maps were cropped (empty if they never were)
+		std::string ccWindowReport() const;
 
 		static std::vector<bool> findUnfinishedJobs(
                 const std::vector<MetaDataTable>& mdts, std::string path);
@@ -129,6 +138,11 @@ class MotionEstimator
             bool debug, no_whitening, all_groups;
 			
 			std::vector<std::vector<Image<RFLOAT>>> damageWeights;
+
+			// Correlation maps cropped to ccWindow pixels around the initial tracks (0: whole maps);
+			// a micrograph whose fit leaves the window is fitted again on whole maps, and the window grows
+			int ccWindow = -1, ccWindowLast = 0, ccWindowed = 0, ccFallbacks = 0;
+			bool ccWindowFixed = false;
 
             std::string outPath;
 

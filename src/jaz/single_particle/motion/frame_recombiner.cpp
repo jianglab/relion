@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "frame_recombiner.h"
+#include "polish_timing.h"
 #include <src/async_file_writer.h>
 #include "motion_refiner.h"
 #include "motion_helper.h"
@@ -37,6 +38,48 @@
 #include <src/filename.h>
 
 using namespace gravis;
+
+// sum(.,.,p) += weight * frame shifted by (dx, dy) pixels. The shift is that of Translation::shiftInFourierSpace2D,
+// but the phase of each pixel is built from one factor per column and one per row (w + h sines and cosines
+// instead of w*h, which took most of the time): the same up to rounding, about 1e-16
+static void addShifted(
+		RawImage<Complex> frame, double dx, double dy,
+		const Image<RFLOAT>& weight, BufferedImage<Complex>& sum, int p)
+{
+	const int w = frame.xdim;
+	const int h = frame.ydim;
+
+	const double xshift = -dx / (2 * (w - 1));
+	const double yshift = -dy / h;
+
+	std::vector<double> cx(w), sx(w), cy(h), sy(h);
+
+	for (int x = 0; x < w; x++)
+	{
+		SINCOS(2 * PI * x * xshift, &sx[x], &cx[x]);
+	}
+
+	for (int y = 0; y < h; y++)
+	{
+		const double yy = y < h/2? y : y - h;
+		SINCOS(2 * PI * yy * yshift, &sy[y], &cy[y]);
+	}
+
+	for (int y = 0; y < h; y++)
+	for (int x = 0; x < w; x++)
+	{
+		const double a = cy[y] * cx[x] - sy[y] * sx[x];
+		const double b = sy[y] * cx[x] + cy[y] * sx[x];
+
+		const double c = frame(x,y).real;
+		const double d = frame(x,y).imag;
+		const double ac = a * c;
+		const double bd = b * d;
+		const double ab_cd = (a + b) * (c + d);
+
+		sum(x,y,p) += weight(y,x) * Complex(ac - bd, ab_cd - ac - bd);
+	}
+}
 
 FrameRecombiner::FrameRecombiner()
 {}
@@ -233,7 +276,8 @@ void FrameRecombiner::init(
 	}
 }
 
-void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_start, long g_end)
+void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_start, long g_end,
+                              const MetaDataTable* afterLast)
 {
 	int barstep;
 	int my_nr_micrographs = g_end - g_start + 1;
@@ -262,6 +306,7 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 
 		const int pc = mdts[g].numberOfObjects();
 		if (pc == 0) continue;
+		polishtiming::Scope tall("rec: total");
 
 		pctot += pc;
 
@@ -284,6 +329,8 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 		FileName fn_root = MotionRefiner::getOutputFileNameRoot(outPath, mdtOut);
 		std::vector<std::vector<d2Vector>> priorShift;
 		priorShift = MotionHelper::readTracksInPix(fn_root + "_tracks.star", angpix_out[ogmg]);
+		micrographHandler->expectNext(g < g_end? &mdts[g+1] : afterLast,
+			g + 1 < g_end? &mdts[g+2] : g + 1 == g_end? afterLast : 0);
 
 		const std::string movieFn = micrographHandler->getMovieFilename(mdtOut);
 		const bool isCompressedMRC = CompressedMRCReader::isCompressedMRC(movieFn);
@@ -305,7 +352,7 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 				obsModel->setPixelSize(og, angpix_out[og]);
 			}
 			
-			shift[p].resize(readAtOnce ? fc : 1, d2Vector(0));
+			shift[p].resize(fc, d2Vector(0));
 		}
 		
 		if (do_recenter)
@@ -318,6 +365,21 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 		
 		BufferedImage<Complex> sumStack(sh_out[ogmg], s_out[ogmg], pc);
 		sumStack.fill(Complex(0,0));
+
+		// A movie kept in memory: each particle's frames extracted and added in turn, no frame of all particles kept
+		bool fromMemory = false;
+
+		if (!readAtOnce)
+		{
+			polishtiming::Scope t("rec: extract, shift + sum");
+
+			fromMemory = micrographHandler->combineFromMemory(
+				mdtOut, s_out[ogmg], angpix_out[ogmg], nr_omp_threads, &priorShift, &shift, data_angpix[ogmg],
+				[&](int p, int f, Image<Complex>& frame)
+				{
+					addShifted(frame, -shift[p][f].x, -shift[p][f].y, freqWeights[ogmg][f], sumStack, p);
+				});
+		}
 
 		// This is an ugly code duplication.
 		// Frame-by-frame reading (the normal route) is more memory efficient but
@@ -335,19 +397,11 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 				#pragma omp parallel for num_threads(nr_omp_threads)
 				for (int p = 0; p < pc; p++)
 				{
-					RawImage<Complex> obs(fullFrame[p][f]);
-
-					Translation::shiftInFourierSpace2D(obs, -shift[p][f].x, -shift[p][f].y);
-
-					for (int y = 0; y < s_out[ogmg]; y++)
-					for (int x = 0; x < sh_out[ogmg]; x++)
-					{
-						sumStack(x,y,p) += freqWeights[ogmg][f](y,x) * obs(x,y);
-					}
+					addShifted(fullFrame[p][f], -shift[p][f].x, -shift[p][f].y, freqWeights[ogmg][f], sumStack, p);
 				}
 			}
 		}
-		else
+		else if (!fromMemory)
 		{
 			for (int f = 0; f < fc; f++)
 			{
@@ -358,22 +412,19 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 					priorShift_f[p] = {priorShift[p][f]};
 				}
 
-				std::vector<std::vector<Image<Complex>>> fullFrame = micrographHandler->loadMovie(
+				std::vector<std::vector<Image<Complex>>> fullFrame;
+				{
+					polishtiming::Scope tl("rec: load frame");
+					fullFrame = micrographHandler->loadMovie(
 							mdtOut, s_out[ogmg], angpix_out[ogmg], fts,
 							&priorShift_f, &shift, data_angpix[ogmg], f);
+				}
 
+				polishtiming::Scope tss("rec: shift + sum");
 				#pragma omp parallel for num_threads(nr_omp_threads)
 				for (int p = 0; p < pc; p++)
 				{
-					RawImage<Complex> obs(fullFrame[p][0]);
-
-					Translation::shiftInFourierSpace2D(obs, -shift[p][0].x, -shift[p][0].y);
-
-					for (int y = 0; y < s_out[ogmg]; y++)
-					for (int x = 0; x < sh_out[ogmg]; x++)
-					{
-						sumStack(x,y,p) += freqWeights[ogmg][f](y,x) * obs(x,y);
-					}
+					addShifted(fullFrame[p][0], -shift[p][0].x, -shift[p][0].y, freqWeights[ogmg][f], sumStack, p);
 				}
 			}
 		}
@@ -383,6 +434,7 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 		Image<RFLOAT> &outStack_xmipp = *outStack_ptr;
 		RawImage<RFLOAT> outStack(outStack_xmipp);
 
+		polishtiming::Scope tfin("rec: CTF, normalise, iFFT");
 		#pragma omp parallel for num_threads(nr_omp_threads)
 		for (int p = 0; p < pc; p++)
 		{

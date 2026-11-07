@@ -43,7 +43,10 @@ class MotionHelper
                 const std::vector<std::vector<Image<Complex>>>& movie,
                 const std::vector<Image<Complex>>& preds,
                 const std::vector<Image<RFLOAT>>& damageWeights,
-                double pad, int threads);
+                double pad, int threads,
+                // if given: keep only a window x window piece of each map around centres[p][f] (in padded pixels),
+                // the pixel of shift k in slot k mod window, so wrapped interpolation reads the same values
+                const std::vector<std::vector<gravis::i2Vector>>* centres = 0, int window = 0);
 
         // deprecated: use the one above!
         /*static std::vector<std::vector<Image<RFLOAT>>> movieCC(
@@ -74,6 +77,11 @@ class MotionHelper
                 const Image<Complex>& img,
                 const std::vector<double> &sigma2,
                 Image<Complex>& dest);
+
+        // The same for many images of one size (wf x h): the divisor of each pixel, computed once
+        // (0 where noiseNormalize writes 0), then applied in place with the same arithmetic
+        static std::vector<double> noiseDivisors(int wf, int h, const std::vector<double> &sigma2);
+        static void noiseNormalize(Image<Complex>& img, const std::vector<double> &divisors);
 
         static void writeTracks(
                 const std::vector<std::vector<gravis::d2Vector>>& tracksInPix,

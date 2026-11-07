@@ -54,7 +54,7 @@ void ReferenceMap::read(IOParser& parser, int argc, char* argv[])
 	paddingFactor = textToFloat(parser.getOption("--pad", "Padding factor", "2"));
 }
 
-void ReferenceMap::load(int verb, bool debug)
+void ReferenceMap::load(int verb, bool debug, int threads)
 {
 	if (reconFn0 == "" || reconFn1 == "")
 	{
@@ -141,11 +141,18 @@ void ReferenceMap::load(int verb, bool debug)
 
 	if (verb > 0) std::cout << " + Transforming references ...\n";
 
+	// The two padded 3D transforms are by far the largest of the setup: give them all threads,
+	// then go back to single-threaded plans for the per-particle loops that follow
+	relionFftwInitThreads();
+	relionFftwPlanThreads(threads);
+
 	projectors[0] = Projector(s, TRILINEAR, paddingFactor, 10, 2);
 	projectors[0].computeFourierTransformMap(maps[0].data, powSpec[0].data, maps[0].data.xdim);
 
 	projectors[1] = Projector(s, TRILINEAR, paddingFactor, 10, 2);
 	projectors[1].computeFourierTransformMap(maps[1].data, powSpec[1].data, maps[1].data.xdim);
+
+	relionFftwPlanThreads(1);
 
 	if (fscFn != "")
 	{

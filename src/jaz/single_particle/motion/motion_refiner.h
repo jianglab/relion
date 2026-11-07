@@ -80,6 +80,7 @@ class MotionRefiner
 			int verb;
 			
 			bool debug, findShortestMovie;
+			bool readFirstMovieEarly = true;  // MPI ranks start elsewhere in the list
 			
 			int nr_omp_threads;
 			std::string outPath;

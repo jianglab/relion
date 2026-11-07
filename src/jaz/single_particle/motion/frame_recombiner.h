@@ -49,7 +49,9 @@ class FrameRecombiner
 		          MicrographHandler* micrographHandler);
 		
 		void process_old(const std::vector<MetaDataTable>& mdts, long g_start, long g_end);
-		void process(const std::vector<MetaDataTable>& mdts, long g_start, long g_end);
+		// afterLast: the micrograph whose movie will be loaded after g_end (for read-ahead), or 0
+		void process(const std::vector<MetaDataTable>& mdts, long g_start, long g_end,
+		             const MetaDataTable* afterLast = 0);
 		void process_new(const std::vector<MetaDataTable>& mdts, long g_start, long g_end);
 
 		bool doingRecombination();

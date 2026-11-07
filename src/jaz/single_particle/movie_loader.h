@@ -4,10 +4,26 @@
 #include <src/image.h>
 #include <src/jaz/image/buffered_image.h>
 #include <src/renderEER.h>
+#include <cstdint>
 #include <string>
+#include <memory>
+#include <mutex>
 
 class MovieLoader
 {
+	// An exception must not leave an OpenMP loop: keep the first one and throw it after the loop
+	class ReadErrors
+	{
+		public:
+			bool failed() { std::lock_guard<std::mutex> g(m); return has; }
+			void keep(const RelionError &e) { std::lock_guard<std::mutex> g(m); if (!has) { first.reset(new RelionError(e)); has = true; } }
+			void rethrow() { if (has) throw *first; }
+		private:
+			std::mutex m;
+			bool has = false;
+			std::unique_ptr<RelionError> first;
+	};
+
 	public:
 
 		template <typename T>
@@ -31,11 +47,23 @@ class MovieLoader
 				int eer_grouping,
 				int num_threads);
 
+		// Defective pixels get a good neighbour, or Gaussian noise, chosen by a hash of (frame, x, y)
+		// instead of rand(), so the result is the same in every run, at any thread count
 		template <typename T>
 		static void fixDefects(
 				RawImage<T>& muGraphFrame,
 				const RawImage<bool>* defectivePixels,
+				int frame,
 				int num_threads, bool isEER);
+
+		// splitmix64, as in MotioncorrRunner
+		static uint64_t reproducibleHash(uint64_t x)
+		{
+			x += 0x9E3779B97F4A7C15ULL;
+			x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+			x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+			return x ^ (x >> 31);
+		}
 };
 
 template <typename T>
@@ -97,9 +125,14 @@ BufferedImage<T> MovieLoader::readDense(
 
 
 	BufferedImage<T> out(w0, h0, fc);
+	ReadErrors errors;
 
+	// Frames in parallel, each thread with its own file handle (the compressed-MRC reader is shared, so one at a time)
+	#pragma omp parallel for num_threads(num_threads) if(fc > 1 && !isCompressedMRC)
 	for (long f = 0; f < fc; f++)
 	{
+		if (errors.failed()) continue;
+		try {
 		Image<float> muGraphFrame_xmipp;
 
 		if (isCompressedMRC)
@@ -122,12 +155,14 @@ BufferedImage<T> MovieLoader::readDense(
 
 		if (do_fixDefect)
 		{
-			fixDefects(muGraphFrame, defectivePixels, num_threads, false);
+			fixDefects(muGraphFrame, defectivePixels, frame0 + f, num_threads, false);
 		}
 
 		out.getSliceRef(f).copyFrom(muGraphFrame);
+		} catch (RelionError &e) { errors.keep(e); }
 	}
 
+	errors.rethrow();
 	return out;
 }
 
@@ -170,10 +205,13 @@ BufferedImage<T> MovieLoader::readEER(
 
 
 	BufferedImage<T> out(w0, h0, fc);
+	ReadErrors errors;
 
-	#pragma omp parallel for num_threads(num_threads)
+	#pragma omp parallel for num_threads(num_threads) if(fc > 1)
 	for (int f = 0; f < fc; f++)
 	{
+		if (errors.failed()) continue;
+		try {
 		MultidimArray<float> muGraphFrame_xmipp;
 		// this takes 1-indexed frame numbers
 		renderer.renderFrames(
@@ -194,12 +232,14 @@ BufferedImage<T> MovieLoader::readEER(
 
 		if (do_fixDefect)
 		{
-			fixDefects(muGraphFrame, defectivePixels, num_threads, true);
+			fixDefects(muGraphFrame, defectivePixels, frame0 + f, num_threads, true);
 		}
 
 		out.getSliceRef(f).copyFrom(muGraphFrame);
+		} catch (RelionError &e) { errors.keep(e); }
 	}
 
+	errors.rethrow();
 	return out;
 }
 
@@ -207,6 +247,7 @@ template <typename T>
 void MovieLoader::fixDefects(
 		RawImage<T>& muGraphFrame,
 		const RawImage<bool>* defectivePixels,
+		int frame,
 		int num_threads, bool isEER)
 {
 	const long int w0 = muGraphFrame.xdim;
@@ -267,14 +308,18 @@ void MovieLoader::fixDefects(
 			pbuf[n_ok] = muGraphFrame(xx,yy);
 			n_ok++;
 		}
-//						std::cout << "n_ok = " << n_ok << std::endl;
+		const uint64_t hash = reproducibleHash(((uint64_t)frame << 42) ^ ((uint64_t)y << 21) ^ (uint64_t)x);
+
 		if (n_ok > min_num_ok)
 		{
-			muGraphFrame(x,y) = pbuf[rand() % n_ok];
+			muGraphFrame(x,y) = pbuf[hash % n_ok];
 		}
 		else
 		{
-			muGraphFrame(x,y) = rnd_gaus(frame_mean, frame_std);
+			// Gaussian from two hash-derived uniforms (Box-Muller)
+			const double u1 = ((hash >> 11) + 1.0) / 9007199254740993.0;
+			const double u2 = (reproducibleHash(hash) >> 11) / 9007199254740992.0;
+			muGraphFrame(x,y) = frame_mean + frame_std * std::sqrt(-2 * std::log(u1)) * std::cos(2 * PI * u2);
 		}
 	}
 }

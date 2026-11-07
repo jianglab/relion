@@ -463,33 +463,52 @@ RFLOAT StackHelper::computePower(std::vector<Image<Complex>>& movie, bool circle
 	return var / cnt;
 }
 
-std::vector<double> StackHelper::powerSpectrum(const std::vector<std::vector<Image<Complex>>> &stack)
+std::vector<double> StackHelper::powerSpectrum(const std::vector<std::vector<Image<Complex>>> &stack, int threads)
 {
 	const int ic = stack.size();
 	const int fc = stack[0].size();
 	const int w = stack[0][0].data.xdim;
 	const int h = stack[0][0].data.ydim;
 
+	// The radius of each pixel, once instead of in every image
+	std::vector<int> radius(w*h);
 	std::vector<double> out(w, 0.0), wgh(w, 0.0);
 
+	for (int y = 0; y < h; y++)
+	for (int x = 0; x < w; x++)
+	{
+		const double yy = y < w? y : y - h;
+		const double xx = x;
+
+		const int r = (int) sqrt(xx*xx + yy*yy);
+
+		radius[y*w + x] = r;
+
+		if (r < w) wgh[r] += (double) ic * fc;
+	}
+
+	// Summed per image, then over the images in order: the same at any thread count
+	std::vector<std::vector<double>> sums(ic, std::vector<double>(w, 0.0));
+
+	#pragma omp parallel for num_threads(threads)
 	for (int i = 0; i < ic; i++)
 	for (int f = 0; f < fc; f++)
 	{
 		for (int y = 0; y < h; y++)
 		for (int x = 0; x < w; x++)
 		{
-			const Complex z = DIRECT_A2D_ELEM(stack[i][f].data, y, x);
-
-			const double yy = y < w? y : y - h;
-			const double xx = x;
-
-			const int r = (int) sqrt(xx*xx + yy*yy);
+			const int r = radius[y*w + x];
 
 			if (r >= w) continue;
 
-			out[r] += z.norm();
-			wgh[r] += 1.0;
+			sums[i][r] += DIRECT_A2D_ELEM(stack[i][f].data, y, x).norm();
 		}
+	}
+
+	for (int i = 0; i < ic; i++)
+	for (int r = 0; r < w; r++)
+	{
+		out[r] += sums[i][r];
 	}
 
 	for (int x = 0; x < w; x++)

@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "motion_refiner.h"
+#include "polish_timing.h"
 
 #include <src/jaz/optimization/lbfgs.h>
 #include <src/jaz/single_particle/image_log.h>
@@ -115,6 +116,7 @@ void MotionRefiner::read(int argc, char **argv)
 
 void MotionRefiner::init()
 {
+	polishtiming::Scope tinit("run: init");
 	if (outPath[outPath.length()-1] != '/')
 	{
 		outPath += "/";
@@ -199,6 +201,7 @@ void MotionRefiner::init()
 		// initialise corrected/uncorrected micrograph dictionary, then load the header
 		// of the first movie (or read corrected_micrographs.star) to obtain:
 		// frame count, micrograph size and the fractional dose
+		polishtiming::Scope t("init: movie handler");
 		micrographHandler.init(
 			chosenMdts, verb, nr_omp_threads, // in
 			fc0, fractDose, metaFn); // out
@@ -223,6 +226,7 @@ void MotionRefiner::init()
 		motionEstimator.proposeDosePerFrame(fractDose, metaFn, verb);
 	}
 	
+	polishtiming::Scope tfc("init: frame counts");
 	if (findShortestMovie)
 	{
 		// make sure we don't try to load too many frames
@@ -236,6 +240,7 @@ void MotionRefiner::init()
 					chosenMdts, micrographHandler.lastFrame+1, verb);
 	}
 	
+	polishtiming::Scope tun("init: unfinished");
 	if (only_do_unfinished)
 	{
 		motionUnfinished = MotionEstimator::findUnfinishedJobs(chosenMdts, outPath);
@@ -313,6 +318,7 @@ void MotionRefiner::init()
 	recombineFrames = frameRecombiner.doingRecombination() && 
 	                  (recombMdts.size() > 0 || !exists(outPath + "shiny" + frameRecombiner.getOutputSuffix() + ".star"));
 	generateStar = frameRecombiner.doingRecombination();
+	micrographHandler.keepForCombination = recombineFrames;
 	
 	bool doAnything = estimateParams || estimateMotion || recombineFrames;
 	bool needsReference = doAnything;
@@ -324,7 +330,22 @@ void MotionRefiner::init()
 	{
 		if (verb > 0) std::cout << " + Reading references ..." << std::endl;
 		
-		reference.load(verb, debug);
+		// The first movies are decoded in the background while the reference is read (the second one if the
+		// first pass loads it next)
+		if (readFirstMovieEarly && !estimateParams)
+		{
+			const int lastForFCC = lastTotalMicrographForFCC();
+
+			if (estimateMotion)
+				micrographHandler.startReadAhead(motionMdts[0],
+					subtractFinishedMicrographs(lastForFCC, motionUnfinished) >= 1? &motionMdts[1] : 0);
+			else if (recombineFrames && recombMdts.size() > 0)
+				micrographHandler.startReadAhead(recombMdts[0],
+					subtractFinishedMicrographs(lastForFCC, recombUnfinished) >= 1? &recombMdts[1] : 0);
+		}
+
+		polishtiming::Scope t("init: reference");
+		reference.load(verb, debug, nr_omp_threads);
 	}
 
 	micrographHandler.validatePixelSize(reference.angpix);
@@ -333,6 +354,7 @@ void MotionRefiner::init()
 	{
 		if (verb > 0) std::cout << " + Initializing motion estimator ..." << std::endl;
 		
+		polishtiming::Scope t("init: motion estimator");
 		motionEstimator.init(
 			verb, fc, nr_omp_threads, debug, outPath,
 			&reference, &obsModel, &micrographHandler);
@@ -375,7 +397,12 @@ void MotionRefiner::run()
 	
 	if (estimateMotion)
 	{
-		motionEstimator.process(motionMdts, 0, lastMotionMgForFCC, true);
+		polishtiming::Scope t("run: FCC pass");
+		// read-ahead across the passes: what follows is the frame combination of the same micrographs
+		const MetaDataTable* afterLast =
+			recombineFrames && lastRecombMgForFCC >= 0? &recombMdts[0] :
+			firstTotalMgWithoutFCC < mgc? &chosenMdts[firstTotalMgWithoutFCC] : 0;
+		motionEstimator.process(motionMdts, 0, lastMotionMgForFCC, true, afterLast);
 	}
 	
 	if (recombineFrames)
@@ -385,12 +412,18 @@ void MotionRefiner::run()
 
 		// Recombine movies that have already been aligned:
 		
-		frameRecombiner.init(
-			allMdts, verb, reference.s, fc, k_out_A, reference.angpix,
-			nr_omp_threads, outPath, debug,
-			&reference, &obsModel, &micrographHandler);
-		
-		frameRecombiner.process(recombMdts, 0, lastRecombMgForFCC);
+		{
+			polishtiming::Scope t("run: recombiner init");
+			frameRecombiner.init(
+				allMdts, verb, reference.s, fc, k_out_A, reference.angpix,
+				nr_omp_threads, outPath, debug,
+				&reference, &obsModel, &micrographHandler);
+		}
+		{
+			polishtiming::Scope t("run: recombine aligned");
+			frameRecombiner.process(recombMdts, 0, lastRecombMgForFCC,
+				firstTotalMgWithoutFCC < mgc? &chosenMdts[firstTotalMgWithoutFCC] : 0);
+		}
 
 
 		// Then, align and recombine in an alternating pattern to minimize disk I/O:
@@ -412,14 +445,16 @@ void MotionRefiner::run()
 			// TODO: TAKANORI: micrograph handler can cache movie frames to avoid reading movies twice.
 			//                 (if --sbs, don't cache to save memory)
 
+			const MetaDataTable* next = m+1 < mgc? &chosenMdts[m+1] : 0;
+
 			if (estimateMotion && motionUnfinished[m])
 			{
-				motionEstimator.process(motionMdts, total2motion[m], total2motion[m], false);
+				motionEstimator.process(motionMdts, total2motion[m], total2motion[m], false, next);
 			}
 
 			if (recombUnfinished[m])
 			{
-				frameRecombiner.process(recombMdts, total2recomb[m], total2recomb[m]);
+				frameRecombiner.process(recombMdts, total2recomb[m], total2recomb[m], next);
 			}
 
 			const int nr_done = m - firstTotalMgWithoutFCC;
@@ -440,8 +475,16 @@ void MotionRefiner::run()
 		motionEstimator.process(motionMdts, firstMotionMgWithoutFCC, motionMdts.size()-1, true);
 	}
 	
+	if (verb > 0)
+	{
+		if (micrographHandler.movieCacheReport() != "") std::cout << micrographHandler.movieCacheReport() << std::endl;
+		if (micrographHandler.readAheadReport() != "") std::cout << micrographHandler.readAheadReport() << std::endl;
+		if (motionEstimator.ccWindowReport() != "") std::cout << motionEstimator.ccWindowReport() << std::endl;
+	}
+
 	if (generateStar)
 	{
+		polishtiming::Scope t("run: combine EPS/STAR");
 		combineEPSAndSTARfiles();
 	}
 }

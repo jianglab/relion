@@ -185,7 +185,7 @@ void CtfRefiner::init()
 		std::cout << " + Reading references ..." << std::endl;
 	}
 
-	reference.load(verb, debug);
+	reference.load(verb, debug, nr_omp_threads);
 
 	// Get dimensions
 	int s = reference.s;
