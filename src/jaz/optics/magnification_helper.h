@@ -53,13 +53,13 @@ class MagnificationHelper
 						RFLOAT& angleDeg);
 
 		// deprecated: use the other one!
+		// adds row y of one particle (ctfImg: its CTF image)
 		static void updateScaleFreq(
 						const Image<Complex>& prediction,
 						const Volume<gravis::t2Vector<Complex>>& predGradient,
 						const Image<Complex>& observation,
-						CTF& ctf, double angpix,
-						Volume<Equation2x2>& eqs,
-						bool do_ctf_padding = false);
+						const Image<RFLOAT>& ctfImg, long y,
+						Volume<Equation2x2>& eqs);
 
 		static void updateScale(
 						const RawImage<fComplex>& prediction,

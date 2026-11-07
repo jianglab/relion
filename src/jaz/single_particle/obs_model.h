@@ -95,6 +95,11 @@ class ObservationModel
 				bool applyCtf = true, bool shiftPhases = true, bool applyShift = true,
 				bool applyMtf = true, bool applyCtfPadding = false);
 
+		// The last steps of predictObservation(): the phase shift of the odd aberrations, then the MTF
+		void applyPhasesAndMtf(
+				MultidimArray<Complex>& dest, int opticsGroup,
+				bool shiftPhases, bool applyMtf);
+
 
 		// Correction //
 

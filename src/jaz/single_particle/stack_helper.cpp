@@ -32,6 +32,8 @@
 #include <src/jaz/single_particle/parallel_ft.h>
 #include <src/jaz/single_particle/new_ft.h>
 
+#include <src/async_file_writer.h>
+#include <map>
 #include <omp.h>
 
 using namespace gravis;
@@ -139,24 +141,62 @@ std::vector<MetaDataTable> StackHelper::splitByStack(const MetaDataTable* mdt)
 
 std::vector<Image<RFLOAT> > StackHelper::loadStack(const MetaDataTable* mdt, std::string path, int threads)
 {
-	std::vector<Image<RFLOAT>> out(mdt->numberOfObjects());
 	const long ic = mdt->numberOfObjects();
+	std::vector<Image<RFLOAT>> out(ic);
 
-	std::string name, fullName;
-	mdt->getValue(EMDL_IMAGE_NAME, fullName, 0);
-	name = fullName.substr(fullName.find("@")+1);
+	// A stack file of which at least half the images are wanted is read in one pass, which on network
+	// file systems is several times faster than reading one image at a time (the pixels are the same).
+	// Not with a path override, and not when the stack would take more than a quarter of the free memory.
+	std::map<std::string, Image<RFLOAT>> whole;
 
-	if (path != "")
+	if (path == "")
 	{
-		name = path + "/" + name.substr(name.find_last_of("/")+1);
+		std::map<std::string, long> wanted;
+
+		for (long i = 0; i < ic; i++)
+		{
+			long n;
+			std::string fn;
+			FileName(mdt->getString(EMDL_IMAGE_NAME, i)).decompose(n, fn);
+			if (n > 0) wanted[fn]++;
+		}
+
+		for (const auto& w : wanted)
+		{
+			Image<RFLOAT> header;
+			header.read(w.first, false, -1, false, true);
+
+			const long n = NSIZE(header.data);
+			const double bytes = (double) n * XSIZE(header.data) * YSIZE(header.data) * sizeof(RFLOAT);
+
+			const long long avail = asyncwrite::memoryAvailableBytes();  // -1: unknown
+
+			if (ZSIZE(header.data) == 1 && 2 * w.second >= n && (avail < 0 || bytes < 0.25 * avail))
+			{
+				whole[w.first].read(w.first, true, -1, false, true);
+			}
+		}
 	}
 
 	#pragma omp parallel for num_threads(threads)
 	for (long i = 0; i < ic; i++)
 	{
 		std::string sliceName;
-		mdt->getValue(EMDL_IMAGE_NAME, sliceName, i);	
-		out[i].read(sliceName, true, -1, false, true);
+		mdt->getValue(EMDL_IMAGE_NAME, sliceName, i);
+
+		long n;
+		std::string fn;
+		FileName(sliceName).decompose(n, fn);
+		const auto stack = whole.find(fn);
+
+		if (stack != whole.end() && n > 0 && n <= NSIZE(stack->second.data))
+		{
+			stack->second.data.getImage(n - 1, out[i].data);
+		}
+		else
+		{
+			out[i].read(sliceName, true, -1, false, true);
+		}
 	}
 
 	return out;
@@ -164,6 +204,15 @@ std::vector<Image<RFLOAT> > StackHelper::loadStack(const MetaDataTable* mdt, std
 
 std::vector<Image<Complex> > StackHelper::loadStackFS(
 		const MetaDataTable& mdt, std::string path,
+		int threads, bool centerParticle, ObservationModel* obs)
+{
+	std::vector<Image<RFLOAT>> images = loadStack(&mdt, path, threads);
+
+	return transformStackFS(images, mdt, threads, centerParticle, obs);
+}
+
+std::vector<Image<Complex> > StackHelper::transformStackFS(
+		std::vector<Image<RFLOAT>>& images, const MetaDataTable& mdt,
 		int threads, bool centerParticle, ObservationModel* obs)
 {
 	std::vector<Image<Complex> > out(mdt.numberOfObjects());
@@ -175,37 +224,24 @@ std::vector<Image<Complex> > StackHelper::loadStackFS(
 
 	const long ic = mdt.numberOfObjects();
 
-	std::string name, fullName;
-	mdt.getValue(EMDL_IMAGE_NAME, fullName, 0);
-	name = fullName.substr(fullName.find("@")+1);
+	if (ic == 0) return out;
 
-	if (path != "")
-	{
-		name = path + "/" + name.substr(name.find_last_of("/")+1);
-	}
-
-	Image<RFLOAT> dummy;
-	dummy.read(name, false);
-
-	const int s = dummy.data.xdim;
+	const int s = images[0].data.xdim;
 
 	NewFFTPlan<RFLOAT>::type plan(s,s,1);
 
 	#pragma omp parallel for num_threads(threads)
 	for (long i = 0; i < ic; i++)
 	{
-		int optGroup = obs->getOpticsGroup(mdt, i);
-		double angpix = obs->getPixelSize(optGroup);
+		Image<RFLOAT>& in = images[i];
 
-		std::string sliceName;
-		mdt.getValue(EMDL_IMAGE_NAME, sliceName, i);
-		Image<RFLOAT> in;
-		in.read(sliceName, true, -1, false, true);
-		
 		NewFFT::FourierTransform(in(), out[i](), plan);
 
 		if (centerParticle)
 		{
+			int optGroup = obs->getOpticsGroup(mdt, i);
+			double angpix = obs->getPixelSize(optGroup);
+
 			const int s = in.data.ydim;
 
 			double xoff, yoff;
@@ -218,6 +254,8 @@ std::vector<Image<Complex> > StackHelper::loadStackFS(
 
 			shiftImageInFourierTransform(out[i](), out[i](), s, xoff - s/2, yoff - s/2);
 		}
+
+		in.data.clear();
 	}
 
 	return out;

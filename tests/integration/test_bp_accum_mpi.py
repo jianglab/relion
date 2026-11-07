@@ -17,7 +17,10 @@ import pytest
 from fixtures import generate_test_dataset, read_mrc
 
 
-def _gpu_available():
+def _gpu_available(relion_bin):
+    from fixtures import cuda_build
+    if not cuda_build(relion_bin):
+        return False
     return shutil.which("nvidia-smi") is not None and subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
 
 
@@ -39,7 +42,7 @@ def _run(relion_bin, paths, out, env_extra):
 
 @pytest.mark.integration
 def test_mpi_run_matches_run_without_accumulation(test_data_dir, relion_bin, relion_runner):
-    if not _gpu_available():
+    if not _gpu_available(relion_bin):
         pytest.skip("no GPU visible")
     paths = generate_test_dataset(str(test_data_dir / "data"), relion_bin, relion_runner,
                                   num_particles=60, size=32, angpix=1.0)

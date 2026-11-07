@@ -44,9 +44,14 @@ def test_async_star_write_identical_files(test_data_dir, relion_bin, relion_runn
     plain = test_data_dir / "plain"
     on = test_data_dir / "on"
     chk = test_data_dir / "chk"
-    _run(relion_bin, relion_runner, paths, plain, {"RELION_ASYNC_STAR_WRITE": "0"})
-    _run(relion_bin, relion_runner, paths, on, {})   # the default
-    r = _run(relion_bin, relion_runner, paths, chk, {"RELION_ASYNC_STAR_WRITE": "check"})
+    # Three independent runs (own directories, fixed seed), side by side: a third of the time
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(3) as ex:
+        runs = [ex.submit(_run, relion_bin, relion_runner, paths, d, env)
+                for d, env in ((plain, {"RELION_ASYNC_STAR_WRITE": "0"}),
+                               (on, {}),   # the default
+                               (chk, {"RELION_ASYNC_STAR_WRITE": "check"}))]
+        r = [f.result() for f in runs][2]
 
     lines = [l for l in r.stderr.splitlines() if l.startswith("ASYNC_STAR_WRITE check")]
     for suffix in ("_data.star", "_model.star", "_optimiser.star"):

@@ -20,7 +20,9 @@
 
 #include "tilt_estimator.h"
 #include "tilt_helper.h"
+#include "ordered_sum.h"
 #include "ctf_refiner.h"
+#include <src/async_file_writer.h>
 
 #include <src/jaz/single_particle/obs_model.h>
 #include <src/jaz/single_particle/reference_map.h>
@@ -111,44 +113,29 @@ void TiltEstimator::processMicrograph(
 
 		const int pc = partIndices.size();
 
-		std::vector<Image<Complex>> xyAcc(nr_omp_threads);
-		std::vector<Image<RFLOAT>> wAcc(nr_omp_threads);
-
-		for (int i = 0; i < nr_omp_threads; i++)
-		{
-			xyAcc[i] = Image<Complex>(sh[og],s[og]);
-			xyAcc[i].data.initZeros();
-
-			wAcc[i] = Image<RFLOAT>(sh[og],s[og]);
-			wAcc[i].data.initZeros();
-		}
-
-		#pragma omp parallel for num_threads(nr_omp_threads)
-		for (long pp = 0; pp < pc; pp++)
-		{
-			const int p = partIndices[pp];
-
-			CTF ctf;
-			ctf.readByGroup(mdt, obsModel, p);
-
-			int threadnum = omp_get_thread_num();
-
-			TiltHelper::updateTiltShift(
-				pred[p], obs[p], ctf, angpix[og],
-				xyAcc[threadnum], wAcc[threadnum], do_ctf_padding);
-		}
-
-		// Combine the accumulated weights from all threads for this subset,
-		// store weighted sums in xyAccSum and wAccSum
-
+		// Weighted sums over the particles, in their order whatever the number of threads
 		Image<Complex> xyAccSum(sh[og], s[og]);
 		Image<RFLOAT> wAccSum(sh[og], s[og]);
 
-		for (int threadnum = 0; threadnum < nr_omp_threads; threadnum++)
-		{
-			ImageOp::linearCombination(xyAccSum, xyAcc[threadnum], 1.0, 1.0, xyAccSum);
-			ImageOp::linearCombination(wAccSum, wAcc[threadnum], 1.0, 1.0, wAccSum);
-		}
+		xyAccSum.data.initZeros();
+		wAccSum.data.initZeros();
+
+		std::vector<Image<RFLOAT>> ctfImgs(orderedsum::chunk);
+
+		orderedsum::run(pc, s[og], nr_omp_threads,
+			[&](int pp, int slot)
+			{
+				CTF ctf;
+				ctf.readByGroup(mdt, obsModel, partIndices[pp]);
+
+				ctfImgs[slot] = Image<RFLOAT>(sh[og], s[og]);
+				ctf.getFftwImage(ctfImgs[slot](), s[og], s[og], angpix[og], false, false, false, true, do_ctf_padding);
+			},
+			[&](int pp, int slot, int y)
+			{
+				const int p = partIndices[pp];
+				TiltHelper::updateTiltShift(pred[p], obs[p], ctfImgs[slot], y, xyAccSum, wAccSum);
+			});
 
 		// Write out the intermediate results for this micrograph:
 
@@ -157,8 +144,16 @@ void TiltEstimator::processMicrograph(
 		std::stringstream sts;
 		sts << (og+1);
 
-		ComplexIO::write(xyAccSum(), outRoot + "_xyAcc_optics-group_" + sts.str(), ".mrc");
-		wAccSum.write(outRoot+"_wAcc_optics-group_" + sts.str() + ".mrc");
+		// By the background writer; CtfRefiner waits for it before the sums are read back
+		auto xy = std::make_shared<Image<Complex>>(std::move(xyAccSum));
+		auto wt = std::make_shared<Image<RFLOAT>>(std::move(wAccSum));
+		const std::string root = outRoot, og_str = sts.str();
+
+		AsyncFileWriter::instance().submit([xy, wt, root, og_str]
+		{
+			ComplexIO::write((*xy)(), root + "_xyAcc_optics-group_" + og_str, ".mrc");
+			wt->write(root + "_wAcc_optics-group_" + og_str + ".mrc");
+		}, 3 * wt->data.nzyxdim * sizeof(RFLOAT));
 	}
 }
 

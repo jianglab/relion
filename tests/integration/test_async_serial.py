@@ -18,6 +18,9 @@ def _have_mpi(relion_bin):
 
 
 def _have_cuda_gpu(relion_bin):
+    from fixtures import cuda_build
+    if not cuda_build(relion_bin):
+        return False
     if shutil.which("nvidia-smi") is None:
         return False
     try:

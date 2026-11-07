@@ -42,7 +42,8 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 set_property(TEST integration_all PROPERTY LABELS integration)
-# The whole suite takes about 1.5 h on one RTX 4090
+# The whole suite takes about 22 min on one RTX A4000 (2 h with the three slow MPI class-alignment runs and the
+# sequential refinements that used to be repeated). The timeout stays generous for slower hosts.
 set_property(TEST integration_all PROPERTY TIMEOUT 14400)
 set_property(TEST integration_all PROPERTY ENVIRONMENT
     "RELION_BIN_DIR=${CMAKE_BINARY_DIR}/bin;PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")

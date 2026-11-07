@@ -33,6 +33,7 @@
 #include <src/jaz/single_particle/parallel_ft.h>
 
 #include <src/jaz/util/zio.h>
+#include <src/async_file_writer.h>
 
 #include <src/ctf.h>
 #include <src/image.h>
@@ -40,6 +41,12 @@
 #include <src/time.h>
 
 #include <omp.h>
+#include <chrono>
+#include <deque>
+#include <future>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 using namespace gravis;
 
@@ -185,7 +192,15 @@ void CtfRefiner::init()
 		std::cout << " + Reading references ..." << std::endl;
 	}
 
+	// The projections jump around the two large reference volumes
+	hugepages::enable();
+
 	reference.load(verb, debug, nr_omp_threads);
+
+	if (verb > 0 && !hugepages::report().empty())
+	{
+		std::cout << " + Reference: " << hugepages::report() << std::endl;
+	}
 
 	// Get dimensions
 	int s = reference.s;
@@ -247,10 +262,48 @@ void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
 		barstep = XMIPP_MAX(1, my_nr_micrographs/ 60);
 	}
 
-	std::vector<ParFourierTransformer> fts(nr_omp_threads);
-
 	long nr_done = 0;
 	FileName prevdir = "";
+
+	// The particles of the next two micrographs are read from disk in the background, each by its own
+	// thread (two reads at a time are faster than one on network file systems), while this one is processed;
+	// their Fourier transforms are computed when they are needed, by all threads. Not when they would take
+	// more than half of the free memory.
+	const char* aheadEnv = getenv("RELION_CTF_REFINE_READ_AHEAD");
+	const bool readAhead = !(aheadEnv && std::string(aheadEnv) == "0");
+	const char* niceEnv = getenv("RELION_CTF_REFINE_READ_AHEAD_NICE");
+	const int readerNice = niceEnv? std::max(0, std::min(19, atoi(niceEnv))) : 19;
+	std::deque<std::pair<long, std::future<std::vector<Image<RFLOAT>>>>> ahead;
+	long nextToRead = g_start;
+	int nr_ahead = 0;
+	double waited = 0.0;
+
+	auto startReading = [&]()
+	{
+		while (readAhead && ahead.size() < 2 && nextToRead <= g_end)
+		{
+			const long g = nextToRead;
+			const int s = obsModel.getBoxSize(obsModel.getOpticsGroup(unfinishedMdts[g], 0));
+			const double bytes = unfinishedMdts[g].numberOfObjects() * (double) s * s * sizeof(RFLOAT);
+
+			const long long avail = asyncwrite::memoryAvailableBytes();  // -1: unknown
+			if (avail >= 0 && bytes * (ahead.size() + 1) > 0.5 * avail) return;
+
+			const MetaDataTable* mdt = &unfinishedMdts[g];
+			const int threads = nr_omp_threads, niceness = readerNice;
+
+			ahead.emplace_back(g, std::async(std::launch::async, [mdt, threads, niceness]()
+			{
+				if (niceness > 0) setpriority(PRIO_PROCESS, (id_t) syscall(SYS_gettid), niceness);
+				return StackHelper::loadStack(mdt, "", threads);
+			}));
+
+			nextToRead++;
+			nr_ahead++;
+		}
+	};
+
+	startReading();
 
 	for (long g = g_start; g <= g_end; g++)
 	{
@@ -263,7 +316,22 @@ void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
 		std::vector<Image<Complex> > obs;
 
 		// all CTF-refinement programs need the same observations
-		obs = StackHelper::loadStackFS(unfinishedMdts[g], "", nr_omp_threads, true, &obsModel);
+		if (!ahead.empty() && ahead.front().first == g)
+		{
+			const auto t0 = std::chrono::steady_clock::now();
+			std::vector<Image<RFLOAT>> images = ahead.front().second.get();
+			ahead.pop_front();
+			waited += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+			obs = StackHelper::transformStackFS(images, unfinishedMdts[g], nr_omp_threads, true, &obsModel);
+		}
+		else
+		{
+			obs = StackHelper::loadStackFS(unfinishedMdts[g], "", nr_omp_threads, true, &obsModel);
+			nextToRead = std::max(nextToRead, g + 1);
+		}
+
+		startReading();
 
 		// Make sure output directory exists
 		FileName newdir = getOutputFilenameRoot(unfinishedMdts[g], outPath);
@@ -276,53 +344,51 @@ void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
 		}
 
 		std::vector<Image<Complex>>
-				predSameT, // phase-demodulated (defocus)
-				predOppNT, // not phase-demodulated (tilt)
-				predOppT;  // phase-demodulated (mag and aberr)
+				predT,   // phase-demodulated (defocus, mag and aberr)
+				predNT;  // not phase-demodulated (tilt)
 		// applyMtf is always true
 
+		const bool needT = do_defocus_fit || do_bfac_fit || do_aberr_fit || do_mag_fit;
+
 		// Four booleans in predictAll are applyCtf, applyTilt, applyShift, applyMtf.
-		if (do_defocus_fit || do_bfac_fit)
+		if (needT && do_tilt_fit)
 		{
-			predSameT = reference.predictAll(
+			reference.predictAllWithAndWithoutTilt(
+				unfinishedMdts[g], obsModel, ReferenceMap::Own, nr_omp_threads, true, predT, predNT);
+		}
+		else if (needT)
+		{
+			predT = reference.predictAll(
 				unfinishedMdts[g], obsModel, ReferenceMap::Own, nr_omp_threads,
 				false, true, false, true, do_ctf_padding);
 		}
-
-		if (do_tilt_fit)
+		else if (do_tilt_fit)
 		{
-			predOppNT = reference.predictAll(
+			predNT = reference.predictAll(
 				unfinishedMdts[g], obsModel, ReferenceMap::Own, nr_omp_threads,
 				false, false, false, true, do_ctf_padding);
 		}
 
-		if (do_aberr_fit || do_mag_fit)
-		{
-			predOppT = reference.predictAll(
-				unfinishedMdts[g], obsModel, ReferenceMap::Own, nr_omp_threads,
-				false, true, false, true, do_ctf_padding);
-		}
-
 		if (do_defocus_fit)
 		{
-			defocusEstimator.processMicrograph(g, unfinishedMdts[g], obs, predSameT);
+			defocusEstimator.processMicrograph(g, unfinishedMdts[g], obs, predT);
 		}
 
 		// B-factor fit is always performed after the defocus fit (so it can use the optimal CTFs)
 		// The prediction is *not* CTF-weighted, so an up-to-date CTF can be used internally
 		if (do_bfac_fit)
 		{
-			bfactorEstimator.processMicrograph(g, unfinishedMdts[g], obs, predSameT, do_ctf_padding);
+			bfactorEstimator.processMicrograph(g, unfinishedMdts[g], obs, predT, do_ctf_padding);
 		}
 
 		if (do_tilt_fit)
 		{
-			tiltEstimator.processMicrograph(g, unfinishedMdts[g], obs, predOppNT, do_ctf_padding);
+			tiltEstimator.processMicrograph(g, unfinishedMdts[g], obs, predNT, do_ctf_padding);
 		}
 
 		if (do_aberr_fit)
 		{
-			aberrationEstimator.processMicrograph(g, unfinishedMdts[g], obs, predOppT);
+			aberrationEstimator.processMicrograph(g, unfinishedMdts[g], obs, predT);
 		}
 
 		if (do_mag_fit)
@@ -332,7 +398,7 @@ void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
 					unfinishedMdts[g], obsModel, ReferenceMap::Opposite, nr_omp_threads,
 					false, true, false, true, do_ctf_padding);
 
-			magnificationEstimator.processMicrograph(g, unfinishedMdts[g], obs, predOppT, predGradient, do_ctf_padding);
+			magnificationEstimator.processMicrograph(g, unfinishedMdts[g], obs, predT, predGradient, do_ctf_padding);
 		}
 
 		nr_done++;
@@ -343,9 +409,24 @@ void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
 		}
 	}
 
+	// The per-micrograph sums are written by the background writer (RELION_ASYNC_WRITE=0: at once); the fits read them back
+	AsyncFileWriter::instance().waitOrThrow();
+
 	if (verb > 0)
 	{
 		progress_bar(my_nr_micrographs);
+
+		if (nr_ahead > 0)
+		{
+			char w[32];
+			snprintf(w, sizeof(w), "%.2f", waited);
+
+			std::cout << " + Read-ahead: the particles of " << nr_ahead << " micrographs were read in the background "
+			          << "while the ones before were processed (up to two at a time"
+			          << (readerNice > 0? ", at nice " + std::to_string(readerNice) : std::string()) << "); "
+			          << "the computation waited " << w << " s for them. "
+			          << "RELION_CTF_REFINE_READ_AHEAD=0 turns this off." << std::endl;
+		}
 	}
 }
 

@@ -108,13 +108,13 @@ class TiltHelper
 {
     public:
 
+        // adds row y of one particle (ctfImg: its CTF image)
         static void updateTiltShift(
                 const Image<Complex>& prediction,
                 const Image<Complex>& observation,
-                CTF& ctf, double angpix,
+                const Image<RFLOAT>& ctfImg, long y,
                 Image<Complex>& xyDest,
-                Image<RFLOAT>& wDest,
-				bool do_ctf_padding = false);
+                Image<RFLOAT>& wDest);
 
         static void updateTiltShiftPar(const Image<Complex>& prediction,
                 const Image<Complex>& observation,

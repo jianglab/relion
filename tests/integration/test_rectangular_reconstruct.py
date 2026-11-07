@@ -130,6 +130,10 @@ def test_rectangular_class3d_runs_and_writes_cuboid_maps(rect_dataset, relion_bi
     (["--gpu", "--iter", "1", "--K", "1"], "--gpu"),
 ], ids=["vdam", "gpu"])
 def test_rectangular_refine_refuses_unsupported_modes(rect_dataset, relion_bin, relion_runner, extra, message):
+    if "--gpu" in extra:
+        from fixtures import cuda_build
+        if not cuda_build(relion_bin):
+            pytest.skip("--gpu is only refused by a CUDA build; this one has no GPU code")
     d, _, _ = rect_dataset
     r = refine(relion_bin, relion_runner, d, "refused_run", extra)
     assert r.returncode != 0

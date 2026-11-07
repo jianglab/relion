@@ -46,6 +46,15 @@ class StackHelper
 		static std::vector<Image<RFLOAT> > loadStack(
 				const MetaDataTable* mdt, std::string path = "", int threads = 1);
 		
+		// The Fourier transforms of images from loadStack() (which it frees), centred on the particles
+		// if centerParticle (which needs obs)
+		static std::vector<Image<Complex> > transformStackFS(
+				std::vector<Image<RFLOAT>>& images,
+				const MetaDataTable& mdt,
+				int threads = 1,
+				bool centerParticle = false,
+				ObservationModel* obs = 0);
+
 		static std::vector<Image<Complex> > loadStackFS(
 				const MetaDataTable& mdt, 
 				std::string path = "",

@@ -14,6 +14,7 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <unistd.h>
 
 using parhint::Kind;
 
@@ -300,7 +301,7 @@ TEST_CASE("auto threads: GPU memory and work size limits", "[parhint]")
 	}
 	SECTION("count particles in a STAR file")
 	{
-		const std::string fn = "test_count_particles.star";
+		const std::string fn = "test_count_particles_" + std::to_string(getpid()) + ".star";
 		{
 			std::ofstream o(fn);
 			o << "# version 30001\n\ndata_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n\n"

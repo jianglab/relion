@@ -14,6 +14,7 @@
 
 #include "src/metadata_table.h"
 #include "src/ml_model.h"
+#include <unistd.h>
 
 static MetaDataTable makeRefs()
 {
@@ -56,7 +57,7 @@ TEST_CASE("class settings: round trip through model_class_settings", "[class_set
     MetaDataTable MD = makeRefs();
     MlModel::ClassSettings cs, back;
     cs.read(MD);
-    const std::string fn = "relion_class_settings_test.star";
+    const std::string fn = "relion_class_settings_test_" + std::to_string(getpid()) + ".star";
     {
         std::ofstream fo(fn.c_str());
         fo << "data_model_classes\n\nloop_\n_rlnReferenceImage #1\nx.mrc\n\n"; // another table before it

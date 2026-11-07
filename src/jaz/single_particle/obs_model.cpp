@@ -431,6 +431,16 @@ void ObservationModel::predictObservation(
 		}
 	}
 
+	applyPhasesAndMtf(dest, opticsGroup, shiftPhases, applyMtf);
+}
+
+void ObservationModel::applyPhasesAndMtf(
+		MultidimArray<Complex>& dest, int opticsGroup,
+		bool shiftPhases, bool applyMtf)
+{
+	const int s_out = getBoxSize(opticsGroup);
+	const int sh_out = s_out/2 + 1;
+
 	if (shiftPhases && oddZernikeCoeffs.size() > opticsGroup
 			&& oddZernikeCoeffs[opticsGroup].size() > 0)
 	{

@@ -249,6 +249,14 @@ _rlnCorrectedFourierShellCorrelationPhaseRandomizedMaskedMaps #8
         f.write(content)
 
 
+def cuda_build(relion_bin):
+    """True if relion_refine was built with CUDA (its --version names CUDA-ACC). A GPU test must skip on a CPU-only
+    build even where nvidia-smi sees a card, because --gpu is not available in that binary."""
+    import subprocess
+    res = subprocess.run([str(Path(relion_bin) / "relion_refine"), "--version"], capture_output=True, text=True)
+    return "CUDA-ACC" in res.stdout + res.stderr
+
+
 def gpu_double_precision(relion_bin):
     """True if relion_refine was built with double-precision GPU code (-DDoublePrec_ACC=ON)."""
     import subprocess

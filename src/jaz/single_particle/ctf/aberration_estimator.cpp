@@ -19,6 +19,8 @@
 #include <set>
 
 #include <omp.h>
+#include "ordered_sum.h"
+#include <src/async_file_writer.h>
 
 using namespace gravis;
 
@@ -86,65 +88,48 @@ void AberrationEstimator::processMicrograph(
 
 		const int pc = partIndices.size();
 
-		std::vector<Image<RFLOAT>>
-			Axx(nr_omp_threads, Image<RFLOAT>(sh[og],s[og])),
-			Axy(nr_omp_threads, Image<RFLOAT>(sh[og],s[og])),
-			Ayy(nr_omp_threads, Image<RFLOAT>(sh[og],s[og])),
-			bx(nr_omp_threads, Image<RFLOAT>(sh[og],s[og])),
-			by(nr_omp_threads, Image<RFLOAT>(sh[og],s[og]));
-
-		const double as = (double)s[og] * angpix[og];
-
-		#pragma omp parallel for num_threads(nr_omp_threads)
-		for (long pp = 0; pp < pc; pp++)
-		{
-			const int p = partIndices[pp];
-
-			CTF ctf;
-			ctf.readByGroup(mdt, obsModel, p);
-
-			int t = omp_get_thread_num();
-
-			for (int y = 0; y < s[og];  y++)
-			for (int x = 0; x < sh[og]; x++)
-			{
-				const double xf = x;
-				const double yf = y < sh[og]? y : y - s[og];
-
-				const double gamma_i = ctf.getLowOrderGamma(xf/as, yf/as);
-				const double cg = cos(gamma_i);
-				const double sg = sin(gamma_i);
-
-				Complex zobs = obs[p](y,x);
-				Complex zprd = pred[p](y,x);
-
-				double zz = zobs.real * zprd.real + zobs.imag * zprd.imag;
-				double nr = zprd.norm();
-
-				Axx[t](y,x) += nr * sg * sg;
-				Axy[t](y,x) += nr * cg * sg;
-				Ayy[t](y,x) += nr * cg * cg;
-
-				bx[t](y,x) -= zz * sg;
-				by[t](y,x) -= zz * cg;
-			}
-		}
-
-		// Combine the accumulated weights from all threads for this subset
-
+		// Sums over the particles, in their order whatever the number of threads
 		Image<RFLOAT>
 			AxxSum(sh[og],s[og]), AxySum(sh[og],s[og]), AyySum(sh[og],s[og]),
 			bxSum(sh[og],s[og]), bySum(sh[og],s[og]);
 
-		for (int threadnum = 0; threadnum < nr_omp_threads; threadnum++)
-		{
-			ImageOp::linearCombination(AxxSum, Axx[threadnum], 1.0, 1.0, AxxSum);
-			ImageOp::linearCombination(AxySum, Axy[threadnum], 1.0, 1.0, AxySum);
-			ImageOp::linearCombination(AyySum, Ayy[threadnum], 1.0, 1.0, AyySum);
+		const double as = (double)s[og] * angpix[og];
 
-			ImageOp::linearCombination(bxSum, bx[threadnum], 1.0, 1.0, bxSum);
-			ImageOp::linearCombination(bySum, by[threadnum], 1.0, 1.0, bySum);
-		}
+		std::vector<CTF> ctfs(orderedsum::chunk);
+
+		orderedsum::run(pc, s[og], nr_omp_threads,
+			[&](int pp, int slot)
+			{
+				ctfs[slot].readByGroup(mdt, obsModel, partIndices[pp]);
+			},
+			[&](int pp, int slot, int y)
+			{
+				const int p = partIndices[pp];
+				const CTF& ctf = ctfs[slot];
+
+				for (int x = 0; x < sh[og]; x++)
+				{
+					const double xf = x;
+					const double yf = y < sh[og]? y : y - s[og];
+
+					const double gamma_i = ctf.getLowOrderGamma(xf/as, yf/as);
+					const double cg = cos(gamma_i);
+					const double sg = sin(gamma_i);
+
+					Complex zobs = obs[p](y,x);
+					Complex zprd = pred[p](y,x);
+
+					double zz = zobs.real * zprd.real + zobs.imag * zprd.imag;
+					double nr = zprd.norm();
+
+					AxxSum(y,x) += nr * sg * sg;
+					AxySum(y,x) += nr * cg * sg;
+					AyySum(y,x) += nr * cg * cg;
+
+					bxSum(y,x) -= zz * sg;
+					bySum(y,x) -= zz * cg;
+				}
+			});
 
 		// Write out the intermediate results per-micrograph:
 
@@ -153,12 +138,17 @@ void AberrationEstimator::processMicrograph(
 		std::stringstream sts;
 		sts << (og+1);
 
-		AxxSum.write(outRoot+"_aberr-Axx_optics-group_" + sts.str() + ".mrc");
-		AxySum.write(outRoot+"_aberr-Axy_optics-group_" + sts.str() + ".mrc");
-		AyySum.write(outRoot+"_aberr-Ayy_optics-group_" + sts.str() + ".mrc");
+		// By the background writer; CtfRefiner waits for it before the sums are read back
+		auto sums = std::make_shared<std::vector<Image<RFLOAT>>>(5);
+		(*sums)[0] = std::move(AxxSum); (*sums)[1] = std::move(AxySum); (*sums)[2] = std::move(AyySum);
+		(*sums)[3] = std::move(bxSum); (*sums)[4] = std::move(bySum);
+		const std::string root = outRoot + "_aberr-", tail = "_optics-group_" + sts.str() + ".mrc";
 
-		bxSum.write(outRoot+"_aberr-bx_optics-group_" + sts.str() + ".mrc");
-		bySum.write(outRoot+"_aberr-by_optics-group_" + sts.str() + ".mrc");
+		AsyncFileWriter::instance().submit([sums, root, tail]
+		{
+			const char* names[5] = {"Axx", "Axy", "Ayy", "bx", "by"};
+			for (int i = 0; i < 5; i++) (*sums)[i].write(root + names[i] + tail);
+		}, 5 * (*sums)[0].data.nzyxdim * sizeof(RFLOAT));
 	}
 }
 

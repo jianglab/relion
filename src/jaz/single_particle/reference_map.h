@@ -83,6 +83,16 @@ class ReferenceMap
 				bool applyMtf = true,
 				bool applyCtfPadding = false);
 
+		// predictAll() with and without the odd-aberration phase shift (applyTilt), from one projection
+		// per particle (no CTF or shift)
+		void predictAllWithAndWithoutTilt(
+				const MetaDataTable& mdt,
+				ObservationModel& obs,
+				HalfSet hs, int threads,
+				bool applyMtf,
+				std::vector<Image<Complex>>& withTilt,
+				std::vector<Image<Complex>>& withoutTilt);
+
 		std::vector<Volume<gravis::t2Vector<Complex> > > predictAllComplexGradients(
 				const MetaDataTable& mdt,
 				ObservationModel& obs,

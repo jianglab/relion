@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
 
 // ---------------------------------------------------------------------------
 // Construction and basic CRUD
@@ -175,7 +176,7 @@ std::string writeTable(const MetaDataTable &t)
 
 TEST_CASE("MDT: threaded and one-line-at-a-time STAR readers agree", "[metadata][star_parse]")
 {
-    const std::string fn = "relion_star_parse_test.star";
+    const std::string fn = "relion_star_parse_test_" + std::to_string(getpid()) + ".star";
     const int n = 40000;
     {
         std::ofstream o(fn);
@@ -229,7 +230,7 @@ TEST_CASE("MDT: threaded and one-line-at-a-time STAR readers agree", "[metadata]
 
 TEST_CASE("MDT: a bad row is reported by the threaded reader as by the serial one", "[metadata][star_parse]")
 {
-    const std::string fn = "relion_star_parse_bad.star";
+    const std::string fn = "relion_star_parse_bad_" + std::to_string(getpid()) + ".star";
     {
         std::ofstream o(fn);
         o << "data_x\n\nloop_\n_rlnCoordinateX #1\n_rlnCoordinateY #2\n_rlnGroupNumber #3\n";

@@ -22,6 +22,9 @@ from fixtures import generate_test_dataset, gpu_double_precision, read_mrc
 
 
 def _gpu_available(relion_bin):
+    from fixtures import cuda_build
+    if not cuda_build(relion_bin):
+        return False
     if shutil.which("nvidia-smi") is None:
         return False
     return subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0

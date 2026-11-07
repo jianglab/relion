@@ -14,6 +14,9 @@ import pytest
 
 
 def _have_cuda_gpu(relion_bin, marker="GPU_KEEP_POOL"):
+    from fixtures import cuda_build
+    if not cuda_build(relion_bin):
+        return False
     if shutil.which("nvidia-smi") is None:
         return False
     try:

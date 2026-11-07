@@ -20,6 +20,8 @@
 
 #include "magnification_estimator.h"
 #include "ctf_refiner.h"
+#include "ordered_sum.h"
+#include <src/async_file_writer.h>
 
 #include <src/jaz/single_particle/reference_map.h>
 #include <src/jaz/single_particle/fftw_helper.h>
@@ -99,40 +101,37 @@ void MagnificationEstimator::processMicrograph(
 
 		const int pc = partIndices.size();
 
-		std::vector<Volume<Equation2x2>> magEqs(nr_omp_threads);
-
-		for (int i = 0; i < nr_omp_threads; i++)
-		{
-			magEqs[i] = Volume<Equation2x2>(sh[og],s[og],1);
-		}
-
-		#pragma omp parallel for num_threads(nr_omp_threads)
-		for (long pp = 0; pp < pc; pp++)
-		{
-			const int p = partIndices[pp];
-
-			CTF ctf;
-			ctf.readByGroup(mdt, obsModel, p);
-
-			int threadnum = omp_get_thread_num();
-
-			MagnificationHelper::updateScaleFreq(
-				pred[p], predGradient[p], obs[p], ctf, angpix[og], magEqs[threadnum], do_ctf_padding);
-		}
-
+		// Sums over the particles, in their order whatever the number of threads
 		Volume<Equation2x2> magEq(sh[og], s[og],1);
 
-		for (int threadnum = 0; threadnum < nr_omp_threads; threadnum++)
-		{
-			magEq += magEqs[threadnum];
-		}
+		std::vector<Image<RFLOAT>> ctfImgs(orderedsum::chunk);
+
+		orderedsum::run(pc, s[og], nr_omp_threads,
+			[&](int pp, int slot)
+			{
+				CTF ctf;
+				ctf.readByGroup(mdt, obsModel, partIndices[pp]);
+
+				ctfImgs[slot] = Image<RFLOAT>(sh[og], s[og]);
+				ctf.getFftwImage(ctfImgs[slot](), s[og], s[og], angpix[og], false, false, false, true, do_ctf_padding);
+			},
+			[&](int pp, int slot, int y)
+			{
+				const int p = partIndices[pp];
+				MagnificationHelper::updateScaleFreq(pred[p], predGradient[p], obs[p], ctfImgs[slot], y, magEq);
+			});
 
 		std::string outRoot = CtfRefiner::getOutputFilenameRoot(mdt, outPath);
 
 		std::stringstream sts;
 		sts << (og+1);
 
-		MagnificationHelper::writeEQs(magEq, outRoot+"_mag_optics-group_" + sts.str());
+		// By the background writer; CtfRefiner waits for it before the sums are read back
+		auto eqs = std::make_shared<Volume<Equation2x2>>(std::move(magEq));
+		const std::string root = outRoot + "_mag_optics-group_" + sts.str();
+
+		AsyncFileWriter::instance().submit([eqs, root] { MagnificationHelper::writeEQs(*eqs, root); },
+			eqs->voxels.size() * sizeof(Equation2x2));
 
 	}
 }

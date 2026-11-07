@@ -18,7 +18,10 @@ import pytest
 from fixtures import generate_test_dataset
 
 
-def _gpu_available():
+def _gpu_available(relion_bin):
+    from fixtures import cuda_build
+    if not cuda_build(relion_bin):
+        return False
     if shutil.which("nvidia-smi") is None:
         return False
     return subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
@@ -62,7 +65,7 @@ class TestCoarseEarly:
 
     @pytest.fixture
     def paths(self, test_data_dir, relion_bin, relion_runner):
-        if not _gpu_available():
+        if not _gpu_available(relion_bin):
             pytest.skip("no GPU visible")
         return generate_test_dataset(str(test_data_dir / "data"), relion_bin, relion_runner,
                                      num_particles=60, size=32, angpix=1.0)

@@ -7,7 +7,7 @@
 #include <src/jaz/single_particle/obs_model.h>
 #include <vector>
 
-class ModularCtfOptimisation : public DifferentiableOptimization
+class ModularCtfOptimisation : public FastDifferentiableOptimization
 {
 	public:
 		
@@ -46,14 +46,8 @@ class ModularCtfOptimisation : public DifferentiableOptimization
 			                      //    are to be estimated per [p]article, per [m]icrograph or
 			                      //    to be kept [f]ixed.
 		
-		double f(const std::vector<double> &x) const;
-		double f(const std::vector<double> &x, void *tempStorage) const;
-		
-		void grad(const std::vector<double> &x, std::vector<double> &gradDest) const;
-		void grad(const std::vector<double> &x, std::vector<double> &gradDest, void *tempStorage) const;
-		
-		void* allocateTempStorage() const;
-		void deallocateTempStorage(void* ts) const;
+		// cost and gradient in one pass
+		double gradAndValue(const std::vector<double> &x, std::vector<double> &gradDest) const;
 		
 		std::vector<double> encodeInitial();
 		void writeToTable(const std::vector<double> &x);
@@ -82,6 +76,10 @@ class ModularCtfOptimisation : public DifferentiableOptimization
 			
 			std::vector<BufferedImage<RFLOAT>> aberrationByGroup;
 			const std::vector<Image<RFLOAT>>& frqWghByGroup;
+
+			// the pixels of each optics group with a non-zero frequency weight (the others add exactly 0)
+			struct Pixel { long index; double xu, yu, u2, u4, a1, bf, wght, gammaOffset; };
+			std::vector<std::vector<Pixel>> pixelsByGroup;
 			
 					
 		inline double readParam(CtfParam param, const std::vector<double> &x, int p) const;

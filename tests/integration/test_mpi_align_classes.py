@@ -47,7 +47,7 @@ def _refine(cmd_prefix, relion_bin, program, paths, refs_star, out, run, extra=(
         "--ref", str(refs_star), "--K", "2", "--iter", "3", "--ini_high", "20",
         "--ctf", "--tau2_fudge", "4", "--particle_diameter", "25",
         "--flatten_solvent", "--zero_mask", "--oversampling", "1",
-        "--healpix_order", "2", "--offset_range", "5", "--offset_step", "2",
+        "--healpix_order", "1", "--offset_range", "5", "--offset_step", "2",
         "--sym", "c1", "--norm", "--scale", "--j", str(threads),
         "--dont_combine_weights_via_disc", "--random_seed", "7", "--keep_all_iterations",
         "--pool", "5", "--dont_check_norm",
@@ -82,12 +82,23 @@ class TestMpiAlignClasses:
         return paths, star
 
     def test_mpi_aligns_and_is_consistent(self, setup, test_data_dir, relion_bin):
+        # One test, so the two MPI refinements and the serial one run once each (they are the whole cost).
         paths, star = setup
         mpi = ["mpirun", "--oversubscribe", "-n", "3"]
         out_on = test_data_dir / "on"
         out_off = test_data_dir / "off"
-        log_on = _refine(mpi, relion_bin, "relion_refine_mpi", paths, star, out_on, "on")
-        _refine(mpi, relion_bin, "relion_refine_mpi", paths, star, out_off, "off", ["--dont_align_classes"])
+        # Independent runs (own directories, fixed seed), side by side: the serial one is used at the end
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(3) as ex:
+            f_on = ex.submit(_refine, mpi, relion_bin, "relion_refine_mpi", paths, star, out_on, "on")
+            f_off = ex.submit(_refine, mpi, relion_bin, "relion_refine_mpi", paths, star, out_off, "off",
+                              ["--dont_align_classes"])
+            f_ser = ex.submit(_refine, [], relion_bin, "relion_refine", paths, star, test_data_dir / "ser", "ser",
+                              threads=4)
+            log_on, log_off, serial_log = f_on.result(), f_off.result(), f_ser.result()
+
+        # --dont_align_classes is understood under MPI, and nothing is reported
+        assert not ALIGN_LINE.search(log_off) and "Aligning 2 classes" not in log_off
 
         found = ALIGN_LINE.findall(log_on)
         assert found, "the MPI run did not report any class alignment"
@@ -126,24 +137,10 @@ class TestMpiAlignClasses:
         c1 = same_class & (s_on["rlnClassNumber"] == 1)
         assert np.allclose(s_on["rlnOriginXAngst"][c1], s_off["rlnOriginXAngst"][c1])
 
-    def test_serial_finds_the_same_alignment(self, setup, test_data_dir, relion_bin):
-        paths, star = setup
-        mpi = ["mpirun", "--oversubscribe", "-n", "3"]
-        log_on = _refine(mpi, relion_bin, "relion_refine_mpi", paths, star, test_data_dir / "on", "on")
-        found = ALIGN_LINE.findall(log_on)
-        assert found, "the MPI run did not report any class alignment"
         # The serial program finds the same transformation (within a search step or two)
-        serial_log = _refine([], relion_bin, "relion_refine", paths, star, test_data_dir / "ser", "ser", threads=4)
         serial = SERIAL_LINE.findall(serial_log)
         assert serial, "the serial run did not report an alignment"
         mpi_best = [float(v) for v in found[-1][2:]]
         ser_best = [float(v) for v in serial[-1]]
         assert np.allclose(mpi_best[3:], ser_best[3:], atol=2.5), (mpi_best, ser_best)
         assert np.allclose(mpi_best[:3], ser_best[:3], atol=5.0), (mpi_best, ser_best)
-
-    def test_dont_align_is_parsed_under_mpi_and_continue(self, setup, test_data_dir, relion_bin):
-        paths, star = setup
-        mpi = ["mpirun", "--oversubscribe", "-n", "3"]
-        out = test_data_dir / "off1"
-        log = _refine(mpi, relion_bin, "relion_refine_mpi", paths, star, out, "off", ["--dont_align_classes"])
-        assert not ALIGN_LINE.search(log) and "Aligning 2 classes" not in log

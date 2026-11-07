@@ -99,20 +99,11 @@ void MagnificationHelper::updateScaleFreq(
 		const Image<Complex> &prediction,
 		const Volume<t2Vector<Complex>>& predGradient,
 		const Image<Complex> &observation,
-		CTF &ctf, double angpix, Volume<Equation2x2> &eqs,
-		bool do_ctf_padding)
+		const Image<RFLOAT>& ctfImg, long y,
+		Volume<Equation2x2> &eqs)
 {
 	const long w = prediction.data.xdim;
-	const long h = prediction.data.ydim;
 
-	/*Volume<gravis::d2Vector> gradReal(w,h,1), gradImg(w,h,1);
-
-	FilterHelper::centralGrad2D(prediction, gradReal, gradImg);*/
-
-	Image<RFLOAT> ctfImg(w,h);
-	ctf.getFftwImage(ctfImg(), h, h, angpix, false, false, false, true, do_ctf_padding);
-
-	for (long y = 0; y < h; y++)
 	for (long x = 0; x < w; x++)
 	{
 		Complex vx = DIRECT_A2D_ELEM(prediction.data, y, x);

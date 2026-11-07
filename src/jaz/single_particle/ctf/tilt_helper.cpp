@@ -31,18 +31,12 @@ using namespace gravis;
 void TiltHelper::updateTiltShift(
         const Image<Complex> &prediction,
         const Image<Complex> &observation,
-        CTF& ctf, double angpix,
+        const Image<RFLOAT>& ctfImg, long y,
         Image<Complex>& xyDest,
-        Image<RFLOAT>& wDest,
-		bool do_ctf_padding)
+        Image<RFLOAT>& wDest)
 {
     const long w = prediction.data.xdim;
-    const long h = prediction.data.ydim;
 
-	Image<RFLOAT> ctfImg(w,h);
-	ctf.getFftwImage(ctfImg(), h, h, angpix, false, false, false, true, do_ctf_padding);
-
-    for (long y = 0; y < h; y++)
     for (long x = 0; x < w; x++)
     {
         Complex vx = DIRECT_A2D_ELEM(prediction.data, y, x);

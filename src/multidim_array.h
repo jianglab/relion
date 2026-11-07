@@ -66,6 +66,20 @@ void relionZeroMemory(void *p, size_t bytes);
 #define RELION_ALIGNED_MALLOC fftw_malloc
 #define RELION_ALIGNED_FREE fftw_free
 
+/// Transparent huge pages (2 MB) for large arrays. Most nodes give them only to memory that asks for them
+/// ("madvise" mode); random access into a big volume (projections of a reference) then misses the address
+/// translation cache far less (CtfRefine ~15% faster). Asked for only when the kernel already has twice as many
+/// free 2 MB blocks: otherwise it compacts memory first, which once cost 20-40 s more than it saved.
+/// Programs opt in with enable(); RELION_HUGE_PAGES=0 never, =1 in every program.
+namespace hugepages
+{
+	void enable();
+	/// For a new array, before it is first written; does nothing for arrays under 64 MB or when not enabled
+	void advise(void *data, size_t bytes);
+	/// What advise() did so far, as a line for the program's output ("" when it did nothing)
+	std::string report();
+}
+
 extern int bestPrecision(float F, int _width);
 extern std::string floatToString(float F, int _width, int _prec);
 
@@ -702,6 +716,7 @@ public:
         else
         {
             data = (T*)RELION_ALIGNED_MALLOC(sizeof(T) * nzyxdim);
+            hugepages::advise(data, sizeof(T) * nzyxdim);
             if (data == NULL)
                 REPORT_ERROR( "Allocate: No space left");
         }
@@ -743,6 +758,7 @@ public:
         else
         {
             data = (T*)RELION_ALIGNED_MALLOC(sizeof(T) * nzyxdim);
+            hugepages::advise(data, sizeof(T) * nzyxdim);
             if (data == NULL)
                 REPORT_ERROR( "Allocate: No space left");
         }
@@ -918,6 +934,7 @@ public:
             return;
         T* old_array = data;
         data = (T*)RELION_ALIGNED_MALLOC(sizeof(T) * nzyxdim);
+        hugepages::advise(data, sizeof(T) * nzyxdim);
         memcpy(data, old_array, sizeof(T) * nzyxdim);
         RELION_ALIGNED_FREE(old_array);
         nzyxdimAlloc = nzyxdim;
@@ -1054,7 +1071,10 @@ public:
                     REPORT_ERROR("MultidimArray::resize: mmap failed.");
             }
             else
+            {
                 new_data = (T*)RELION_ALIGNED_MALLOC(sizeof(T) * NZYXdim);
+                hugepages::advise(new_data, sizeof(T) * NZYXdim);
+            }
         }
         catch (std::bad_alloc &)
         {
@@ -1147,7 +1167,10 @@ public:
                     REPORT_ERROR("MultidimArray::resize: mmap failed.");
             }
             else
+            {
                 new_data = (T*)RELION_ALIGNED_MALLOC(sizeof(T) * NZYXdim);
+                hugepages::advise(new_data, sizeof(T) * NZYXdim);
+            }
         }
         catch (std::bad_alloc &)
         {

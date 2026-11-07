@@ -271,6 +271,32 @@ Image<Complex> ReferenceMap::predict(
 	return pred;
 }
 
+void ReferenceMap::predictAllWithAndWithoutTilt(
+		const MetaDataTable& mdt,
+		ObservationModel& obs,
+		HalfSet hs, int threads,
+		bool applyMtf,
+		std::vector<Image<Complex>>& withTilt,
+		std::vector<Image<Complex>>& withoutTilt)
+{
+	const int pc = mdt.numberOfObjects();
+
+	withTilt.resize(pc);
+	withoutTilt.resize(pc);
+
+	#pragma omp parallel for num_threads(threads)
+	for (int p = 0; p < pc; p++)
+	{
+		withoutTilt[p] = predict(mdt, p, obs, hs, false, false, false, false, false);
+		withTilt[p] = withoutTilt[p];
+
+		const int og = obs.getOpticsGroup(mdt, p);
+
+		obs.applyPhasesAndMtf(withTilt[p](), og, true, applyMtf);
+		obs.applyPhasesAndMtf(withoutTilt[p](), og, false, applyMtf);
+	}
+}
+
 std::vector<Volume<gravis::t2Vector<Complex>>> ReferenceMap::predictAllComplexGradients(
 		const MetaDataTable &mdt,
 		ObservationModel &obs,

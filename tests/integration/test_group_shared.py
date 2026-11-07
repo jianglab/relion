@@ -24,7 +24,10 @@ from fixtures import generate_test_dataset, gpu_double_precision
 N_FIL = 10
 
 
-def _gpu_available():
+def _gpu_available(relion_bin):
+    from fixtures import cuda_build
+    if not cuda_build(relion_bin):
+        return False
     if shutil.which("nvidia-smi") is None:
         return False
     return subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
@@ -94,7 +97,7 @@ def _run(relion_bin, star, ref, out, env_extra):
 class TestGroupShared:
 
     def test_shared_projections_are_exact(self, test_data_dir, relion_bin, relion_runner):
-        if not _gpu_available():
+        if not _gpu_available(relion_bin):
             pytest.skip("no GPU visible")
         if gpu_double_precision(relion_bin):
             pytest.skip("the shared coarse pass is single-precision only")
