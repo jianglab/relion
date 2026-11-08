@@ -135,13 +135,23 @@ class NewFFT
         static void FourierTransform(
                 MultidimArray<float>& src,
                 MultidimArray<fComplex>& dest,
-                Normalization normalization = FwdOnly);
+                Normalization normalization = FwdOnly,
+                unsigned int plan_flags = FFTW_ESTIMATE);
 
         static void inverseFourierTransform(
                 MultidimArray<fComplex>& src,
                 MultidimArray<float>& dest,
                 Normalization normalization = FwdOnly,
-                bool preserveInput = true);
+                bool preserveInput = true,
+                unsigned int plan_flags = FFTW_ESTIMATE);
+
+        /* plan_flags: add MEASURED to plan with FFTW_MEASURE instead of FFTW_ESTIMATE (float transforms with
+           array-specific plans only). Measured plans are often 1.5x faster, but they may add up rounding
+           differently from the estimated ones, and differently on another CPU, so use them only where the result
+           is not meant to be reproduced bit for bit (e.g. estimating motion, not summing it). The plans are
+           measured once per size and CPU model and kept in a wisdom file next to the other RELION caches
+           (on unless RELION_FFTW_PLANS=estimate; RELION_FFTW_NEWFFT_WISDOM=<file> sets the file). */
+        static const unsigned int MEASURED = 0x80000000u;
 	
 		
 		template<class T>

@@ -59,6 +59,17 @@ void MotioncorrRunnerMpi::run()
 		barstep = XMIPP_MAX(1, my_nr_micrographs / 60);
 	}
 
+	// The next movies of this rank are decoded in the background at the lowest CPU priority; the ranks of a node
+	// share its memory. One movie ahead: ranks work one movie at a time.
+	if (do_own && my_nr_micrographs > 0)
+	{
+		MPI_Comm local;
+		MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, node->rank, MPI_INFO_NULL, &local);
+		MPI_Comm_size(local, &mem_share);
+		MPI_Comm_free(&local);
+		startReadAhead(my_first_micrograph, my_last_micrograph + 1, 1, 0);
+	}
+
 	for (long int imic = my_first_micrograph; imic <= my_last_micrograph; imic++)
 	{
 		if (verb > 0 && imic % barstep == 0)
@@ -69,7 +80,9 @@ void MotioncorrRunnerMpi::run()
 			MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
       
 		Micrograph mic(fn_micrographs[imic], fn_gain_reference, bin_factor, eer_upsampling, eer_grouping);
-    mic.pre_exposure = pre_exposure + pre_exposure_micrographs[imic];
+		if (!dose_per_frame_vec.empty())
+			mic.setDosePerFrame(dose_per_frame_vec[imic]);
+		mic.pre_exposure = pre_exposure + pre_exposure_micrographs[imic];
 
 		// Get angpix and voltage from the optics groups:
 		obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, voltage, optics_group_micrographs[imic]-1);
@@ -87,6 +100,10 @@ void MotioncorrRunnerMpi::run()
 			saveModel(mic);
 			plotShifts(fn_micrographs[imic], mic);
 		}
+	}
+	{
+		const std::string report = stopReadAhead();
+		if (!report.empty() && verb > 0) std::cout << "\n" << report << std::endl;
 	}
 	if (verb > 0)
 		progress_bar(my_nr_micrographs);

@@ -435,3 +435,43 @@ class TestMovieAveragesFlag:
         real = (d / "MC_real" / stem).with_suffix(".mrc")
         assert not real.read_bytes().startswith(MAGIC)
         assert "rlnMicrographSumRecipe" in real.with_suffix(".star").read_text()
+
+
+@pytest.mark.integration
+class TestPerMovieDose:
+    """A dose per movie (rlnMicrographDoseRate in the movies STAR file) must be used by the MPI program as well
+    as by the single-process one: the micrographs the two make from the same movies are the same."""
+
+    def test_mpi_uses_the_dose_of_each_movie(self, test_data_dir, relion_bin):
+        import shutil
+        if shutil.which("mpirun") is None or not (relion_bin / "relion_run_motioncorr_mpi").exists():
+            pytest.skip("no MPI MotionCorr")
+        d = test_data_dir
+        names = _write_movies(d, n_movies=3)
+        doses = [0.5, 1.0, 1.5]
+        with open(d / "movies.star", "w") as fh:
+            fh.write("\ndata_optics\n\nloop_\n_rlnOpticsGroupName #1\n_rlnOpticsGroup #2\n"
+                     "_rlnMicrographOriginalPixelSize #3\n_rlnVoltage #4\n_rlnSphericalAberration #5\n"
+                     "_rlnAmplitudeContrast #6\n")
+            fh.write(f"opticsGroup1 1 {ANGPIX:.6f} 300.000000 2.700000 0.100000\n\n")
+            fh.write("\ndata_movies\n\nloop_\n_rlnMicrographMovieName #1\n_rlnOpticsGroup #2\n_rlnMicrographDoseRate #3\n")
+            for n, dose in zip(names, doses):
+                fh.write(f"{n} 1 {dose}\n")
+
+        _motioncorr(relion_bin, d, "MC1", ["--dose_weighting"], threads=2)
+        cmd = [str(relion_bin / "relion_run_motioncorr_mpi"), "--i", "movies.star", "--o", "MCmpi/",
+               "--use_own", "--j", "1", "--first_frame_sum", "1", "--last_frame_sum", "-1",
+               "--bfactor", "150", "--dose_per_frame", "1.3", "--preexposure", "0",
+               "--patch_x", "3", "--patch_y", "3", "--gainref", "Movies/gain.mrc",
+               "--gain_rot", "0", "--gain_flip", "0", "--grouping_for_ps", "3", "--ps_size", "128",
+               "--dose_weighting"]
+        env = _env("real")
+        env.setdefault("OMPI_MCA_rmaps_base_oversubscribe", "1")
+        r = subprocess.run(["mpirun", "-np", "2"] + cmd, cwd=d, env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+
+        for n, dose in zip(names, doses):
+            stem = Path("MC1") / Path(n).with_suffix(""), Path("MCmpi") / Path(n).with_suffix("")
+            # the same dose gives the same micrograph in the two programs
+            assert (d / stem[0].with_suffix(".mrc")).read_bytes()[1024:] == \
+                   (d / stem[1].with_suffix(".mrc")).read_bytes()[1024:], f"{n}: MPI and single-process differ"

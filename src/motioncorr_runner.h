@@ -27,12 +27,15 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <algorithm>
+#include <memory>
 #include <src/time.h>
 #include "src/metadata_table.h"
 #include "src/image.h"
 #include "src/micrograph_model.h"
 #include <src/jaz/single_particle/obs_model.h>
 #include "src/jaz/tomography/tomogram_set.h"
+
+class MovieReadAhead;
 
 class MotioncorrRunner
 {
@@ -192,6 +195,28 @@ public:
 	// Execute our own implementation for a single micrograph
 	bool executeOwnMotionCorrection(Micrograph &mic);
 
+	// The frames of a movie as read from the file (before the gain), decoded ahead of time by a MovieReadAhead
+	struct DecodedMovie
+	{
+		int nx = 0, ny = 0, nn = 0;
+		std::vector<int> frames; // 0-indexed, the ones that are summed
+		std::vector<Image<float> > Iframes;
+		double seconds = 0;
+	};
+	std::shared_ptr<DecodedMovie> decodeMovie(const FileName &fn_mic, int n_io_threads) const;
+
+	// Set by run(): where executeOwnMotionCorrection() takes movies decoded in the background (NULL: it reads them)
+	MovieReadAhead *read_ahead = NULL;
+	std::shared_ptr<MovieReadAhead> ahead_owner;
+	// Processes (MPI ranks) that share this node's memory; the read-ahead and the kept frames take a share of it
+	int mem_share = 1;
+	// Decode the movies first..last-1 of fn_micrographs ahead of executeOwnMotionCorrection() (RELION_MOTIONCORR_READ_AHEAD=0: not)
+	void startReadAhead(size_t first, size_t last, int depth, double bytes);
+	// Stop it and say what it did ("" if it never ran)
+	std::string stopReadAhead();
+	// Bytes of the frames of the last movie it read (sizes the read-ahead)
+	double movie_bytes = 0;
+
 	// Plot the shifts
 	void plotShifts(FileName fn_mic, Micrograph &mic);
 
@@ -241,7 +266,12 @@ public:
 
 	// Sum the movie of mic as recorded: global shifts in one Fourier step, dose
 	// weighting, the local model, binning. Reads the movie itself.
-	void sumFromRecord(const Micrograph &mic, const SumRecipe &recipe, Image<float> &Isum);
+	// prepared_F: instead, their transforms as made here (plans by size, cropped with early binning).
+	// prepared: the frames of the movie after the gain and the pixel fixes, if the caller still has them (the
+	// summing then does not read the movie again; it must hold the same frames, else it is ignored)
+	void sumFromRecord(const Micrograph &mic, const SumRecipe &recipe, Image<float> &Isum,
+	                   std::vector<Image<float> > *prepared = NULL, const std::vector<int> *prepared_frames = NULL,
+	                   std::vector<MultidimArray<fComplex> > *prepared_F = NULL);
 
 	// Regenerate the micrograph described by a motion record written with a sum
 	// recipe (the .star next to the micrograph, or a virtual movie average

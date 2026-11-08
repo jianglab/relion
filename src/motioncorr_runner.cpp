@@ -18,6 +18,18 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include <omp.h>
+#include <array>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <chrono>
+#include <iomanip>
+#include <set>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <cstdint>
 #include <map>
 #include <sstream>
@@ -536,6 +548,194 @@ static void writeImageAsync(const Image<T> &img, const FileName &fn, DataType da
 	});
 }
 
+// Decodes the next movies in the background, at the lowest CPU priority, so that the movie a worker asks for next is
+// already in memory: they use the CPUs the computation leaves idle. Only as many movies as fit in a quarter of the
+// free memory and (depth) at most; a movie nobody asked for early is decoded by the worker itself.
+class MovieReadAhead
+{
+public:
+	MovieReadAhead(const MotioncorrRunner &runner, const std::vector<FileName> &names, size_t first, size_t last, int depth, int threads,
+	               double bytes, int mem_share)
+		: runner(runner), names(names), next(first), last(last), depth(depth), threads(threads), bytes0(bytes), mem_share(std::max(1, mem_share))
+	{
+		worker = std::thread([this]() { loop(); });
+	}
+
+	~MovieReadAhead()
+	{
+		{
+			std::lock_guard<std::mutex> lk(m);
+			stop = true;
+		}
+		cv.notify_all();
+		if (worker.joinable()) worker.join();
+	}
+
+	// The decoded movie, waiting for it if it is being decoded; NULL if it was not started (the caller reads it)
+	std::shared_ptr<MotioncorrRunner::DecodedMovie> take(const FileName &fn)
+	{
+		const auto t0 = std::chrono::steady_clock::now();
+		std::unique_lock<std::mutex> lk(m);
+		if (taken.count(fn)) return NULL;
+		auto it = entries.find(fn);
+		if (it == entries.end())
+		{
+			taken.insert(fn);   // not started: nobody decodes it for this caller
+			return NULL;
+		}
+		cv.wait(lk, [&]() { return it->second.ready; });
+		std::shared_ptr<MotioncorrRunner::DecodedMovie> d = it->second.data;
+		entries.erase(it);
+		taken.insert(fn);
+		if (d) n_used++;
+		waited += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+		lk.unlock();
+		cv.notify_all();
+		return d;
+	}
+
+	std::string report()
+	{
+		std::lock_guard<std::mutex> lk(m);
+		std::ostringstream os;
+		os << " + Read-ahead: " << n_used << " movies were decoded in the background (up to " << depth << " ahead, "
+		   << threads << " thread(s) at nice 19); the computation waited " << std::setprecision(3) << waited
+		   << " s for them. RELION_MOTIONCORR_READ_AHEAD=0 turns this off.";
+		if (stopped_for_memory) os << " Stopped early: not enough free memory.";
+		return os.str();
+	}
+
+private:
+	struct Entry { bool ready = false; std::shared_ptr<MotioncorrRunner::DecodedMovie> data; };
+
+	void loop()
+	{
+		setpriority(PRIO_PROCESS, (id_t) syscall(SYS_gettid), 19);   // inherited by the OpenMP threads of the decoding
+		double bytes = bytes0;   // of one movie; the first one decoded here replaces the estimate
+		for (;;)
+		{
+			FileName fn;
+			{
+				std::unique_lock<std::mutex> lk(m);
+				for (;;)
+				{
+					if (stop || next >= last) return;
+					// Movies nobody has asked for yet, at most `depth`
+					if ((int) entries.size() < depth)
+					{
+						const long long avail = asyncwrite::memoryAvailableBytes();
+						if (bytes <= 0 || avail < 0 || bytes * (entries.size() + 1) <= 0.25 * avail / mem_share) break;
+						if (entries.empty()) { stopped_for_memory = true; return; }
+					}
+					cv.wait_for(lk, std::chrono::milliseconds(200));
+				}
+				while (next < last && taken.count(names[next])) next++;
+				if (next >= last) return;
+				fn = names[next++];
+				entries[fn];   // claimed
+			}
+
+			std::shared_ptr<MotioncorrRunner::DecodedMovie> d;
+			try { d = runner.decodeMovie(fn, threads); }
+			catch (...) { d.reset(); }   // the worker reads it, and reports what is wrong
+
+			{
+				std::lock_guard<std::mutex> lk(m);
+				if (d) bytes = (double) d->Iframes.size() * d->nx * d->ny * sizeof(float);
+				entries[fn].data = d;
+				entries[fn].ready = true;
+			}
+			cv.notify_all();
+		}
+	}
+
+	const MotioncorrRunner &runner;
+	const std::vector<FileName> &names;
+	size_t next, last;
+	int depth, threads;
+	double bytes0;
+	int mem_share;   // processes of the node that share its memory
+	bool stop = false, stopped_for_memory = false;
+	int n_used = 0;
+	double waited = 0;
+	std::map<FileName, Entry> entries;
+	std::set<FileName> taken;
+	std::mutex m;
+	std::condition_variable cv;
+	std::thread worker;
+};
+
+void MotioncorrRunner::startReadAhead(size_t first, size_t last, int depth, double bytes)
+{
+	const char *env = getenv("RELION_MOTIONCORR_READ_AHEAD");
+	if (env && std::string(env) == "0") return;
+	ahead_owner.reset(new MovieReadAhead(*this, fn_micrographs, first, last, depth, n_threads, bytes, mem_share));
+	read_ahead = ahead_owner.get();
+}
+
+std::string MotioncorrRunner::stopReadAhead()
+{
+	read_ahead = NULL;
+	std::string report;
+	if (ahead_owner) report = ahead_owner->report();
+	ahead_owner.reset();
+	return report;
+}
+
+std::shared_ptr<MotioncorrRunner::DecodedMovie> MotioncorrRunner::decodeMovie(const FileName &fn_mic, int n_io_threads) const
+{
+	const auto t0 = std::chrono::steady_clock::now();
+	std::shared_ptr<DecodedMovie> d(new DecodedMovie);
+
+	EERRenderer renderer;
+	const bool isEER = EERRenderer::isEER(fn_mic);
+	CompressedMRCReader compressedMRCreader;
+	const bool isCompressedMRC = compressedMRCreader.isCompressedMRC(fn_mic);
+	if (max_io_threads > 0 && n_io_threads > max_io_threads) n_io_threads = max_io_threads;
+
+	Image<float> Ihead;
+	if (isEER)
+	{
+		renderer.read(fn_mic, eer_upsampling);
+		d->nx = renderer.getWidth(); d->ny = renderer.getHeight();
+		d->nn = renderer.getNFrames() / eer_grouping;
+	}
+	else if (isCompressedMRC)
+	{
+		compressedMRCreader.read(fn_mic, n_io_threads);
+		d->nx = XSIZE(compressedMRCreader.Ihead()); d->ny = YSIZE(compressedMRCreader.Ihead());
+		d->nn = NSIZE(compressedMRCreader.Ihead());
+	}
+	else
+	{
+		Ihead.read(fn_mic, false, -1, false, true);
+		d->nx = XSIZE(Ihead()); d->ny = YSIZE(Ihead()); d->nn = NSIZE(Ihead());
+	}
+
+	for (int i = 0; i < d->nn; i++)
+	{
+		const int frame = i + 1;
+		if (frame < first_frame_sum) continue;
+		if (last_frame_sum > 0 && frame > last_frame_sum) continue;
+		d->frames.push_back(i);
+	}
+
+	const int n_frames = d->frames.size();
+	d->Iframes.resize(n_frames);
+	#pragma omp parallel for num_threads(isCompressedMRC ? 1 : n_io_threads)
+	for (int iframe = 0; iframe < n_frames; iframe++)
+	{
+		if (isEER)
+			renderer.renderFrames(d->frames[iframe] * eer_grouping + 1, (d->frames[iframe] + 1) * eer_grouping, d->Iframes[iframe]());
+		else if (isCompressedMRC)
+			compressedMRCreader.readFrameInto(d->Iframes[iframe], d->frames[iframe]);
+		else
+			d->Iframes[iframe].read(fn_mic, true, d->frames[iframe], false, true);
+	}
+	d->seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	return d;
+}
+
 void MotioncorrRunner::run()
 {
 	prepareGainReference(true);
@@ -554,40 +754,110 @@ void MotioncorrRunner::run()
 		barstep = XMIPP_MAX(1, fn_micrographs.size() / 60);
 	}
 
-	for (long int imic = 0; imic < fn_micrographs.size(); imic++)
+	// One movie. `r` is this runner or a copy of it with its own thread count (it writes angpix and voltage)
+	std::mutex progress_mutex;
+	std::atomic<long int> n_done(0);
+	std::atomic<bool> aborted(false);
+	auto processMovie = [&](MotioncorrRunner &r, long int imic)
 	{
-		if (verb > 0 && imic % barstep == 0)
-			progress_bar(imic);
-
-		// Abort through the pipeline_control system
-		if (pipeline_control_check_abort_job())
-			exit(RELION_EXIT_ABORTED);
+		{
+			std::lock_guard<std::mutex> lk(progress_mutex);
+			if (verb > 0 && imic % barstep == 0)
+				progress_bar(imic);
+			// Abort through the pipeline_control system
+			if (pipeline_control_check_abort_job())
+				aborted = true;
+		}
+		if (aborted) return;
 
 		Micrograph mic(fn_micrographs[imic], fn_gain_reference, bin_factor, eer_upsampling, eer_grouping);
-		
+
 		if (!dose_per_frame_vec.empty())
 			mic.setDosePerFrame(dose_per_frame_vec[imic]);
-		
-        // Set per-micrograph pre_exposure
-        mic.pre_exposure = pre_exposure + pre_exposure_micrographs[imic];
 
-        // Get angpix and voltage from the optics groups:
-		obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, voltage, optics_group_micrographs[imic]-1);
-		obsModel.opticsMdt.getValue(EMDL_MICROGRAPH_ORIGINAL_PIXEL_SIZE, angpix, optics_group_micrographs[imic]-1);
+		// Set per-micrograph pre_exposure
+		mic.pre_exposure = pre_exposure + pre_exposure_micrographs[imic];
+
+		// Get angpix and voltage from the optics groups:
+		obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, r.voltage, optics_group_micrographs[imic]-1);
+		obsModel.opticsMdt.getValue(EMDL_MICROGRAPH_ORIGINAL_PIXEL_SIZE, r.angpix, optics_group_micrographs[imic]-1);
 
 		bool result = false;
 		if (do_own)
-			result = executeOwnMotionCorrection(mic);
+			result = r.executeOwnMotionCorrection(mic);
 		else if (do_motioncor2)
-			result = executeMotioncor2(mic);
+			result = r.executeMotioncor2(mic);
 		else
 			REPORT_ERROR("Bug: by now it should be clear whether to use MotionCor2 or own implementation ...");
 
 		if (result) {
-			saveModel(mic);
-			plotShifts(fn_micrographs[imic], mic);
+			r.saveModel(mic);
+			r.plotShifts(fn_micrographs[imic], mic);
 		}
+		n_done++;
+	};
+
+	const long int n_mics = fn_micrographs.size();
+	long int next_mic = 0;
+	if (n_mics > 0)
+	{
+		// The first movie runs alone with every thread, which also measures how much memory one movie needs
+		processMovie(*this, next_mic++);
+		if (aborted) exit(RELION_EXIT_ABORTED);
 	}
+
+	int n_movies = 1;
+	if (do_own && next_mic < n_mics && n_threads > 1)
+	{
+		const char *env = getenv("RELION_MOTIONCORR_MOVIES");
+		const long long peak = asyncwrite::procKb("/proc/self/status", "VmHWM:");
+		const long long avail = asyncwrite::memoryAvailableBytes();
+		const long long rss = std::max(0LL, asyncwrite::procKb("/proc/self/status", "VmRSS:"));
+		// Threads per movie stay at 2 or more: the transforms of one movie scale well to that
+		const int by_threads = std::max(1, n_threads / 2);
+		int by_memory = by_threads;
+		if (peak > 0 && avail >= 0)
+			by_memory = std::max(1, (int)((0.8 * (avail + rss)) / peak));
+		n_movies = std::min(by_threads, by_memory);
+		if (env && atoi(env) > 0) n_movies = std::min(atoi(env), n_threads);
+		n_movies = (int)std::min<long int>(n_movies, n_mics - next_mic);
+		if (verb > 0)
+			std::cout << "\n Processing " << n_movies << " movie(s) at a time, " << n_threads / n_movies << " thread(s) each"
+			          << (env && atoi(env) > 0 ? " (RELION_MOTIONCORR_MOVIES)" : "")
+			          << ": one movie needed " << (peak > 0 ? peak >> 20 : -1) << " MB, "
+			          << (avail >= 0 ? avail >> 20 : -1) << " MB are available. RELION_MOTIONCORR_MOVIES=1 runs them one by one." << std::endl;
+	}
+
+	// The movies the workers will ask for next are decoded in the background meanwhile
+	if (do_own && next_mic < n_mics)
+		startReadAhead(next_mic, n_mics, std::max(1, n_movies), movie_bytes);
+
+	std::atomic<long int> next_atomic(next_mic);
+	auto worker = [&](MotioncorrRunner &r)
+	{
+		for (long int imic; (imic = next_atomic++) < n_mics && !aborted; )
+			processMovie(r, imic);
+	};
+	if (n_movies <= 1)
+		worker(*this);
+	else
+	{
+		std::vector<std::unique_ptr<MotioncorrRunner> > copies;
+		std::vector<std::thread> threads;
+		for (int w = 0; w < n_movies; w++)
+		{
+			copies.emplace_back(new MotioncorrRunner(*this));
+			copies.back()->n_threads = n_threads / n_movies + (w < n_threads % n_movies ? 1 : 0);
+		}
+		for (int w = 0; w < n_movies; w++)
+			threads.emplace_back(worker, std::ref(*copies[w]));
+		for (auto &t : threads) t.join();
+	}
+	{
+		const std::string report = stopReadAhead();
+		if (!report.empty() && verb > 0) std::cout << "\n" << report << std::endl;
+	}
+	if (aborted) exit(RELION_EXIT_ABORTED);
 
 	if (verb > 0)
 		progress_bar(fn_micrographs.size());
@@ -1305,8 +1575,14 @@ bool MotioncorrRunner::executeOwnMotionCorrection(Micrograph &mic) {
 
 	// Read images
 	RCTIC(TIMING_READ_MOVIE);
-	#pragma omp parallel for num_threads(isCompressedMRC ? 1 : n_io_threads)
+	std::shared_ptr<DecodedMovie> pre = read_ahead != NULL ? read_ahead->take(fn_mic) : std::shared_ptr<DecodedMovie>();
+	const bool predecoded = pre && pre->nx == nx && pre->ny == ny && pre->frames == frames;
+	if (predecoded) Iframes = std::move(pre->Iframes);
+	pre.reset();
+	movie_bytes = (double) n_frames * nx * ny * sizeof(float);
+	#pragma omp parallel for num_threads(isCompressedMRC ? 1 : n_io_threads) if(!predecoded)
 	for (int iframe = 0; iframe < n_frames; iframe++) {
+		if (predecoded) continue;
 		if (isEER)
 			renderer.renderFrames(frames[iframe] * eer_grouping + 1, (frames[iframe] + 1) * eer_grouping, Iframes[iframe]());
 		else if (isCompressedMRC)
@@ -1465,18 +1741,61 @@ bool MotioncorrRunner::executeOwnMotionCorrection(Micrograph &mic) {
 	}
 
 	// FFT
+	// A reproducible sum is made from these same frames again (gain, pixel fixes) once the motion is known: keep
+	// them for it, when memory allows, instead of reading the movie a second time
+	std::vector<Image<float> > kept;
+	std::vector<MultidimArray<fComplex> > keptF;
+	// Reproducible modes: transform the frames as the reproducible sum does (plans by size), so that real and
+	// virtual averages estimate the same motion, and give the sum these transforms, so that it does not transform
+	// the frames again. The sum is unchanged; the motion differs from RELION_MOTIONCORR_SHARED_FFT=0 at the level of
+	// rounding. Not in the default mode, where measured plans are faster and there is no sum to share with.
+	const char *shared = getenv("RELION_MOTIONCORR_SHARED_FFT");
+	const bool size_plans = reproducible && !(shared != NULL && std::string(shared) == "0");
+	static std::atomic<bool> said_fft(false);
+	if (verb > 0 && !said_fft.exchange(true))
+	{
+		const char *plans = getenv("RELION_FFTW_PLANS");
+		const bool measured = plans == NULL || std::string(plans) != "estimate";
+		std::cout << "\n + Motion estimation FFTs: " << (measured ? "measured plans, kept in a wisdom file per CPU model"
+		          " (RELION_FFTW_PLANS=estimate turns this off)" : "estimated plans (RELION_FFTW_PLANS=estimate)")
+		          << (!reproducible ? "" : size_plans ? "; frames transformed as the reproducible sum does, which reuses them"
+		          " (RELION_MOTIONCORR_SHARED_FFT=0 turns this off)" : "; frames transformed separately for the sum"
+		          " (RELION_MOTIONCORR_SHARED_FFT=0)") << std::endl;
+	}
+	bool keep_frames = false, share_fft = false;
+	if (reproducible && !virtual_averages)
+	{
+		const char *env = getenv("RELION_MOTIONCORR_KEEP_FRAMES");
+		const long long avail = asyncwrite::memoryAvailableBytes();
+		const double bytes = (double) n_frames * (double) XSIZE(Iframes[0]()) * YSIZE(Iframes[0]()) * sizeof(float);
+		keep_frames = !(env && std::string(env) == "0") && (avail < 0 || 3 * bytes * mem_share < avail);
+		share_fft = keep_frames && size_plans;
+	}
 	RCTIC(TIMING_GLOBAL_FFT);
-	#pragma omp parallel for num_threads(n_threads)
-	for (int iframe = 0; iframe < n_frames; iframe++) {
-		if (!early_binning) {
-			NewFFT::FourierTransform(Iframes[iframe](), Fframes[iframe]);
-		} else {
-			MultidimArray<fComplex> Fframe;
-			NewFFT::FourierTransform(Iframes[iframe](), Fframe);
-			Fframes[iframe].reshape(ny, nx / 2 + 1);
-			cropInFourierSpace(Fframe, Fframes[iframe]);
+	{
+		const int nx_full = XSIZE(Iframes[0]()), ny_full = YSIZE(Iframes[0]());
+		NewFFT::FloatPlan plan_full(size_plans ? nx_full : 2, size_plans ? ny_full : 2, 1, FFTW_ESTIMATE);
+		#pragma omp parallel for num_threads(n_threads)
+		for (int iframe = 0; iframe < n_frames; iframe++) {
+			if (!early_binning) {
+				if (size_plans) NewFFT::FourierTransform(Iframes[iframe](), Fframes[iframe], plan_full);
+				else NewFFT::FourierTransform(Iframes[iframe](), Fframes[iframe], NewFFT::FwdOnly, NewFFT::MEASURED);
+			} else {
+				MultidimArray<fComplex> Fframe;
+				if (size_plans) NewFFT::FourierTransform(Iframes[iframe](), Fframe, plan_full);
+				else NewFFT::FourierTransform(Iframes[iframe](), Fframe, NewFFT::FwdOnly, NewFFT::MEASURED);
+				Fframes[iframe].reshape(ny, nx / 2 + 1);
+				cropInFourierSpace(Fframe, Fframes[iframe]);
+			}
+			if (!keep_frames || share_fft) Iframes[iframe].clear(); // save some memory (global alignment use the most memory)
 		}
-		Iframes[iframe].clear(); // save some memory (global alignment use the most memory)
+	}
+	if (share_fft)
+		keptF = Fframes;   // before the alignment shifts them
+	else if (keep_frames)
+	{
+		kept.swap(Iframes);
+		Iframes.resize(n_frames);
 	}
 	RCTOC(TIMING_GLOBAL_FFT);
 
@@ -1599,7 +1918,7 @@ bool MotioncorrRunner::executeOwnMotionCorrection(Micrograph &mic) {
 	#pragma omp parallel for num_threads(n_threads)
 	for (int iframe = 0; iframe < n_frames; iframe++) {
 		Iframes[iframe]().reshape(ny, nx);
-		NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe]());
+		NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe](), NewFFT::FwdOnly, true, NewFFT::MEASURED);
 		// Unfortunately, we cannot deallocate Fframes here because of dose-weighting
 	}
 	RCTOC(TIMING_GLOBAL_IFFT);
@@ -1659,7 +1978,7 @@ bool MotioncorrRunner::executeOwnMotionCorrection(Micrograph &mic) {
 					RCTOC(TIMING_CLIP_PATCH);
 
 					RCTIC(TIMING_PATCH_FFT);
-					NewFFT::FourierTransform(Ipatches[tid], Fpatches[igroup]);
+					NewFFT::FourierTransform(Ipatches[tid], Fpatches[igroup], NewFFT::FwdOnly, NewFFT::MEASURED);
 					RCTOC(TIMING_PATCH_FFT);
 				}
 				RCTOC(TIMING_PREP_PATCH);
@@ -1948,9 +2267,11 @@ skip_fitting:
 
 		// Update real space images
 		RCTIC(TIMING_DW_IFFT);
+		// Without exact (NUFFT) local shifts the weighted transforms are not needed afterwards: no copy of each
+		const bool keep_fframes = local_nufft != 0;
 		#pragma omp parallel for num_threads(n_threads)
 		for (int iframe = 0; iframe < n_frames; iframe++) {
-			NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe]());
+			NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe](), NewFFT::FwdOnly, keep_fframes, NewFFT::MEASURED);
 		}
 		RCTOC(TIMING_DW_IFFT);
 		RCTOC(TIMING_DOSE_WEIGHTING);
@@ -1989,7 +2310,7 @@ skip_fitting:
 		// The micrograph is, by definition, what sumFromRecord() makes of the movie
 		// and the record saved next to it; regenerating it later runs the same code
 		// on the same (exactly written) numbers.
-		Fframes.clear(); Iframes.clear(); Irefframes.clear();   // the sum re-reads the movie
+		Fframes.clear(); Iframes.clear(); Irefframes.clear();   // the sum reads the movie again (or has kept frames)
 
 		double dose_used = mic.getDosePerFrame();
 		if (dose_used == -1) dose_used = dose_per_frame;
@@ -2021,7 +2342,10 @@ skip_fitting:
 		else
 		{
 			logfile << "Summing frames from the recorded motion (reproducible): ";
-			sumFromRecord(mic, recipe, Iref);
+			sumFromRecord(mic, recipe, Iref, (keep_frames && !share_fft) ? &kept : NULL, keep_frames ? &frames : NULL,
+			              share_fft ? &keptF : NULL);
+			kept.clear();
+			keptF.clear();
 			logfile << " done" << std::endl;
 			writeImageAsync(Iref, fn_avg, write_float16 ? Float16: Float);
 			logfile << "Written " << (do_dose_weighting ? "aligned and dose-weighted" : "aligned") << " sum to " << fn_avg
@@ -2234,15 +2558,16 @@ void MotioncorrRunner::realSpaceInterpolation(Image <float> &Isum, std::vector<I
 
 	const int n_frames = Iframes.size();
 	if (model_version == MOTION_MODEL_NULL) {
-		// Simple sum
-		for (int iframe = 0; iframe < n_frames; iframe++) {
-			logfile << "." << std::flush;
-
-			#pragma omp parallel for num_threads(n_threads)
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Isum()) {
-				DIRECT_MULTIDIM_ELEM(Isum(), n) += DIRECT_MULTIDIM_ELEM(Iframes[iframe](), n);
-			}
+		// Simple sum: each pixel adds the frames in order, all frames of a block of pixels before the next block
+		const long int n_pix = MULTIDIM_SIZE(Isum()), block = 4096;
+		#pragma omp parallel for num_threads(n_threads) schedule(static)
+		for (long int b0 = 0; b0 < n_pix; b0 += block) {
+			const long int b1 = std::min(n_pix, b0 + block);
+			for (int iframe = 0; iframe < n_frames; iframe++)
+				for (long int n = b0; n < b1; n++)
+					DIRECT_MULTIDIM_ELEM(Isum(), n) += DIRECT_MULTIDIM_ELEM(Iframes[iframe](), n);
 		}
+		for (int iframe = 0; iframe < n_frames; iframe++) logfile << "." << std::flush;
 	} else if (model_version == MOTION_MODEL_THIRD_ORDER_POLYNOMIAL) { // Optimised code
 		ThirdOrderPolynomialModel *polynomial_model = (ThirdOrderPolynomialModel*)model;
 		realSpaceInterpolation_ThirdOrderPolynomial(Isum, Iframes, *polynomial_model, logfile);
@@ -2309,42 +2634,31 @@ void MotioncorrRunner::realSpaceInterpolation_ThirdOrderPolynomial(Image <float>
 	const int nx = XSIZE(Iframes[0]()), ny = YSIZE(Iframes[0]());
 	const Matrix1D<RFLOAT> coeffX = model.coeffX, coeffY = model.coeffY;
 
+	// Common terms of each frame
+	std::vector<std::array<RFLOAT, 12> > C(n_frames);
 	for (int iframe = 0; iframe < n_frames; iframe++) {
-		logfile << "." << std::flush;
-
 		const RFLOAT z = iframe, z2 = iframe * iframe;
 		const RFLOAT z3 = z * z2;
-		// Common terms
-		const RFLOAT x_C0 = coeffX(0)  * z + coeffX(1)  * z2 + coeffX(2)  * z3;
-		const RFLOAT x_C1 = coeffX(3)  * z + coeffX(4)  * z2 + coeffX(5)  * z3;
-		const RFLOAT x_C2 = coeffX(6)  * z + coeffX(7)  * z2 + coeffX(8)  * z3;
-		const RFLOAT x_C3 = coeffX(9)  * z + coeffX(10) * z2 + coeffX(11) * z3;
-		const RFLOAT x_C4 = coeffX(12) * z + coeffX(13) * z2 + coeffX(14) * z3;
-		const RFLOAT x_C5 = coeffX(15) * z + coeffX(16) * z2 + coeffX(17) * z3;
-		const RFLOAT y_C0 = coeffY(0)  * z + coeffY(1)  * z2 + coeffY(2)  * z3;
-		const RFLOAT y_C1 = coeffY(3)  * z + coeffY(4)  * z2 + coeffY(5)  * z3;
-		const RFLOAT y_C2 = coeffY(6)  * z + coeffY(7)  * z2 + coeffY(8)  * z3;
-		const RFLOAT y_C3 = coeffY(9)  * z + coeffY(10) * z2 + coeffY(11) * z3;
-		const RFLOAT y_C4 = coeffY(12) * z + coeffY(13) * z2 + coeffY(14) * z3;
-		const RFLOAT y_C5 = coeffY(15) * z + coeffY(16) * z2 + coeffY(17) * z3;
+		for (int k = 0; k < 6; k++) {
+			C[iframe][k]     = coeffX(3 * k) * z + coeffX(3 * k + 1) * z2 + coeffX(3 * k + 2) * z3;
+			C[iframe][6 + k] = coeffY(3 * k) * z + coeffY(3 * k + 1) * z2 + coeffY(3 * k + 2) * z3;
+		}
+	}
 
-		#pragma omp parallel for num_threads(n_threads)
-		for (int iy = 0; iy < ny; iy++) {
-			const RFLOAT y = (RFLOAT)iy / ny - 0.5;
+	// Row by row, all frames of a row before the next row: the row of the sum stays in the cache instead of the
+	// whole sum being read and written once per frame. Each pixel adds the frames in the same order as before.
+	#pragma omp parallel for num_threads(n_threads) schedule(static)
+	for (int iy = 0; iy < ny; iy++) {
+		const RFLOAT y = (RFLOAT)iy / ny - 0.5;
+		for (int iframe = 0; iframe < n_frames; iframe++) {
+			const RFLOAT x_C0 = C[iframe][0], x_C1 = C[iframe][1], x_C2 = C[iframe][2], x_C3 = C[iframe][3], x_C4 = C[iframe][4], x_C5 = C[iframe][5];
+			const RFLOAT y_C0 = C[iframe][6], y_C1 = C[iframe][7], y_C2 = C[iframe][8], y_C3 = C[iframe][9], y_C4 = C[iframe][10], y_C5 = C[iframe][11];
 			for (int ix = 0; ix < nx; ix++) {
 				const RFLOAT x = (RFLOAT)ix / nx - 0.5;
 				bool valid = true;
 
 				RFLOAT x_fitted = x_C0 + (x_C1 + x_C2 * x) * x + (x_C3 + x_C4 * y + x_C5 * x) * y;
 				RFLOAT y_fitted = y_C0 + (y_C1 + y_C2 * x) * x + (y_C3 + y_C4 * y + y_C5 * x) * y;
-
-#ifdef VALIDATE_OPTIMISED_CODE
-				RFLOAT x_fitted2, y_fitted2;
-				model.getShiftAt(z, x, y, x_fitted2, y_fitted2);
-				if (abs(x_fitted - x_fitted2) > 1E-4 || abs(y_fitted - y_fitted2) > 1E-4) {
-					std::cout << "error at " << x << ", " << y << " : " << x_fitted << " " << x_fitted2 << " " << y_fitted << " " << y_fitted2 << std::endl;
-				}
-#endif
 				x_fitted = ix - x_fitted; y_fitted = iy - y_fitted;
 
 				int x0 = FLOOR(x_fitted);
@@ -2359,18 +2673,12 @@ void MotioncorrRunner::realSpaceInterpolation_ThirdOrderPolynomial(Image <float>
 				if (y1 >= ny || y0 >= ny - 1) {y0 = ny - 1; valid = false;}
 				if (!valid) {
 					DIRECT_A2D_ELEM(Isum(), iy, ix) += DIRECT_A2D_ELEM(Iframes[iframe](), y0, x0);
-#ifdef DEBUG_OWN
-					if (std::isnan(DIRECT_A2D_ELEM(Isum(), iy, ix))) {
-						std::cerr << "ix = " << ix << " xfit = " << x_fitted << " iy = " << iy << " ifit = " << y_fitted << std::endl;
-					}
-#endif
 					continue;
 				}
 
 				const RFLOAT fx = x_fitted - x0;
 				const RFLOAT fy = y_fitted - y0;
 
-//				std::cout << "ix = " << ix << " xfit = " << x_fitted << " iy = " << iy << " ifit = " << y_fitted << std::endl;
 				const RFLOAT d00 = DIRECT_A2D_ELEM(Iframes[iframe](), y0, x0);
 				const RFLOAT d01 = DIRECT_A2D_ELEM(Iframes[iframe](), y0, x1);
 				const RFLOAT d10 = DIRECT_A2D_ELEM(Iframes[iframe](), y1, x0);
@@ -2379,15 +2687,11 @@ void MotioncorrRunner::realSpaceInterpolation_ThirdOrderPolynomial(Image <float>
 				const RFLOAT dx0 = LIN_INTERP(fx, d00, d01);
 				const RFLOAT dx1 = LIN_INTERP(fx, d10, d11);
 				const RFLOAT val = LIN_INTERP(fy, dx0, dx1);
-#ifdef DEBUG_OWN
-				if (std::isnan(val)) {
-					std::cerr << "ix = " << ix << " xfit = " << x_fitted << " iy = " << iy << " ifit = " << y_fitted << " d00 " << d00 << " d01 " << d01 << " d10 " << d10 << " d11 " << d11 << " dx0 " << dx0 << " dx1 " << dx1 << std::endl;
-				}
-#endif
 				DIRECT_A2D_ELEM(Isum(), iy, ix) += val;
 			}
 		}
 	}
+	for (int iframe = 0; iframe < n_frames; iframe++) logfile << "." << std::flush;
 }
 
 bool MotioncorrRunner::alignPatch(std::vector<MultidimArray<fComplex> > &Fframes, const int pnx, const int pny, const RFLOAT scaled_B, std::vector<RFLOAT> &xshifts, std::vector<RFLOAT> &yshifts, std::ostream &logfile) {
@@ -2493,7 +2797,7 @@ bool MotioncorrRunner::alignPatch(std::vector<MultidimArray<fComplex> > &Fframes
 			RCTOC(TIMING_CCF_CALC);
 
 			RCTIC(TIMING_CCF_IFFT);
-			NewFFT::inverseFourierTransform(Fccs[tid], Iccs[tid]());
+			NewFFT::inverseFourierTransform(Fccs[tid], Iccs[tid](), NewFFT::FwdOnly, true, NewFFT::MEASURED);
 			RCTOC(TIMING_CCF_IFFT);
 
 			RCTIC(TIMING_CCF_FIND_MAX);
@@ -2745,10 +3049,12 @@ void MotioncorrRunner::doseWeighting(std::vector<MultidimArray<fComplex> > &Ffra
 	const int n_frames= Fframes.size();
 	const RFLOAT A = 0.245, B = -1.665, C = 2.81;
 
-	#pragma omp parallel for num_threads(n_threads)
-	for (int y = 0; y < nfy; y++) {
-		int ly = y;
-		if (y > nfy_half) ly = y - nfy;
+	// The weights of row y and of its mirror row nfy - y are the same numbers (ly is only squared), so each is
+	// computed once and applied to both rows; every pixel gets exactly the operations it always got.
+	#pragma omp parallel for num_threads(n_threads) schedule(dynamic, 4)
+	for (int y = 0; y <= nfy_half; y++) {
+		const int ly = y;
+		const int y_mirror = (y == 0 || y == nfy - y) ? -1 : nfy - y;
 
 		const RFLOAT ly2 = (RFLOAT)ly * ly / nfy2;
 		for (int x = 0; x < nfx; x++) {
@@ -2764,6 +3070,7 @@ void MotioncorrRunner::doseWeighting(std::vector<MultidimArray<fComplex> > &Ffra
 				}
 				sum_weight_sq += weight * weight;
 				DIRECT_A2D_ELEM(Fframes[iframe], y, x) *= weight;
+				if (y_mirror >= 0) DIRECT_A2D_ELEM(Fframes[iframe], y_mirror, x) *= weight;
 			}
 
 			sum_weight_sq = std::sqrt(sum_weight_sq);
@@ -2773,6 +3080,7 @@ void MotioncorrRunner::doseWeighting(std::vector<MultidimArray<fComplex> > &Ffra
 			}
 			for (int iframe = 0; iframe < n_frames; iframe++) {
 				DIRECT_A2D_ELEM(Fframes[iframe], y, x) /= sum_weight_sq; // Eq. 9
+				if (y_mirror >= 0) DIRECT_A2D_ELEM(Fframes[iframe], y_mirror, x) /= sum_weight_sq;
 			}
 		}
 	}
@@ -3043,7 +3351,9 @@ void MotioncorrRunner::fillBadPixelsReproducibly(std::vector<Image<float> > &Ifr
 	}
 }
 
-void MotioncorrRunner::sumFromRecord(const Micrograph &mic, const SumRecipe &recipe, Image<float> &Isum)
+void MotioncorrRunner::sumFromRecord(const Micrograph &mic, const SumRecipe &recipe, Image<float> &Isum,
+                                     std::vector<Image<float> > *prepared, const std::vector<int> *prepared_frames,
+                                     std::vector<MultidimArray<fComplex> > *prepared_F)
 {
 	const FileName fn_mic = mic.getMovieFilename();
 	const FileName fn_gain = mic.getGainFilename();
@@ -3089,46 +3399,62 @@ void MotioncorrRunner::sumFromRecord(const Micrograph &mic, const SumRecipe &rec
 	const int n_frames = frames.size();
 	if (n_frames == 0) REPORT_ERROR("sumFromRecord: no frame of " + fn_mic + " has a recorded shift");
 
-	std::vector<Image<float> > Iframes(n_frames);
-	#pragma omp parallel for num_threads(isCompressedMRC ? 1 : n_io_threads)
-	for (int iframe = 0; iframe < n_frames; iframe++)
+	// Frames the caller has kept after the gain and the pixel fixes are used as they are: reading the movie and
+	// repeating these two steps would give the same numbers
+	const bool have_frames = prepared != NULL && prepared_frames != NULL && *prepared_frames == frames
+	                         && (int) prepared->size() == n_frames;
+	// ... and so are their transforms, made with the plans below
+	const bool have_transforms = prepared_F != NULL && prepared_frames != NULL && *prepared_frames == frames
+	                             && (int) prepared_F->size() == n_frames;
+	std::vector<Image<float> > Iframes;
+	if (have_frames)
+		Iframes = std::move(*prepared);
+	else if (have_transforms)
+		Iframes.resize(n_frames);
+	else
 	{
-		if (isEER)
-			renderer.renderFrames(frames[iframe] * mic.getEERGrouping() + 1, (frames[iframe] + 1) * mic.getEERGrouping(), Iframes[iframe]());
-		else if (isCompressedMRC)
-			compressedMRCreader.readFrameInto(Iframes[iframe], frames[iframe]);
-		else
-			Iframes[iframe].read(fn_mic, true, frames[iframe], false, true);
-	}
-
-	Image<float> Igain;
-	if (fn_gain != "")
-	{
-		if (isEER) renderer.loadEERGain(fn_gain, Igain());
-		else Igain.read(fn_gain);
-		if (XSIZE(Igain()) != nx || YSIZE(Igain()) != ny)
-			REPORT_ERROR("sumFromRecord: the gain reference " + fn_gain + " does not match the movie " + fn_mic);
-		#pragma omp parallel for num_threads(n_threads)
+		Iframes.resize(n_frames);
+		#pragma omp parallel for num_threads(isCompressedMRC ? 1 : n_io_threads)
 		for (int iframe = 0; iframe < n_frames; iframe++)
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Igain())
-				DIRECT_MULTIDIM_ELEM(Iframes[iframe](), n) *= DIRECT_MULTIDIM_ELEM(Igain(), n);
-	}
+		{
+			if (isEER)
+				renderer.renderFrames(frames[iframe] * mic.getEERGrouping() + 1, (frames[iframe] + 1) * mic.getEERGrouping(), Iframes[iframe]());
+			else if (isCompressedMRC)
+				compressedMRCreader.readFrameInto(Iframes[iframe], frames[iframe]);
+			else
+				Iframes[iframe].read(fn_mic, true, frames[iframe], false, true);
+		}
 
-	if (recipe.fix_defects)
-	{
-		// The same pixels MotionCorr fixed: defect map, dead gain pixels and the
-		// hot pixels it detected (recorded)
-		MultidimArray<bool> bBad(ny, nx);
-		bBad.initZeros();
-		if (mic.fnDefect != "") fillDefectMask(bBad, mic.fnDefect, n_threads);
+		Image<float> Igain;
 		if (fn_gain != "")
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Igain())
-				if (DIRECT_MULTIDIM_ELEM(Igain(), n) == 0) DIRECT_MULTIDIM_ELEM(bBad, n) = true;
-		for (size_t k = 0; k < mic.hotpixelX.size(); k++)
-			DIRECT_A2D_ELEM(bBad, mic.hotpixelY[k], mic.hotpixelX[k]) = true;
-		fillBadPixelsReproducibly(Iframes, frames, bBad, isEER ? 4 : 2);
+		{
+			if (isEER) renderer.loadEERGain(fn_gain, Igain());
+			else Igain.read(fn_gain);
+			if (XSIZE(Igain()) != nx || YSIZE(Igain()) != ny)
+				REPORT_ERROR("sumFromRecord: the gain reference " + fn_gain + " does not match the movie " + fn_mic);
+			#pragma omp parallel for num_threads(n_threads)
+			for (int iframe = 0; iframe < n_frames; iframe++)
+				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Igain())
+					DIRECT_MULTIDIM_ELEM(Iframes[iframe](), n) *= DIRECT_MULTIDIM_ELEM(Igain(), n);
+		}
+
+		if (recipe.fix_defects)
+		{
+			// The same pixels MotionCorr fixed: defect map, dead gain pixels and the
+			// hot pixels it detected (recorded)
+			MultidimArray<bool> bBad(ny, nx);
+			bBad.initZeros();
+			if (mic.fnDefect != "") fillDefectMask(bBad, mic.fnDefect, n_threads);
+			if (fn_gain != "")
+				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Igain())
+					if (DIRECT_MULTIDIM_ELEM(Igain(), n) == 0) DIRECT_MULTIDIM_ELEM(bBad, n) = true;
+			for (size_t k = 0; k < mic.hotpixelX.size(); k++)
+				DIRECT_A2D_ELEM(bBad, mic.hotpixelY[k], mic.hotpixelX[k]) = true;
+			fillBadPixelsReproducibly(Iframes, frames, bBad, isEER ? 4 : 2);
+		}
+		Igain.clear();
+
 	}
-	Igain.clear();
 
 	const RFLOAT prescaling = early ? bin : 1;
 	const int wnx = early ? (int)(nx / bin) : nx, wny = early ? (int)(ny / bin) : ny;
@@ -3138,10 +3464,19 @@ void MotioncorrRunner::sumFromRecord(const Micrograph &mic, const SumRecipe &rec
 	NewFFT::FloatPlan plan_full(nx, ny, 1, FFTW_ESTIMATE);
 	NewFFT::FloatPlan plan_work(wnx, wny, 1, FFTW_ESTIMATE);
 	std::vector<MultidimArray<fComplex> > Fframes(n_frames);
+	if (have_transforms)
+	{
+		Fframes = std::move(*prepared_F);
+		for (int iframe = 0; iframe < n_frames; iframe++)
+			if (XSIZE(Fframes[iframe]) != wnx / 2 + 1 || YSIZE(Fframes[iframe]) != wny)
+				REPORT_ERROR("sumFromRecord: BUG: the transforms given do not have the size of the sum");
+	}
 	#pragma omp parallel for num_threads(n_threads)
 	for (int iframe = 0; iframe < n_frames; iframe++)
 	{
-		if (!early)
+		if (have_transforms)
+			;
+		else if (!early)
 			NewFFT::FourierTransform(Iframes[iframe](), Fframes[iframe], plan_full);
 		else
 		{
@@ -3179,7 +3514,7 @@ void MotioncorrRunner::sumFromRecord(const Micrograph &mic, const SumRecipe &rec
 		for (int iframe = 0; iframe < n_frames; iframe++)
 		{
 			Iframes[iframe]().reshape(wny, wnx);
-			NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe](), plan_work);
+			NewFFT::inverseFourierTransform(Fframes[iframe], Iframes[iframe](), plan_work, NewFFT::FwdOnly, false);   // no copy: cleared next
 			Fframes[iframe].clear();
 		}
 	}
