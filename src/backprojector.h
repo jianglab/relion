@@ -28,6 +28,8 @@
 #ifndef BACKPROJECTOR_H_
 #define BACKPROJECTOR_H_
 
+#include <climits>
+
 #define DEFAULT_EXTERNAL_RECONSTRUCT "relion_external_reconstruct"
 
 #include "src/strings.h"
@@ -255,12 +257,16 @@ public:
 	* Set a 2D slice in the 3D map (backward projection)
 	* If a exp_Mweight is given, rather than adding 1 to all relevant pixels in the weight array, we use exp_Mweight
 	*/
+	// z_lo, z_hi: only the voxels of the z planes z_lo..z_hi (array indices, 0 = STARTINGZ) are added to, so
+	// that threads owning different planes can add the same images at once, in the same order as one thread
+	// (not for rectangular boxes)
 	void backproject2Dto3D(const MultidimArray<Complex > &img_in,
 	                       const Matrix2D<RFLOAT> &A,
 	                       const MultidimArray<RFLOAT> *Mweight = NULL,
 	                       RFLOAT r_ewald_sphere = -1.,
 	                       bool is_positive_curvature = true,
-	                       Matrix2D<RFLOAT>* magMatrix = 0);
+	                       Matrix2D<RFLOAT>* magMatrix = 0,
+	                       int z_lo = INT_MIN, int z_hi = INT_MAX);
 
 	/*
 	* Set a set of nonuniform 2D Fourier samples into the 3D map (backward projection)

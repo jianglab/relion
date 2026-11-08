@@ -20,6 +20,9 @@
 
 #include <src/rect_refusal.h>
 #include "src/postprocessing.h"
+#include "src/async_file_writer.h"
+#include <omp.h>
+#include <algorithm>
 
 void Postprocessing::read(int argc, char **argv)
 {
@@ -61,6 +64,7 @@ void Postprocessing::read(int argc, char **argv)
 	locres_edgwidth = textToFloat(parser.getOption("--locres_edgwidth", "Width of soft edge (in A) on masks for local-resolution map (default = sampling)", "-1"));
 	locres_randomize_fsc = textToFloat(parser.getOption("--locres_randomize_at", "Randomize phases from this resolution (in A)", "25."));
 	locres_minres = textToFloat(parser.getOption("--locres_minres", "Lowest local resolution allowed (in A)", "50."));
+	locres_threads = textToInteger(parser.getOption("--j", "Threads for --locres (default: chosen from the cores and the free memory)", "-1"));
 
 	int expert_section = parser.addSection("Expert options");
 	do_ampl_corr = parser.checkOption("--ampl_corr", "Perform amplitude correlation and DPR, also re-normalize amplitudes for non-uniform angular distributions");
@@ -1061,101 +1065,217 @@ void Postprocessing::run_locres(int rank, int size)
 	int myrad = XSIZE(I1())/2 - maskrad_pix;
 	float myradf = (float)myrad/(float)step_size;
 	long int nr_samplings = ROUND((4.* PI / 3.) * (myradf*myradf*myradf));
-	if (verb > 0)
-	{
-		std::cout << " Calculating local resolution in " << nr_samplings << " sampling points ..." << std::endl;
-		init_progress_bar(nr_samplings);
-	}
 
+	// The sampling points of this rank, in the order of the loop over the volume
+	struct Point { long int kk, ii, jj, nn; };
+	std::vector<Point> points;
 	long int nn = 0;
 	for (long int kk=((I1()).zinit); kk<=((I1()).zinit + (I1()).zdim - 1); kk+= step_size)
-	{
 		for (long int ii=((I1()).yinit); ii<=((I1()).yinit + (I1()).ydim - 1); ii+= step_size)
-		{
 			for (long int jj=((I1()).xinit); jj<=((I1()).xinit + (I1()).xdim - 1); jj+= step_size)
 			{
-				// Abort through the pipeline_control system, TODO: check how this goes with MPI....
-				if (pipeline_control_check_abort_job())
-					exit(RELION_EXIT_ABORTED);
-
 				// Only calculate local-resolution inside a spherical mask with radius less than half-box-size minus maskrad_pix
 				float rad = sqrt(kk*kk + ii*ii + jj*jj);
 				if (rad < myrad)
 				{
 					if (nn%size == rank)
-					{
-						// Make a spherical mask around (k,i,j), diameter is step_size pixels, soft-edge width is edgewidth_pix
-						raisedCosineMask(locmask, maskrad_pix, maskrad_pix + edgewidth_pix, kk, ii, jj);
-
-						// FSC of masked maps
-						I1m = I1() * locmask;
-						I2m = I2() * locmask;
-						getFSC(I1m, I2m, fsc_masked);
-
-						// FSC of masked randomized-phase map
-						I1m = I1p * locmask;
-						I2m = I2p * locmask;
-						getFSC(I1m, I2m, fsc_random_masked);
-
-						// Now that we have fsc_masked and fsc_random_masked, calculate fsc_true according to Richard's formula
-						// FSC_true = FSC_t - FSC_n / ( )
-						calculateFSCtrue(fsc_true, fsc_unmasked, fsc_masked, fsc_random_masked, randomize_at);
-
-						if (rank == 0)
-						{
-							MetaDataTable MDfsc;
-							FileName fn_name = "fsc_"+integerToString(kk, 5)+"_"+integerToString(ii, 5)+"_"+integerToString(jj, 5);
-							MDfsc.setName(fn_name);
-							FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY1D(fsc_true)
-							{
-								MDfsc.addObject();
-								RFLOAT res = (i > 0) ? (XSIZE(I1()) * angpix / (RFLOAT)i) : 999.;
-								MDfsc.setValue(EMDL_SPECTRAL_IDX, (int)i);
-								MDfsc.setValue(EMDL_RESOLUTION, 1./res);
-								MDfsc.setValue(EMDL_RESOLUTION_ANGSTROM, res);
-								MDfsc.setValue(EMDL_POSTPROCESS_FSC_TRUE, DIRECT_A1D_ELEM(fsc_true, i) );
-								MDfsc.setValue(EMDL_POSTPROCESS_FSC_UNMASKED, DIRECT_A1D_ELEM(fsc_unmasked, i) );
-								MDfsc.setValue(EMDL_POSTPROCESS_FSC_MASKED, DIRECT_A1D_ELEM(fsc_masked, i) );
-								MDfsc.setValue(EMDL_POSTPROCESS_FSC_RANDOM_MASKED, DIRECT_A1D_ELEM(fsc_random_masked, i) );
-							}
-							MDfsc.write(fh);
-						}
-
-						float local_resol = 999.;
-						// See where corrected FSC drops below 0.143
-						FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY1D(fsc_true)
-						{
-							if ( DIRECT_A1D_ELEM(fsc_true, i) < 0.143)
-								break;
-							local_resol = (i > 0) ? XSIZE(I1())*angpix/(RFLOAT)i : 999.;
-						}
-						local_resol = XMIPP_MIN(locres_minres, local_resol);
-						if (rank == 0)
-							fh << " kk= " << kk << " ii= " << ii << " jj= " << jj << " local resolution= " << local_resol << std::endl;
-
-						// Now low-pass filter Isum to the estimated resolution
-						MultidimArray<Complex > FT = FTsum;
-						applyFscWeighting(FT, fsc_true);
-						lowPassFilterMap(FT, XSIZE(I1()), local_resol, angpix, filter_edge_width);
-
-						// Re-use I1m to save some memory
-						transformer.inverseFourierTransform(FT, I1m);
-
-						// Store weighted sum of local resolution and filtered map
-						FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(I1m)
-						{
-							DIRECT_MULTIDIM_ELEM(Ifil, n) +=  DIRECT_MULTIDIM_ELEM(locmask, n) * DIRECT_MULTIDIM_ELEM(I1m, n);
-							DIRECT_MULTIDIM_ELEM(Ilocres, n) +=  DIRECT_MULTIDIM_ELEM(locmask, n) / local_resol;
-							DIRECT_MULTIDIM_ELEM(Isumw, n) +=  DIRECT_MULTIDIM_ELEM(locmask, n);
-						}
-					}
-
+						points.push_back({kk, ii, jj, nn});
 					nn++;
-					if (verb > 0 && nn <= nr_samplings)
-						progress_bar(nn);
 				}
 			}
+
+	// Points are computed on several threads, each with its own arrays, and added to the maps in the
+	// order above, so the maps are the same at any number of threads. A point's mask is zero beyond
+	// radius_p from it, so only that cube is kept and added.
+	const RFLOAT radius = maskrad_pix, radius_p = maskrad_pix + edgewidth_pix;
+	const long int R = (long int)radius_p + 1;
+	const double volume_bytes = (double)MULTIDIM_SIZE(I1()) * sizeof(RFLOAT);
+	int ranks_here = 1;
+	if (size > 1)
+	{
+		MPI_Comm node;
+		MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, rank, MPI_INFO_NULL, &node);
+		MPI_Comm_size(node, &ranks_here);
+		MPI_Comm_free(&node);
+	}
+	int n_threads = locres_threads;
+	std::string why = "--j";
+	if (n_threads < 1)
+	{
+		// about 8 volumes per thread: mask, two masked maps, their transforms, the filtered map
+		const int by_cores = std::max(1, omp_get_num_procs() / ranks_here);
+		const long long avail = asyncwrite::memoryAvailableBytes();
+		const int by_memory = (avail < 0) ? by_cores : std::max(1, (int)(0.7 * avail / ranks_here / (8 * volume_bytes)));
+		n_threads = std::min(by_cores, by_memory);
+		why = (by_memory < by_cores) ? "free memory" : "cores";
+	}
+	n_threads = (int)std::max(1L, std::min((long int)n_threads, (long int)points.size()));
+	if (verb > 0)
+	{
+		std::cout << " Calculating local resolution in " << nr_samplings << " sampling points on " << n_threads
+		          << " thread(s) per process (from the " << why << "; --j sets it) ..." << std::endl;
+		init_progress_bar(nr_samplings);
+	}
+
+	struct Work
+	{
+		MultidimArray<RFLOAT> locmask, I1m, I2m, fsc_unm;
+		MultidimArray<Complex> FT1, FT2, FT;
+		FourierTransformer transformer;
+		long int z0 = 0, z1 = -1, y0 = 0, y1 = -1, x0 = 0, x1 = -1;   // the cube set in locmask
+	};
+	struct Result
+	{
+		MultidimArray<RFLOAT> fsc_true, fsc_masked, fsc_random_masked, fsc_unm;
+		float local_resol;
+		long int z0, z1, y0, y1, x0, x1;
+		std::vector<RFLOAT> mask, filtered;
+	};
+	std::vector<Work> work(n_threads);
+	for (Work &w : work)
+	{
+		w.locmask.initZeros(I1());
+		w.I1m.resize(I1());
+		w.I2m.resize(I1());
+	}
+
+	const int batch = 2 * n_threads;
+	std::vector<Result> results(batch);
+	long int nn_done = 0;
+	for (size_t first = 0; first < points.size(); first += batch)
+	{
+		// Abort through the pipeline_control system, TODO: check how this goes with MPI....
+		if (pipeline_control_check_abort_job())
+			exit(RELION_EXIT_ABORTED);
+
+		const size_t last = std::min(points.size(), first + batch);
+		#pragma omp parallel for num_threads(n_threads) schedule(dynamic, 1)
+		for (size_t ip = first; ip < last; ip++)
+		{
+			Work &w = work[omp_get_thread_num()];
+			Result &res = results[ip - first];
+			const Point &pt = points[ip];
+
+			// Make a spherical mask around (k,i,j), diameter is step_size pixels, soft-edge width is edgewidth_pix
+			// (raisedCosineMask(locmask, radius, radius_p, kk, ii, jj): its x is kk and its z is jj)
+			for (long int k = w.z0; k <= w.z1; k++)
+				for (long int i = w.y0; i <= w.y1; i++)
+					for (long int j = w.x0; j <= w.x1; j++)
+						A3D_ELEM(w.locmask, k, i, j) = 0.;
+			const int x = pt.kk, y = pt.ii, z = pt.jj;
+			w.z0 = std::max(STARTINGZ(w.locmask), z - R); w.z1 = std::min(FINISHINGZ(w.locmask), z + R);
+			w.y0 = std::max(STARTINGY(w.locmask), y - R); w.y1 = std::min(FINISHINGY(w.locmask), y + R);
+			w.x0 = std::max(STARTINGX(w.locmask), x - R); w.x1 = std::min(FINISHINGX(w.locmask), x + R);
+			for (long int k = w.z0; k <= w.z1; k++)
+				for (long int i = w.y0; i <= w.y1; i++)
+					for (long int j = w.x0; j <= w.x1; j++)
+					{
+						RFLOAT d = sqrt((RFLOAT)((z-k)*(z-k) + (y-i)*(y-i) + (x-j)*(x-j)));
+						if (d > radius_p)
+							A3D_ELEM(w.locmask, k, i, j) = 0.;
+						else if (d < radius)
+							A3D_ELEM(w.locmask, k, i, j) = 1.;
+						else
+							A3D_ELEM(w.locmask, k, i, j) = 0.5 - 0.5 * cos(PI * (radius_p - d) / (radius_p - radius));
+					}
+
+			// FSC of masked maps
+			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(w.locmask)
+			{
+				DIRECT_MULTIDIM_ELEM(w.I1m, n) = DIRECT_MULTIDIM_ELEM(I1(), n) * DIRECT_MULTIDIM_ELEM(w.locmask, n);
+				DIRECT_MULTIDIM_ELEM(w.I2m, n) = DIRECT_MULTIDIM_ELEM(I2(), n) * DIRECT_MULTIDIM_ELEM(w.locmask, n);
+			}
+			w.transformer.FourierTransform(w.I1m, w.FT1);
+			w.transformer.FourierTransform(w.I2m, w.FT2);
+			getFSC(w.FT1, w.FT2, res.fsc_masked);
+
+			// FSC of masked randomized-phase map
+			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(w.locmask)
+			{
+				DIRECT_MULTIDIM_ELEM(w.I1m, n) = DIRECT_MULTIDIM_ELEM(I1p, n) * DIRECT_MULTIDIM_ELEM(w.locmask, n);
+				DIRECT_MULTIDIM_ELEM(w.I2m, n) = DIRECT_MULTIDIM_ELEM(I2p, n) * DIRECT_MULTIDIM_ELEM(w.locmask, n);
+			}
+			w.transformer.FourierTransform(w.I1m, w.FT1);
+			w.transformer.FourierTransform(w.I2m, w.FT2);
+			getFSC(w.FT1, w.FT2, res.fsc_random_masked);
+
+			// Now that we have fsc_masked and fsc_random_masked, calculate fsc_true according to Richard's formula
+			// FSC_true = FSC_t - FSC_n / ( ); it sets element 0 of the unmasked FSC, so each point gets a copy
+			res.fsc_unm = fsc_unmasked;
+			calculateFSCtrue(res.fsc_true, res.fsc_unm, res.fsc_masked, res.fsc_random_masked, randomize_at);
+
+			float local_resol = 999.;
+			// See where corrected FSC drops below 0.143
+			FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY1D(res.fsc_true)
+			{
+				if ( DIRECT_A1D_ELEM(res.fsc_true, i) < 0.143)
+					break;
+				local_resol = (i > 0) ? XSIZE(I1())*angpix/(RFLOAT)i : 999.;
+			}
+			local_resol = XMIPP_MIN(locres_minres, local_resol);
+			res.local_resol = local_resol;
+
+			// Now low-pass filter Isum to the estimated resolution
+			w.FT = FTsum;
+			applyFscWeighting(w.FT, res.fsc_true);
+			lowPassFilterMap(w.FT, XSIZE(I1()), local_resol, angpix, filter_edge_width);
+			w.transformer.inverseFourierTransform(w.FT, w.I1m);
+
+			// Keep the cube of the mask and of the filtered map
+			res.z0 = w.z0; res.z1 = w.z1; res.y0 = w.y0; res.y1 = w.y1; res.x0 = w.x0; res.x1 = w.x1;
+			res.mask.clear();
+			res.filtered.clear();
+			for (long int k = w.z0; k <= w.z1; k++)
+				for (long int i = w.y0; i <= w.y1; i++)
+					for (long int j = w.x0; j <= w.x1; j++)
+					{
+						res.mask.push_back(A3D_ELEM(w.locmask, k, i, j));
+						res.filtered.push_back(A3D_ELEM(w.I1m, k, i, j));
+					}
 		}
+
+		// Write and add the results in order
+		for (size_t ip = first; ip < last; ip++)
+		{
+			const Point &pt = points[ip];
+			const Result &res = results[ip - first];
+			const long int kk = pt.kk, ii = pt.ii, jj = pt.jj;
+			if (rank == 0)
+			{
+				MetaDataTable MDfsc;
+				FileName fn_name = "fsc_"+integerToString(kk, 5)+"_"+integerToString(ii, 5)+"_"+integerToString(jj, 5);
+				MDfsc.setName(fn_name);
+				FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY1D(res.fsc_true)
+				{
+					MDfsc.addObject();
+					RFLOAT resol = (i > 0) ? (XSIZE(I1()) * angpix / (RFLOAT)i) : 999.;
+					MDfsc.setValue(EMDL_SPECTRAL_IDX, (int)i);
+					MDfsc.setValue(EMDL_RESOLUTION, 1./resol);
+					MDfsc.setValue(EMDL_RESOLUTION_ANGSTROM, resol);
+					MDfsc.setValue(EMDL_POSTPROCESS_FSC_TRUE, DIRECT_A1D_ELEM(res.fsc_true, i) );
+					MDfsc.setValue(EMDL_POSTPROCESS_FSC_UNMASKED, DIRECT_A1D_ELEM(res.fsc_unm, i) );
+					MDfsc.setValue(EMDL_POSTPROCESS_FSC_MASKED, DIRECT_A1D_ELEM(res.fsc_masked, i) );
+					MDfsc.setValue(EMDL_POSTPROCESS_FSC_RANDOM_MASKED, DIRECT_A1D_ELEM(res.fsc_random_masked, i) );
+				}
+				MDfsc.write(fh);
+				fh << " kk= " << kk << " ii= " << ii << " jj= " << jj << " local resolution= " << res.local_resol << std::endl;
+			}
+
+			// Store weighted sum of local resolution and filtered map (the mask is zero outside the cube)
+			size_t c = 0;
+			for (long int k = res.z0; k <= res.z1; k++)
+				for (long int i = res.y0; i <= res.y1; i++)
+					for (long int j = res.x0; j <= res.x1; j++, c++)
+					{
+						const RFLOAT m = res.mask[c];
+						A3D_ELEM(Ifil, k, i, j) += m * res.filtered[c];
+						A3D_ELEM(Ilocres, k, i, j) += m / res.local_resol;
+						A3D_ELEM(Isumw, k, i, j) += m;
+					}
+			nn_done = pt.nn + 1;
+		}
+		if (verb > 0)
+			progress_bar(std::min(nn_done, nr_samplings));
 	}
 
 	fh.close();

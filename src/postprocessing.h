@@ -110,6 +110,9 @@ public:
 	// Lowest resolution allowed in the locres map
 	RFLOAT locres_minres;
 
+	// Threads for the local resolution (-1: chosen from the cores and the free memory)
+	int locres_threads;
+
 	//////// Sharpening
 
 	// Filename for the STAR-file with the MTF of the detector

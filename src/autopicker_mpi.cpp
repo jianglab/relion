@@ -30,6 +30,7 @@ void AutoPickerMpi::read(int argc, char **argv)
 
 	// First read in non-parallelisation-dependent variables
 	AutoPicker::read(argc, argv);
+	mpi_size = node->size;
 
 	// Don't put any output to screen for mpi followers
 	if (!node->isLeader())

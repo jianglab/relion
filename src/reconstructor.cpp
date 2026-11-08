@@ -858,6 +858,18 @@ void Reconstructor::checkRectSupport() const
 		REPORT_ERROR("ERROR: with rectangular images all optics groups must have the same box size and pixel size.");
 }
 
+// With RELION_RECONSTRUCT_PLANES (default on), the threads prepare a batch of images (FFT, CTF, shift) and then
+// add them to the 3D map together, each thread owning a range of z planes, every image in the order of the
+// particles: every voxel then gets its terms in the order of one thread, so the map is the same at any --j.
+struct ReconstructBpSlot
+{
+	MultidimArray<Complex> F2D;
+	MultidimArray<RFLOAT> Fctf;
+	Matrix2D<RFLOAT> A;
+	bool used = false;
+};
+static thread_local ReconstructBpSlot *tls_bp_slot = NULL;
+
 void Reconstructor::backproject(int rank, int size)
 {
 	if (fn_sub != "")
@@ -919,8 +931,16 @@ void Reconstructor::backproject(int rank, int size)
 		my_parts.assign(order.begin() + cut[rank], order.begin() + cut[rank + 1]);
 	}
 
+	// (the paths that add to the map directly, not through tls_bp_slot, are all excluded here: S2, fn_sub, Ewald)
+	const char *env_planes = getenv("RELION_RECONSTRUCT_PLANES");
+	const bool by_planes = nr_threads > 1 && ref_dim == 3 && data_dim == 2 && !isRect() && !do_ewald && fn_sub == ""
+	                       && spatial_frequency_mode != SPATIAL_FREQUENCY_MODE_S2
+	                       && (interpolator == TRILINEAR || interpolator == NEAREST_NEIGHBOUR)
+	                       && !(env_planes != NULL && std::string(env_planes) == "0");
+
 	prefetcher_.reset();
-	const bool use_prefetch = do_prefetch && !do_fused_extract && !do_reconstruct_ctf && fn_noise == "";
+	// (by planes, the threads read their own images while others add a batch: faster than one reader thread)
+	const bool use_prefetch = do_prefetch && !do_fused_extract && !do_reconstruct_ctf && fn_noise == "" && !by_planes;
 	if (use_prefetch)
 	{
 		prefetcher_.reset(new AsyncReconstructPrefetcher(&DF, my_parts, subset, chosen_class, nr_threads + 2));
@@ -935,10 +955,93 @@ void Reconstructor::backproject(int rank, int size)
 		setFinufftThreadCount(1);
 	}
 
+	if (by_planes)
+	{
+		// Plane chunks with about the same work, from the views of each batch: an image's slice with in-plane
+		// z extent s (A(0,2), A(1,2)) puts on plane z a chord of length 2 sqrt(R^2 - (z/s)^2), over 1/s planes.
+		// More chunks than threads, handed out as threads come free.
+		const long int zdim = ZSIZE(backprojector.data), z0 = STARTINGZ(backprojector.data);
+		const double R = backprojector.r_max * backprojector.padding_factor;
+		const int n_chunks = (int)std::min<long int>(zdim, 4 * nr_threads);
+		std::vector<double> cum(zdim + 1);
+		std::vector<int> lo(n_chunks), hi(n_chunks);
+		if (verb > 0)
+			std::cout << " + Adding the images to the map on " << nr_threads << " threads, by " << n_chunks << " ranges of planes"
+			          << " (the same map at any --j; RELION_RECONSTRUCT_PLANES=0 for the old way)" << std::endl;
+
+		// Batches of images: while the threads add one batch by planes, those that come free prepare the next
+		const long int batch = 4 * nr_threads, n_parts = my_parts.size();
+		std::vector<ReconstructBpSlot> slots(2 * batch);
+		auto prepare = [&](long int idx, ReconstructBpSlot &slot)
+		{
+			slot.used = false;
+			tls_bp_slot = &slot;
+			backprojectOneParticle(my_parts[idx]);
+			tls_bp_slot = NULL;
+		};
+		long int first = 0, last = std::min(n_parts, batch);
+		#pragma omp parallel for num_threads(nr_threads) schedule(dynamic, 1)
+		for (long int idx = first; idx < last; idx++)
+			prepare(idx, slots[idx - first]);
+		for (int b = 0; first < n_parts; b++)
+		{
+			ReconstructBpSlot *cur = &slots[(b % 2) * batch], *next = &slots[((b + 1) % 2) * batch];
+			std::fill(cum.begin(), cum.end(), 0.);
+			for (long int k = 0; k < last - first; k++)
+			{
+				if (!cur[k].used)
+					continue;
+				const Matrix2D<RFLOAT> &A = cur[k].A;
+				const double sz = sqrt(A(0, 2) * A(0, 2) + A(1, 2) * A(1, 2));
+				const long int zmax = (long int)(R * sz);
+				for (long int zz = -zmax; zz <= zmax; zz++)
+				{
+					const long int z = zz - z0;
+					if (z >= 0 && z < zdim)
+						cum[z + 1] += (sz * R < 1.) ? PI * R * R : 2. * sqrt(std::max(0., R * R - (zz / sz) * (zz / sz))) / sz;
+				}
+			}
+			for (long int z = 0; z < zdim; z++)
+				cum[z + 1] += cum[z];
+			long int z = 0;
+			for (int c = 0; c < n_chunks; c++)
+			{
+				lo[c] = z;
+				const double target = cum[zdim] * (c + 1) / n_chunks;
+				while (z < zdim && (c == n_chunks - 1 || cum[z + 1] <= target || z == lo[c]))
+					z++;
+				hi[c] = z - 1;
+			}
+
+			const long int next_first = last, next_last = std::min(n_parts, last + batch);
+			const long int n_items = n_chunks + (next_last - next_first);
+			#pragma omp parallel for num_threads(nr_threads) schedule(dynamic, 1)
+			for (long int item = 0; item < n_items; item++)
+			{
+				if (item < n_chunks)
+				{
+					const int c = item;
+					for (long int k = 0; k < last - first; k++)
+						if (cur[k].used && lo[c] <= hi[c])
+							backprojector.backproject2Dto3D(cur[k].F2D, cur[k].A, &cur[k].Fctf, -1., true, 0, lo[c], hi[c]);
+				}
+				else
+				{
+					const long int idx = next_first + item - n_chunks;
+					prepare(idx, next[idx - next_first]);
+				}
+			}
+			first = next_first;
+			last = next_last;
+		}
+	}
+	else
+	{
 #pragma omp parallel for num_threads(nr_threads) schedule(dynamic, 1)
 	for (long int idx = 0; idx < (long int)my_parts.size(); idx++)
 	{
 		backprojectOneParticle(my_parts[idx]);
+	}
 	}
 
 	if (nr_threads > 1)
@@ -1683,8 +1786,19 @@ if (do_ewald)
 					DIRECT_MULTIDIM_ELEM(Fctf, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
 				}
 			}
+		if (tls_bp_slot != NULL)
+		{
+			// added to the map by planes in backproject()
+			tls_bp_slot->F2D = F2D;
+			tls_bp_slot->Fctf = Fctf;
+			tls_bp_slot->A = A3D;
+			tls_bp_slot->used = true;
+		}
+		else
+		{
 		#pragma omp critical(backproject)
 		backprojector.set2DFourierTransform(F2D, A3D, &Fctf);
+		}
 		}
 	}
 

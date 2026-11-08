@@ -21,6 +21,9 @@
 #include <src/rect_refusal.h>
 #include "src/autopicker.h"
 #include "src/virtual_movie_averages.h"
+#include "src/async_file_writer.h"
+#include <omp.h>
+#include <mpi.h>
 #include <src/jaz/single_particle/new_ft.h>
 
 //#define DEBUG
@@ -926,41 +929,83 @@ void AutoPicker::initialise(int rank)
 	#endif
 
 
-			PPref.clear();
-			if (verb > 0)
-				init_progress_bar(Mrefs.size());
-
-			Projector PP(micrograph_size, projector_interpolator, padding);
-			MultidimArray<RFLOAT> dummy;
-
-			for (int iref = 0; iref < Mrefs.size(); iref++)
+			const int n_refs = Mrefs.size();
+			PPref.assign(n_refs, Projector(micrograph_size, projector_interpolator, padding));
+			for (int iref = 0; iref < n_refs; iref++)
 			{
-
 				// (Re-)apply the mask to the references
 				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Mrefs[iref])
 				{
 					DIRECT_MULTIDIM_ELEM(Mrefs[iref], n) *= DIRECT_MULTIDIM_ELEM(Mcirc_mask, n);
 				}
+			}
 
+			// Each reference's transform (a padded micrograph-size FFT) is independent of the others: with
+			// MPI each process makes every mpi_size-th one and receives the rest; within a process they are
+			// spread over threads, each with its own buffer. Every transform is made as before, so the
+			// projectors are the same whatever the numbers of processes and threads.
+			int ranks_here = 1;
+			if (mpi_size > 1)
+			{
+				MPI_Comm node_comm;
+				MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, rank, MPI_INFO_NULL, &node_comm);
+				MPI_Comm_size(node_comm, &ranks_here);
+				MPI_Comm_free(&node_comm);
+			}
+			// (with fewer references than processes, or the FINUFFT interpolator, whose projectors keep more
+			// than `data` and whose planning is not known to be thread-safe, every process makes all of them on
+			// one thread, as before)
+			const bool finufft = (projector_interpolator == FINUFFT);
+			const bool split = (mpi_size > 1 && n_refs >= mpi_size && !finufft);
+			std::vector<int> mine;
+			for (int iref = split ? rank : 0; iref < n_refs; iref += split ? mpi_size : 1)
+				mine.push_back(iref);
+			// the padded real map, its transform and the micrograph-size map
+			const double pad = 2. * padding * micrograph_size;
+			const double thread_bytes = (pad * pad + 0.5 * pad * pad * 2. + (double)micrograph_size * micrograph_size) * sizeof(RFLOAT);
+			const char *env = getenv("RELION_AUTOPICK_PREP_THREADS");
+			int n_threads = (env != NULL) ? textToInteger(env) : -1;
+			std::string why = "RELION_AUTOPICK_PREP_THREADS";
+			if (n_threads < 1)
+			{
+				const int by_cores = std::max(1, omp_get_num_procs() / ranks_here);
+				const long long avail = asyncwrite::memoryAvailableBytes();
+				const int by_memory = (avail < 0) ? by_cores : std::max(1, (int)(0.7 * avail / ranks_here / thread_bytes));
+				n_threads = std::min(by_cores, by_memory);
+				why = (by_memory < by_cores) ? "free memory" : "cores";
+			}
+			n_threads = finufft ? 1 : std::max(1, std::min(n_threads, (int)mine.size()));
+			if (verb > 0)
+				std::cout << " + Preparing " << n_refs << " references on " << mpi_size << " process(es) x " << n_threads
+				          << " thread(s) (threads from the " << why << "; RELION_AUTOPICK_PREP_THREADS sets them)" << std::endl;
+
+			#pragma omp parallel for schedule(dynamic) num_threads(n_threads)
+			for (int m = 0; m < (int)mine.size(); m++)
+			{
+				const int iref = mine[m];
 				// Set reference in the large box of the micrograph
-				Maux.initZeros();
-				Maux.setXmippOrigin();
+				MultidimArray<RFLOAT> Mbig(micrograph_size, micrograph_size), dummy;
+				Mbig.setXmippOrigin();
 				FOR_ALL_ELEMENTS_IN_ARRAY2D(Mrefs[iref])
 				{
-					A2D_ELEM(Maux, i, j) = A2D_ELEM(Mrefs[iref], i, j);
+					A2D_ELEM(Mbig, i, j) = A2D_ELEM(Mrefs[iref], i, j);
 				}
 
 				// And compute its Fourier Transform inside the Projector
-				PP.computeFourierTransformMap(Maux, dummy, downsize_mic, 1, false);
-				PPref.push_back(PP);
-
-				if (verb > 0)
-					progress_bar(iref+1);
-
+				PPref[iref].computeFourierTransformMap(Mbig, dummy, downsize_mic, 1, false);
 			}
 
-			if (verb > 0)
-				progress_bar(Mrefs.size());
+			if (split)
+			{
+				// Every transform has the same shape: the others start as a copy of this process's first
+				for (int iref = 0; iref < n_refs; iref++)
+				{
+					if (iref % mpi_size != rank)
+						PPref[iref] = PPref[mine[0]];
+					MPI_Bcast(MULTIDIM_ARRAY(PPref[iref].data), 2 * MULTIDIM_SIZE(PPref[iref].data), MY_MPI_DOUBLE,
+					          iref % mpi_size, MPI_COMM_WORLD);
+				}
+			}
 		}
 	}
 
@@ -3413,9 +3458,9 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 {
 	Image<RFLOAT> Imic;
 	MultidimArray<Complex > Faux, Faux2, Fmic;
-	MultidimArray<RFLOAT> Maux, Mstddev, Mmean, Mstddev2, Mavg, Mdiff2, MsumX2, Mccf_best, Mpsi_best, Fctf, Mccf_best_combined, Mpsi_best_combined;
+	MultidimArray<RFLOAT> Maux, Mfull, Mstddev, Mmean, Mstddev2, Mavg, Mdiff2, MsumX2, Mccf_best, Mpsi_best, Fctf, Mccf_best_combined, Mpsi_best_combined;
 	MultidimArray<int> Mclass_best_combined;
-	FourierTransformer transformer;
+	FourierTransformer transformer, transformer_full;
 	RFLOAT sum_ref_under_circ_mask, sum_ref2_under_circ_mask;
 	int my_skip_side = autopick_skip_side + particle_size/2;
 	CTF ctf;
@@ -3769,14 +3814,16 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 					// and the sum_ref_under_circ_mask and sum_ref_under_circ_mask2
 					// Do this also if we're not recalculating the fom maps...
 					// This calculation needs to be done on an "non-shrinked" micrograph, in order to get the correct I^2 statistics
+					// (in its own array and transformer: resizing Maux and re-planning for every reference cost
+					// a reallocation and a new FFT plan each time)
 					windowFourierTransform(Faux, Faux2, micrograph_size);
 					CenterFFTbySign(Faux2);
-					Maux.resize(micrograph_size, micrograph_size);
-					transformer.inverseFourierTransform(Faux2, Maux);
-					Maux.setXmippOrigin();
+					Mfull.resize(micrograph_size, micrograph_size);
+					transformer_full.inverseFourierTransform(Faux2, Mfull);
+					Mfull.setXmippOrigin();
 #ifdef DEBUG
 					Image<RFLOAT> ttt;
-					ttt()=Maux;
+					ttt()=Mfull;
 					ttt.write("Maux.spi");
 #endif
 					sum_ref_under_circ_mask = 0.;
@@ -3789,14 +3836,14 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 					{
 						if (i*i + j*j < particle_radius2)
 						{
-							suma2 += A2D_ELEM(Maux, i, j) * A2D_ELEM(Maux, i, j);
-							suma2 += 2. * A2D_ELEM(Maux, i, j) * rnd_gaus(0., 1.);
-							sum_ref_under_circ_mask += A2D_ELEM(Maux, i, j);
-							sum_ref2_under_circ_mask += A2D_ELEM(Maux, i, j) * A2D_ELEM(Maux, i, j);
+							suma2 += A2D_ELEM(Mfull, i, j) * A2D_ELEM(Mfull, i, j);
+							suma2 += 2. * A2D_ELEM(Mfull, i, j) * rnd_gaus(0., 1.);
+							sum_ref_under_circ_mask += A2D_ELEM(Mfull, i, j);
+							sum_ref2_under_circ_mask += A2D_ELEM(Mfull, i, j) * A2D_ELEM(Mfull, i, j);
 							sumn += 1.;
 						}
 #ifdef DEBUG
-						A2D_ELEM(Mctfref, i, j) = A2D_ELEM(Maux, i, j);
+						A2D_ELEM(Mctfref, i, j) = A2D_ELEM(Mfull, i, j);
 #endif
 					}
 					sum_ref_under_circ_mask /= sumn;
@@ -3813,8 +3860,6 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 					std::cerr << "expected_Pratio " << expected_Pratio << std::endl;
 #endif
 
-					// Maux goes back to the workSize
-					Maux.resize(workSize, workSize);
 #ifdef TIMING
 					timer.toc(TIMING_B5);
 #endif

@@ -81,6 +81,8 @@ void autoMaskBinary(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT lowp
 
 // Euclidean distance (pixels) of every voxel to the nearest voxel of the binary mask (0 inside)
 void autoMaskDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads = 1);
+// The same, squared: exact integers (1e30 where there is no voxel above 0.5)
+void autoMaskSquaredDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads = 1);
 
 // Raised-cosine soft edge of width pixels outside the voxels at distance 0
 void autoMaskSoftEdge(const MultidimArray<RFLOAT> &dist, RFLOAT width, MultidimArray<RFLOAT> &mask);

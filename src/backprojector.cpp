@@ -76,10 +76,12 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
   	                              const Matrix2D<RFLOAT> &A,
                                       const MultidimArray<RFLOAT> *Mweight,
                                       RFLOAT r_ewald_sphere, bool is_positive_curvature,
-                                      Matrix2D<RFLOAT>* magMatrix)
+                                      Matrix2D<RFLOAT>* magMatrix, int z_lo, int z_hi)
 {
 	if (rect)
 	{
+		if (z_lo != INT_MIN || z_hi != INT_MAX)
+			REPORT_ERROR("BUG: backproject2Dto3D: z planes for a rectangular box");
 		backproject2Dto3DRect(f2d, A, Mweight, r_ewald_sphere, is_positive_curvature, magMatrix);
 		return;
 	}
@@ -151,6 +153,11 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
 	const int s  = YSIZE(f2d);
 	const int sh = XSIZE(f2d);
 
+	// With z planes (trilinear, flat slice), each row only visits the x where the slice, or its Friedel
+	// mate, is within a plane of z_lo..z_hi; the exact test per pixel stays below
+	const bool z_rows = (z_lo != INT_MIN || z_hi != INT_MAX) && interpolator == TRILINEAR && inv_diam_ewald == 0.;
+	const double zl = (double)z_lo - 2. + STARTINGZ(data), zh = (double)z_hi + 2. + STARTINGZ(data);
+
 	for (int i = 0; i < s; i++)
 	{
 		int y, first_allowed_x;
@@ -191,7 +198,54 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
 		if (first_x < first_allowed_x) first_x = first_allowed_x;
 		if (last_x > sh - 1) last_x = sh - 1;
 
-		for (int x = first_x; x <= last_x; x++)
+		int seg_lo[2] = {first_x, 1}, seg_hi[2] = {last_x, 0};
+		if (z_rows)
+		{
+			// zp = z0 + z1 x, xp = x0 + x1 x: keep x with xp >= 0 and zp in [zl, zh], or xp < 0 and -zp in
+			// [zl, zh] (the Friedel mate), each with a margin, in increasing x
+			const double cz0 = Am_Zy * y, cz1 = Am_Zx, cx0 = Am_Xy * y, cx1 = Am_Xx;
+			auto clip = [](double &a, double &b, double c0, double c1, double lo, double hi)
+			{
+				if (c1 == 0.)
+				{
+					if (c0 < lo || c0 > hi) a = b + 1.;
+					return;
+				}
+				const double t0 = (lo - c0) / c1, t1 = (hi - c0) / c1;
+				a = std::max(a, std::min(t0, t1));
+				b = std::min(b, std::max(t0, t1));
+			};
+			for (int k = 0; k < 2; k++)
+			{
+				double a = first_x, b = last_x;
+				if (k == 0)
+				{
+					clip(a, b, cx0, cx1, -1., 1e30);
+					clip(a, b, cz0, cz1, zl, zh);
+				}
+				else
+				{
+					clip(a, b, cx0, cx1, -1e30, 1.);
+					clip(a, b, cz0, cz1, -zh, -zl);
+				}
+				seg_lo[k] = (a <= b) ? (int)ceil(a) : 1;
+				seg_hi[k] = (a <= b) ? (int)floor(b) : 0;
+			}
+			if (seg_lo[1] < seg_lo[0])
+			{
+				std::swap(seg_lo[0], seg_lo[1]);
+				std::swap(seg_hi[0], seg_hi[1]);
+			}
+			if (seg_lo[1] <= seg_hi[0] + 1 && seg_lo[1] <= seg_hi[1]) // overlapping: one segment
+			{
+				seg_hi[0] = std::max(seg_hi[0], seg_hi[1]);
+				seg_lo[1] = 1;
+				seg_hi[1] = 0;
+			}
+		}
+
+		for (int seg = 0; seg < 2; seg++)
+		for (int x = seg_lo[seg]; x <= seg_hi[seg]; x++)
 		{
 			// Get the value from the input image
 			Complex my_val = DIRECT_A2D_ELEM(f2d, i, x);
@@ -309,24 +363,29 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
 					my_val = conj(my_val);
 				}
 
-				// Store slice in 3D weighted sum
-				DIRECT_A3D_ELEM(data, z0, y0, x0) += dd000 * my_val;
-				DIRECT_A3D_ELEM(data, z0, y0, x1) += dd001 * my_val;
-				DIRECT_A3D_ELEM(data, z0, y1, x0) += dd010 * my_val;
-				DIRECT_A3D_ELEM(data, z0, y1, x1) += dd011 * my_val;
-				DIRECT_A3D_ELEM(data, z1, y0, x0) += dd100 * my_val;
-				DIRECT_A3D_ELEM(data, z1, y0, x1) += dd101 * my_val;
-				DIRECT_A3D_ELEM(data, z1, y1, x0) += dd110 * my_val;
-				DIRECT_A3D_ELEM(data, z1, y1, x1) += dd111 * my_val;
-				// Store corresponding weights
-				DIRECT_A3D_ELEM(weight, z0, y0, x0) += dd000 * my_weight;
-				DIRECT_A3D_ELEM(weight, z0, y0, x1) += dd001 * my_weight;
-				DIRECT_A3D_ELEM(weight, z0, y1, x0) += dd010 * my_weight;
-				DIRECT_A3D_ELEM(weight, z0, y1, x1) += dd011 * my_weight;
-				DIRECT_A3D_ELEM(weight, z1, y0, x0) += dd100 * my_weight;
-				DIRECT_A3D_ELEM(weight, z1, y0, x1) += dd101 * my_weight;
-				DIRECT_A3D_ELEM(weight, z1, y1, x0) += dd110 * my_weight;
-				DIRECT_A3D_ELEM(weight, z1, y1, x1) += dd111 * my_weight;
+				// Store slice in 3D weighted sum, and the corresponding weights
+				if (z0 >= z_lo && z0 <= z_hi)
+				{
+					DIRECT_A3D_ELEM(data, z0, y0, x0) += dd000 * my_val;
+					DIRECT_A3D_ELEM(data, z0, y0, x1) += dd001 * my_val;
+					DIRECT_A3D_ELEM(data, z0, y1, x0) += dd010 * my_val;
+					DIRECT_A3D_ELEM(data, z0, y1, x1) += dd011 * my_val;
+					DIRECT_A3D_ELEM(weight, z0, y0, x0) += dd000 * my_weight;
+					DIRECT_A3D_ELEM(weight, z0, y0, x1) += dd001 * my_weight;
+					DIRECT_A3D_ELEM(weight, z0, y1, x0) += dd010 * my_weight;
+					DIRECT_A3D_ELEM(weight, z0, y1, x1) += dd011 * my_weight;
+				}
+				if (z1 >= z_lo && z1 <= z_hi)
+				{
+					DIRECT_A3D_ELEM(data, z1, y0, x0) += dd100 * my_val;
+					DIRECT_A3D_ELEM(data, z1, y0, x1) += dd101 * my_val;
+					DIRECT_A3D_ELEM(data, z1, y1, x0) += dd110 * my_val;
+					DIRECT_A3D_ELEM(data, z1, y1, x1) += dd111 * my_val;
+					DIRECT_A3D_ELEM(weight, z1, y0, x0) += dd100 * my_weight;
+					DIRECT_A3D_ELEM(weight, z1, y0, x1) += dd101 * my_weight;
+					DIRECT_A3D_ELEM(weight, z1, y1, x0) += dd110 * my_weight;
+					DIRECT_A3D_ELEM(weight, z1, y1, x1) += dd111 * my_weight;
+				}
 
 			} // endif TRILINEAR
 			else if (interpolator == NEAREST_NEIGHBOUR )
@@ -356,7 +415,8 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
 
 				if (xr < 0 || xr >= data.xdim
 				 || yr < 0 || yr >= data.ydim
-				 || zr < 0 || zr >= data.zdim)
+				 || zr < 0 || zr >= data.zdim
+				 || zr < z_lo || zr > z_hi)
 				{
 					continue;
 				}

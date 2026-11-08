@@ -102,6 +102,9 @@ public:
 	// Verbosity
 	int verb;
 
+	// Number of MPI processes (set by AutoPickerMpi), which share the preparation of the references
+	int mpi_size = 1;
+
 	// Random seed
 	long int random_seed;
 

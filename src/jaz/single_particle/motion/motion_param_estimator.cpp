@@ -24,6 +24,7 @@
 #include "three_hyperparameter_fit.h"
 
 #include <src/jaz/optimization/nelder_mead.h>
+#include "polish_timing.h"
 #include <src/jaz/single_particle/index_sort.h>
 #include <src/jaz/single_particle/micrograph_handler.h>
 #include <src/jaz/single_particle/img_proc/filter_helper.h>
@@ -262,7 +263,10 @@ void MotionParamEstimator::run()
 
     RCTIC(paramTimer, timeSetup);
 
-    prepAlignment();
+    {
+        polishtiming::Scope t("param: prepare alignment");
+        prepAlignment();
+    }
 
 	RCTOC(paramTimer, timeSetup);
 
@@ -428,12 +432,15 @@ void MotionParamEstimator::evaluateParams(
 
             RCTIC(paramTimer,timeOpt);
 
-            std::vector<std::vector<gravis::d2Vector>> tracks =
-                motionEstimator->optimize(
+            std::vector<std::vector<gravis::d2Vector>> tracks;
+            {
+                polishtiming::Scope topt("param: optimize tracks");
+                tracks = motionEstimator->optimize(
                     alignmentSet.CCs[g],
                     alignmentSet.initialTracks[g],
                     sig_v_vals_px[i], sig_a_vals_px[i], sig_d_vals_px[i],
                     alignmentSet.positions[g], alignmentSet.globComp[g]);
+            }
 
 			if (debug)
             {
@@ -459,7 +466,10 @@ void MotionParamEstimator::evaluateParams(
 
             RCTIC(paramTimer,timeEval);
 
-            tscsAs[i] += alignmentSet.updateTsc(tracks, g, nr_omp_threads);
+            {
+                polishtiming::Scope t("param: update TSC");
+                tscsAs[i] += alignmentSet.updateTsc(tracks, g, nr_omp_threads);
+            }
 
             RCTOC(paramTimer,timeEval);
         }
@@ -551,6 +561,11 @@ void MotionParamEstimator::prepAlignment()
         #pragma omp parallel for num_threads(nr_omp_threads)
         for (int p = 0; p < pc; p++)
         {
+			// (the prediction does not depend on the frame: it used to be made once per frame)
+			Image<Complex> pred = reference->predict(
+				mdts[g], p, *obsModel, ReferenceMap::Opposite);
+			alignmentSet.accelerate(pred, alignmentSet.pred[g][p]);
+
 			for (int f = 0; f < fc; f++)
             {
 				if (maxRange > 0)
@@ -559,12 +574,7 @@ void MotionParamEstimator::prepAlignment()
                 }
 
                 alignmentSet.copyCC(g, p, f, movieCC[p][f]);
-
-                Image<Complex> pred = reference->predict(
-                    mdts[g], p, *obsModel, ReferenceMap::Opposite);
-
                 alignmentSet.accelerate(movie[p][f], alignmentSet.obs[g][p][f]);
-                alignmentSet.accelerate(pred, alignmentSet.pred[g][p]);
             }
         }
     }

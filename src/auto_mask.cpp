@@ -322,6 +322,13 @@ static void squaredDistance1D(const std::vector<double> &f, std::vector<double> 
 
 void autoMaskDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads)
 {
+	autoMaskSquaredDistance(binary, dist, n_threads);
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(dist)
+		DIRECT_MULTIDIM_ELEM(dist, n) = sqrt(DIRECT_MULTIDIM_ELEM(dist, n));
+}
+
+void autoMaskSquaredDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads)
+{
 	const double far = 1e30;
 	const long int xdim = XSIZE(binary), ydim = YSIZE(binary), zdim = ZSIZE(binary);
 	dist.resize(binary);
@@ -361,9 +368,6 @@ void autoMaskDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT>
 			}
 		}
 	}
-
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(dist)
-		DIRECT_MULTIDIM_ELEM(dist, n) = sqrt(DIRECT_MULTIDIM_ELEM(dist, n));
 }
 
 static inline RFLOAT softEdgeValue(RFLOAT d, RFLOAT width)
