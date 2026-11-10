@@ -97,6 +97,7 @@ replaces the job value for that class only; an empty or missing column means
 | `rlnHelicalTwist`, `rlnHelicalRise` | Twist, Rise | start values of this class |
 | `rlnHelicalTwistMin/Max`, `rlnHelicalRiseMin/Max` | Twist min ... | local symmetry search window of this class |
 | `rlnHelicalMaskTubeInnerDiameter`, `...OuterDiameter` | Tube inner, Tube outer | helical tube of this class |
+| `rlnReferenceSeedGroup` | (none) | classes with the same number (> 0) are seeded together (see below); found automatically for rows that hold identical maps |
 
 - The settings are saved in `run_itNNN_model.star` (table
   `model_class_settings`) and kept by `--continue`.
@@ -104,6 +105,41 @@ replaces the job value for that class only; an empty or missing column means
   works on a continued run.
 - The job tube is the widest of the classes (inner: the narrowest, none if any
   class has none); each class is masked and symmetrised with its own tube.
+
+**One map in several rows** (for example one map with different twists and
+rises, to test symmetry hypotheses). Such classes start out identical: each
+class's twist and rise are first applied after the first E-step. Without help,
+`--firstiter_cc` (reference not on absolute greyscale) then puts every particle
+in the first of those rows, and the others stay empty. Two ways to start them
+apart:
+
+- **Seeding within the group (default).** Rows that hold identical maps form a
+  group, like the classes of a single `--ref` map. The job prints "Classes 1 and
+  2 start from the same map ...".
+  - In the first iteration (the second one with `--firstiter_cc`), each particle
+    goes to one random class of its group. It still competes normally against
+    classes with other maps. Each class is then rebuilt from its own random share
+    and given its own twist and rise.
+  - With `--firstiter_cc`, the CC iteration uses only the first class of each
+    group. Afterwards its map is copied to the other classes of the group, and
+    each of them gets its own helical symmetry.
+  - The random class depends only on `--random_seed` and the particle. So
+    serial, MPI and GPU runs, and a run continued after the CC iteration, give
+    the same classes.
+  - The groups are saved in model.star (`rlnReferenceSeedGroup`) until they have
+    been seeded. You can also set this column in the `--ref` STAR file; a group
+    then starts from the map of its first class.
+  - `--no_shared_ref_seeds` switches this off.
+- **`--helical_symmetrise_refs` (optional).** Before the first iteration, each
+  class's starting map is symmetrised with its own twist and rise, so the first
+  E-step already compares every particle with every hypothesis. Mind the
+  reference: a map from a job with twist A, re-symmetrised with twist B, is a
+  blurred A map rather than a B structure. That favours A unless the map is
+  low-passed below where the lattices differ.
+
+Rows that start from identical maps and are not seeded (`--no_shared_ref_seeds`)
+can never separate if they also share the same symmetry: the job warns about
+them ("classes 1 and 2 start from identical maps ...").
 
 GUI: the table of **One reference per class** (above) holds these columns.
 Errors name the table headings ("class 1: Twist lies outside Twist min to Twist max").

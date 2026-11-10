@@ -1004,6 +1004,7 @@ void MlModel::reorderClasses(const std::vector<int> &order)
 	permuteClasses(class_settings.outer_diameter, order);
 	permuteClasses(class_settings.mask, order);
 	permuteClasses(class_settings.sym, order);
+	permuteClasses(class_settings.seed_group, order);
 }
 
 std::vector<int> MlModel::sortedClassOrder(const std::vector<RFLOAT> &pdf, const std::vector<RFLOAT> &resolution,
@@ -1077,7 +1078,8 @@ std::vector<int> MlModel::typeNumbersFromClassOrder(const std::vector<int> &orde
 bool MlModel::ClassSettings::empty() const
 {
 	return twist.empty() && rise.empty() && twist_min.empty() && twist_max.empty() && rise_min.empty() &&
-	       rise_max.empty() && inner_diameter.empty() && outer_diameter.empty() && mask.empty() && sym.empty();
+	       rise_max.empty() && inner_diameter.empty() && outer_diameter.empty() && mask.empty() && sym.empty() &&
+	       seed_group.empty();
 }
 
 void MlModel::ClassSettings::read(MetaDataTable &MD)
@@ -1092,6 +1094,7 @@ void MlModel::ClassSettings::read(MetaDataTable &MD)
 	readSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, outer_diameter);
 	readSettingsColumn(MD, EMDL_OPTIMISER_SOLVENT_MASK_NAME, mask);
 	readSettingsColumn(MD, EMDL_SAMPLING_SYMMETRY, sym);
+	readSettingsColumn(MD, EMDL_MLMODEL_REF_SEED_GROUP, seed_group);
 	if ((twist_min.empty() != twist_max.empty()) || (rise_min.empty() != rise_max.empty()))
 		REPORT_ERROR("ERROR: per-class search ranges need both rlnHelicalTwistMin and rlnHelicalTwistMax (rlnHelicalRiseMin and rlnHelicalRiseMax)");
 }
@@ -1101,7 +1104,7 @@ void MlModel::ClassSettings::write(std::ostream &fo) const
 	if (empty())
 		return;
 	size_t n = std::max({twist.size(), rise.size(), twist_min.size(), rise_min.size(), inner_diameter.size(),
-	                     outer_diameter.size(), mask.size(), sym.size()});
+	                     outer_diameter.size(), mask.size(), sym.size(), seed_group.size()});
 	MetaDataTable MD;
 	MD.setName("model_class_settings");
 	for (size_t i = 0; i < n; i++)
@@ -1116,6 +1119,7 @@ void MlModel::ClassSettings::write(std::ostream &fo) const
 	writeSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, outer_diameter);
 	writeSettingsColumn(MD, EMDL_OPTIMISER_SOLVENT_MASK_NAME, mask);
 	writeSettingsColumn(MD, EMDL_SAMPLING_SYMMETRY, sym);
+	writeSettingsColumn(MD, EMDL_MLMODEL_REF_SEED_GROUP, seed_group);
 	MD.write(fo);
 }
 

@@ -776,6 +776,9 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     nr_iter_max = textToInteger(parser.getOption("--auto_iter_max", "In auto-refinement, stop at this iteration.", "999"));
     debug_split_random_half = textToInteger(getParameter(argc, argv, "--debug_split_random_half", "0"));
     skip_realspace_helical_sym = parser.checkOption("--skip_realspace_helical_sym", "", "false", true);
+    // (the groups are kept in model.star until they have been seeded: a run continued after the --firstiter_cc
+    // iteration seeds them in its first iteration)
+    do_shared_ref_seeds = !parser.checkOption("--no_shared_ref_seeds", "Do not seed randomly among classes that start from the same map");
 
     do_blush = parser.checkOption("--blush", "Perform the reconstruction with the Blush algorithm.");
     blush_model = parser.getOption("--blush_model", "File location of a non-standard blush model", "");
@@ -1029,6 +1032,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     if (parser.checkOption("--dont_helical_auto_diameter", "Mask all classes with the tube of the job (the default, unless RELION_HELICAL_AUTO_DIAMETER=1)"))
         helical_auto_diameter = false;
     do_helical_symmetry_local_refinement = parser.checkOption("--helical_symmetry_search", "Perform local refinement of helical symmetry?");
+    do_helical_symmetrise_refs = parser.checkOption("--helical_symmetrise_refs", "Before the first iteration, give each class's starting map its own helical twist and rise (from the --ref STAR file)");
     helical_sigma_distance_A = textToFloat(parser.getOption("--helical_sigma_distance_A", "Sigma of distance along the helical tracks (Angstroms; the persistence length of the filament, independent of box size and pixel size)", "-1."));
     helical_sigma_distance = textToFloat(parser.getOption("--helical_sigma_distance", "OLD: sigma of distance along the helical tracks as a fraction of the box size (use --helical_sigma_distance_A)", "-1."));
     if (helical_sigma_distance_A >= 0. && helical_sigma_distance >= 0.)
@@ -1363,6 +1367,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     skip_gridding = !parser.checkOption("--dont_skip_gridding", "Perform gridding in the reconstruction step (obsolete?)");
     debug_split_random_half = textToInteger(getParameter(argc, argv, "--debug_split_random_half", "0"));
     skip_realspace_helical_sym = parser.checkOption("--skip_realspace_helical_sym", "", "false", true);
+    do_shared_ref_seeds = !parser.checkOption("--no_shared_ref_seeds", "Do not seed randomly among classes that start from the same map (by default, classes whose --ref rows hold identical maps, or the same rlnReferenceSeedGroup, are seeded together: in the first iteration each particle goes to one random class of its group)");
 
 	min_sigma2_offset = textToFloat(parser.getOption("--min_sigma2_offset", "Lower bound for sigma2 for offset", "2.", true));
 
@@ -2796,6 +2801,14 @@ void MlOptimiser::initialiseGeneral(int rank)
         if (do_helical_symmetry_local_refinement)
             REPORT_ERROR("ERROR: cannot do local refinement of helical parameters for non-helical segments!");
     }
+    if (iter == 0)
+    {
+        detectSharedReferenceGroups();   // (on the maps as read)
+        imposeClassHelicalSymmetryOnStartingReferences();
+        warnIdenticalStartingReferences();
+    }
+    else
+        updateSharedReferenceGroups();
     // Automatic class diameters: the job's tube only limits them, so it is the mask diameter (it also masks the images)
     if (helical_auto_diameter && mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0. && particle_diameter > 0. &&
         helical_tube_outer_diameter != particle_diameter && !rectMaskAlongLength())
@@ -5583,6 +5596,9 @@ void MlOptimiser::expectationSetup()
     // Use the iteration number so that each iteration has a different random seed
     init_random_generator(random_seed + iter);
 
+    // Classes that start from one map: whether this iteration seeds among them
+    updateSharedReferenceGroups();
+
     // Reset the random perturbation for this sampling
     sampling.resetRandomlyPerturbedSampling();
 
@@ -6597,6 +6613,212 @@ RFLOAT MlOptimiser::classTubeDiameter(int iclass, bool outer) const
     return outer ? helical_tube_outer_diameter : helical_tube_inner_diameter;
 }
 
+void MlOptimiser::imposeClassHelicalSymmetryOnStartingReferences()
+{
+    // A --ref STAR row with its own twist and rise says which symmetry that class stands for. Otherwise the symmetry
+    // is first imposed after the first E-step, so classes that share one map start out identical (and are seeded
+    // together, see detectSharedReferenceGroups). With this option the first E-step already compares each particle
+    // with every class's own symmetry.
+    const MlModel::ClassSettings &cs = mymodel.class_settings;
+    if (!do_helical_symmetrise_refs)
+        return;
+    if (!do_helical_refine || ignore_helical_symmetry || skip_realspace_helical_sym || mymodel.ref_dim != 3 ||
+        mymodel.nr_bodies > 1 || (cs.twist.empty() && cs.rise.empty()))
+    {
+        if (verb > 0)
+            std::cerr << " WARNING: --helical_symmetrise_refs needs 3D helical classification (--helix) without --ignore_helical_symmetry, "
+                      << "and a --ref STAR file with rlnHelicalTwist or rlnHelicalRise: the starting maps are left as they are" << std::endl;
+        return;
+    }
+    // (each MPI rank reads the references itself, and does the same here)
+    for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+        imposeHelicalSymmetryInRealSpace(
+                mymodel.Iref[iclass],
+                mymodel.pixel_size,
+                (particle_diameter / 2.),
+                (classTubeDiameter(iclass, false) / 2.),
+                (classTubeDiameter(iclass, true) / 2.),
+                helical_z_percentage,
+                mymodel.helical_rise[iclass],
+                mymodel.helical_twist[iclass],
+                width_mask_edge,
+                rectMaskAlongLength(),
+                nr_threads,
+                helical_cylindrical_mask);
+    if (verb > 0)
+        std::cout << " Each class's starting map has been given its own helical twist and rise (from the reference STAR file)" << std::endl;
+}
+
+void MlOptimiser::warnIdenticalStartingReferences() const
+{
+    // One map for all classes gets random seeds in the first iteration (do_generate_seeds), and so do classes whose
+    // STAR rows share a map (shared_ref_groups); other identical classes can never separate. (Without --ref the maps
+    // are made later.)
+    if (verb <= 0 || !fn_ref.isStarFile() || do_generate_seeds || do_average_unaligned || do_som ||
+        mymodel.nr_bodies > 1 || mymodel.nr_classes < 2)
+        return;
+    for (int i = 0; i < mymodel.nr_classes; i++)
+        for (int j = i + 1; j < mymodel.nr_classes; j++)
+        {
+            if (!shared_ref_group_of_class.empty() && shared_ref_group_of_class[i] >= 0 &&
+                shared_ref_group_of_class[i] == shared_ref_group_of_class[j])
+                continue;
+            const MultidimArray<RFLOAT> &a = mymodel.Iref[i], &b = mymodel.Iref[j];
+            if (!a.sameShape(b) || !std::equal(MULTIDIM_ARRAY(a), MULTIDIM_ARRAY(a) + MULTIDIM_SIZE(a), MULTIDIM_ARRAY(b)))
+                continue;
+            std::cerr << " WARNING: classes " << i + 1 << " and " << j + 1 << " start from identical maps"
+                      << (do_helical_refine && mymodel.ref_dim == 3 ? " with the same helical twist and rise" : "")
+                      << ": they will stay identical"
+                      << (do_firstiter_cc ? ", and the first iteration (--firstiter_cc) puts every particle in class " + integerToString(i + 1) : std::string(""))
+                      << std::endl;
+            break;
+        }
+}
+
+bool MlOptimiser::sharedRefSeedsSupported() const
+{
+    // Seeding works through the class priors of the EM algorithm
+    return do_shared_ref_seeds && !gradient_refine && !do_som && !do_always_cc && !do_skip_align && !do_skip_rotate &&
+           !do_fix_classes && mymodel.nr_bodies == 1 && mymodel.nr_classes > 1;
+}
+
+void MlOptimiser::detectSharedReferenceGroups()
+{
+    // A single --ref map for K classes is seeded randomly (do_generate_seeds). A STAR file that lists one map in
+    // several rows is not: those classes start identical, and with --firstiter_cc every particle ties and goes to the
+    // first of them. Seed them like a single map, but only among themselves.
+    std::vector<int> &group = mymodel.class_settings.seed_group;
+    const int K = mymodel.nr_classes;
+    if (group.empty() && sharedRefSeedsSupported() && fn_ref.isStarFile() && !do_generate_seeds && !do_average_unaligned)
+    {
+        group.assign(K, 0);
+        bool shared = false;
+        for (int i = 0; i < K; i++)
+        {
+            if (group[i] > 0)
+                continue;
+            group[i] = i + 1;
+            const MultidimArray<RFLOAT> &a = mymodel.Iref[i];
+            for (int j = i + 1; j < K; j++)
+            {
+                const MultidimArray<RFLOAT> &b = mymodel.Iref[j];
+                if (group[j] == 0 && a.sameShape(b) &&
+                    std::equal(MULTIDIM_ARRAY(a), MULTIDIM_ARRAY(a) + MULTIDIM_SIZE(a), MULTIDIM_ARRAY(b)))
+                {
+                    group[j] = i + 1;
+                    shared = true;
+                }
+            }
+        }
+        if (!shared)
+            group.clear();
+    }
+    else if (!group.empty() && (int)group.size() != K)
+        REPORT_ERROR("ERROR: rlnReferenceSeedGroup needs a value for every class");
+    updateSharedReferenceGroups();
+    if (!group.empty() && shared_ref_groups.empty() && do_shared_ref_seeds && verb > 0 && !sharedRefSeedsSupported())
+        std::cerr << " WARNING: rlnReferenceSeedGroup is ignored: seeding among classes needs EM classification with alignments "
+                  << "(not --grad, --som, --always_cc, --skip_align or --skip_rotate)" << std::endl;
+    if (shared_ref_groups.empty())
+        return;
+
+    // A group given by rlnReferenceSeedGroup starts from the map of its first class
+    for (const std::vector<int> &members : shared_ref_groups)
+        for (size_t i = 1; i < members.size(); i++)
+            mymodel.Iref[members[i]] = mymodel.Iref[members[0]];
+
+    if (verb > 0)
+        for (const std::vector<int> &members : shared_ref_groups)
+        {
+            std::cout << " Classes";
+            for (size_t i = 0; i < members.size(); i++)
+                std::cout << (i == 0 ? " " : (i + 1 == members.size() ? " and " : ", ")) << members[i] + 1;
+            std::cout << " start from the same map: in iteration " << (do_firstiter_cc ? 2 : 1)
+                      << " each particle goes to one random class among them (--no_shared_ref_seeds switches this off)" << std::endl;
+        }
+
+    // The --firstiter_cc iteration takes the best class of each particle: only the first class of each group takes
+    // part (the others would tie with it), and copySharedReferenceLeaders() fills in the others afterwards
+    if (do_firstiter_cc)
+        for (const std::vector<int> &members : shared_ref_groups)
+            for (size_t i = 1; i < members.size(); i++)
+            {
+                mymodel.pdf_class[members[0]] += mymodel.pdf_class[members[i]];
+                mymodel.pdf_class[members[i]] = 0.;
+            }
+}
+
+void MlOptimiser::updateSharedReferenceGroups()
+{
+    shared_ref_groups.clear();
+    shared_ref_group_of_class.assign(mymodel.nr_classes, -1);
+    shared_ref_seed_iter = false;
+    const std::vector<int> &group = mymodel.class_settings.seed_group;
+    if (!sharedRefSeedsSupported() || (int)group.size() != mymodel.nr_classes)
+        return;
+    std::map<int, int> index;   // group value -> position in shared_ref_groups
+    for (int k = 0; k < mymodel.nr_classes; k++)
+    {
+        if (group[k] <= 0)
+            continue;
+        auto it = index.find(group[k]);
+        if (it == index.end())
+        {
+            index[group[k]] = shared_ref_groups.size();
+            shared_ref_groups.push_back(std::vector<int>(1, k));
+        }
+        else
+            shared_ref_groups[it->second].push_back(k);
+    }
+    // groups of one class are not groups
+    shared_ref_groups.erase(std::remove_if(shared_ref_groups.begin(), shared_ref_groups.end(),
+                                           [](const std::vector<int> &m) { return m.size() < 2; }),
+                            shared_ref_groups.end());
+    for (size_t g = 0; g < shared_ref_groups.size(); g++)
+        for (int k : shared_ref_groups[g])
+            shared_ref_group_of_class[k] = g;
+    // The first iteration that is not the --firstiter_cc one seeds; afterwards the groups are dropped (see
+    // maximizationOtherParameters). (A run continued after the CC iteration has do_firstiter_cc false.)
+    shared_ref_seed_iter = !shared_ref_groups.empty() && iter >= 1 && !(iter == 1 && do_firstiter_cc);
+}
+
+void MlOptimiser::copySharedReferenceLeaders()
+{
+    // As for do_generate_seeds: the other classes of a group take the first class's map and statistics, and an equal
+    // share of its particles. Each keeps its own helical twist and rise, imposed here (under MPI the real-space
+    // symmetry was imposed during the reconstruction, before this; serially it is imposed again after it).
+    const bool helix = do_helical_refine && !ignore_helical_symmetry && !skip_realspace_helical_sym && mymodel.ref_dim == 3;
+    for (const std::vector<int> &members : shared_ref_groups)
+    {
+        const int lead = members[0];
+        const RFLOAT pdf = mymodel.pdf_class[lead] / members.size();
+        for (int k : members)
+        {
+            mymodel.pdf_class[k] = pdf;
+            if (k == lead)
+                continue;
+            mymodel.tau2_class[k] = mymodel.tau2_class[lead];
+            mymodel.data_vs_prior_class[k] = mymodel.data_vs_prior_class[lead];
+            mymodel.pdf_direction[k] = mymodel.pdf_direction[lead];
+            mymodel.Iref[k] = mymodel.Iref[lead];
+            if (helix && (mymodel.helical_twist[k] != mymodel.helical_twist[lead] || mymodel.helical_rise[k] != mymodel.helical_rise[lead]))
+                imposeHelicalSymmetryInRealSpace(
+                        mymodel.Iref[k],
+                        mymodel.pixel_size,
+                        (particle_diameter / 2.),
+                        (classTubeDiameter(k, false) / 2.),
+                        (classTubeDiameter(k, true) / 2.),
+                        helical_z_percentage,
+                        mymodel.helical_rise[k],
+                        mymodel.helical_twist[k],
+                        width_mask_edge,
+                        rectMaskAlongLength(),
+                        nr_threads,
+                        helical_cylindrical_mask);
+        }
+    }
+}
+
 void MlOptimiser::makeGoodHelixForEachRef()
 {
     if ( (!do_helical_refine) || (ignore_helical_symmetry) || (mymodel.ref_dim == 2) )
@@ -7435,7 +7657,15 @@ void MlOptimiser::maximizationOtherParameters()
             }
             mymodel.pdf_class[0] /= mymodel.nr_classes;
         }
-
+        else if (!shared_ref_groups.empty())
+            copySharedReferenceLeaders();
+    }
+    // The classes of a group have been seeded: they are ordinary classes from now on (also in model.star, so that
+    // --continue does not seed them again)
+    if (shared_ref_seed_iter)
+    {
+        mymodel.class_settings.seed_group.clear();
+        shared_ref_seed_iter = false;
     }
     RCTOC(timer,RCT_8);
 #ifdef DEBUG
@@ -10543,7 +10773,7 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
 
                     if (pdf_orientation_mean != 0.)
                         pdf_orientation /= pdf_orientation_mean;
-                    pdf_orientation *= filamentClassFactor(part_id, exp_iclass);
+                    pdf_orientation *= filamentClassFactor(part_id, exp_iclass) * sharedRefSeedFactor(part_id, exp_iclass);
 
                     // Loop over all translations
                     long int ihidden = iorientclass * exp_nr_trans;

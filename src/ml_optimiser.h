@@ -689,6 +689,18 @@ public:
 	// TODO: implement!
 	bool do_generate_seeds;
 
+	// --helical_symmetrise_refs: before the first iteration, give each class's starting map its own helical twist and rise
+	bool do_helical_symmetrise_refs;
+	// Seed randomly among classes that start from the same map (off with --no_shared_ref_seeds)
+	bool do_shared_ref_seeds;
+	// This iteration seeds within shared_ref_groups (set in expectationSetup): the first one that is not the
+	// --firstiter_cc iteration. After it the groups are dropped from mymodel.class_settings.
+	bool shared_ref_seed_iter;
+	// The groups of 2 or more classes that start from one map (from mymodel.class_settings.seed_group, lowest class
+	// first), and the group of each class (-1: none)
+	std::vector<std::vector<int> > shared_ref_groups;
+	std::vector<int> shared_ref_group_of_class;
+
 	// Flag whether to calculate the average of the unaligned images (for 2D refinements)
 	bool do_average_unaligned;
 
@@ -1012,6 +1024,9 @@ public:
             do_zero_mask(0),
             do_write_unmasked_refs(0),
             do_generate_seeds(0),
+            do_helical_symmetrise_refs(false),
+            do_shared_ref_seeds(true),
+            shared_ref_seed_iter(false),
             sum_changes_count(0),
             current_changes_optimal_orientations(0),
             do_average_unaligned(0),
@@ -1419,6 +1434,41 @@ public:
 	 * Then elongate and fill the perfect helix along Z axis.
 	 * */
 	void makeGoodHelixForEachRef();
+
+	// Before the first iteration: give each class's starting map its own helical twist and rise (--helical_symmetrise_refs)
+	void imposeClassHelicalSymmetryOnStartingReferences();
+	// Before the first iteration: warn about classes that start from identical maps and so cannot separate
+	void warnIdenticalStartingReferences() const;
+
+	// Seeding among classes that start from the same map (see shared_ref_groups)
+	bool sharedRefSeedsSupported() const;
+	// Before the first iteration: group the classes whose --ref rows hold identical maps (unless rlnReferenceSeedGroup
+	// gives the groups); with --firstiter_cc only the first class of each group takes part in that iteration
+	void detectSharedReferenceGroups();
+	// Each iteration: shared_ref_groups from mymodel.class_settings.seed_group, and whether this iteration seeds
+	void updateSharedReferenceGroups();
+	// After the --firstiter_cc iteration: copy the first class of each group to the others
+	void copySharedReferenceLeaders();
+	// In the seeding iteration a particle may only go to one class of each group, picked at random from
+	// --random_seed and the particle: the factor on that class's prior is the group size, on the others 0
+	inline RFLOAT sharedRefSeedFactor(long int part_id, int iclass) const
+	{
+		if (!shared_ref_seed_iter)
+			return 1.;
+		const int g = shared_ref_group_of_class[iclass];
+		if (g < 0)
+			return 1.;
+		const std::vector<int> &members = shared_ref_groups[g];
+		auto mix = [](unsigned long long x)
+		{
+			x += 0x9E3779B97F4A7C15ULL;
+			x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+			x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+			return x ^ (x >> 31);
+		};
+		const unsigned long long h = mix(mix((unsigned long long)random_seed) ^ mix(((unsigned long long)part_id << 16) + g));
+		return (members[h % members.size()] == iclass) ? (RFLOAT)members.size() : 0.;
+	}
 
     /*
      * Calculate the average CTF^2 from the summed weights in wsum_model and return boolean whether to

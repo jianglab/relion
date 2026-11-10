@@ -243,6 +243,7 @@ public:
 		std::vector<RFLOAT> inner_diameter, outer_diameter; // helical tube (A); < 0: the job's
 		std::vector<std::string> mask;                    // reference mask: "None", "auto" or a file
 		std::vector<std::string> sym;                     // point group of the reconstruction
+		std::vector<int> seed_group;                      // classes with the same value (> 0) start from one map: seeded together
 		bool empty() const;
 		void read(MetaDataTable &MD);                     // all rows of MD
 		void write(std::ostream &fo) const;               // as table model_class_settings, if not empty

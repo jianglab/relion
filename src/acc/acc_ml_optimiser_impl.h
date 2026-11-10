@@ -2584,7 +2584,8 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 					pdf = op.directions_prior[idir] * op.psi_prior[ipsi];
 				pdf *= baseMLO->helicalContextPrior(op.part_id, exp_iclass);
 
-				pdfs[iorientclass] = pdf * baseMLO->filamentClassFactor(op.part_id, exp_iclass);
+				pdfs[iorientclass] = pdf * baseMLO->filamentClassFactor(op.part_id, exp_iclass) *
+				                     baseMLO->sharedRefSeedFactor(op.part_id, exp_iclass);
 			}
 
 	pdfs.cpToDevice();
@@ -2636,6 +2637,25 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             PassWeights.weights.setHostPtr(&Mweight[0]);
             PassWeights.weights.setSize(nr_coarse_weights);
             PassWeights.weights.doFreeHost=false;
+
+            // Classes that were not scored (pdf_class 0: e.g. the other classes of a group that shares one --ref
+            // map in the --firstiter_cc iteration) keep the lowest value Mweight starts from: keep them out of the
+            // arg-min below, as the CPU code skips them
+            bool unscored = false;
+            for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
+                unscored |= !(baseMLO->mymodel.pdf_class[c] > 0.);
+            if (unscored)
+            {
+                const size_t block = (size_t)sp.nr_dir * sp.nr_psi * sp.nr_trans;
+                PassWeights.weights.cpToHost();
+                PassWeights.weights.streamSync();
+                XFLOAT *h = PassWeights.weights.getHostPtr();
+                for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
+                    if (!(baseMLO->mymodel.pdf_class[c] > 0.))
+                        std::fill(h + (c - sp.iclass_min) * block, h + (c - sp.iclass_min + 1) * block, std::numeric_limits<XFLOAT>::max());
+                PassWeights.weights.cpToDevice();
+                PassWeights.weights.streamSync();
+            }
         }
 
         std::pair<size_t, XFLOAT> min_pair=AccUtilities::getArgMinOnDevice<XFLOAT>(PassWeights.weights);

@@ -337,6 +337,7 @@ enum EMDLabel
 	EMDL_MLMODEL_SIGMA_TILT,
 	EMDL_MLMODEL_SIGMA_PSI,
 	EMDL_MLMODEL_REF_IMAGE,
+	EMDL_MLMODEL_REF_SEED_GROUP,
 	EMDL_MLMODEL_GRADIENT_MOMENT1_IMAGE,
 	EMDL_MLMODEL_GRADIENT_MOMENT2_IMAGE,
 	EMDL_MLMODEL_SIGMA2_NOISE,
@@ -1140,6 +1141,7 @@ private:
 		EMDL::addLabel(EMDL_MLMODEL_POWER_REF, EMDL_DOUBLE, "rlnReferenceSpectralPower", "Spherical average of the power of the reference");
 		EMDL::addLabel(EMDL_MLMODEL_PRIOR_MODE, EMDL_INT, "rlnOrientationalPriorMode", "Mode for prior distributions on the orientations (0=no prior; 1=(rot,tilt,psi); 2=(rot,tilt); 3=rot; 4=tilt; 5=psi) ");
 		EMDL::addLabel(EMDL_MLMODEL_REF_IMAGE, EMDL_STRING, "rlnReferenceImage", "Name of a reference image");
+		EMDL::addLabel(EMDL_MLMODEL_REF_SEED_GROUP, EMDL_INT, "rlnReferenceSeedGroup", "Classes with the same number (> 0) start from the map of the first of them and are seeded together: in the first iteration each particle goes to one random class of its group");
 		EMDL::addLabel(EMDL_MLMODEL_GRADIENT_MOMENT1_IMAGE, EMDL_STRING, "rlnGradMoment1", "Name of image containing the first moment of the gradient");
 		EMDL::addLabel(EMDL_MLMODEL_GRADIENT_MOMENT2_IMAGE, EMDL_STRING, "rlnGradMoment2", "Name of image containing the second moment of the gradient");
 		EMDL::addLabel(EMDL_MLMODEL_SIGMA_OFFSET, EMDL_DOUBLE, "rlnSigmaOffsets","Standard deviation in the origin offsets (in pixels)");
