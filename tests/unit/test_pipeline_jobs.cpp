@@ -246,6 +246,52 @@ TEST_CASE("Refine3D: align-halves checkbox emits a flag either way",
 	REQUIRE(command.find(" --dont_align_halves ") != std::string::npos);
 }
 
+TEST_CASE("Class3D and Refine3D: the unmasked-maps checkbox is on by default and adds --write_unmasked_maps, also in a continuation",
+          "[pipeline][class3d][refine3d]")
+{
+	for (int type : {PROC_3DCLASS, PROC_3DAUTO})
+	{
+		INFO("job type " << type);
+		RelionJob job;
+		job.clear();
+		job.initialise(type);
+		job.label = get_proc_label(job.type);
+		job.joboptions["fn_img"].setString("particles.star");
+		job.joboptions["fn_ref"].setString("ref.mrc");
+		if (type == PROC_3DCLASS)
+		{
+			job.joboptions["do_em"].setString("Yes");
+			job.joboptions["do_grad"].setString("No");
+		}
+		job.joboptions["nr_mpi"].setString(type == PROC_3DAUTO ? "3" : "1");
+		job.joboptions["nr_threads"].setString("1");
+		job.joboptions["do_queue"].setString("No");
+		job.joboptions["scratch_dir"].setString("");
+		REQUIRE(job.joboptions.find("do_write_unmasked") != job.joboptions.end());
+		REQUIRE(job.joboptions["do_write_unmasked"].getBoolean());
+
+		std::string command;
+		REQUIRE(generateCommand(job, command));
+		CHECK(command.find(" --write_unmasked_maps") != std::string::npos);
+
+		job.joboptions["do_write_unmasked"].setString("No");
+		command.clear();
+		REQUIRE(generateCommand(job, command));
+		CHECK(command.find("--write_unmasked_maps") == std::string::npos);
+
+		job.joboptions["do_write_unmasked"].setString("Yes");
+
+		// The option is not in the optimiser.star, so a continuation gives it again
+		job.is_continue = true;
+		job.joboptions["fn_cont"].setString(type == PROC_3DAUTO ? "Refine3D/job001/run_it005_optimiser.star"
+		                                                        : "Class3D/job001/run_it005_optimiser.star");
+		command.clear();
+		REQUIRE(generateCommand(job, command));
+		CHECK(command.find(" --continue ") != std::string::npos);
+		CHECK(command.find(" --write_unmasked_maps") != std::string::npos);
+	}
+}
+
 TEST_CASE("Extract: virtual-particles checkbox emits a flag either way",
           "[pipeline][extract]")
 {

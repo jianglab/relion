@@ -5298,6 +5298,9 @@ void MlOptimiserMpi::iterate()
         timer.toc(TIMING_ITER_HELICALREFINE);
         timer.tic(TIMING_SOLVFLAT);
 #endif
+        // With --write_unmasked_maps: the maps as they are before the mask, by the ranks that write the model
+        if (node->rank == 1 || (do_split_random_halves && !do_join_random_halves && node->rank == 2))
+        	writeUnmaskedMaps(node->rank);
         if (do_auto_mask && do_solvent && !has_converged)
         	updateAutoMasks();
 		sclock.mark("auto_mask", iter, node->rank);

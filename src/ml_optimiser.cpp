@@ -330,6 +330,9 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     fn_lowpass_mask = parser.getOption("--lowpass_mask", "User-provided mask for low-pass filtering", "None");
     lowpass = textToFloat(parser.getOption("--lowpass", "User-provided cutoff for region specified above", "0"));
 
+    // Not in the optimiser.star: give it again when continuing
+    do_write_unmasked_maps = parser.checkOption("--write_unmasked_maps", "3D classification and auto-refinement: at every iteration also write the maps before the solvent mask (rootname_itNNN[_halfN]_classNNN_unmasked.mrc), next to the masked ones");
+
     // Check whether tau2-spectrum has changed
     fnt = parser.getOption("--tau", "STAR file with input tau2-spectrum (to be kept constant)", "OLD");
     if (fnt != "OLD")
@@ -842,6 +845,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     do_solvent = parser.checkOption("--flatten_solvent", "Perform masking on the references as well?");
     fn_mask = parser.getOption("--solvent_mask", "User-provided mask for the references (default is to use spherical mask with particle_diameter)", "None");
     fn_mask2 = parser.getOption("--solvent_mask2", "User-provided secondary mask (with its own average density)", "None");
+    do_write_unmasked_maps = parser.checkOption("--write_unmasked_maps", "3D classification and auto-refinement: at every iteration also write the maps before the solvent mask (rootname_itNNN[_halfN]_classNNN_unmasked.mrc), next to the masked ones");
     do_auto_mask = parser.checkOption("--auto_mask", "Mask the 3D references at every iteration with masks made from them automatically, as trueFSC in helicon: low-pass filtered, thresholded (Otsu), the regions with the brightest voxels kept and a soft edge added (in auto-refinement made from the two half-maps, with the soft edge that best separates signal from noise). Needs --flatten_solvent; not with --solvent_mask");
     auto_mask_start_res = textToFloat(parser.getOption("--auto_mask_start_res", "Make the automatic masks only once the resolution is better than this (in A); spherical masks until then", "12"));
     auto_mask_soft_edge = textToFloat(parser.getOption("--auto_mask_soft", "Width of the soft edge of the automatic masks (in A). Default: optimised from the half-maps in auto-refinement, 3 times the resolution of the class in classification", "-1"));
@@ -4874,6 +4878,9 @@ void MlOptimiser::iterate()
         timer.toc(TIMING_ITER_HELICALREFINE);
         timer.tic(TIMING_SOLVFLAT);
 #endif
+        // With --write_unmasked_maps: the maps as they are before the mask
+        writeUnmaskedMaps(0);
+
         // Apply masks to the reference images
         // At the last iteration, do not mask the map for validation purposes
         if (do_auto_mask && do_solvent && !has_converged)
@@ -7792,6 +7799,31 @@ static RFLOAT softStep(RFLOAT x, RFLOAT edge, RFLOAT width)
     if (x < edge) return 1.;
     if (x > edge + width) return 0.;
     return 0.5 - 0.5 * cos(PI * (edge + width - x) / width);
+}
+
+void MlOptimiser::writeUnmaskedMaps(int random_subset)
+{
+    // Converged auto-refinements are not masked: their maps are the unmasked ones already
+    if (!do_write_unmasked_maps || !do_solvent || has_converged || mymodel.ref_dim != 3 || mymodel.nr_bodies > 1 || iter < 0)
+        return;
+    // Only in the iterations whose maps write() writes
+    if (do_grad && subset_size > 0 && (iter % write_every_grad_iter) != 0 && iter != nr_iter)
+        return;
+
+    FileName fn_root;
+    fn_root.compose(fn_out + "_it", iter, "", 3);
+    if (do_split_random_halves && !do_join_random_halves)
+        fn_root += "_half" + integerToString(random_subset);
+    for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
+    {
+        std::shared_ptr<Image<RFLOAT> > pimg = std::make_shared<Image<RFLOAT> >();
+        (*pimg)() = mymodel.Iref[iclass];
+        pimg->setSamplingRateInHeader(mymodel.pixel_size);
+        FileName fn_img;
+        fn_img.compose(fn_root + "_class", iclass + 1, "", 3);
+        fn_img += "_unmasked.mrc";
+        AsyncFileWriter::instance().submit([pimg, fn_img] { pimg->write(fn_img); });
+    }
 }
 
 void MlOptimiser::solventFlatten()

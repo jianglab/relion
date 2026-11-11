@@ -2244,6 +2244,7 @@ void JobWindow::initialiseClass3DWindow()
     group_auto_mask->end();
     guientries["do_auto_mask"].cb_menu_i(); // to make default effective
 	ui->auto_mask_group = group_auto_mask;
+	place("do_write_unmasked");
 
 	current_y += STEPY/2;
 
@@ -2577,6 +2578,7 @@ void JobWindow::initialiseAutorefineWindow()
     place("auto_mask_start_res");
     group_auto_mask->end();
     guientries["do_auto_mask"].cb_menu_i(); // to make default effective
+    place("do_write_unmasked");
 
     current_y += STEPY/2;
 

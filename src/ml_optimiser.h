@@ -846,6 +846,9 @@ public:
 	// Prepare for automated 2D class average selection: nice to have access to unmasked reference
 	bool do_write_unmasked_refs;
 
+	// 3D classification and auto-refinement: also write the maps of every iteration before the solvent mask (--write_unmasked_maps)
+	bool do_write_unmasked_maps;
+
     // User-specified (and fixed) directional offset searches in X/Y/Z directions (in Angstroms)
     RFLOAT offset_range_x, offset_range_y, offset_range_z;
     // Remove priors from particle star file after user-specified offset searches?
@@ -1023,6 +1026,7 @@ public:
             finufft_batch_budget_mb(0),
             do_zero_mask(0),
             do_write_unmasked_refs(0),
+            do_write_unmasked_maps(false),
             do_generate_seeds(0),
             do_helical_symmetrise_refs(false),
             do_shared_ref_seeds(true),
@@ -1502,6 +1506,11 @@ public:
 	/* Apply a solvent flattening to a map
 	 */
 	void solventFlatten();
+
+	/* With --write_unmasked_maps: write the 3D references as they are before solventFlatten(), next to the masked ones
+	 * (<root>_itNNN[_halfN]_classNNN_unmasked.mrc). random_subset as in write()
+	 */
+	void writeUnmaskedMaps(int random_subset);
 
 	// 2D classes of helical segments: measure the diameters of the class averages (helical_class_diameter) and,
 	// with helical_auto_diameter, update each class's tube (class_settings.outer_diameter) and its mask

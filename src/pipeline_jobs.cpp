@@ -5029,6 +5029,7 @@ its reference is masked at every iteration with a mask made automatically from t
 low-pass filtered, binarised at Otsu's threshold, the regions that hold its brightest voxels kept, and a raised-cosine soft edge of 3 times the resolution of the class added. \
 The automatic mask is applied inside the spherical mask of the mask diameter. Each iteration writes them as _itNNN_classNNN_automask.mrc.");
 	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", 12, 3, 30, 1, "Spherical masks are used until the resolution is better than this (in Angstroms); from then on the automatic masks.");
+	joboptions["do_write_unmasked"] = JobOption("Also write unmasked maps?", true, "If set to Yes, then at every iteration the maps are also written as they are before the reference mask (the mask above, the automatic masks or the spherical mask of the mask diameter) is applied, as run_itNNN_classNNN_unmasked.mrc, next to the masked ones. They are only written: the run uses the masked maps as before, so the results are the same. Like the other files of an iteration, they are deleted once the next iteration has been written, unless all iterations are kept.");
 	joboptions["fn_mask"] = JobOption("Reference mask (optional):", LABEL_MASK_CPIPE, 1, "", "Image Files (*.{spi,vol,msk,mrc})", "\
 If no mask is provided, a soft spherical mask based on the particle diameter will be used.\n\
 \n\
@@ -5535,6 +5536,10 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 		command += " --auto_mask --auto_mask_start_res " + joboptions["auto_mask_start_res"].getString();
 	}
 
+	// Not saved in the optimiser.star: given again in a continuation
+	if (joboptions["do_write_unmasked"].getBoolean())
+		command += " --write_unmasked_maps";
+
 	// Sampling
 	if (!joboptions["dont_skip_align"].getBoolean())
 	{
@@ -5746,6 +5751,7 @@ and a raised-cosine soft edge is added whose width best separates signal from no
 The automatic mask is applied inside the spherical mask of the mask diameter. With solvent-flattened FSCs (Optimisation tab), the FSC of the next iteration is corrected for this mask. \
 Each iteration writes it as _itNNN_automask.mrc. Searching for the soft edge takes a few Fourier transforms of the box per step on the first MPI follower.");
 	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", 12, 3, 30, 1, "A spherical mask is used until the resolution is better than this (in Angstroms); from then on the automatic mask.");
+	joboptions["do_write_unmasked"] = JobOption("Also write unmasked maps?", true, "If set to Yes, then at every iteration the maps are also written as they are before the reference mask (the mask above, the automatic masks or the spherical mask of the mask diameter) is applied, as run_itNNN_half1_class001_unmasked.mrc and run_itNNN_half2_class001_unmasked.mrc, next to the masked ones. They are only written: the run uses the masked maps as before, so the results are the same. Like the other files of an iteration, they are deleted once the next iteration has been written, unless all iterations are kept. The final maps of a converged refinement are not masked, so they get no extra copy.");
 	joboptions["fn_mask"] = JobOption("Reference mask (optional):", LABEL_MASK_CPIPE, 1, "", "Image Files (*.{spi,vol,msk,mrc})", "\
 If no mask is provided, a soft spherical mask based on the particle diameter will be used.\n\
 \n\
@@ -6138,6 +6144,10 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 		if (joboptions["do_solvent_fsc"].getBoolean())
 			command += " --solvent_correct_fsc ";
 	}
+
+	// Not saved in the optimiser.star: given again in a continuation
+	if (joboptions["do_write_unmasked"].getBoolean())
+		command += " --write_unmasked_maps";
 
 	if (!is_continue)
 	{
