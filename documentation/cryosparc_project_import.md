@@ -64,8 +64,55 @@ and agree with the rule, so the importer does not need to parse them.
 The project as a whole gets `default_pipeline.star` — with the CryoSPARC parent
 relationships turned into RELION pipeline edges — plus the `.gui_projectdir`
 sentinel and `.TMP_runfiles/` that the GUI requires before it will open a
-directory as a project. Jobs are numbered from a single project-wide counter, as
-RELION numbers them, so `job001` appears once across all job directories.
+directory as a project. Each job keeps its CryoSPARC number — `J48` becomes
+`Class2D/job048`, say — so a job is found under the same number in both
+projects. CryoSPARC numbers are unique project-wide, as RELION's are, so no
+number appears twice; numbers of skipped jobs are simply left as gaps, and the
+pipeline's job counter starts one past the highest imported number.
+
+The main STAR file's data block follows what the rows are, not the job type:
+`data_particles` for anything with particle images or pick coordinates (so a
+filament-tracer or blob-picker job yields particles), `data_micrographs` for
+exposures, including CTF jobs whose micrograph paths live only in the
+passthrough table.
+
+Picks (from the filament tracer or another picker) are not extracted yet, so
+their optics table says so: `rlnImageSize` is 0, and `rlnImagePixelSize` is the
+micrograph's (`location/micrograph_psize_A`), since their only "image" is the
+micrograph. That is what lets the AutoPick job's `particles.star` go straight
+into Extract as "re-extract refined particles", keeping its helical columns:
+Extract needs the box-size label to be present and replaces it with the box it
+extracts, and with equal pixel sizes it applies no rescaling to coordinates
+that have no offsets to rescale.
+
+Pick coordinates are CryoSPARC's fractional positions scaled by the
+micrograph size. CryoSPARC stores that size in NumPy order, (height, width), so
+x scales by the second element; the two are only interchangeable on square
+micrographs.
+
+Filament segments — any particle table with CryoSPARC's `filament/*` columns,
+in its own table or through the passthrough, so the tracer's picks and every
+job downstream of them — get the columns RELION's own helical extraction
+writes:
+
+| RELION column | From |
+|---|---|
+| `rlnHelicalTubeID` | `filament/filament_uid`, renumbered from 1 within each micrograph |
+| `rlnAnglePsiPrior` | −`filament/filament_pose`, in degrees (RELION's sign, as for the 2D pose) |
+| `rlnAngleTiltPrior` | 90 |
+| `rlnAnglePsiFlipRatio` | 0.5, RELION's bimodal default, since polarity is unknown |
+| `rlnHelicalTrackLengthAngst` | `filament/position_A` |
+
+CryoSPARC does not keep `filament/*` in every downstream job: 2D
+classification, for one, passes through only `location/*`. A particle job whose
+own tables lack `filament/*` therefore takes them from its nearest ancestor
+whose particle table still has them (the extraction, or the tracer itself),
+joined on particle uid, which CryoSPARC keeps from job to job. The import log
+names the table used (`[filament columns from J19/...]`), and warns if some
+particles are not found in it.
+
+Single-particle tables get none of these, so they are never mistaken for
+helical data.
 
 ## Motion correction
 

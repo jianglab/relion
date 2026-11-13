@@ -379,10 +379,84 @@ Suggested use during development:
   it the particles come out unturned with consistent micrograph-frame metadata, and
   `--recenter` works on them.
 - `--interpolation linear|cubic|nufft` (default from `RELION_EXTRACT_INTERPOLATION`).
-- Not supported: 3D, CTF phase flip/premultiply, scale/window, recentering.
+- Downscaling: `--downscale_factor F` divides both sides by F (2 halves each side), so the
+  pixel size grows by F on both axes. Both downscaled sides must be even whole numbers;
+  otherwise the job stops and names the nearest factors that work. With
+  g = gcd(W, H) these are g / (2m): a 768 x 256 box can be downscaled by 2 (384 x 128)
+  or 4 (192 x 64), but not by 3 (the nearest are 2.977, 258 x 86, and 3.048, 252 x 84).
+  The Extract job of the GUI asks for this factor for a rectangular box and checks it
+  before the job runs (`src/rect_downscale.h`). `--scale N` still works: N is then the
+  new length and the width follows the aspect ratio.
+- Not supported: 3D, CTF phase flip/premultiply, window, recentering.
 - Beam tilt and Zernike aberrations are not rotated; a warning says so.
 - Virtual particles compute the same pixels with the same code (`src/extract_rect.h`).
   Rectangular or rotated recipes are written as version 2 descriptors; square ones remain version 1.
+
+## Masks in relion_refine (Class2D, Class3D, Refine3D)
+
+There are two choices for the masks of rectangular images.
+
+**Default: the mask diameter applies to the box width.** This is the behaviour the
+validation runs below used, and it is unchanged:
+
+- Non-helical images and references: an ellipse (ellipsoid) with the proportions of the
+  box whose radius is on the shortest side (`--particle_diameter` is the short axis).
+- Helical segments: the tube mask cut off by a circle (sphere) of the mask diameter,
+  which must fit the box width. Alignment therefore uses about one box width of the
+  segment; the rest of its length is used only in the reconstruction (the images are
+  back-projected unmasked) and in the helical symmetry average along z.
+- Default diameter: the box width (helical 3D: 90% of it, minus the edges).
+
+**`--rect_mask_length` (GUI: "Mask rectangular boxes along their length?"):** every
+mask is an ellipse (ellipsoid) with the proportions of the box whose **long axis** is the
+mask diameter; the semi-axes along the other sides are shorter by the box's aspect ratio,
+and the soft edge is `--width_mask_edge` pixels wide along every axis (`BoxEllipse` in
+`src/mask.h`).
+
+- Particle images (E-step, initial noise estimate): the ellipse; for helical segments the
+  ellipse combined with the tube mask around the helical axis at the segment's psi, so
+  alignment uses the whole segment length.
+- References: 2D class averages and non-helical 3D references are flattened with the same
+  ellipse (ellipsoid); helical 3D references get the ellipsoid in
+  `imposeHelicalSymmetryInRealSpace`.
+- Default diameter: the long side (helical 3D: 90% of it, minus the edges).
+- Checks before the run: for helical segments the diameter must fit the long side, and the
+  tube must fit across the ellipse (diameter * short side / long side >= tube diameter);
+  the error gives the smallest diameter that works. For a cuboid reference the
+  `--helical_z_percentage` limit is the height of the ellipsoid at the tube radius.
+- The choice is stored in the optimiser STAR file (`rlnRectMaskAlongLength`), so continued
+  runs keep it.
+
+Both choices leave square images and cubic references unchanged, bit for bit. With
+`--ignore_helical_symmetry` the cylindrical solvent mask of a cuboid reference is now as
+deep as the cuboid (it was a cube, which did not match the reference). Extraction
+(`relion_preprocess --norm`) is not affected: its background ellipse keeps `--bg_radius`
+on the short side.
+
+### Wrap-around of references across the box width
+
+Reference projections and rotated 2D references are sampled on the Fourier grid of the
+image, so in real space they repeat with the period of the box: whatever reaches beyond
+the box comes back in on the other side, instead of being cut off as in a real image. A
+reference that is long along the box reaches across the box width once it turns in the
+image plane (psi) by more than a few degrees. Out-of-plane changes (tilt) do not cause
+this: they only shorten the projection along the helical axis. For a reference with
+half-length `R`, half-width `a` and tube radius `r` turned by `psi`, the half extent across
+the box is `min(sqrt(R^2 sin^2 psi + a^2 cos^2 psi), R sin psi + r cos psi)`; it must stay
+within half the box width.
+
+- With the default helical masks `R` is at most half the box width, so this never happens.
+- With `--rect_mask_length` (and for non-helical rectangular particles, whose default
+  ellipse is also long along the box) it can. Example: a 768 x 256 box at about 1 A/pixel,
+  a 100 A tube and the default diameter wrap beyond about 13 degrees of psi.
+
+At the start `relion_refine` prints a warning when the in-plane search can reach further
+than that: the largest psi deviation of the input angles or priors from the box length,
+plus 3 x `--sigma_psi` (or 90 degrees for a global in-plane search). Narrow the psi search
+(for helical segments extract them with `--rotate_to_horizontal` and use a small psi
+range), use a smaller mask diameter, or extract wider boxes. A complete fix would project
+onto a grid as wide as the reference is long and crop in real space, at the cost of extra
+Fourier transforms per projection.
 
 ## End-to-end validation results
 
@@ -420,7 +494,7 @@ Problems found and fixed during validation:
 
 - `calculateExpectedAngularErrors` still allocated square images, so the final (Nyquist) iteration of a rect Refine3D crashed.
 - `--grad` (VDAM) is refused for rectangular images with a clear message.
-- `--helical_z_percentage` must be small enough for the box (a Z percentage out of range is an error); `particle_diameter` must fit in the image height for helical soft masking.
+- `--helical_z_percentage` must be small enough for the box (a Z percentage out of range is an error); `particle_diameter` must fit in the image height for helical soft masking. (These runs used the default masks; see "Masks in relion_refine" above for `--rect_mask_length`, which has not been validated end to end yet.)
 - The cuboid convention and the image-side shell scales (`imgScaleX/Y`) and depth normalisation were corrected, as described in section 4.3.
 
 Limits found in validation and how each was resolved are tracked in
