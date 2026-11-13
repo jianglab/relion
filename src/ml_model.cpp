@@ -1000,6 +1000,8 @@ void MlModel::reorderClasses(const std::vector<int> &order)
 	permuteClasses(class_settings.twist_max, order);
 	permuteClasses(class_settings.rise_min, order);
 	permuteClasses(class_settings.rise_max, order);
+	permuteClasses(class_settings.twist_step, order);
+	permuteClasses(class_settings.rise_step, order);
 	permuteClasses(class_settings.inner_diameter, order);
 	permuteClasses(class_settings.outer_diameter, order);
 	permuteClasses(class_settings.mask, order);
@@ -1078,7 +1080,7 @@ std::vector<int> MlModel::typeNumbersFromClassOrder(const std::vector<int> &orde
 bool MlModel::ClassSettings::empty() const
 {
 	return twist.empty() && rise.empty() && twist_min.empty() && twist_max.empty() && rise_min.empty() &&
-	       rise_max.empty() && inner_diameter.empty() && outer_diameter.empty() && mask.empty() && sym.empty() &&
+	       rise_max.empty() && twist_step.empty() && rise_step.empty() && inner_diameter.empty() && outer_diameter.empty() && mask.empty() && sym.empty() &&
 	       seed_group.empty();
 }
 
@@ -1090,6 +1092,8 @@ void MlModel::ClassSettings::read(MetaDataTable &MD)
 	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST_MAX, twist_max);
 	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_MIN, rise_min);
 	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_MAX, rise_max);
+	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST_INITIAL_STEP, twist_step);
+	readSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_INITIAL_STEP, rise_step);
 	readSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, inner_diameter);
 	readSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, outer_diameter);
 	readSettingsColumn(MD, EMDL_OPTIMISER_SOLVENT_MASK_NAME, mask);
@@ -1103,7 +1107,8 @@ void MlModel::ClassSettings::write(std::ostream &fo) const
 {
 	if (empty())
 		return;
-	size_t n = std::max({twist.size(), rise.size(), twist_min.size(), rise_min.size(), inner_diameter.size(),
+	size_t n = std::max({twist.size(), rise.size(), twist_min.size(), rise_min.size(), twist_step.size(),
+	                     rise_step.size(), inner_diameter.size(),
 	                     outer_diameter.size(), mask.size(), sym.size(), seed_group.size()});
 	MetaDataTable MD;
 	MD.setName("model_class_settings");
@@ -1115,6 +1120,8 @@ void MlModel::ClassSettings::write(std::ostream &fo) const
 	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST_MAX, twist_max);
 	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_MIN, rise_min);
 	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_MAX, rise_max);
+	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_TWIST_INITIAL_STEP, twist_step);
+	writeSettingsColumn(MD, EMDL_MLMODEL_HELICAL_RISE_INITIAL_STEP, rise_step);
 	writeSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_INNER_DIAMETER, inner_diameter);
 	writeSettingsColumn(MD, EMDL_OPTIMISER_HELICAL_TUBE_OUTER_DIAMETER, outer_diameter);
 	writeSettingsColumn(MD, EMDL_OPTIMISER_SOLVENT_MASK_NAME, mask);
@@ -1176,6 +1183,8 @@ void MlModel::initialiseFromImages(
 					take(class_settings.twist_max, saved.twist_max);
 					take(class_settings.rise_min, saved.rise_min);
 					take(class_settings.rise_max, saved.rise_max);
+					take(class_settings.twist_step, saved.twist_step);
+					take(class_settings.rise_step, saved.rise_step);
 					take(class_settings.inner_diameter, saved.inner_diameter);
 					take(class_settings.outer_diameter, saved.outer_diameter);
 					take(class_settings.mask, saved.mask);

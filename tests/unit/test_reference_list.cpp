@@ -431,6 +431,38 @@ TEST_CASE("reference list: bad per-class tables are refused", "[reference_list]"
 	REQUIRE(error == "class 1: Twist lies outside Twist min to Twist max");  // the table's headings, not STAR labels
 	t.cells = {{"-1.2", "-1.1", "-1.0"}};
 	REQUIRE(checkTable(t, error));
+	t.labels = {"rlnHelicalTwistInitialStep"}; t.cells = {{"-0.1"}};
+	REQUIRE_FALSE(checkTable(t, error));
+	REQUIRE(error.find("Twist step") != std::string::npos);
+	t.cells = {{"0"}};
+	REQUIRE(checkTable(t, error));
+}
+
+TEST_CASE("reference list: per-class search steps", "[reference_list]")
+{
+	using namespace reflist;
+	ClassTable t;
+	t.maps = {"a.mrc", "b.mrc"};
+	t.labels = {"rlnHelicalTwist", "rlnHelicalTwistMin", "rlnHelicalTwistMax", "rlnHelicalTwistInitialStep",
+	            "rlnHelicalRise", "rlnHelicalRiseMin", "rlnHelicalRiseMax", "rlnHelicalRiseInitialStep"};
+	t.cells = {{"-1", "-1.5", "-0.5", "0.1", "4.7", "4.6", "4.8", "0.02"},
+	           {"-1", "-1.5", "-0.5", "0.05", "4.7", "4.6", "4.8", "0.02"}};
+	PerClassRefs refs;
+	std::string error;
+	// with symmetry searches: a step that differs stays per class, the job gets the finest; one that does not is job-wide
+	REQUIRE(perClassRefs(encodeTable(t), 2, true, true, refs, error));
+	REQUIRE(refs.table.column("rlnHelicalTwistInitialStep") >= 0);
+	REQUIRE(refs.job["helical_twist_inistep"] == "0.05");
+	REQUIRE(refs.table.column("rlnHelicalRiseInitialStep") < 0);
+	REQUIRE(refs.job["helical_rise_inistep"] == "0.02");
+	// without, the steps are not used
+	REQUIRE(perClassRefs(encodeTable(t), 2, true, false, refs, error));
+	REQUIRE(refs.table.column("rlnHelicalTwistInitialStep") < 0);
+	REQUIRE(refs.job.count("helical_twist_inistep") == 0);
+	// a new class gets the job's step
+	const std::vector<std::string> labels = {"rlnHelicalTwistInitialStep"};
+	ClassTable fresh = resizeTable(ClassTable(), 1, labels, {{"rlnHelicalTwistInitialStep", "0"}});
+	REQUIRE(fresh.cells[0] == std::vector<std::string>{"0"});
 }
 
 TEST_CASE("Class3D: per-class symmetry needs C1 for the job", "[pipeline][class3d][reference_list]")

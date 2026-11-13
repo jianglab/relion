@@ -87,6 +87,9 @@ extern bool create_scheduler_gui;
 #define MENUHEIGHT 30
 #define TABHEIGHT 25
 #define GUIWIDTH 800
+// Width of a job's window (and of the group that holds it in the main window: a widget beyond its group's
+// edge is drawn, but gets no clicks)
+#define JOBWINDOW_WIDTH (GUIWIDTH - WCOL0 - 10)
 // Three rows taller than upstream's job tabs, so that the fullest tabs (Class3D Helix and
 // Optimisation, Extract) fit; everything below the tabs moves down with them
 #define GUI_TABS_EXTRA (3 * STEPY)

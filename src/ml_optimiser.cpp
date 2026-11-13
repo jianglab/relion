@@ -6611,6 +6611,17 @@ void MlOptimiser::helicalSearchRange(int iclass, RFLOAT &rise_min, RFLOAT &rise_
         twist_min = cs.twist[iclass] - th, twist_max = cs.twist[iclass] + th;
 }
 
+void MlOptimiser::helicalSearchStep(int iclass, RFLOAT &rise_step, RFLOAT &twist_step) const
+{
+    const MlModel::ClassSettings &cs = mymodel.class_settings;
+    rise_step = mymodel.helical_rise_inistep;
+    twist_step = mymodel.helical_twist_inistep;
+    if (iclass < (int)cs.rise_step.size() && cs.rise_step[iclass] > 0.)
+        rise_step = cs.rise_step[iclass];
+    if (iclass < (int)cs.twist_step.size() && cs.twist_step[iclass] > 0.)
+        twist_step = cs.twist_step[iclass];
+}
+
 RFLOAT MlOptimiser::classTubeDiameter(int iclass, bool outer) const
 {
     // A class's own tube (rlnHelicalMaskTubeInner/OuterDiameter in --ref), else the job's
@@ -6844,8 +6855,9 @@ void MlOptimiser::makeGoodHelixForEachRef()
             {
                 if ( (iter > 1) && (do_helical_symmetry_local_refinement) )
                 {
-                    RFLOAT rmin, rmax, tmin, tmax;
+                    RFLOAT rmin, rmax, tmin, tmax, rstep, tstep;
                     helicalSearchRange(iclass, rmin, rmax, tmin, tmax);
+                    helicalSearchStep(iclass, rstep, tstep);
                     localSearchHelicalSymmetry(
                             mymodel.Iref[ith_recons],
                             mymodel.pixel_size,
@@ -6855,11 +6867,11 @@ void MlOptimiser::makeGoodHelixForEachRef()
                             helical_z_percentage,
                             rmin,
                             rmax,
-                            mymodel.helical_rise_inistep,
+                            rstep,
                             mymodel.helical_rise[iclass],
                             tmin,
                             tmax,
-                            mymodel.helical_twist_inistep,
+                            tstep,
                             mymodel.helical_twist[iclass],
                             NULL,
                             rectMaskAlongLength());

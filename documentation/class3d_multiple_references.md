@@ -28,24 +28,25 @@ The I/O tab of Class3D starts with **Reference mode** and **Number of classes (K
 
 - **One reference, K classes** (the default): the usual 3D classification, with
   one map in **Reference map**.
-- **One reference per class**: the reference field gives way to a table at the
-  bottom of the tab with K rows, one per class. Changing K adds or removes rows
-  at once; rows taken away are remembered while the window is open, so making K
-  larger again brings them back. A new row has no map and the settings of the
-  row above it (the first row: the job-wide fields, and the map of the
-  reference field).
-  - Columns: **Reference map**, **Symmetry**, **Mask** (`None`, `auto` or a mask
-    file); with helical reconstruction also **Twist**, **Rise**, **Tube inner**,
-    **Tube outer**; with local searches of helical symmetry also **Twist min/max**
-    and **Rise min/max**. Each map and mask has a **...** Browse button; the map's
-    chooser takes several maps, which fill the rows from that one on (K grows if
-    needed).
-  - **Fill from STAR file...** (in the row of the reference field) takes the maps
-    and per-class settings of a STAR file with `_rlnReferenceImage`, such as
-    `run_it025_model.star` of an earlier job; K becomes its number of rows.
+- **One reference per class**: the reference field gives way to a table right
+  under **Number of classes**, with one column per class (Class 1, Class 2, ...)
+  and one row per setting; the fields below move down to make room. The table is
+  as tall as its settings need, up to what the tab leaves; it scrolls up and down
+  (settings) and sideways (classes), with its scroll bars or the mouse wheel.
+  Changing K adds or removes columns at once; classes taken away are remembered
+  while the window is open, so making K larger again brings them back. A new
+  class has no map and the settings of the class before it (the first class: the
+  job-wide fields, and the map of the reference field).
+  - Rows: **Map**, **Symmetry**, **Mask** (`None`, `auto` or a mask file); with
+    helical reconstruction also **Twist**, **Rise**, **Tube inner**, **Tube
+    outer**; with local searches of helical symmetry also **Twist min/max/step**
+    and **Rise min/max/step** (a step of 0 lets RELION choose it). Each map and
+    mask cell has a **...** Browse button; the map's chooser takes several maps,
+    which fill this class and the next ones (K grows if needed).
   - The job-wide fields that the table holds per class are greyed out:
     Reference mask and Use automatic masks (I/O), Symmetry (Reference), tube
-    diameters, initial twist and rise, and the twist and rise search ranges (Helix).
+    diameters, initial twist and rise, and the twist and rise search ranges and
+    steps (Helix).
     "Automatic masks from (A)" stays active for the classes marked `auto`.
   - The table is kept in job option `ref_table` as text
     (`rlnReferenceImage|<label>|...;<map>|<cell>|...`), so it is saved with the
@@ -64,7 +65,7 @@ Code: `src/reference_list.{h,cpp}` (namespace `reflist`, no FLTK), used by
   (`--sym`, `--solvent_mask`/`--auto_mask`, `--helical_twist_initial`, ...) and is
   left out of the file; a column that differs stays in the file, and the
   job-wide option gets a value that covers all classes (`--sym C1`, the widest
-  tube and search range, the first class's twist and rise). The job writes
+  tube and search range, the finest search step, the first class's twist and rise). The job writes
   `References/refs_<hash>.star` (the hash is of the content, so the same table
   gives the same file, and the file is only rewritten when its content changes)
   and passes it as `--ref`.
@@ -96,6 +97,7 @@ replaces the job value for that class only; an empty or missing column means
 | `rlnSolventMaskName` | Mask | `None`, `auto` (automask this class) or a mask file |
 | `rlnHelicalTwist`, `rlnHelicalRise` | Twist, Rise | start values of this class |
 | `rlnHelicalTwistMin/Max`, `rlnHelicalRiseMin/Max` | Twist min ... | local symmetry search window of this class |
+| `rlnHelicalTwistInitialStep`, `rlnHelicalRiseInitialStep` | Twist step, Rise step | initial step of that search (0: the job's) |
 | `rlnHelicalMaskTubeInnerDiameter`, `...OuterDiameter` | Tube inner, Tube outer | helical tube of this class |
 | `rlnReferenceSeedGroup` | (none) | classes with the same number (> 0) are seeded together (see below); found automatically for rows that hold identical maps |
 

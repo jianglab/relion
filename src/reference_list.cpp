@@ -288,8 +288,10 @@ const std::vector<TableColumn>& tableColumns()
 		{"rlnHelicalRise", "Rise", "helical_rise_initial", true},
 		{"rlnHelicalTwistMin", "Twist min", "helical_twist_min", true},
 		{"rlnHelicalTwistMax", "Twist max", "helical_twist_max", true},
+		{"rlnHelicalTwistInitialStep", "Twist step", "helical_twist_inistep", true},
 		{"rlnHelicalRiseMin", "Rise min", "helical_rise_min", true},
 		{"rlnHelicalRiseMax", "Rise max", "helical_rise_max", true},
+		{"rlnHelicalRiseInitialStep", "Rise step", "helical_rise_inistep", true},
 		{"rlnHelicalMaskTubeInnerDiameter", "Tube inner", "helical_tube_inner_diameter", true},
 		{"rlnHelicalMaskTubeOuterDiameter", "Tube outer", "helical_tube_outer_diameter", true},
 	};
@@ -432,6 +434,11 @@ bool checkTable(const ClassTable& table, std::string& error)
 			else if (EMDL::isNumber(EMDL::str2Label(l)) && !toNumber(v, x))
 			{
 				error = where + name(l) + " must be a number, not \"" + v + "\"";
+				return false;
+			}
+			else if (l.find("InitialStep") != std::string::npos && x < 0.)
+			{
+				error = where + name(l) + " must not be negative (0: chosen by RELION)";
 				return false;
 			}
 		}
@@ -655,7 +662,8 @@ bool perClassRefs(const std::string& encoded, int nr_classes, bool helical, bool
 	for (const TableColumn& c : tableColumns())
 	{
 		const std::string l = c.label;
-		const bool range = l.find("Min") != std::string::npos || l.find("Max") != std::string::npos;
+		const bool range = l.find("Min") != std::string::npos || l.find("Max") != std::string::npos ||
+		                   l.find("InitialStep") != std::string::npos;
 		if (all.column(l) >= 0 && (!c.helical || (helical && (!range || symmetry_search))))
 			used.push_back(l);
 	}
@@ -701,7 +709,8 @@ bool perClassRefs(const std::string& encoded, int nr_classes, bool helical, bool
 			result.job[option] = "C1";  // the orientations of all classes are searched together
 		else if (l == "rlnHelicalMaskTubeOuterDiameter" || l == "rlnHelicalTwistMax" || l == "rlnHelicalRiseMax")
 			result.job[option] = numberText(*std::max_element(x.begin(), x.end()));
-		else if (l == "rlnHelicalMaskTubeInnerDiameter" || l == "rlnHelicalTwistMin" || l == "rlnHelicalRiseMin")
+		else if (l == "rlnHelicalMaskTubeInnerDiameter" || l == "rlnHelicalTwistMin" || l == "rlnHelicalRiseMin" ||
+		         l == "rlnHelicalTwistInitialStep" || l == "rlnHelicalRiseInitialStep")  // (the finest step)
 			result.job[option] = numberText(*std::min_element(x.begin(), x.end()));
 		else
 			result.job[option] = trim(t.cells[0][c]);

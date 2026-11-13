@@ -68,7 +68,7 @@ public:
 
 public:
 	// Constructor with x, y, w, h and a title
-	JobWindow(int _x = WCOL0, int _y = 2, int _w = GUIWIDTH - WCOL0 - 10, int _h = GUIHEIGHT_OLD-65, const char* title = "");
+	JobWindow(int _x = WCOL0, int _y = 2, int _w = JOBWINDOW_WIDTH, int _h = GUIHEIGHT_OLD-65, const char* title = "");
 
 	// Destructor
 	~JobWindow() { clear(); }

@@ -240,6 +240,7 @@ public:
 	{
 		std::vector<RFLOAT> twist, rise;                  // starting helical twist (deg) and rise (A)
 		std::vector<RFLOAT> twist_min, twist_max, rise_min, rise_max; // their search ranges
+		std::vector<RFLOAT> twist_step, rise_step;        // initial steps of those searches; <= 0: the job's
 		std::vector<RFLOAT> inner_diameter, outer_diameter; // helical tube (A); < 0: the job's
 		std::vector<std::string> mask;                    // reference mask: "None", "auto" or a file
 		std::vector<std::string> sym;                     // point group of the reconstruction

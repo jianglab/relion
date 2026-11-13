@@ -2978,8 +2978,9 @@ void MlOptimiserMpi::maximization()
 					// Shaoda Jul26,2015 - Helical symmetry local refinement
 					if ( (iter > 1) && (do_helical_refine) && (!ignore_helical_symmetry) && (do_helical_symmetry_local_refinement) && mymodel.ref_dim != 2)
 					{
-						RFLOAT rmin, rmax, tmin, tmax;
+						RFLOAT rmin, rmax, tmin, tmax, rstep, tstep;
 						helicalSearchRange(ith_recons, rmin, rmax, tmin, tmax);
+						helicalSearchStep(ith_recons, rstep, tstep);
 						localSearchHelicalSymmetry(
 								mymodel.Iref[ith_recons],
 								mymodel.pixel_size,
@@ -2989,11 +2990,11 @@ void MlOptimiserMpi::maximization()
 								helical_z_percentage,
 								rmin,
 								rmax,
-								mymodel.helical_rise_inistep,
+								rstep,
 								mymodel.helical_rise[ith_recons],
 								tmin,
 								tmax,
-								mymodel.helical_twist_inistep,
+								tstep,
 								mymodel.helical_twist[ith_recons],
 								NULL,
 								rectMaskAlongLength());
@@ -3122,8 +3123,9 @@ void MlOptimiserMpi::maximization()
 							// Shaoda Jul26,2015 - Helical symmetry local refinement
 							if ( (iter > 1) && (do_helical_refine) && (!ignore_helical_symmetry) && (do_helical_symmetry_local_refinement) && mymodel.ref_dim != 2 )
 							{
-								RFLOAT rmin, rmax, tmin, tmax;
+								RFLOAT rmin, rmax, tmin, tmax, rstep, tstep;
 								helicalSearchRange(ith_recons, rmin, rmax, tmin, tmax);
+								helicalSearchStep(ith_recons, rstep, tstep);
 								localSearchHelicalSymmetry(
 										mymodel.Iref[ith_recons],
 										mymodel.pixel_size,
@@ -3133,11 +3135,11 @@ void MlOptimiserMpi::maximization()
 										helical_z_percentage,
 										rmin,
 										rmax,
-										mymodel.helical_rise_inistep,
+										rstep,
 										mymodel.helical_rise[ith_recons],
 										tmin,
 										tmax,
-										mymodel.helical_twist_inistep,
+										tstep,
 										mymodel.helical_twist[ith_recons],
 										NULL,
 										rectMaskAlongLength());

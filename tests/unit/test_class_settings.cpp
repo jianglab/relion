@@ -74,6 +74,37 @@ TEST_CASE("class settings: round trip through model_class_settings", "[class_set
     CHECK(back.sym == cs.sym);
     CHECK(back.mask == cs.mask);
     CHECK(back.rise.empty());
+    CHECK(back.twist_step.empty());
+}
+
+TEST_CASE("class settings: per-class search steps are read and kept", "[class_settings]")
+{
+    MetaDataTable MD = makeRefs();
+    const RFLOAT twist_step[] = {0.1, 0., 0.05}, rise_step[] = {0.02, 0.02, 0.};
+    for (int i = 0; i < 3; i++)
+    {
+        MD.setValue(EMDL_MLMODEL_HELICAL_TWIST_INITIAL_STEP, twist_step[i], i);
+        MD.setValue(EMDL_MLMODEL_HELICAL_RISE_INITIAL_STEP, rise_step[i], i);
+    }
+    MlModel::ClassSettings cs, back;
+    cs.read(MD);
+    REQUIRE(cs.twist_step.size() == 3);
+    CHECK(cs.twist_step[2] == Approx(0.05));
+    REQUIRE(cs.rise_step.size() == 3);
+    CHECK(cs.rise_step[0] == Approx(0.02));
+    const std::string fn = "relion_class_steps_test_" + std::to_string(getpid()) + ".star";
+    {
+        std::ofstream fo(fn.c_str());
+        cs.write(fo);
+    }
+    MetaDataTable MDin;
+    std::ifstream in(fn.c_str());
+    MDin.readStar(in, "model_class_settings");
+    back.read(MDin);
+    in.close();
+    std::remove(fn.c_str());
+    CHECK(back.twist_step == cs.twist_step);
+    CHECK(back.rise_step == cs.rise_step);
 }
 
 TEST_CASE("class settings: nothing written without settings, half a range is refused", "[class_settings]")

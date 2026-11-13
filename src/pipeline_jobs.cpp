@@ -5012,10 +5012,10 @@ with X being the iteration from which one continues the previous run.");
 \n\
 " + job_ref_mode_options[0] + ": all K classes start from the one reference map below; they are made different by dividing the data into random subsets in the first iteration (the usual 3D classification).\n\
 \n\
-" + job_ref_mode_options[1] + ": every class starts from its own map, chosen in the table at the bottom of this tab, which has one row per class (K rows). \
-Each row also has the class's symmetry and mask and, for helical reconstruction, its helical twist and rise, tube diameters and (with local searches of symmetry) twist and rise search ranges. \
+" + job_ref_mode_options[1] + ": every class starts from its own map, chosen in the table under the number of classes, which has one column per class (K columns). \
+Each column also has the class's symmetry and mask and, for helical reconstruction, its helical twist and rise, tube diameters and (with local searches of symmetry) twist and rise search ranges and steps. \
 These replace the fields on the other tabs that hold the same settings for the whole job, which are greyed out. \
-The Browse button of a map takes several maps at once and puts them into consecutive rows (adding rows if needed); 'Fill from STAR file...' takes the maps and settings of a STAR file with a column _rlnReferenceImage, such as run_it025_model.star of an earlier job. \
+The Browse button of a map takes several maps at once and puts them into consecutive classes (adding classes if needed). \
 A mask is None, auto (an automatic mask made from the class, from the resolution given above) or a mask file. \
 All maps need the same box size and pixel size. When the job is run, RELION writes the table as a STAR file in the References directory and gives it to relion_refine as --ref; \
 a setting that is the same for every class is passed as the usual option instead. A symmetry that differs between classes is applied when reconstructing each class, while the orientations are searched in C1.");
@@ -5615,18 +5615,18 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
             command += " --helical_twist_min " + option("helical_twist_min");
             command += " --helical_twist_max " + option("helical_twist_max");
 
-            float twist_inistep = joboptions["helical_twist_inistep"].getNumber(error_message);
+            float twist_inistep = number("helical_twist_inistep");
             if (error_message != "") return false;
             if (twist_inistep > 0.)
-                command += " --helical_twist_inistep " + joboptions["helical_twist_inistep"].getString();
+                command += " --helical_twist_inistep " + option("helical_twist_inistep");
 
             command += " --helical_rise_min " + option("helical_rise_min");
             command += " --helical_rise_max " + option("helical_rise_max");
 
-            float rise_inistep = joboptions["helical_rise_inistep"].getNumber(error_message);
+            float rise_inistep = number("helical_rise_inistep");
             if (error_message != "") return false;
             if (rise_inistep > 0.)
-                command += " --helical_rise_inistep " + joboptions["helical_rise_inistep"].getString();
+                command += " --helical_rise_inistep " + option("helical_rise_inistep");
         }
         if (joboptions["keep_tilt_prior_fixed"].getBoolean())
 			command += " --helical_keep_tilt_prior_fixed";

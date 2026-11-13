@@ -130,7 +130,8 @@ struct PerClassRefs
 	ClassTable table;
 	/// Job option -> value, for the job-wide options that the table decides (they are greyed out in the GUI):
 	/// a column that is the same for every class becomes that value; one that differs gives a value that
-	/// covers all classes (symmetry C1, the widest tube, the widest search range, the first class's twist and rise).
+	/// covers all classes (symmetry C1, the widest tube, the widest search range, the finest search step, the first
+	/// class's twist and rise).
 	/// "fn_mask" and "do_auto_mask" come from the Mask column.
 	std::map<std::string, std::string> job;
 	/// Mask files named in the table (for the input nodes)
@@ -138,7 +139,7 @@ struct PerClassRefs
 };
 
 /// Check the table of `nr_classes` rows and split it as above. Only the symmetry and mask columns are used,
-/// plus twist, rise and tube diameters if `helical`, plus the search ranges if `symmetry_search`.
+/// plus twist, rise and tube diameters if `helical`, plus the search ranges and steps if `symmetry_search`.
 /// A column the table lacks leaves its job option alone. Mask files must exist.
 bool perClassRefs(const std::string& encoded, int nr_classes, bool helical, bool symmetry_search,
                   PerClassRefs& result, std::string& error);

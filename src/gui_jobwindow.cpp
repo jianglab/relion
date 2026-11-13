@@ -222,8 +222,8 @@ const char *const MASK_LABEL = "rlnSolventMaskName";
 const std::vector<std::string> &perClassOptions()
 {
 	static const std::vector<std::string> keys = {"sym_name", "helical_twist_initial", "helical_rise_initial",
-		"helical_twist_min", "helical_twist_max", "helical_rise_min", "helical_rise_max",
-		"helical_tube_inner_diameter", "helical_tube_outer_diameter", "fn_mask", "do_auto_mask"};
+		"helical_twist_min", "helical_twist_max", "helical_twist_inistep", "helical_rise_min", "helical_rise_max",
+		"helical_rise_inistep", "helical_tube_inner_diameter", "helical_tube_outer_diameter", "fn_mask", "do_auto_mask"};
 	return keys;
 }
 
@@ -251,9 +251,14 @@ struct PerClassUi
 {
 	JobWindow *win = nullptr;
 	ReferenceTable *table = nullptr;
-	Fl_Box *maps_label = nullptr;
-	Fl_Button *fill = nullptr;
 	Fl_Group *auto_mask_group = nullptr;
+	// The table takes the row of the reference field and pushes the fields below it down
+	struct ShiftedWidget { Fl_Widget *w; int y; };
+	std::vector<ShiftedWidget> below;  // the fields below the reference field, where they are without the table
+	int ref_y = 0;             // top of the reference field and of the table
+	int below_y = 0;           // top of the fields below them
+	int end_y = 0;             // bottom of the last field
+	int bottom = 0;            // bottom of the tab
 	reflist::ClassTable memory;  // the rows of all classes, also those beyond K while K is made smaller
 	bool hold = false;           // K is being set to fit the table: do not resize the table meanwhile
 
@@ -280,7 +285,7 @@ struct PerClassUi
 		return d;
 	}
 
-	// The columns shown: the helical ones only for helical reconstruction, the search ranges only with symmetry searches
+	// The settings shown: the helical ones only for helical reconstruction, the searches only with symmetry searches
 	std::vector<std::string> shown()
 	{
 		std::vector<std::string> labels = {"rlnReferenceImage", "rlnSymmetryGroup", MASK_LABEL};
@@ -289,10 +294,49 @@ struct PerClassUi
 			for (const char *l : {"rlnHelicalTwist", "rlnHelicalRise", "rlnHelicalMaskTubeInnerDiameter", "rlnHelicalMaskTubeOuterDiameter"})
 				labels.push_back(l);
 			if (value("do_local_search_helical_symmetry") == "Yes")
-				for (const char *l : {"rlnHelicalTwistMin", "rlnHelicalTwistMax", "rlnHelicalRiseMin", "rlnHelicalRiseMax"})
+				for (const char *l : {"rlnHelicalTwistMin", "rlnHelicalTwistMax", "rlnHelicalTwistInitialStep",
+				                      "rlnHelicalRiseMin", "rlnHelicalRiseMax", "rlnHelicalRiseInitialStep"})
 					labels.push_back(l);
 		}
 		return labels;
+	}
+
+	// The fields below the reference field (in `tab`, the table aside) as they are placed without the table
+	void recordBelow(Fl_Group *tab)
+	{
+		for (int i = 0; i < tab->children(); i++)
+		{
+			Fl_Widget *c = tab->child(i);
+			if (c == table)
+				continue;
+			if (Fl_Group *g = c->as_group())
+				recordBelow(g);
+			else if (c->y() >= below_y)
+				below.push_back({c, c->y()});
+		}
+	}
+
+	// One reference per class: the table in the row of the reference field, as tall as its settings need
+	// (scrolled if the tab is too short), with the fields below moved down; else the fields where they were
+	void layout()
+	{
+		int shift = 0;
+		if (perClass())
+		{
+			const int room = bottom - end_y + STEPY;   // what the fields below leave over
+			const int least = table->fullHeight() - (int)table->shownLabels().size() * (STEPY + 2) + 3 * (STEPY + 2);
+			const int h = std::max(std::min(table->fullHeight(), room), least);
+			if (h != table->h() || table->y() != ref_y)
+				table->resize(table->x(), ref_y, table->w(), h);
+			shift = h - STEPY;  // as far below the table as below the reference field
+		}
+		for (const ShiftedWidget &b : below)
+			if (b.w->y() != b.y + shift)
+			{
+				b.w->position(b.w->x(), b.y + shift);
+				if (b.w->parent())
+					b.w->parent()->init_sizes();
+			}
 	}
 
 	// What the table shows, with what was typed, into memory
@@ -335,6 +379,7 @@ struct PerClassUi
 			memory = t;
 		table->setTable(t, shown());
 		win->guientries["ref_table"].inp->value(reflist::encodeTable(t).c_str());
+		layout();
 	}
 
 	// Which fields are shown, greyed out or filled in, for the mode
@@ -349,16 +394,14 @@ struct PerClassUi
 				if (per_class) w->hide();
 				else w->show();
 			}
-		for (Fl_Widget *w : {(Fl_Widget *)maps_label, (Fl_Widget *)fill, (Fl_Widget *)table})
-		{
-			if (per_class) w->show();
-			else w->hide();
-		}
+		if (per_class) table->show();
+		else table->hide();
 		if (per_class)
 		{
 			remember();
 			showTable();
 		}
+		layout();
 		for (const std::string &key : perClassOptions())
 		{
 			GuiEntry &entry = win->guientries[key];
@@ -370,15 +413,9 @@ struct PerClassUi
 		else
 			win->guientries["do_auto_mask"].cb_menu_i();
 		if (is_continue)
-		{
-			fill->deactivate();
 			table->deactivate();
-		}
 		else
-		{
-			fill->activate();
 			table->activate();
-		}
 		win->redraw();
 	}
 
@@ -411,32 +448,7 @@ struct PerClassUi
 			setClasses((int)memory.maps.size());
 	}
 
-	// "Fill from STAR file...": the maps and settings of a STAR file
-	void fillFromStar()
-	{
-		JobOption star("STAR file:", std::string(""), "STAR files (*.star)", ".", "");
-		const std::vector<std::string> names = chooseFiles(star, false);
-		if (names.empty())
-			return;
-		reflist::ClassTable given;
-		std::string error;
-		if (!reflist::readTable(names[0], given, error))
-		{
-			fl_message("%s", error.c_str());
-			return;
-		}
-		if (given.maps.empty())
-		{
-			fl_message("%s lists no maps.", names[0].c_str());
-			return;
-		}
-		memory = reflist::resizeTable(given, (int)given.maps.size(), allTableLabels(), defaults());
-		table->setTable(reflist::ClassTable(), shown());
-		setClasses((int)memory.maps.size());
-		showTable();
-	}
-
-	// The Browse button of a row: several maps fill the rows from this one on (adding classes if needed)
+	// The Browse button of a class: several maps fill this class and the next ones (adding classes if needed)
 	void browse(int row, bool mask)
 	{
 		const std::vector<std::string> names = chooseFiles(win->guientries[mask ? "fn_mask" : "fn_ref"].joboption, !mask);
@@ -2213,25 +2225,31 @@ void JobWindow::initialiseClass3DWindow()
 
     current_y += STEPY/2;
 
-	// How the classes start: K classes from one map, or each class from its own map (the table below)
+	// How the classes start: K classes from one map, or each class from its own map (the table, which takes
+	// the row of the reference field and pushes the fields below it down)
 	place("ref_mode", TOGGLE_DEACTIVATE);
 	place("nr_classes", TOGGLE_DEACTIVATE);
-    place("fn_ref", TOGGLE_DEACTIVATE);
-	auto ui = std::make_shared<PerClassUi>();
+	auto ui = std::make_shared<PerClassUi>();  // (lives as long as the window: refresh holds it)
 	ui->win = this;
+	ui->ref_y = current_y;
+	place("ref_table", TOGGLE_DEACTIVATE);  // the table's job option: the text behind it, never shown
+	current_y = ui->ref_y;
+	guientries["ref_table"].inp->hide();
+	place("fn_ref", TOGGLE_DEACTIVATE);
+	ui->below_y = current_y;
 	{
-		// in the row of the reference field, which the table replaces
-		const int ref_y = guientries["fn_ref"].inp->y();
-		ui->maps_label = new Fl_Box(XCOL1, ref_y, WCOL1, STEPY, "Reference maps:");
-		ui->maps_label->labelsize(ENTRY_FONTSIZE);
-		ui->maps_label->align(FL_ALIGN_INSIDE | FL_ALIGN_RIGHT);
-		ui->fill = new Fl_Button(XCOL2, ref_y, WCOL2, STEPY, "Fill from STAR file...");
-		ui->fill->color(GUI_BUTTON_COLOR);
-		ui->fill->labelsize(ENTRY_FONTSIZE);
-		ui->fill->tooltip("Fill the table below with the maps and per-class settings of a STAR file with a column _rlnReferenceImage, "
-		                  "such as run_it025_model.star of an earlier job; the number of classes becomes its number of rows");
-		// (ui lives as long as the window: refresh holds it)
-		ui->fill->callback([](Fl_Widget *, void *data) { static_cast<PerClassUi *>(data)->fillFromStar(); }, ui.get());
+		const int left = XCOL1 - 5;
+		reference_table = new ReferenceTable(left, ui->ref_y, XCOL5 + WCOL5 - left, 4 * STEPY);
+		reference_table->hide();
+		guientries["ref_table"].extra = reference_table;  // greyed out when continuing
+		ui->table = reference_table;
+		ReferenceTable *table = reference_table;
+		table->on_edit = [this, table]()
+		{
+			guientries["ref_table"].inp->value(reflist::encodeTable(table->table()).c_str());
+		};
+		PerClassUi *p = ui.get();
+		table->on_browse = [p](int cls, bool mask) { p->browse(cls, mask); };
 	}
     place("fn_mask");
 
@@ -2250,26 +2268,9 @@ void JobWindow::initialiseClass3DWindow()
 
 	place("fn_cont", TOGGLE_REACTIVATE);
 
-	current_y += STEPY/2;
-
-	// The table of one map per class fills the rest of the tab; its job option is the text behind it
-	{
-		const int table_y = current_y;
-		place("ref_table", TOGGLE_DEACTIVATE);
-		current_y = table_y;
-		guientries["ref_table"].inp->hide();
-		const int left = XCOL1 - 5, bottom = tabs->y() + tabs->h() - 5;
-		reference_table = new ReferenceTable(left, table_y, XCOL5 + WCOL5 - left, bottom - table_y);
-		guientries["ref_table"].extra = reference_table;  // greyed out when continuing
-		ui->table = reference_table;
-		ReferenceTable *table = reference_table;
-		table->on_edit = [this, table]()
-		{
-			guientries["ref_table"].inp->value(reflist::encodeTable(table->table()).c_str());
-		};
-		PerClassUi *p = ui.get();
-		table->on_browse = [p](int row, bool mask) { p->browse(row, mask); };
-	}
+	ui->end_y = current_y;
+	ui->bottom = tabs->y() + tabs->h() - 5;
+	ui->recordBelow(tab1);
 
 	tab1->end();
 	tab2->begin();

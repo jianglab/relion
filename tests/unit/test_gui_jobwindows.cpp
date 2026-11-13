@@ -281,7 +281,7 @@ reflist::ClassTable decoded(GuiEntry &text)
 }
 }
 
-TEST_CASE("GUI: Class3D one reference per class is a table of K rows on the I/O tab", "[gui][layout][reference_list]")
+TEST_CASE("GUI: Class3D one reference per class is a table of K classes on the I/O tab", "[gui][layout][reference_list]")
 {
 	JobWindow window;
 	window.initialise(PROC_3DCLASS, false);
@@ -312,14 +312,18 @@ TEST_CASE("GUI: Class3D one reference per class is a table of K rows on the I/O 
 	classes.setValue("3");
 	pick(mode, job_ref_mode_options[1]);
 
-	SECTION("one reference per class: K rows, the first from the reference field, the job-wide fields greyed out")
+	SECTION("one reference per class: K classes, the first from the reference field, the job-wide fields greyed out")
 	{
 		CHECK_FALSE(ref.inp->visible());
 		CHECK(table.visible());
-		REQUIRE(table.rows() == 3);
+		REQUIRE(table.classes() == 3);
+		// one column per class, one row per setting
+		CHECK(table.cols() == 3);
+		CHECK(table.rows() == (int)table.shownLabels().size());
 		CHECK(decoded(text).maps == std::vector<std::string>{"x/a.mrc", "", ""});
 		for (const char *key : {"sym_name", "helical_twist_initial", "helical_rise_initial", "helical_twist_min",
-		                         "helical_tube_inner_diameter", "helical_tube_outer_diameter", "fn_mask", "do_auto_mask"})
+		                         "helical_twist_inistep", "helical_rise_inistep", "helical_tube_inner_diameter",
+		                         "helical_tube_outer_diameter", "fn_mask", "do_auto_mask"})
 		{
 			INFO(key);
 			CHECK_FALSE(window.guientries[key].inp->active());
@@ -327,14 +331,26 @@ TEST_CASE("GUI: Class3D one reference per class is a table of K rows on the I/O 
 		// automatic masks of the classes marked "auto" use their resolution
 		CHECK(window.guientries["auto_mask_start_res"].inp->active_r());
 		// options the table does not hold stay
-		CHECK(window.guientries["helical_twist_inistep"].inp->active());
 		CHECK(window.guientries["ini_high"].inp->active());
 
+		// the table sits right under the number of classes, the fields that followed the reference move below it
+		GuiEntry &mask = window.guientries["fn_mask"];
+		CHECK(table.y() > classes.inp->y());
+		CHECK(table.y() < classes.inp->y() + 2 * STEPY);
+		CHECK(mask.inp->y() >= table.y() + table.h());
+		CHECK(table.h() == table.fullHeight());  // three settings fit
+		// no "Fill from STAR file..." button
+		for (int i = 0; i < io->children(); i++)
+			CHECK(std::string(io->child(i)->label() ? io->child(i)->label() : "").find("Fill") == std::string::npos);
+
 		// back to one reference: as before
+		const int mask_y = mask.inp->y();
 		pick(mode, job_ref_mode_options[0]);
 		CHECK(ref.inp->visible());
 		CHECK_FALSE(table.visible());
 		CHECK(window.guientries["sym_name"].inp->active());
+		CHECK(mask.inp->y() < mask_y);
+		CHECK(mask.inp->y() > ref.inp->y());
 	}
 
 	SECTION("typed cells go into the job option; rows beyond K are kept while K is smaller")
@@ -351,12 +367,12 @@ TEST_CASE("GUI: Class3D one reference per class is a table of K rows on the I/O 
 		CHECK(t.cells[1][t.column("rlnSymmetryGroup")] == "C3");
 
 		classes.setValue("2");
-		CHECK(table.rows() == 2);
+		CHECK(table.classes() == 2);
 		CHECK(decoded(text).maps.size() == 2);
 		// typed, with the slider following
 		classes.inp->value("4");
 		classes.inp->do_callback();
-		CHECK(table.rows() == 4);
+		CHECK(table.classes() == 4);
 		CHECK(classes.slider->value() == 4);
 		t = decoded(text);
 		CHECK(t.maps == std::vector<std::string>{"x/a.mrc", "", "x/c.mrc", ""});
@@ -365,7 +381,7 @@ TEST_CASE("GUI: Class3D one reference per class is a table of K rows on the I/O 
 		// half-typed numbers change nothing
 		classes.inp->value("");
 		classes.inp->do_callback();
-		CHECK(table.rows() == 4);
+		CHECK(table.classes() == 4);
 	}
 
 	SECTION("helical columns are shown for helical reconstruction, search ranges with symmetry searches")
@@ -379,6 +395,49 @@ TEST_CASE("GUI: Class3D one reference per class is a table of K rows on the I/O 
 		CHECK(table.cell(2, "rlnHelicalRiseMax") != nullptr);
 		CHECK(table.browseButton(2, false) != nullptr);
 		CHECK(table.browseButton(2, true) != nullptr);
+		// the steps of the symmetry searches, from the job-wide fields
+		REQUIRE(table.cell(2, "rlnHelicalTwistInitialStep") != nullptr);
+		REQUIRE(table.cell(2, "rlnHelicalRiseInitialStep") != nullptr);
+		CHECK(std::string(table.cell(2, "rlnHelicalTwistInitialStep")->value()) ==
+		      window.guientries["helical_twist_inistep"].inp->value());
+		table.cell(1, "rlnHelicalRiseInitialStep")->value("0.05");
+		table.cell(1, "rlnHelicalRiseInitialStep")->do_callback();
+		reflist::ClassTable t = decoded(text);
+		CHECK(t.cells[1][t.column("rlnHelicalRiseInitialStep")] == "0.05");
+		// the Browse button sits in the cell of its map, beside the input
+		const Fl_Widget *map = table.cell(2, "rlnReferenceImage"), *button = table.browseButton(2, false);
+		CHECK(button->y() == map->y());
+		CHECK(button->x() == map->x() + map->w());
+	}
+
+	SECTION("many classes and settings scroll, with the scroll bars and with the mouse wheel")
+	{
+		pick(window.guientries["do_helix"], "Yes");
+		pick(window.guientries["do_local_search_helical_symmetry"], "Yes");
+		classes.setValue("12");
+		REQUIRE(table.classes() == 12);
+		// the table stays inside the tab: the settings that do not fit scroll
+		CHECK(table.h() < table.fullHeight());
+		Fl_Input *last = table.cell(11, "rlnReferenceImage");
+		REQUIRE(last != nullptr);
+		const int x0 = last->x();
+		CHECK(x0 > table.x() + table.w());  // out of sight
+		// the wheel scrolls the settings up and down while some are hidden
+		Fl_Input *step = table.cell(0, "rlnHelicalRiseInitialStep");
+		const int y0 = step->y();
+		Fl::e_x = table.x() + table.w() / 2;
+		Fl::e_y = table.y() + table.h() / 2;
+		Fl::e_dx = 0;
+		Fl::e_dy = 3;
+		CHECK(table.handle(FL_MOUSEWHEEL) == 1);
+		CHECK(step->y() < y0);
+		CHECK(last->x() == x0);
+		// sideways (a horizontal wheel or a touchpad) scrolls the classes, and the cells follow
+		Fl::e_dx = 5;
+		Fl::e_dy = 0;
+		CHECK(table.handle(FL_MOUSEWHEEL) == 1);
+		CHECK(last->x() < x0);
+		Fl::e_dx = 0;
 	}
 
 	SECTION("a saved job comes back with its table")
@@ -392,7 +451,7 @@ TEST_CASE("GUI: Class3D one reference per class is a table of K rows on the I/O 
 			other.myjob.joboptions[opt.first].value = opt.second.value;
 		other.updateMyGui();
 		CHECK(std::string(other.guientries["ref_mode"].inp->value()) == job_ref_mode_options[1]);
-		REQUIRE(other.reference_table->rows() == 3);
+		REQUIRE(other.reference_table->classes() == 3);
 		CHECK(other.reference_table->table().maps == std::vector<std::string>{"x/a.mrc", "x/b.mrc", ""});
 		CHECK(other.reference_table->visible());
 		CHECK_FALSE(other.guientries["sym_name"].inp->active());

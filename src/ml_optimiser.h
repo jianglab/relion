@@ -722,6 +722,8 @@ public:
 
 	// Helical symmetry search range of a class (mymodel.class_settings, else the run's range)
 	void helicalSearchRange(int iclass, RFLOAT &rise_min, RFLOAT &rise_max, RFLOAT &twist_min, RFLOAT &twist_max) const;
+	// The initial steps of that search: a class's own (rlnHelicalRise/TwistInitialStep in --ref, if > 0), else the run's
+	void helicalSearchStep(int iclass, RFLOAT &rise_step, RFLOAT &twist_step) const;
 	RFLOAT classTubeDiameter(int iclass, bool outer) const;
 
 	// Initial helical rise in Angstroms
