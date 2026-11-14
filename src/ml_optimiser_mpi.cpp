@@ -3814,17 +3814,37 @@ int MlOptimiserMpi::alignHalvesFreedom() const
 	return nr_freedom;
 }
 
+bool MlOptimiserMpi::alignHalvesAxial() const
+{
+	return alignHalvesFreedom() == 2;
+}
+
+RFLOAT MlOptimiserMpi::alignHalvesMaxres() const
+{
+	const RFLOAT current = 1. / mymodel.current_resolution;
+	// Helices and Cn: the place along the axis shows only at the axial repeat (4.75 A for amyloids),
+	// which the low-resolution join does not tie between the halves
+	// and which must stay in view when the resolution estimate falls back because of an offset
+	if (do_helical_refine && !ignore_helical_symmetry && helical_rise_initial > 0.)
+		return XMIPP_MIN(current, 0.8 * helical_rise_initial);
+	if (alignHalvesAxial())
+		return current;
+	return XMIPP_MAX(low_resol_join_halves, current);
+}
+
 // Rank 2 sends its map to rank 1; rank 1 aligns and broadcasts params.  For a cubic map
 // the search works on a 64-cube, so each rank reduces its own map (in parallel) and only
 // the small cubes travel; the parameters found are the same as for the full-size maps.
 void MlOptimiserMpi::alignHalvesExchange(int ibody, int reconstruct_rank1, int reconstruct_rank2, HalvesCubes &cubes)
 {
 	MPI_Status status;
+	// Helices and Cn are searched at full size (see alignHalvesMaxres)
+	const int work_size = alignHalvesAxial() ? XSIZE(mymodel.Iref[ibody]) : alignWorkSize(XSIZE(mymodel.Iref[ibody]));
 	const bool reduce_first = XSIZE(mymodel.Iref[ibody]) == YSIZE(mymodel.Iref[ibody])
 			&& XSIZE(mymodel.Iref[ibody]) == ZSIZE(mymodel.Iref[ibody])
-			&& alignWorkSize(XSIZE(mymodel.Iref[ibody])) != XSIZE(mymodel.Iref[ibody]);
+			&& work_size != XSIZE(mymodel.Iref[ibody]);
 	cubes.angpix = reduce_first
-			? mymodel.pixel_size * XSIZE(mymodel.Iref[ibody]) / alignWorkSize(XSIZE(mymodel.Iref[ibody]))
+			? mymodel.pixel_size * XSIZE(mymodel.Iref[ibody]) / work_size
 			: mymodel.pixel_size;
 	const bool align_timing = getenv("RELION_ALIGN_TIMING") != NULL;
 	const double t_align0 = align_timing ? MPI_Wtime() : 0.;
@@ -3864,12 +3884,14 @@ void MlOptimiserMpi::alignHalvesSearch(int nr_freedom, RFLOAT maxres, const Halv
 	RFLOAT best_dx = 0., best_dy = 0., best_dz = 0.;
 	// alignCuboidMapToMap leaves its inputs as they are when it does not apply the result
 	MultidimArray<RFLOAT> half2(cubes.half2);
+	// Helices and Cn: full-size maps and a local search only (one step each way, then halved steps)
+	const bool helical = alignHalvesAxial();
 	alignCuboidMapToMap(half2, cubes.half1, nr_freedom,
 			cubes.angpix, maxres,
-			3, 1., 1.,
+			helical ? 1 : 3, 1., 1.,
 			best_rot, best_tilt, best_psi,
 			best_dx, best_dy, best_dz,
-			threads, false);
+			threads, false, helical);
 	params[0] = best_rot; params[1] = best_tilt; params[2] = best_psi;
 	params[3] = best_dx;  params[4] = best_dy;  params[5] = best_dz;
 }
@@ -3889,7 +3911,8 @@ void MlOptimiserMpi::startAlignHalvesAsync()
 	if (!do_split_random_halves || !do_align_halves || mymodel.nr_bodies != 1 || node->size < 3)
 		return;
 	const int nr_freedom = alignHalvesFreedom();
-	if (nr_freedom == 0)
+	// Helices and Cn are aligned after maximization, on the new maps (see iterate())
+	if (nr_freedom == 0 || alignHalvesAxial())
 		return;
 	// Both ranks of the pair run MPI from the background thread
 	if (node->thread_level < MPI_THREAD_MULTIPLE)
@@ -3909,7 +3932,7 @@ void MlOptimiserMpi::startAlignHalvesAsync()
 		return;
 
 	job.nr_freedom = nr_freedom;
-	job.maxres = XMIPP_MAX(low_resol_join_halves, 1./mymodel.current_resolution);
+	job.maxres = alignHalvesMaxres();
 	job.exchange_failed = job.search_failed = false;
 	job.exchange_error.clear();
 	job.cubes = HalvesCubes();
@@ -3978,7 +4001,7 @@ void MlOptimiserMpi::alignHalves()
 		return;
 	}
 
-	RFLOAT maxres = XMIPP_MAX(low_resol_join_halves, 1./mymodel.current_resolution);
+	RFLOAT maxres = alignHalvesMaxres();
 
 	for (int ibody = 0; ibody < mymodel.nr_bodies; ibody++)
 	{
@@ -4044,6 +4067,14 @@ void MlOptimiserMpi::alignHalves()
 		best_rot = params[0]; best_tilt = params[1]; best_psi = params[2];
 		best_dx  = params[3]; best_dy  = params[4]; best_dz  = params[5];
 
+		// Helices and Cn: the half2 map is moved as well (see moveHalf2Maps). Moving only the particles left them next to a map in the old place.
+		if (alignHalvesAxial())
+		{
+			halves_move_.resize(6 * mymodel.nr_bodies, 0.);
+			for (int i = 0; i < 6; i++)
+				halves_move_[6 * ibody + i] = params[i];
+		}
+
 		// Adjust the leader's authoritative metadata for half2. Followers receive
 		// these updated values when expectation distributes the next set of jobs.
 		if (node->isLeader())
@@ -4062,6 +4093,18 @@ void MlOptimiserMpi::alignHalves()
 			}
 		}
 	}
+}
+
+// What alignHalves() found on ranks 1 and 2 is applied to the half2 map on every rank of half2.
+void MlOptimiserMpi::moveHalf2Maps()
+{
+	if (!node->isLeader() && node->rank % 2 == 0)
+		for (int ibody = 0; 6 * ibody < (int) halves_move_.size(); ibody++)
+		{
+			const RFLOAT *p = &halves_move_[6 * ibody];
+			applyMapTransformation(mymodel.Iref[ibody], p[0], p[1], p[2], p[3], p[4], p[5], mymodel.pixel_size);
+		}
+	halves_move_.clear();
 }
 
 void MlOptimiserMpi::reconstructUnregularisedMapAndCalculateSolventCorrectedFSC()
@@ -5115,7 +5158,7 @@ void MlOptimiserMpi::iterate()
 
 			// Align the two half-maps and adjust per-particle orientations
 			// to prevent divergence at all resolutions
-			if (do_align_halves)
+			if (do_align_halves && !alignHalvesAxial())
 				alignHalves();
 		sclock.mark("align_halves", iter, node->rank);
 
@@ -5213,6 +5256,12 @@ void MlOptimiserMpi::iterate()
 #endif
 
 		maximization();
+		// Helices and Cn: measure the half-map offset on the maps just made and move the half2 map by
+		// it. Measured on the maps of the previous iteration, the correction lagged one iteration
+		// behind the map it was applied to and kept overshooting.
+		if (do_split_random_halves && do_align_halves && alignHalvesAxial())
+			alignHalves();
+		moveHalf2Maps();
 		sclock.mark("maximization", iter, node->rank);
 
 		// Make sure all nodes have the same resolution, set the data_vs_prior array from half1 also for half2

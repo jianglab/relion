@@ -64,7 +64,8 @@ void alignMapToMap(
     RFLOAT &best_dy,
     RFLOAT &best_dz,
     int nr_threads = 1,
-    bool apply_result = true);
+    bool apply_result = true,
+    bool full_size = false);
 
 /// Side of the cube alignMapToMap searches in for a map of side orig_size (64, or orig_size if
 /// smaller; always even).
@@ -94,7 +95,8 @@ void alignCuboidMapToMap(
     RFLOAT &best_rot, RFLOAT &best_tilt, RFLOAT &best_psi,
     RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz,
     int nr_threads = 1,
-    bool apply_result = true);
+    bool apply_result = true,
+    bool full_size = false);
 
 /// Apply the inverse of a found transformation to a per-particle orientation.
 /// For C1 (nr_freedom==6): composes the inverse rotation into the old one,

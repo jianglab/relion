@@ -56,6 +56,32 @@ particles now move with the offsets as well.
 Set `RELION_ALIGN_TIMING=1` to print the parameters `alignHalves` finds at every iteration (the existing
 message was unreachable: rank 1 is a follower and its verbosity is 0).
 
+## Score: Fourier shell correlation, not squared difference (class and half-map alignment)
+
+`alignMapToMap` scored each candidate by its squared difference to the reference in real space. That
+rewards whatever blurs a noisy map most: a half-pixel shift or a rotation off the grid lowers the noise
+power more than it loses signal, and rotating through the projector also damps the noisy edge of the box.
+On half maps of helices the search therefore settled at about ±0.5 pixel along the axis, with a random
+sign, and moved the halves apart instead of together. Candidates are now scored by the mean Fourier shell
+correlation with the reference (shells weighted by the reference's power), shifts applied as exact phase
+ramps, and the reference goes through the same interpolation as the candidates (turned by a fixed 7.3°
+about z, which every candidate is scored against), so no candidate gains from blur.
+
+Helices and Cn (rotation about z and shift along z only) get their own half-map path, because the
+register of the two halves along the axis shows only at fine detail (the 4.75 Å repeat of amyloids):
+
+* the search works on the full-size maps, not the 64-cube, with shells weighted by their size, up to the
+  current resolution or 0.8 × the helical rise, whichever is finer;
+* it is local (one step each way, then halved steps);
+* it runs after maximization, on the maps just made, and the half-2 map is moved along with its
+  particles. Measured on the maps of the previous iteration and applied to the particles only, the
+  correction lagged an iteration behind and kept overshooting.
+
+On EMPIAR-10940 (amyloid, auto-refine with helical symmetry search) the final half-map offset along z is
+now about 0.01 pixel, and a rerun of the project's refinements from the first Extract on stays within
+one FSC shell of the original project at every step (final PostProcess 2.276 Å against 2.244 Å). Unit tests: `[alignmap]`, including noisy maps that must be left alone and an axial register that
+needs the full-size map.
+
 ## What could change for existing MPI jobs
 
 Any MPI Class3D job with `K > 1` and a Cn/C1/helical-without-symmetry-constraint setup now aligns its

@@ -311,6 +311,58 @@ TEST_CASE("alignMapToMap: C1 returns params within search range for identical ma
 	REQUIRE(fabs(dz) <= 3.);
 }
 
+// Noisy maps: interpolating a noisy map blurs it, and a score that rewards the blur prefers
+// half-pixel shifts and off-grid rotations to the true alignment.
+namespace
+{
+void addNoise(MultidimArray<RFLOAT> &vol, unsigned seed, RFLOAT amplitude)
+{
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(vol)
+	{
+		seed = seed * 1664525u + 1013904223u;
+		DIRECT_MULTIDIM_ELEM(vol, n) += amplitude * ((seed >> 8) / 16777216. - 0.5);
+	}
+}
+}
+
+TEST_CASE("alignMapToMap: noisy maps that are already aligned are left alone", "[alignmap]")
+{
+	// With noise as strong as the blobs the rotation of these smooth blobs is not determined
+	// to better than a few degrees, so only the shifts are checked there (the squared
+	// difference went to half a pixel on every axis); the angles are checked at weak noise.
+	for (RFLOAT amplitude : {1., 0.1})
+	for (int nr_freedom : {6, 2})
+	{
+		auto a = makeVol(64), b = a;
+		addNoise(a, 1u, amplitude);
+		addNoise(b, 2u, amplitude);
+		RFLOAT br, bt, bp, dx, dy, dz;
+		alignMapToMap(a, b, nr_freedom, 1., 3., 3, 1., 1., br, bt, bp, dx, dy, dz, 1, false);
+		INFO("noise " << amplitude << " freedom " << nr_freedom << ": rot " << br << " tilt " << bt << " psi " << bp << " dx " << dx << " dy " << dy << " dz " << dz);
+		CHECK(fabs(dx) + fabs(dy) + fabs(dz) <= 0.75);
+		// at a small tilt, rot and psi both turn about Z: their sum is the rotation
+		if (amplitude < 1.) CHECK(fabs(br + bp) + fabs(bt) <= 1.);
+	}
+}
+
+TEST_CASE("alignMapToMap: a rotation and shift are found in noisy maps", "[alignmap]")
+{
+	auto ref = makeVol(64);
+	auto moved = ref;
+	rotateZ(moved, 2.);
+	translate(moved, 1.5, -1., 0.5);
+	auto ref_noisy = ref, moved_noisy = moved;
+	addNoise(ref_noisy, 3u, 1.);
+	addNoise(moved_noisy, 4u, 1.);
+
+	RFLOAT br, bt, bp, dx, dy, dz;
+	alignMapToMap(moved_noisy, ref_noisy, 6, 1., 3., 3, 1., 1., br, bt, bp, dx, dy, dz, 1, false);
+	// what was found on the noisy pair must align the clean pair
+	applyMapTransformation(moved, br, bt, bp, dx, dy, dz, 1.);
+	INFO("rot " << br << " tilt " << bt << " psi " << bp << " dx " << dx << " dy " << dy << " dz " << dz);
+	REQUIRE(corr(moved, ref) > 0.99);
+}
+
 // Cuboid maps (rectangular particles): the search runs in the central cube and the
 // result is applied to the whole cuboid.
 namespace
@@ -420,6 +472,48 @@ TEST_CASE("alignMapToMap: maps reduced by the caller give the same parameters", 
 	}
 }
 
+// A stack of rungs 4.75 A apart (as in an amyloid) shows its place along the axis only at that
+// repeat: the 64-cube (6 A Nyquist here) cannot see it, the full-size map can.
+TEST_CASE("alignMapToMap: the axial register of a fine repeat needs the full-size map", "[alignmap]")
+{
+	const RFLOAT angpix = 1.5;
+	MultidimArray<RFLOAT> ref(128, 128, 128);
+	ref.initZeros();
+	for (int k = -12; k <= 12; k++)
+	{
+		const RFLOAT a = DEG2RAD(-1.14 * k), z = k * 4.75 / angpix;
+		addBlob(ref, 10. * cos(a), 10. * sin(a), z, 0.9);
+		addBlob(ref, 5. * cos(a + 2.1), 5. * sin(a + 2.1), z, 0.9);
+	}
+	MultidimArray<RFLOAT> align = ref;
+	translate(align, 0., 0., 1.); // 1.5 A, a third of the repeat
+	const double before = corr(align, ref);
+
+	RFLOAT br, bt, bp, dx, dy, dz;
+	MultidimArray<RFLOAT> coarse = align;
+	alignMapToMap(coarse, ref, 2, angpix, 4., 1, 1., 1., br, bt, bp, dx, dy, dz, 2, true, false);
+	const double corr_coarse = corr(coarse, ref);
+
+	alignMapToMap(align, ref, 2, angpix, 4., 1, 1., 1., br, bt, bp, dx, dy, dz, 2, true, true);
+	REQUIRE(dz == Approx(-1.5).margin(0.2));
+	REQUIRE(fabs(br) < 0.5);
+	REQUIRE(corr(align, ref) > 0.9);
+	REQUIRE(corr(align, ref) > before);
+	// not worse than the reduced map (which, without noise, finds the shift from the ends of the stack)
+	REQUIRE(corr(align, ref) >= corr_coarse - 1e-6);
+}
+
+// Hidden tool: apply (rot, dz) to a map file the way the half-map alignment does.
+// RELION_APPLYMAP_IN, _OUT, _ROT (degrees), _DZ (A)
+TEST_CASE("applyMapTransformation on a map file", "[.applymap]")
+{
+	Image<RFLOAT> img;
+	img.read(getenv("RELION_APPLYMAP_IN"));
+	const RFLOAT angpix = img.samplingRateX();
+	applyMapTransformation(img(), atof(getenv("RELION_APPLYMAP_ROT")), 0., 0., 0., 0., atof(getenv("RELION_APPLYMAP_DZ")), angpix);
+	img.write(getenv("RELION_APPLYMAP_OUT"));
+}
+
 // ---------------------------------------------------------------------------
 // Hidden benchmark: RELION_ALIGN_BENCH_A / _B name two maps of the same size;
 // run with `relion_unit_tests "[.alignbench]"` and RELION_ALIGN_TIMING=1.
@@ -442,6 +536,11 @@ TEST_CASE("alignCuboidMapToMap: timing on two maps given by environment", "[.ali
 	const int nt = th ? atoi(th) : 3;
 	relionFftwInitThreads();
 	relionFftwPlanThreads(nt);
+	// RELION_ALIGN_BENCH_MAXRES (A): search as the half-map alignment of a helix does (full size, local)
+	if (const char *mr = getenv("RELION_ALIGN_BENCH_MAXRES"))
+		alignCuboidMapToMap(a(), b(), 2, a.samplingRateX(), atof(mr), 1, 1., 1.,
+				rot, tilt, psi, dx, dy, dz, nt, false, true);
+	else
 	alignCuboidMapToMap(a(), b(), nf ? atoi(nf) : 2, 1.0, 8., 3, 1., 1.,
 			rot, tilt, psi, dx, dy, dz, nt, getenv("RELION_ALIGN_BENCH_NOAPPLY") == NULL);
 	printf("rot=%g tilt=%g psi=%g dx=%g dy=%g dz=%g\n", rot, tilt, psi, dx, dy, dz);

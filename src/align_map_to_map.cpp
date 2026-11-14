@@ -116,7 +116,8 @@ void alignMapToMap(
     RFLOAT &best_dy,
     RFLOAT &best_dz,
     int nr_threads,
-    bool apply_result)
+    bool apply_result,
+    bool full_size)
 {
     best_rot = best_tilt = best_psi = best_dx = best_dy = best_dz = 0.;
     if (nr_freedom == 0) return;
@@ -136,7 +137,7 @@ void alignMapToMap(
     if (orig_size != XSIZE(vol_align))
         REPORT_ERROR("alignMapToMap: vol_align and vol_ref must have the same size!");
 
-    const int work_size = alignWorkSize(orig_size);
+    const int work_size = full_size ? orig_size : alignWorkSize(orig_size);
     RFLOAT work_angpix = angpix * orig_size / work_size;
 
     MultidimArray<RFLOAT> vol_work, vol_ref_down;
@@ -153,6 +154,21 @@ void alignMapToMap(
 
     int r_max = (maxres > 0.) ? CEIL(work_size * work_angpix / maxres) : work_size;
     if (r_max > work_size) r_max = work_size;
+
+    // Candidates are scored by their mean Fourier shell correlation with the reference, shifts
+    // applied as exact phase ramps. The squared difference in real space rewards whatever blurs
+    // a noisy map most (a half-pixel shift, a rotation off the grid), which sent the half-map
+    // alignment of helices to +-half a pixel with a random sign and aligned noisy maps away
+    // from each other. Rotating through the projector also damps the edge of the box, where a
+    // half map is all noise, so any rotation scored better than none. The reference therefore
+    // goes through the same interpolation, turned by A0 (ALIGN_REF_ROT about Z), and every
+    // candidate "rotate by A, then shift by t" is scored as "rotate by A0 * A, shift by A0 * t".
+    const RFLOAT ALIGN_REF_ROT = 7.3;
+    Matrix2D<RFLOAT> A0;
+    Euler_rotation3DMatrix(ALIGN_REF_ROT, 0., 0., A0);
+    const int fsc_rmax = XMIPP_MIN(r_max, work_size / 2 - 1);
+    MultidimArray<Complex> ref_ft;
+    std::vector<double> ref_power(fsc_rmax + 1, 0.);
 
     MultidimArray<RFLOAT> dummy;
     // padding_factor 2 keeps the trilinear interpolation accurate enough that a
@@ -171,9 +187,8 @@ void alignMapToMap(
     // not depend on the number of threads.
     struct Worker
     {
-        MultidimArray<RFLOAT> rotated, shifted;
-        MultidimArray<Complex> rot_ft;
-        FourierTransformer transformer;
+        MultidimArray<Complex> rot_ft; // the rotated map, in Fourier space
+        std::vector<double> power, cross; // per shell, for the Fourier shell correlation score
     };
     std::vector<std::unique_ptr<Worker>> workers;
     {
@@ -186,9 +201,20 @@ void alignMapToMap(
         {
             workers.emplace_back(new Worker);
             Worker &w = *workers.back();
-            w.rotated.reshape(vol_work);
-            w.transformer.setReal(w.rotated);
-            w.transformer.getFourierAlias(w.rot_ft);
+            w.rot_ft.initZeros(work_size, work_size, work_size / 2 + 1);
+        }
+    }
+
+    {
+        Projector ref_projector(work_size, TRILINEAR, 2, 10, 3);
+        ref_projector.computeFourierTransformMap(vol_ref_down, dummy, 2 * r_max, 1, false);
+        ref_ft.initZeros(workers[0]->rot_ft);
+        ref_projector.rotate3D(ref_ft, A0);
+        CenterFFTbySign(ref_ft);
+        FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(ref_ft)
+        {
+            const int r = ROUND(sqrt((RFLOAT) (kp * kp + ip * ip + jp * jp)));
+            if (r <= fsc_rmax) ref_power[r] += norm(FFTW_ELEM(ref_ft, kp, ip, jp));
         }
     }
 
@@ -200,44 +226,60 @@ void alignMapToMap(
             fn(i, *workers[omp_get_thread_num()]);
     };
 
-    // Rotate the working map by (rot, tilt, psi) into the worker's `rotated`
+    // Rotate the working map by (rot, tilt, psi), then by A0, into the worker's `rot_ft`
     auto rotateInto = [&](Worker &w, RFLOAT rot, RFLOAT tilt, RFLOAT psi)
     {
         Matrix2D<RFLOAT> A;
         Euler_rotation3DMatrix(rot, tilt, psi, A);
         w.rot_ft.initZeros();
+        A = A0 * A;
         projector.rotate3D(w.rot_ft, A);
         CenterFFTbySign(w.rot_ft);
-        w.transformer.inverseFourierTransform();
+        // the shell power does not depend on the shift
+        w.power.assign(fsc_rmax + 1, 0.);
+        FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(w.rot_ft)
+        {
+            const int r = ROUND(sqrt((RFLOAT) (kp * kp + ip * ip + jp * jp)));
+            if (r <= fsc_rmax) w.power[r] += norm(FFTW_ELEM(w.rot_ft, kp, ip, jp));
+        }
+    };
+
+    // Minus the weighted mean shell correlation of the worker's rotated
+    // map, shifted by (dx, dy, dz) A, with the reference: smaller is better
+    auto diff2At = [&](Worker &w, RFLOAT dx, RFLOAT dy, RFLOAT dz) -> double
+    {
+        // the shift, turned by A0 like the map
+        const double f = -2. * PI / (work_angpix * work_size);
+        const double fx = f * (A0(0, 0) * dx + A0(0, 1) * dy + A0(0, 2) * dz),
+                     fy = f * (A0(1, 0) * dx + A0(1, 1) * dy + A0(1, 2) * dz),
+                     fz = f * (A0(2, 0) * dx + A0(2, 1) * dy + A0(2, 2) * dz);
+        w.cross.assign(fsc_rmax + 1, 0.);
+        FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(w.rot_ft)
+        {
+            const int r = ROUND(sqrt((RFLOAT) (kp * kp + ip * ip + jp * jp)));
+            if (r == 0 || r > fsc_rmax) continue;
+            const double phase = fx * jp + fy * ip + fz * kp;
+            const Complex a = FFTW_ELEM(w.rot_ft, kp, ip, jp), b = FFTW_ELEM(ref_ft, kp, ip, jp);
+            // Re( a * exp(i phase) * conj(b) )
+            w.cross[r] += (a.real * b.real + a.imag * b.imag) * cos(phase) - (a.imag * b.real - a.real * b.imag) * sin(phase);
+        }
+        double sum = 0., weight = 0.;
+        for (int r = 1; r <= fsc_rmax; r++)
+        {
+            const double den = sqrt(w.power[r] * ref_power[r]);
+            // Weight of a shell: the reference's power in it, so that a noisy or empty shell
+            // counts for no more than it does in a plain correlation. The full-size axial
+            // search (half maps, maxres at the current resolution) weights by shell size
+            // instead: the axial register of a helix shows only in its weak outer shells.
+            const double shell_weight = (full_size && nr_freedom == 2) ? r * (double) r : ref_power[r];
+            if (den > 0.) sum += shell_weight * w.cross[r] / den;
+            weight += shell_weight;
+        }
+        return -sum / weight;
     };
     auto rotateAll = [&](RFLOAT rot, RFLOAT tilt, RFLOAT psi)
     {
         forEach((int) workers.size(), [&](int, Worker &w) { rotateInto(w, rot, tilt, psi); });
-    };
-
-    // Squared difference to the reference of the worker's `rotated` shifted by (dx, dy, dz) A
-    auto diff2At = [&](Worker &w, RFLOAT dx, RFLOAT dy, RFLOAT dz) -> double
-    {
-        const bool do_shift = (fabs(dx) > 0. || fabs(dy) > 0. || fabs(dz) > 0.);
-        if (do_shift)
-        {
-            w.shifted = w.rotated;
-            Matrix1D<RFLOAT> shift(3);
-            XX(shift) = dx / work_angpix;
-            YY(shift) = dy / work_angpix;
-            ZZ(shift) = dz / work_angpix;
-            selfTranslate(w.shifted, shift, WRAP);
-        }
-        const MultidimArray<RFLOAT> &cmp = do_shift ? w.shifted : w.rotated;
-
-        double d2 = 0.;
-        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(cmp)
-        {
-            double d = DIRECT_MULTIDIM_ELEM(cmp, n)
-                     - DIRECT_MULTIDIM_ELEM(vol_ref_down, n);
-            d2 += d * d;
-        }
-        return d2;
     };
 
     // Shifts (dx, dy, dz) = best + (ix, iy, iz) * step for ix, iy in [-xy, xy] and iz in
@@ -490,7 +532,8 @@ void alignCuboidMapToMap(
     RFLOAT &best_rot, RFLOAT &best_tilt, RFLOAT &best_psi,
     RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz,
     int nr_threads,
-    bool apply_result)
+    bool apply_result,
+    bool full_size)
 {
     if (XSIZE(vol_align) != XSIZE(vol_ref) || YSIZE(vol_align) != YSIZE(vol_ref) || ZSIZE(vol_align) != ZSIZE(vol_ref))
         REPORT_ERROR("alignCuboidMapToMap: the two maps must have the same size.");
@@ -500,7 +543,7 @@ void alignCuboidMapToMap(
     {
         alignMapToMap(vol_align, vol_ref, nr_freedom, angpix, maxres, search_range, search_step_rot,
                       search_step_trans, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, nr_threads,
-                      apply_result);
+                      apply_result, full_size);
         return;
     }
 
@@ -522,7 +565,7 @@ void alignCuboidMapToMap(
     MultidimArray<RFLOAT> cube_align = centralCube(vol_align), cube_ref = centralCube(vol_ref);
     alignMapToMap(cube_align, cube_ref, nr_freedom, angpix, maxres, search_range, search_step_rot,
                   search_step_trans, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, nr_threads,
-                  false);
+                  false, full_size);
     if (apply_result)
         applyMapTransformation(vol_align, best_rot, best_tilt, best_psi, best_dx, best_dy, best_dz, angpix);
 }

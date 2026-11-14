@@ -167,6 +167,16 @@ public:
 
     // Degrees of freedom of the search for this job, 0 when alignHalves does nothing
     int alignHalvesFreedom() const;
+    // Helices and Cn (search of rotation about z and shift along z only): the register of the two
+    // half-maps along the axis is only visible at fine detail (the 4.75 A repeat of amyloids), so
+    // the search works on the full-size maps at the current resolution, locally, and the half2 map
+    // is moved together with its particles.
+    bool alignHalvesAxial() const;
+    // What alignHalves() found (6 values per body), waiting to be applied to the half2 maps
+    std::vector<RFLOAT> halves_move_;
+    void moveHalf2Maps();
+    // Resolution limit of the search, in Angstrom
+    RFLOAT alignHalvesMaxres() const;
     // Rank 2 reduces its half-map and sends it to rank 1, which reduces its own and receives it
     void alignHalvesExchange(int ibody, int reconstruct_rank1, int reconstruct_rank2, HalvesCubes &cubes);
     // Rank 1: the search itself; pure computation
