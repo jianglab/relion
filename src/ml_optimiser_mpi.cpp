@@ -3995,7 +3995,11 @@ void MlOptimiserMpi::joinAlignHalvesAsync()
 void MlOptimiserMpi::alignHalves()
 {
 	const int nr_freedom = alignHalvesFreedom();
-	if (nr_freedom == 0)
+	// Not in the last iteration, where the halves are joined: the final map is made from the poses
+	// before the alignment, and turning the half-2 poses afterwards wrote poses that do not fit it.
+	// (A search started in the background is joined and discarded: ranks 1 and 2 learn that this is
+	// the last iteration only from the broadcast in expectationSetup, after the search was started.)
+	if (nr_freedom == 0 || do_join_random_halves)
 	{
 		joinAlignHalvesAsync();
 		return;
