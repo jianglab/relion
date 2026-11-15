@@ -7311,7 +7311,9 @@ void MlOptimiser::applyMapAlignmentToParticle(long int part_id, int nr_freedom,
         mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, dz, part_id);
 
     // The priors move with the offsets
-    RFLOAT prior_x, prior_y, prior_z;
+    // 999 = no prior: getValue leaves the value as it is when the column is missing, and an
+    // uninitialised value below 999 gave half-2 particles a random offset prior
+    RFLOAT prior_x = 999., prior_y = 999., prior_z = 999.;
     mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, prior_x, part_id);
     mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, prior_y, part_id);
     if (prior_x < 999.)

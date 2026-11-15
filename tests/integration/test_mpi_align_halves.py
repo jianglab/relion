@@ -114,3 +114,5 @@ class TestMpiAlignHalves:
         c_off = _half_correlation(relion_bin, test_data_dir / "off")
         assert c_on > c_off + 0.1, f"half-map agreement with alignment {c_on:.3f}, without {c_off:.3f}"
         assert c_on > 0.8, c_on
+        # the input has no offset priors: moving the half-2 particles must not invent any
+        assert "rlnOriginXPriorAngst" not in (test_data_dir / "on" / "run_data.star").read_text()
