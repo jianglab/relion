@@ -14,6 +14,12 @@ movies must therefore agree on which pixel it is:
 So for a particle extracted here with a fraction of 0.5 or more, Polish worked on a box one pixel away
 from the one its offsets belong to.
 
+In practice Polish hid this: it fits each particle's track against the reference, so a whole-pixel box error
+became a constant one-pixel shift in the track and was removed. On EMPIAR-10940 (69912 helical segments, all
+fractional) old and new polished particles correlate 0.999, and the maps are the same (PostProcess 2.637 A for
+both). The fix makes the programs agree instead of relying on the track fit, and keeps the tracks free of a
+fake one-pixel jump.
+
 ## What happens now
 
 * **Extract writes whole-pixel coordinates**: the pixel it cut the box around. Particles that have

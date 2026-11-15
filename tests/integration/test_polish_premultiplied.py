@@ -228,3 +228,37 @@ def test_virtual_polished_particles_check_the_movie_and_gain(relion_bin, polish_
     r = subprocess.run([str(relion_bin / "relion_stack_create"), "--i", str(virt / "shiny.star"), "--o", "bad"],
                        cwd=d, env=env, capture_output=True, text=True)
     assert r.returncode != 0 and "has changed" in r.stdout + r.stderr
+
+
+def shifted_coordinates(star, out, dx):
+    """`star` with `dx` added to every particle's CoordinateX and CoordinateY."""
+    labels, _ = read_particles(star)
+    kx, ky = labels.index("CoordinateX"), labels.index("CoordinateY")
+    lines = []
+    for line in Path(star).read_text().splitlines():
+        f = line.split()
+        if len(f) == len(labels) and "@" in line:
+            f[kx], f[ky] = str(float(f[kx]) + dx), str(float(f[ky]) + dx)
+            line = " ".join(f)
+        lines.append(line)
+    Path(out).write_text("\n".join(lines) + "\n")
+    return out
+
+
+@pytest.mark.parametrize("centre", ["round", "trunc"])
+def test_fractional_coordinates_use_the_centre_their_offsets_refer_to(relion_bin, polish_project, centre):
+    """A particle at x + 0.6 was cut around x + 1 by this RELION's Extract (round) and around x by upstream's
+    (trunc); Polish must cut the same box, so it gives the particle at that whole pixel, with the same offsets."""
+    d = polish_project
+    whole = shifted_coordinates(d / "parts0.star", d / "whole.star", 1.0 if centre == "round" else 0.0)
+    frac = shifted_coordinates(d / "parts0.star", d / "frac.star", 0.6)
+    ref = polish(relion_bin, d, "whole.star", "Polish/whole")
+    env = {"RELION_COORD_CENTRE": "trunc"} if centre == "trunc" else None
+    out = polish(relion_bin, d, "frac.star", "Polish/frac", env_extra=env)
+    stdout = polish.stdout
+    assert np.array_equal(shiny(ref), shiny(out))
+    la, ra = read_particles(ref / "shiny.star")
+    lb, rb = read_particles(out / "shiny.star")
+    i = la.index("ImageName")
+    assert la == lb and [r[:i] + r[i + 1:] for r in ra] == [r[:i] + r[i + 1:] for r in rb]
+    assert "10 particles have fractional coordinates" in stdout, stdout[-2000:]
