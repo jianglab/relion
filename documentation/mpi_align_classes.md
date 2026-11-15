@@ -82,6 +82,14 @@ now about 0.01 pixel, and a rerun of the project's refinements from the first Ex
 one FSC shell of the original project at every step (final PostProcess 2.276 Å against 2.244 Å). Unit tests: `[alignmap]`, including noisy maps that must be left alone and an axial register that
 needs the full-size map.
 
+All other point groups keep the search before maximization (so it can run beside the E-step), but the
+half-2 map made in that iteration is now moved by the same correction as its particles. It is made from
+the poses before the correction, so without the move it stayed in the old place, the next search found
+the offset again and applied it twice: on a synthetic auto-refine with nothing to correct, the half-2
+particles kept turning by about 0.7° per iteration (6° in all); with an injected 4° turn the first two
+corrections were 3.6° and 3.9°. With the move the corrections settle below 0.1° after the first.
+`tests/integration/test_mpi_align_halves.py` injects a turn with a tilt and checks that they settle.
+
 ## What could change for existing MPI jobs
 
 Any MPI Class3D job with `K > 1` and a Cn/C1/helical-without-symmetry-constraint setup now aligns its

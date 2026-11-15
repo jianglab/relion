@@ -4067,13 +4067,13 @@ void MlOptimiserMpi::alignHalves()
 		best_rot = params[0]; best_tilt = params[1]; best_psi = params[2];
 		best_dx  = params[3]; best_dy  = params[4]; best_dz  = params[5];
 
-		// Helices and Cn: the half2 map is moved as well (see moveHalf2Maps). Moving only the particles left them next to a map in the old place.
-		if (alignHalvesAxial())
-		{
-			halves_move_.resize(6 * mymodel.nr_bodies, 0.);
-			for (int i = 0; i < 6; i++)
-				halves_move_[6 * ibody + i] = params[i];
-		}
+		// The half2 map is moved as well (see moveHalf2Maps). Moving only the particles left the map of
+		// this iteration, made from the poses before the move, in the old place: the next search found
+		// the same offset again, applied it twice, and the halves kept turning (~0.7 degrees per
+		// iteration with nothing to correct).
+		halves_move_.resize(6 * mymodel.nr_bodies, 0.);
+		for (int i = 0; i < 6; i++)
+			halves_move_[6 * ibody + i] = params[i];
 
 		// Adjust the leader's authoritative metadata for half2. Followers receive
 		// these updated values when expectation distributes the next set of jobs.

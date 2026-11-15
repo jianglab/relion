@@ -17,6 +17,8 @@ import os
 import subprocess
 import shutil
 
+import re
+
 import numpy as np
 import pytest
 
@@ -51,21 +53,36 @@ def _euler(a, b, g):
                      [sc, ss, cb]])
 
 
-def _move_half2(star_in, star_out, rot_shift=3.0, shift=(2.5, -2.0, 1.5)):
-    """Express the half-2 poses in a frame that is rotated about z and shifted in 3D."""
+def _matrix_to_euler(a):
+    tilt = np.degrees(np.arccos(np.clip(a[2, 2], -1., 1.)))
+    return np.degrees(np.arctan2(a[2, 1], a[2, 0])), tilt, np.degrees(np.arctan2(a[1, 2], -a[0, 2]))
+
+
+def _move_half2(star_in, star_out, turn=(3.0, 4.0, -2.0), shift=(2.5, -2.0, 1.5)):
+    """Express the half-2 poses in a frame that is turned by the Euler angles `turn` (with a tilt, so
+    that all three angles of the correction are exercised) and shifted in 3D."""
     lines, c, start, rows = _parse(star_in)
     t = np.array(shift)
+    m = _euler(*turn)
     for r in rows:
         if int(r[c["rlnRandomSubset"]]) != 2:
             continue
-        rot = float(r[c["rlnAngleRot"]]) + rot_shift
-        a = _euler(rot, float(r[c["rlnAngleTilt"]]), float(r[c["rlnAnglePsi"]]))
-        r[c["rlnAngleRot"]] = repr(rot)
+        a = _euler(float(r[c["rlnAngleRot"]]), float(r[c["rlnAngleTilt"]]), float(r[c["rlnAnglePsi"]])) @ m
         # float(): with NumPy 2, repr() of a numpy float is "np.float64(...)", which RELION cannot read
+        r[c["rlnAngleRot"]], r[c["rlnAngleTilt"]], r[c["rlnAnglePsi"]] = (repr(float(x)) for x in _matrix_to_euler(a))
         r[c["rlnOriginXAngst"]] = repr(float(r[c["rlnOriginXAngst"]]) + float((a @ t)[0]))
         r[c["rlnOriginYAngst"]] = repr(float(r[c["rlnOriginYAngst"]]) + float((a @ t)[1]))
     with open(star_out, "w") as f:
         f.write("\n".join(lines[:start] + [" ".join(r) for r in rows] + lines[start + len(rows):]))
+
+
+def _correction_angles(log):
+    """Rotation angle (degrees) of each half-map correction printed by the run."""
+    out = []
+    for m in re.finditer(r"Aligning half2 to half1: rot=(\S+) tilt=(\S+) psi=(\S+)", log):
+        r = _euler(*map(float, m.groups()))
+        out.append(float(np.degrees(np.arccos(np.clip((np.trace(r) - 1.) / 2., -1., 1.)))))
+    return out
 
 
 def _refine(relion_bin, star, ref, out, extra=()):
@@ -108,6 +125,11 @@ class TestMpiAlignHalves:
 
         log_on = _refine(relion_bin, moved, paths["initial_model"], test_data_dir / "on")
         assert "Aligning half2 to half1" in log_on, "the half alignment did not run"
+        # Once found, the offset must stay corrected: when only the particles were moved, the map of
+        # the same iteration stayed in the old place, the offset was found and applied again, and
+        # the corrections never settled (0.6-1.7 degrees per iteration instead of < 0.1)
+        angles = _correction_angles(log_on)
+        assert len(angles) >= 6 and max(angles[-3:]) < 0.3, angles
         _refine(relion_bin, moved, paths["initial_model"], test_data_dir / "off", ["--dont_align_halves"])
 
         c_on = _half_correlation(relion_bin, test_data_dir / "on")
