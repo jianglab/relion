@@ -4111,6 +4111,60 @@ void MlOptimiserMpi::moveHalf2Maps()
 	halves_move_.clear();
 }
 
+void MlOptimiserMpi::reportFinalHalvesOffset()
+{
+	if (!do_split_random_halves || !do_align_halves || !do_auto_refine || !has_converged
+			|| mymodel.nr_bodies != 1 || mymodel.nr_classes != 1 || node->size < 3)
+		return;
+	const int nr_freedom = alignHalvesFreedom();
+	if (nr_freedom == 0)
+		return;
+
+	// The two maps are written in maximization() by ranks 1 and 2
+	MPI_Barrier(MPI_COMM_WORLD);
+	RFLOAT params[7] = {0., 0., 0., 0., 0., 0., 0.}; // params[6]: 1 when the search ran
+	if (node->rank == 1)
+	{
+		try
+		{
+			HalvesCubes maps;
+			Image<RFLOAT> img;
+			img.read(fn_out + "_half1_class001_unfil.mrc");
+			maps.half1 = img();
+			img.read(fn_out + "_half2_class001_unfil.mrc");
+			maps.half2 = img();
+			maps.half1.setXmippOrigin();
+			maps.half2.setXmippOrigin();
+			maps.angpix = mymodel.pixel_size;
+			alignHalvesSearch(nr_freedom, alignHalvesMaxres(), maps, nr_threads, params);
+			params[6] = 1.;
+		}
+		catch (RelionError &e)
+		{
+			std::cerr << " WARNING: could not measure the offset between the final half maps: " << e.msg << std::endl;
+		}
+	}
+	node->relion_MPI_Bcast(params, 7, MY_MPI_DOUBLE, 1, MPI_COMM_WORLD);
+
+	if (node->isLeader() && verb > 0 && params[6] > 0.)
+	{
+		// How far the offset moves the edge of the mask: rotation about the centre plus the shift
+		Matrix2D<RFLOAT> A;
+		Euler_angles2matrix(params[0], params[1], params[2], A);
+		const RFLOAT cos_angle = XMIPP_MIN(1., XMIPP_MAX(-1., (A(0, 0) + A(1, 1) + A(2, 2) - 1.) / 2.));
+		const RFLOAT radius = (particle_diameter > 0.) ? particle_diameter / (2. * mymodel.pixel_size)
+				: XSIZE(mymodel.Iref[0]) / 2.;
+		const RFLOAT shift = sqrt(params[3] * params[3] + params[4] * params[4] + params[5] * params[5]) / mymodel.pixel_size;
+		const RFLOAT edge = 2. * radius * sin(acos(cos_angle) / 2.) + shift;
+		std::cout << " Auto-refine: offset of half 2 from half 1 in the final unfiltered half maps (not applied): rot= "
+				<< params[0] << " tilt= " << params[1] << " psi= " << params[2] << " dx= " << params[3]
+				<< " dy= " << params[4] << " dz= " << params[5] << " A; it moves the edge of the mask by "
+				<< edge << " pixels" << std::endl;
+		if (edge > 0.25)
+			std::cout << " Auto-refine: + more than a quarter pixel: joining the halves after correcting half 2 would sharpen the final map" << std::endl;
+	}
+}
+
 void MlOptimiserMpi::reconstructUnregularisedMapAndCalculateSolventCorrectedFSC()
 {
 	if (!do_grad && subset_size > 0)
@@ -5266,6 +5320,7 @@ void MlOptimiserMpi::iterate()
 		if (do_split_random_halves && do_align_halves && alignHalvesAxial())
 			alignHalves();
 		moveHalf2Maps();
+		reportFinalHalvesOffset();
 		sclock.mark("maximization", iter, node->rank);
 
 		// Make sure all nodes have the same resolution, set the data_vs_prior array from half1 also for half2

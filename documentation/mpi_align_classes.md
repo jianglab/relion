@@ -90,6 +90,17 @@ particles kept turning by about 0.7° per iteration (6° in all); with an inject
 corrections were 3.6° and 3.9°. With the move the corrections settle below 0.1° after the first.
 `tests/integration/test_mpi_align_halves.py` injects a turn with a tilt and checks that they settle.
 
+In the last iteration of auto-refine, where the halves are joined, nothing is moved: the final map is made
+from the poses of that E-step, and turning the half-2 poses afterwards would write poses that do not fit
+it. Instead the offset between the two final unfiltered half maps (the ones PostProcess compares) is
+measured with the same search and reported, with how far it moves the edge of the mask:
+
+    Auto-refine: offset of half 2 from half 1 in the final unfiltered half maps (not applied): rot= ... ; it moves the edge of the mask by 0.04 pixels
+
+Above a quarter pixel a second line says that joining the halves after correcting half 2 would sharpen
+the final map; that step does not exist yet and is only worth adding if real refinements show such
+offsets.
+
 ## What could change for existing MPI jobs
 
 Any MPI Class3D job with `K > 1` and a Cn/C1/helical-without-symmetry-constraint setup now aligns its

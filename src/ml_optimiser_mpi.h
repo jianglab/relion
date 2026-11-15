@@ -175,6 +175,9 @@ public:
     // What alignHalves() found (6 values per body), waiting to be applied to the half2 maps
     std::vector<RFLOAT> halves_move_;
     void moveHalf2Maps();
+    // Last iteration of auto-refine: measure the offset between the final unfiltered half maps and
+    // report it (not applied), to show whether joining the halves after correcting half 2 would help
+    void reportFinalHalvesOffset();
     // Resolution limit of the search, in Angstrom
     RFLOAT alignHalvesMaxres() const;
     // Rank 2 reduces its half-map and sends it to rank 1, which reduces its own and receives it

@@ -130,6 +130,10 @@ class TestMpiAlignHalves:
         # the corrections never settled (0.6-1.7 degrees per iteration instead of < 0.1)
         angles = _correction_angles(log_on)
         assert len(angles) >= 6 and max(angles[-3:]) < 0.3, angles
+        # the last iteration only reports the offset of the final half maps
+        m = re.search(r"final unfiltered half maps \(not applied\).*moves the edge of the mask by (\S+) pixels", log_on)
+        assert m, log_on[-3000:]
+        print("final half-map offset at the mask edge:", m.group(1), "pixels")
         _refine(relion_bin, moved, paths["initial_model"], test_data_dir / "off", ["--dont_align_halves"])
 
         c_on = _half_correlation(relion_bin, test_data_dir / "on")
