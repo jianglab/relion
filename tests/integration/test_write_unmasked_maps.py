@@ -47,6 +47,8 @@ def dataset(test_data_dir, relion_bin, relion_runner):
                                  num_particles=200, size=SIZE, angpix=ANGPIX)
 
 
+# Coarse angular sampling: the tests check the masking of the maps, not the refinement, and with
+# --healpix_order 2 (and local order 4) one test took about 50 min, beyond ctest's 1500 s
 COMMON = ["--particle_diameter", str(DIAMETER), "--ctf", "--flatten_solvent", "--zero_mask", "--oversampling", "1",
           "--sym", "c1", "--norm", "--scale", "--j", "1", "--random_seed", "7", "--pool", "5",
           "--keep_all_iterations"]
@@ -67,7 +69,7 @@ class TestWriteUnmaskedMaps:
             out.mkdir()
             _run([str(relion_bin / "relion_refine"), "--i", dataset["star_file"], "--ref", dataset["initial_model"],
                   "--o", str(out / "run"), "--K", "2", "--iter", "2", "--ini_high", "15", "--tau2_fudge", "4",
-                  "--healpix_order", "2", "--offset_range", "2", "--offset_step", "1"] + COMMON + extra, out)
+                  "--healpix_order", "1", "--offset_range", "2", "--offset_step", "1"] + COMMON + extra, out)
             unmasked = sorted(p.name for p in out.glob("*_unmasked.mrc"))
             if name == "off":
                 assert unmasked == [], unmasked
@@ -84,7 +86,7 @@ class TestWriteUnmaskedMaps:
         out.mkdir()
         _run(["mpirun", "--oversubscribe", "-n", "3", str(relion_bin / "relion_refine_mpi"),
               "--auto_refine", "--split_random_halves", "--i", dataset["star_file"], "--ref", dataset["initial_model"],
-              "--o", str(out / "run"), "--ini_high", "15", "--healpix_order", "2", "--auto_local_healpix_order", "4",
+              "--o", str(out / "run"), "--ini_high", "15", "--healpix_order", "1", "--auto_local_healpix_order", "3",
               "--offset_range", "2", "--offset_step", "1", "--dont_combine_weights_via_disc",
               "--write_unmasked_maps"] + COMMON, out)
         assert (out / "run_class001.mrc").exists(), "the refinement did not converge"
