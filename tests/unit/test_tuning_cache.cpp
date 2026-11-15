@@ -8,7 +8,10 @@
 
 #include <catch2/catch.hpp>
 
+#include <chrono>
 #include <cstdlib>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -333,4 +336,48 @@ TEST_CASE("tuning_cache adds no row when the newest one already says the same", 
 	tuning::Entry e;
 	REQUIRE(cache.get("n", "k", e));
 	CHECK(e.value == "1200");
+}
+
+TEST_CASE("tuning_cache gives up on a lock held too long", "[tuning_cache]")
+{
+	TempDir td;
+	REQUIRE(!td.dir.empty());
+	const std::string path = td.file();
+	{
+		tuning::Cache cache(ctxA(), path);
+		REQUIRE(cache.put("t", "first", "1"));   // creates the file and its lock file
+	}
+	int hold[2], go[2];
+	REQUIRE(pipe(hold) == 0);
+	REQUIRE(pipe(go) == 0);
+	const pid_t pid = fork();
+	REQUIRE(pid >= 0);
+	if (pid == 0)   // another job holding the lock
+	{
+		const int fd = open((path + ".lock").c_str(), O_RDWR);
+		char c = (fd >= 0 && flock(fd, LOCK_EX) == 0) ? 'y' : 'n';
+		if (write(hold[1], &c, 1) != 1) _exit(1);
+		if (read(go[0], &c, 1) != 1) _exit(1);   // until the parent is done
+		_exit(0);
+	}
+	char c = 0;
+	REQUIRE(read(hold[0], &c, 1) == 1);
+	REQUIRE(c == 'y');
+	setenv("RELION_TUNING_LOCK_WAIT", "0.3", 1);
+	const auto t0 = std::chrono::steady_clock::now();
+	bool ok = true;
+	{
+		tuning::Cache cache(ctxA(), path);
+		ok = cache.put("t", "second", "2");
+	}
+	const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	unsetenv("RELION_TUNING_LOCK_WAIT");
+	if (write(go[1], "x", 1) != 1) {}
+	int status = 0;
+	waitpid(pid, &status, 0);
+	CHECK_FALSE(ok);           // skipped, not hung
+	CHECK(s >= 0.25);
+	CHECK(s < 5.);
+	tuning::Cache cache(ctxA(), path);   // and works again once the lock is free
+	CHECK(cache.put("t", "third", "3"));
 }

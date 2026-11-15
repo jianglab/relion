@@ -1,5 +1,6 @@
 #include "src/tuning_cache.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cerrno>
 #include <cstdio>
@@ -44,14 +45,36 @@ std::vector<std::string> split(const std::string &line)
 	return f;
 }
 
-// An exclusive or shared lock on <file>.lock for the life of the object
+// An exclusive or shared lock on <file>.lock for the life of the object. Never waits without limit: a blocking
+// flock on a network file system (MooseFS) can hang or fail under contention, and the cache is only a hint, so
+// the lock is polled for up to RELION_TUNING_LOCK_WAIT seconds (default 5) and the caller skips the cache if it fails.
 struct Lock
 {
 	int fd = -1;
 	Lock(const std::string &path, bool exclusive, bool create)
 	{
 		fd = open((path + ".lock").c_str(), (create ? O_CREAT : 0) | (exclusive ? O_RDWR : O_RDONLY) | O_CLOEXEC, 0600);
-		if (fd >= 0 && flock(fd, exclusive ? LOCK_EX : LOCK_SH) != 0) { close(fd); fd = -1; }
+		if (fd < 0) return;
+		const char *env = getenv("RELION_TUNING_LOCK_WAIT");
+		const double limit = env && *env ? atof(env) : 5.;
+		int err = 0;
+		for (double waited = 0., pause = 0.001; ; waited += pause, pause = std::min(2. * pause, 0.1))
+		{
+			if (flock(fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) == 0) return;
+			err = errno;
+			if (err != EWOULDBLOCK && err != EINTR && err != ENOLCK) break;   // a real error: give up at once
+			if (waited >= limit) break;
+			usleep((useconds_t) (pause * 1e6));
+		}
+		static bool told = false;   // shortcut: not thread-safe, at worst the note is printed twice
+		if (!told)
+		{
+			told = true;
+			fprintf(stderr, " Tuning cache %s: no lock (%s); measured settings are not saved this time.\n",
+			        path.c_str(), strerror(err));
+		}
+		close(fd);
+		fd = -1;
 	}
 	~Lock() { if (fd >= 0) { flock(fd, LOCK_UN); close(fd); } }
 	bool ok() const { return fd >= 0; }
