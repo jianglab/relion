@@ -120,6 +120,13 @@ void Preprocessing::read(int argc, char **argv, int rank)
 	}
 	keep_ctf_from_micrographs  = parser.checkOption("--keep_ctfs_micrographs", "By default, CTFs from fn_data will be kept. Use this flag to keep CTFs from input micrographs STAR file");
 	do_reset_offsets = parser.checkOption("--reset_offsets", "reset the origin offsets from the input _data.star file to zero?");
+	{
+		const std::string c = parser.getOption("--coord_centre", "Box centre the offsets of input particles with fractional coordinates were measured against: round (extracted by this RELION before it wrote whole-pixel coordinates) or trunc (extracted by upstream RELION). Default from RELION_COORD_CENTRE, else round.",
+		                                       extractrect::coordCentreRoundFromEnvironment() ? "round" : "trunc");
+		if (c != "trunc" && c != "round")
+			REPORT_ERROR("ERROR: --coord_centre must be round or trunc.");
+		coord_centre_round = (c == "round");
+	}
 	do_recenter = parser.checkOption("--recenter", "Re-center particle according to rlnOriginX/Y in --reextract_data_star STAR file");
 	recenter_x = textToFloat(parser.getOption("--recenter_x", "X-coordinate (in pixel inside the reference) to recenter re-extracted data on", "0."));
 	recenter_y = textToFloat(parser.getOption("--recenter_y", "Y-coordinate (in pixel inside the reference) to recenter re-extracted data on", "0."));
@@ -1164,6 +1171,8 @@ bool Preprocessing::extractParticlesFromFieldOfView(FileName fn_mic, long int im
 		}
 		TIMING_TOC(TIMING_BIAS_CORRECT);
 
+		wholePixelCentres(MDin);
+
 		// Warn for small groups
 		int npos = MDin.numberOfObjects();
 		if (npos < 10)
@@ -1212,6 +1221,35 @@ bool Preprocessing::extractParticlesFromFieldOfView(FileName fn_mic, long int im
 	{
 		std::cerr << " WARNING: no particles on micrograph: " << fn_mic << std::endl;
 		return(false);
+	}
+}
+
+/* Boxes are cut around the coordinate rounded to a whole pixel. Write that whole pixel as the coordinate,
+ * so that every program finds the same box centre whether it truncates coordinates (upstream, Polish) or
+ * rounds them. Particles with offsets keep their place: the offsets referred to the rounded centre
+ * (coord_centre_round, the default) or the truncated one (upstream extractions), and the difference is
+ * moved into them. Picks without offsets just get the rounded coordinate (no offset columns are added;
+ * the fraction of a pick is below its accuracy, and upstream drops up to a whole pixel of it). */
+void Preprocessing::wholePixelCentres(MetaDataTable &MD)
+{
+	const bool has_offsets = !do_reset_offsets && MD.containsLabel(EMDL_ORIENT_ORIGIN_X_ANGSTROM)
+	                         && MD.containsLabel(EMDL_ORIENT_ORIGIN_Y_ANGSTROM);
+	const EMDLabel coord[3] = {EMDL_IMAGE_COORD_X, EMDL_IMAGE_COORD_Y, EMDL_IMAGE_COORD_Z};
+	const EMDLabel origin[3] = {EMDL_ORIENT_ORIGIN_X_ANGSTROM, EMDL_ORIENT_ORIGIN_Y_ANGSTROM, EMDL_ORIENT_ORIGIN_Z_ANGSTROM};
+	const int naxes = (dimensionality == 3) ? 3 : 2;
+	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
+	{
+		for (int a = 0; a < naxes; a++)
+		{
+			RFLOAT c;
+			if (!MD.getValue(coord[a], c)) continue;
+			const RFLOAT r = std::floor(c + 0.5);
+			if (r == c) continue;
+			RFLOAT o;
+			if (has_offsets && MD.getValue(origin[a], o))
+				MD.setValue(origin[a], o + (r - extractrect::offsetCentre(c, coord_centre_round)) * angpix);
+			MD.setValue(coord[a], r);
+		}
 	}
 }
 

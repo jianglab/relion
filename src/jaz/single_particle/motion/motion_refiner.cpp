@@ -37,6 +37,7 @@
 #include <src/renderEER.h>
 
 #include "gp_motion_fit.h"
+#include <src/extract_rect.h>
 #include "motion_helper.h"
 
 using namespace gravis;
@@ -127,6 +128,19 @@ void MotionRefiner::init()
 	mdt0.read(starFn);	
 	
 	ObservationModel::loadSafely(starFn, obsModel, mdt0);
+
+	{
+		// Polish cuts its boxes around the truncated coordinate. Fractional coordinates (from extractions
+		// before whole-pixel coordinates were written) become the whole pixel their offsets refer to.
+		const bool rounded = extractrect::coordCentreRoundFromEnvironment();
+		const EMDLabel xy[2] = {EMDL_IMAGE_COORD_X, EMDL_IMAGE_COORD_Y};
+		const long n = extractrect::snapToOffsetCentres(mdt0, xy, 2, rounded);
+		if (n > 0 && verb > 0)
+			std::cout << " + " << n << " particles have fractional coordinates: taken as the "
+			          << (rounded ? "rounded" : "truncated") << " box centres their offsets refer to"
+			          << (rounded ? " (RELION_COORD_CENTRE=trunc for particles extracted by upstream RELION)"
+			                      : " (RELION_COORD_CENTRE=trunc)") << std::endl;
+	}
 
 	// Polish fits the movie frames, which are never CTF-premultiplied, whatever the particles were
 	// (the output's flag is set from --ctf_multiply when the particles are combined)

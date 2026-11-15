@@ -30,12 +30,55 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
+#include "src/error.h"
 #include "src/macros.h"
 #include "src/multidim_array.h"
 #include "src/resample_rotate.h"
 
 namespace extractrect {
+
+/// Box centre (one axis, micrograph pixels) that the offsets of a particle at fractional coordinate c
+/// were measured against: c rounded, as this RELION cut boxes from 2026-10-05 until it started writing
+/// whole-pixel coordinates, or truncated, as upstream RELION (and this RELION before) cut them.
+inline double offsetCentre(double c, bool rounded)
+{
+	return rounded ? std::floor(c + 0.5) : std::trunc(c);
+}
+
+/// RELION_COORD_CENTRE: "round" (default) or "trunc" (particles extracted by upstream RELION).
+inline bool coordCentreRoundFromEnvironment()
+{
+	const char* e = getenv("RELION_COORD_CENTRE");
+	const std::string v = e ? e : "";
+	if (v.empty() || v == "round") return true;
+	if (v != "trunc") REPORT_ERROR("RELION_COORD_CENTRE must be round or trunc, not " + v);
+	return false;
+}
+
+/// Replace every fractional coordinate by the whole pixel its offsets were measured against, so that a
+/// program that truncates or rounds coordinates cuts the box the offsets belong to. Returns how many
+/// particles changed.
+template <class Table, class Label>
+long snapToOffsetCentres(Table& mdt, const Label* labels, int naxes, bool rounded)
+{
+	long changed = 0;
+	for (long p = 0; p < mdt.numberOfObjects(); p++)
+	{
+		bool moved = false;
+		for (int a = 0; a < naxes; a++)
+		{
+			RFLOAT c;
+			if (!mdt.getValue(labels[a], c, p)) continue;
+			const RFLOAT w = offsetCentre(c, rounded);
+			if (w != c) { mdt.setValue(labels[a], w, p); moved = true; }
+		}
+		if (moved) changed++;
+	}
+	return changed;
+}
 
 /// Copy the w x h window of the micrograph whose top-left pixel is (x0, y0),
 /// repeating edge pixels outside the micrograph.

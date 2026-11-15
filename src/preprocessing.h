@@ -110,6 +110,9 @@ public:
 	// Reset origin offsets in the input fn_data STAR file to zero
 	bool do_reset_offsets;
 
+	// Offsets of input particles with fractional coordinates refer to rounded, not truncated, box centres
+	bool coord_centre_round;
+
 	// Re-center particles according to rlnOriginX/Y in fn_data STAR file?
 	bool do_recenter;
 
@@ -301,6 +304,9 @@ public:
 
 	// Get the coordinate metadatatable from fn_data
 	MetaDataTable getCoordinateMetaDataTable(FileName fn_mic);
+
+	// Move every coordinate to the whole pixel its box is cut around, and the difference into the offsets
+	void wholePixelCentres(MetaDataTable &MD);
 	FileName getOutputFileNameRoot(FileName fn_mic);
 
 };

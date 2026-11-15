@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/reconstructor.h"
+#include "src/extract_rect.h"
 #include "src/helix.h"
 #include "src/cache_manager.h"
 #include "src/virtual_particles.h"
@@ -1214,6 +1215,15 @@ bool use_nonuniform_s2 = (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2);
 					box_angle = -psi_prior;
 			}
 			vparticles::readParticleFourierDirect(fn_mic, cx, cy, box_angle, psi_prior, fused_recipe, angpix, fused_nx, fused_ny, F2D);
+			if (!fused_recipe.rotate)
+			{
+				// The box is cut around the rounded coordinate; the offsets refer to offsetCentre (rounded unless RELION_COORD_CENTRE=trunc)
+				// shortcut: turned boxes are left as they were; correct them too if they are ever fed fractional coordinates
+				static const bool rounded = extractrect::coordCentreRoundFromEnvironment();
+				const double f = fused_recipe.mic_angpix / myPixelSize;
+				XX(trans) += (std::floor(cx + 0.5) - extractrect::offsetCentre(cx, rounded)) * f;
+				YY(trans) += (std::floor(cy + 0.5) - extractrect::offsetCentre(cy, rounded)) * f;
+			}
 		}
 		else
 		{
