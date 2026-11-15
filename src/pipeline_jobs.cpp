@@ -21,6 +21,8 @@
 #include "src/pipeline_jobs.h"
 #include "src/rect_downscale.h"
 #include "src/virtual_movie_averages.h"
+#include "src/virtual_particles.h"
+#include <set>
 #include "src/parallel_hint.h"
 #include "src/reference_list.h"
 #include "src/slurm_script.h"
@@ -690,6 +692,8 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 			}
 			if (joboptions.find("auto_parallel") != joboptions.end())
 				joboptions["auto_parallel"].value = "No"; // run.job files predate it
+			for (const char* k : {"do_virtual", "do_premultiply", "do_ctf_multiply"})   // and these
+				if (joboptions.find(k) != joboptions.end()) joboptions[k].value = "No";
 			have_read = true;
 		}
 
@@ -732,12 +736,16 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		std::string label, value;
 		bool read_auto_parallel = false;
 		bool read_cylindrical_mask = false;
+		// Saved before these options existed or became Yes by default: the job keeps what it did then
+		std::set<std::string> read_new_yes;
+		const char* new_yes[] = {"do_virtual", "do_premultiply", "do_ctf_multiply"};
 		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDvals)
 		{
 			MDvals.getValue(EMDL_JOBOPTION_VARIABLE, label);
 			MDvals.getValue(EMDL_JOBOPTION_VALUE, value);
 			if (label == "auto_parallel") read_auto_parallel = true;
 			if (label == "helical_cylindrical_mask") read_cylindrical_mask = true;
+			read_new_yes.insert(label);
 			if (joboptions.find(label) == joboptions.end())
 			{
 				std::cerr << "WARNING: cannot find " << label << " in the defined joboptions. Ignoring it ..." <<std::endl;
@@ -753,6 +761,9 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		// Jobs saved before the cylindrical mask existed keep the mask they had
 		if (!read_cylindrical_mask && joboptions.find("helical_cylindrical_mask") != joboptions.end())
 			joboptions["helical_cylindrical_mask"].value = "No";
+		for (const char* k : new_yes)
+			if (!read_new_yes.count(k) && joboptions.find(k) != joboptions.end())
+				joboptions[k].value = "No";
 		have_read = true;
 	}
 
@@ -3265,10 +3276,14 @@ void RelionJob::initialiseExtractJob()
 	joboptions["do_float16"] = JobOption("Write output in float16?", true ,"If set to Yes, this program will write output images in float16 MRC format. This will save a factor of two in disk space compared to the default of writing in float32. Note that RELION and CCPEM will read float16 images, but other programs may not (yet) do so.");
 	{
 		const char *env = getenv("RELION_VIRTUAL_PARTICLES");
-		const bool default_virtual = (env != NULL) && textToBool(env);
+		const bool default_virtual = env == NULL || env[0] == '\0' || vcache::envTruthy(env);
 		joboptions["do_virtual"] = JobOption("Write virtual particles?", default_virtual, "If set to Yes, no particle images are written. Instead a small descriptor per micrograph records the coordinates and extraction settings, and particles are computed from the micrographs whenever a later job reads them, exactly as they would have been extracted. \
 This saves the disk space of the particle stacks and makes re-extraction nearly instant, but the micrographs must be kept: deleting them makes the particles unreadable. Computed particles are cached in .relion_vparticle_cache/ in the project (or under RELION_VPARTICLE_CACHE / RELION_CACHE_DIRECTORY), which can be deleted at any time. \
-Not available with CTF premultiplication/phase flipping, helical segments or sub-tomograms. Use relion_stack_create to write real stacks for other programs. The default can be set with the RELION_VIRTUAL_PARTICLES environment variable.");
+Not available with CTF phase flipping, dust removal or sub-tomograms. Use relion_stack_create to write real stacks for other programs. Yes by default; RELION_VIRTUAL_PARTICLES=0 makes No the default.");
+		joboptions["do_premultiply"] = JobOption("Premultiply with the CTF?", true, "If set to Yes, each particle is multiplied by its CTF \
+while it is extracted, in a box as large as its defocus needs (chosen per particle), and then cut to the particle box. The signal that the CTF \
+spreads outside the particle box is then kept, so a smaller particle box can be used without losing high resolution. Later jobs know the \
+particles are premultiplied. Not available with rectangular or rotated boxes, where it is switched off.");
 	}
 
 	joboptions["do_norm"] = JobOption("Normalize particles?", true, "If set to Yes, particles will be normalized in the way RELION prefers it.");
@@ -3421,6 +3436,10 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 
 	// Explicit either way, so the job does not depend on the environment it runs in
 	command += joboptions["do_virtual"].getBoolean() ? " --virtual " : " --no_virtual ";
+	// rectangular and rotated boxes cannot be premultiplied (relion_preprocess refuses): the option is off for them
+	const bool rotated = joboptions["do_extract_helix"].getBoolean() && joboptions["do_rotate_horizontal"].getBoolean();
+	if (joboptions["do_premultiply"].getBoolean() && !rect_box && !rotated)
+		command += " --premultiply_ctf --premultiply_extract_size auto ";
 
 	// Operate stuff
 	// Get an integer number for the bg_radius
@@ -7540,6 +7559,16 @@ void RelionJob::initialiseMotionrefineJob()
 The mask used for this postprocessing will be applied to the unfiltered half-maps and should encompass the entire complex. The resulting FSC curve will be used for weighting the different frequencies.");
 	joboptions["do_float16"] = JobOption("Write output in float16?", true ,"If set to Yes, this program will write output images in float16 MRC format. This will save a factor of two in disk space compared to the default of writing in float32. Note that RELION and CCPEM will read float16 images, but other programs may not (yet) do so.");
 
+	{
+		const char *env = getenv("RELION_VIRTUAL_POLISH");
+		joboptions["do_virtual"] = JobOption("Write virtual polished particles?", env == NULL || env[0] == '\0' || vcache::envTruthy(env), "If set to Yes, no polished particle images are written. Instead a small descriptor per micrograph records the motion tracks, the frame weights and the CTF, and the polished particles are recombined from the movies whenever a later job reads them, exactly as they would have been written. \
+This saves the disk space of the polished stacks, but the movies (and their motion records) must be kept: deleting them makes the particles unreadable, and reading is slower than reading a stack until the particles are cached (Cache/virtual_particles in the project). Use relion_stack_create to write real stacks for other programs. The default can be set with the RELION_VIRTUAL_POLISH environment variable.");
+		joboptions["do_ctf_multiply"] = JobOption("Premultiply with the CTF?", true, "If set to Yes, the polished particles are multiplied \
+by their CTF in a window as large as the largest defocus needs (virtual particles: a window per particle), then cut to the particle box, \
+so the signal the CTF spreads outside the particle box is kept. The program chooses the window; the extraction size and re-scaled size \
+below override it.");
+	}
+
 	// Frame range
 	joboptions["first_frame"] = JobOption("First movie frame: ", 1., 1., 10., 1, "First movie frame to take into account in motion fit and combination step");
 	joboptions["last_frame"] = JobOption("Last movie frame: ", -1., 5., 50., 1, "Last movie frame to take into account in motion fit and combination step. Values equal to or smaller than 0 mean 'use all frames'.");
@@ -7677,6 +7706,8 @@ bool RelionJob::getCommandsMotionrefineJob(std::string &outputname, std::vector<
 		}
 
 		command += " --combine_frames";
+		command += joboptions["do_virtual"].getBoolean() ? " --virtual" : " --no_virtual";
+		if (joboptions["do_ctf_multiply"].getBoolean()) command += " --ctf_multiply";
 		command += " --bfac_minfreq " + joboptions["minres"].getString();
 		command += " --bfac_maxfreq " + joboptions["maxres"].getString();
 

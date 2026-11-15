@@ -30,6 +30,7 @@
 #include "io/star_converter.h"
 
 #include <src/backprojector.h>
+#include <src/virtual_particles.h>
 
 #include <set>
 #include <omp.h>
@@ -1671,6 +1672,8 @@ void ObservationModel::loadSafely(std::string filename, ObservationModel& obsMod
     else
         obsModel.isTomoStack2D = false;
 
+	// Premultiplied virtual particles follow the CTF this file gives (recomputed where it changed)
+	vparticles::setCurrentCtfs(particlesMdt, obsModel);
 }
 
 void ObservationModel::saveNew(

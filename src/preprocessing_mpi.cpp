@@ -109,6 +109,11 @@ void PreprocessingMpi::runExtractParticles()
 
 	// Wait until all nodes have finished to make final star file
 	MPI_Barrier(MPI_COMM_WORLD);
+	int pm_lo = premultiply_size_min, pm_hi = premultiply_size_max;
+	MPI_Allreduce(MPI_IN_PLACE, &pm_lo, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+	MPI_Allreduce(MPI_IN_PLACE, &pm_hi, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+	if (verb > 0)
+		reportPremultiplySizes(pm_lo, pm_hi);
 
 	if (node->isLeader())
 	{

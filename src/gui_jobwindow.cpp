@@ -1593,6 +1593,12 @@ void JobWindow::initialiseExtractWindow()
 	guientries["do_rect_box"].my_no_groups.push_back(group_square); // particle box size is unused for a rectangular box
 	guientries["do_rect_box"].cb_menu_i();
 	place("do_invert", TOGGLE_DEACTIVATE); //(current_y, "Invert contrast?", true, "If set to Yes, the contrast in the particles will be inverted.");
+	Fl_Group *group_premultiply = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_premultiply->begin();
+	place("do_premultiply", TOGGLE_DEACTIVATE);
+	group_premultiply->end();
+	guientries["do_rect_box"].my_no_groups.push_back(group_premultiply); // a rectangular box cannot be premultiplied
+	guientries["do_rect_box"].cb_menu_i();
 
 	// Add a little spacer
 	current_y += STEPY/2;
@@ -3178,6 +3184,8 @@ void JobWindow::initialiseMotionrefineWindow()
 	current_y += STEPY/2;
 
 	place("do_float16", TOGGLE_DEACTIVATE);
+	place("do_virtual", TOGGLE_DEACTIVATE);
+	place("do_ctf_multiply", TOGGLE_DEACTIVATE);
 
 	tab1->end();
 

@@ -35,6 +35,11 @@
 #include "src/complex.h"
 #include "src/multidim_array.h"
 #include "src/resample_rotate.h"
+#include "src/jaz/gravis/t2Vector.h"
+
+class MetaDataTable;
+class MicrographHandler;
+class ObservationModel;
 
 /// Helpers shared by the caches of virtual data (particles, movie averages).
 namespace vcache {
@@ -77,6 +82,9 @@ struct Recipe {
 	int    extract_size_y; ///< height of a rectangular box (extract_size is then its width), or -1 for a square box
 	bool   rotated;        ///< each particle is cut with its own box angle around a sub-pixel centre
 	ResampleMethod interpolation; ///< resampling of rotated boxes
+	int    premultiply_size; ///< CTF-premultiplied: box (micrograph pixels) the CTF is applied in before the cut to extract_size; PREMULTIPLY_AUTO: per particle from its CTF (autoPremultiplySize); -1 if not premultiplied
+	bool   ctf_intact_first_peak; ///< premultiplied with --ctf_intact_first_peak
+	double ctf_angpix;     ///< micrograph pixel size the CTF is computed at
 
 	Recipe();
 
@@ -84,7 +92,59 @@ struct Recipe {
 	int outputSize() const;
 	int outputSizeY() const;
 	bool rectangular() const { return extract_size_y > 0 && extract_size_y != extract_size; }
+	bool premultiplied() const { return premultiply_size > 0 || premultiply_size == PREMULTIPLY_AUTO; }
+	static const int PREMULTIPLY_AUTO = -2;
 };
+
+/// The CTF a premultiplied particle is multiplied with (what CTF::readByGroup gives).
+struct ParticleCtf {
+	double defU, defV, angle, kV, Cs, Q0, bfac, scale, phase;
+	/// Its optics group's anisotropic magnification and symmetric aberrations, which the CTF
+	/// includes: empty, or image pixel size, MagMat00, 01, 10, 11, then the even Zernike coefficients
+	std::vector<double> aberr;
+};
+
+/// ParticleCtf::aberr of optics group `og` (0-based).
+std::vector<double> opticsAberrations(const ObservationModel& obs, int og);
+
+/// --premultiply_extract_size auto: the extraction box plus twice the largest CTF
+/// delocalisation |lambda*defocus*s - Cs*lambda^3*s^3| up to the output Nyquist
+/// (output_size pixels across the extract_size box), rounded up to an even size
+/// with factors 2, 3 and 5 only, at most 4 * extract_size. `angpix`: micrograph pixel size.
+int autoPremultiplySize(const ParticleCtf& c, double angpix, int extract_size, int output_size);
+
+/// The CTF image (s/2+1 wide, s high, as CTF::getFftwImage gives it) of a particle with this CTF, at
+/// pixel size `angpix`, as Polish multiplies its particles with it (--ctf_multiply).
+void ctfImage(const ParticleCtf& c, int s, double angpix, MultidimArray<RFLOAT>& out);
+
+/// How Polish (relion_motion_refine --combine_frames) recombines the frames of one micrograph's
+/// movie into particles: what a virtual polished stack records (descriptor version 4).
+struct PolishRecipe {
+	std::string corr_mic;          ///< corrected micrographs STAR file (micrograph -> motion record)
+	std::string meta_fn;           ///< this micrograph's motion record (names the gain reference and defect file)
+	int first_frame, last_frame;   ///< frames combined (0-based, inclusive)
+	int eer_upsampling, eer_grouping;   ///< -1: from the motion record
+	double movie_angpix, coords_angpix, data_angpix, hot_cutoff;
+	int s;                         ///< box the frames are extracted and combined in (output pixels)
+	double angpix;                 ///< output pixel size
+	int out_size;                  ///< box the particles are cut to (--crop), or s
+	bool float16;
+	std::vector<gravis::d2Vector> bk;   ///< dose weight per frame: sigma (pixels at box s) and scale
+};
+
+/// Write a virtual polished stack: the particles of `particles` (one micrograph; their coordinates
+/// are used, after any recentring) as Polish would recombine them with `tracks` (pixels at
+/// r.angpix, per particle and frame) and, if `ctf` is not empty, multiply them with it. `windows`, if not
+/// empty: the box each particle is combined in (even, from r.out_size to r.s) in place of r.s for all.
+void writePolishedDescriptor(const std::string& fn_vstack, const std::string& fn_movie, const PolishRecipe& r,
+                             const MetaDataTable& particles,
+                             const std::vector<std::vector<gravis::d2Vector> >& tracks,
+                             const std::vector<ParticleCtf>& ctf,
+                             const std::vector<int>& windows = std::vector<int>());
+
+/// Identity of what a polished stack is recombined from: the movie, the motion record, and the gain
+/// reference and defect file the record names (a changed gain changes every pixel).
+std::string polishSourceChecksum(const std::string& movie, const std::string& meta_fn);
 
 /// True for the format extension of a virtual stack ("vstack").
 bool isVirtualStackFormat(const std::string& ext);
@@ -120,7 +180,35 @@ void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
                      const std::vector<double>& psi = std::vector<double>(),
                      const std::vector<double>& cx = std::vector<double>(),
                      const std::vector<double>& cy = std::vector<double>(),
-                     const std::vector<double>& angle = std::vector<double>());
+                     const std::vector<double>& angle = std::vector<double>(),
+                     const std::vector<ParticleCtf>& ctf = std::vector<ParticleCtf>());
+
+/// Premultiplied virtual particles follow the CTF their particle STAR file gives
+/// now: ObservationModel::loadSafely hands every particle of a premultiplied
+/// optics group to this, and a particle whose CTF differs from the one recorded
+/// at extraction is recomputed with the new one (under a new cache key).
+/// Particles never registered keep the recorded CTF.
+void setCurrentCtfs(const MetaDataTable& particles, ObservationModel& obs);
+
+/// MPI ranks that will all read the same virtual polished particles: write the cache
+/// entries that are missing, each micrograph by one rank (the shares are made alike on
+/// every rank from this table), so that the readers find them instead of each
+/// recombining every micrograph itself. Call it on all ranks, then barrier. Does
+/// nothing without a cache, with one rank, or with RELION_VPARTICLE_PREBUILD=0.
+void prebuildEntries(const MetaDataTable& particles, int rank, int nr_ranks);
+
+/// Polished stacks keep each particle's frame sums (before the CTF) in the cache, so that a reader, or a
+/// new CTF, does not need the movie again. Polish writes them while it has the movie: true if it should
+/// (a cache is in use and RELION_VPOLISH_SUMS is not 0), and the call that stores one micrograph's sums
+/// of the descriptor just written, made with Polish's own movie reader `mh` exactly as a reader would make them.
+bool polishedSumsWanted();
+void storePolishedSum(const std::string& fn_vstack, MicrographHandler& mh, int threads);
+
+/// From now on, premultiplied virtual particles are read as the plain particles
+/// the same extraction gives without --premultiply_ctf (CTF refinement fits
+/// those: the defocus cannot be fitted well on the premultiplied ones). Call it
+/// before the first read of any virtual stack.
+void readUnpremultiplied();
 
 /// What a header-only read needs.
 struct Header {

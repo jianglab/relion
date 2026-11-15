@@ -319,6 +319,79 @@ TEST_CASE("Extract: virtual-particles checkbox emits a flag either way",
 	REQUIRE(command.find(" --no_virtual ") != std::string::npos);
 }
 
+TEST_CASE("Extract: CTF premultiplication is on by default, off for rectangular and rotated boxes",
+          "[pipeline][extract]")
+{
+	RelionJob job;
+	job.clear();
+	job.initialise(PROC_EXTRACT);
+	job.label = get_proc_label(job.type);
+	job.joboptions["star_mics"].setString("CtfFind/job003/micrographs_ctf.star");
+	job.joboptions["coords_suffix"].setString("AutoPick/job006/autopick.star");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+	REQUIRE(job.joboptions["do_premultiply"].getBoolean());
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --premultiply_ctf --premultiply_extract_size auto ") != std::string::npos);
+
+	job.joboptions["do_premultiply"].setString("No");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find("--premultiply") == std::string::npos);
+
+	job.joboptions["do_premultiply"].setString("Yes");
+	job.joboptions["do_rect_box"].setString("Yes");
+	job.joboptions["extract_size_x"].setString("768");
+	job.joboptions["extract_size_y"].setString("256");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find("--premultiply") == std::string::npos);
+
+	job.joboptions["do_rect_box"].setString("No");
+	job.joboptions["do_extract_helix"].setString("Yes");
+	job.joboptions["do_rotate_horizontal"].setString("Yes");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find("--premultiply") == std::string::npos);
+}
+
+TEST_CASE("Extract and Polish: job STAR files from before the new defaults keep virtual and premultiplication off",
+          "[pipeline][extract][polish]")
+{
+	unsetenv("RELION_VIRTUAL_PARTICLES");
+	unsetenv("RELION_VIRTUAL_POLISH");
+	for (int type : {PROC_EXTRACT, PROC_MOTIONREFINE})
+	{
+		RelionJob job;
+		job.clear();
+		job.initialise(type);
+		job.label = get_proc_label(job.type);
+		std::string fn = "old_defaults_" + integerToString(type) + "_" + integerToString((int)std::time(NULL)) + ".star";
+		job.write(fn);
+
+		// drop the rows of the options, as a job saved before they existed has none
+		std::ifstream in(fn);
+		std::string text, line;
+		while (std::getline(in, line))
+			if (line.find("do_virtual") == std::string::npos && line.find("do_premultiply") == std::string::npos
+			    && line.find("do_ctf_multiply") == std::string::npos)
+				text += line + "\n";
+		in.close();
+		std::ofstream(fn) << text;
+
+		RelionJob loaded;
+		loaded.clear();
+		bool is_continue = false;
+		REQUIRE(loaded.read(fn, is_continue, true));
+		REQUIRE_FALSE(loaded.joboptions["do_virtual"].getBoolean());
+		const char* premult = type == PROC_EXTRACT ? "do_premultiply" : "do_ctf_multiply";
+		REQUIRE_FALSE(loaded.joboptions[premult].getBoolean());
+		std::remove(fn.c_str());
+	}
+}
+
 TEST_CASE("Extract: rectangular box and rotation options are emitted only when used",
           "[pipeline][extract]")
 {
@@ -488,6 +561,52 @@ TEST_CASE("Refinement jobs: masks along the length of rectangular boxes only whe
 		REQUIRE(generateCommand(job, command));
 		REQUIRE(command.find(" --rect_mask_length") != std::string::npos);
 	}
+}
+
+// Polish: virtual polished particles, always passed explicitly
+static void setUpPolishJob(RelionJob &job)
+{
+	job.clear();
+	job.initialise(PROC_MOTIONREFINE);
+	job.label = get_proc_label(job.type);
+	job.joboptions["fn_mic"].setString("MotionCorr/job002/corrected_micrographs.star");
+	job.joboptions["fn_data"].setString("Refine3D/job003/run_data.star");
+	job.joboptions["fn_post"].setString("PostProcess/job004/postprocess.star");
+	job.joboptions["do_param_optim"].setString("No");
+	job.joboptions["do_polish"].setString("Yes");
+	job.joboptions["do_own_params"].setString("Yes");
+	job.joboptions["nr_mpi"].setString("1");
+	job.joboptions["nr_threads"].setString("1");
+	job.joboptions["do_queue"].setString("No");
+}
+
+TEST_CASE("Polish: virtual polished particles emit a flag either way", "[pipeline][polish]")
+{
+	unsetenv("RELION_VIRTUAL_POLISH");
+	RelionJob job;
+	setUpPolishJob(job);
+	REQUIRE(job.joboptions["do_virtual"].getBoolean());        // on by default
+	REQUIRE(job.joboptions["do_ctf_multiply"].getBoolean());
+
+	std::string command;
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --virtual") != std::string::npos);
+	REQUIRE(command.find("--no_virtual") == std::string::npos);
+	REQUIRE(command.find(" --ctf_multiply") != std::string::npos);
+
+	job.joboptions["do_virtual"].setString("No");
+	job.joboptions["do_ctf_multiply"].setString("No");
+	command.clear();
+	REQUIRE(generateCommand(job, command));
+	REQUIRE(command.find(" --no_virtual") != std::string::npos);
+	REQUIRE(command.find("--ctf_multiply") == std::string::npos);
+
+	// RELION_VIRTUAL_POLISH=0 makes No the default
+	setenv("RELION_VIRTUAL_POLISH", "0", 1);
+	RelionJob job2;
+	setUpPolishJob(job2);
+	REQUIRE_FALSE(job2.joboptions["do_virtual"].getBoolean());
+	unsetenv("RELION_VIRTUAL_POLISH");
 }
 
 // MotionCorr: how micrographs are stored, always passed explicitly

@@ -21,6 +21,7 @@
 #include "frame_recombiner.h"
 #include "polish_timing.h"
 #include <src/async_file_writer.h>
+#include <map>
 #include "motion_refiner.h"
 #include "motion_helper.h"
 
@@ -81,6 +82,140 @@ static void addShifted(
 	}
 }
 
+void FrameRecombiner::recombineMicrograph(
+		const MetaDataTable& mdt, MicrographHandler& micrographHandler,
+		const std::vector<std::vector<d2Vector>>& priorShift,
+		int s, double angpix, double data_angpix,
+		const std::vector<Image<RFLOAT>>& weights, int threads,
+		const std::function<bool(int p, MultidimArray<RFLOAT>& ctf)>& ctf,
+		RawImage<RFLOAT> out)
+{
+	BufferedImage<Complex> sumStack = sumMicrograph(mdt, micrographHandler, priorShift, s, angpix, data_angpix, weights, threads);
+	finishParticles(sumStack, threads, ctf, out);
+}
+
+BufferedImage<Complex> FrameRecombiner::sumMicrograph(
+		const MetaDataTable& mdt, MicrographHandler& micrographHandler,
+		const std::vector<std::vector<d2Vector>>& priorShift,
+		int s, double angpix, double data_angpix,
+		const std::vector<Image<RFLOAT>>& weights, int threads)
+{
+	const int pc = mdt.numberOfObjects();
+	const int fc = weights.size();
+	const int sh = s/2 + 1;
+
+	std::vector<ParFourierTransformer> fts(threads);
+	std::vector<std::vector<d2Vector>> shift(pc, std::vector<d2Vector>(fc, d2Vector(0)));
+
+	const bool readAtOnce = CompressedMRCReader::isCompressedMRC(micrographHandler.getMovieFilename(mdt));
+
+	BufferedImage<Complex> sumStack(sh, s, pc);
+	sumStack.fill(Complex(0,0));
+
+	// A movie kept in memory: each particle's frames extracted and added in turn, no frame of all particles kept
+	bool fromMemory = false;
+
+	if (!readAtOnce)
+	{
+		polishtiming::Scope t("rec: extract, shift + sum");
+
+		fromMemory = micrographHandler.combineFromMemory(
+			mdt, s, angpix, threads, &priorShift, &shift, data_angpix,
+			[&](int p, int f, Image<Complex>& frame)
+			{
+				addShifted(frame, -shift[p][f].x, -shift[p][f].y, weights[f], sumStack, p);
+			});
+	}
+
+	// This is an ugly code duplication.
+	// Frame-by-frame reading (the normal route) is more memory efficient but
+	// calling loadMovie every frame is prohibitively slow for compressed MRC.
+	// Ideally, loadMovie should be refactored to take an existing
+	// CompressedMRCReader (and probably EERRenderer).
+	if (readAtOnce)
+	{
+		std::vector<std::vector<Image<Complex>>> fullFrame = micrographHandler.loadMovie(
+					mdt, s, angpix, fts, &priorShift, &shift, data_angpix);
+
+		for (int f = 0; f < fc; f++)
+		{
+			#pragma omp parallel for num_threads(threads)
+			for (int p = 0; p < pc; p++)
+			{
+				addShifted(fullFrame[p][f], -shift[p][f].x, -shift[p][f].y, weights[f], sumStack, p);
+			}
+		}
+	}
+	else if (!fromMemory)
+	{
+		for (int f = 0; f < fc; f++)
+		{
+			std::vector<std::vector<gravis::d2Vector>> priorShift_f(pc);
+
+			for (int p = 0; p < pc; p++)
+			{
+				priorShift_f[p] = {priorShift[p][f]};
+			}
+
+			std::vector<std::vector<Image<Complex>>> fullFrame;
+			{
+				polishtiming::Scope tl("rec: load frame");
+				fullFrame = micrographHandler.loadMovie(
+						mdt, s, angpix, fts, &priorShift_f, &shift, data_angpix, f);
+			}
+
+			polishtiming::Scope tss("rec: shift + sum");
+			#pragma omp parallel for num_threads(threads)
+			for (int p = 0; p < pc; p++)
+			{
+				addShifted(fullFrame[p][0], -shift[p][0].x, -shift[p][0].y, weights[f], sumStack, p);
+			}
+		}
+	}
+
+	return sumStack;
+}
+
+void FrameRecombiner::finishParticles(
+		BufferedImage<Complex>& sumStack, int threads,
+		const std::function<bool(int p, MultidimArray<RFLOAT>& ctf)>& ctf,
+		RawImage<RFLOAT> out)
+{
+	const int pc = sumStack.zdim;
+
+	polishtiming::Scope tfin("rec: CTF, normalise, iFFT");
+	#pragma omp parallel for num_threads(threads)
+	for (int p = 0; p < pc; p++)
+	{
+		BufferedImage<Complex> sumCopy = sumStack.getSliceRef(p);
+
+		MultidimArray<RFLOAT> ctfImg_xmipp;
+		const bool hasCtf = ctf(p, ctfImg_xmipp);
+
+		finishParticle(sumCopy, hasCtf? &ctfImg_xmipp : 0, out.getSliceRef(p));
+	}
+}
+
+void FrameRecombiner::finishParticle(
+		BufferedImage<Complex>& sum, MultidimArray<RFLOAT>* ctf, RawImage<RFLOAT> out)
+{
+	const int s = sum.ydim;
+
+	if (ctf)
+	{
+		RawImage<RFLOAT> ctfImg(*ctf);
+		sum *= ctfImg;
+	}
+
+	RFLOAT scale2 = StackHelper::computePower(sum, false);
+	sum /= out.xdim * sqrt(scale2);
+
+	BufferedImage<RFLOAT> real(s, s);
+	FFT::inverseFourierTransform(sum, real);
+
+	Padding::copyUnpaddedCenter2D_full(real, out);
+}
+
 FrameRecombiner::FrameRecombiner()
 {}
 
@@ -94,6 +229,14 @@ void FrameRecombiner::read(IOParser& parser, int argc, char* argv[])
 	box_arg = textToInteger(parser.getOption("--window", "Re-window the particles to this size (in movie-pixels; by default read from particles star file)", "-1"));
 	crop_arg = textToInteger(parser.getOption("--crop", "Crop the scaled particles to this size after CTF pre-multiplication", "-1"));
 	do_ctf_multiply = parser.checkOption("--ctf_multiply", "Premultiply by CTF.");
+	{
+		// Opt-in; RELION_VIRTUAL_POLISH makes it the default, --no_virtual overrides that
+		const bool want = parser.checkOption("--virtual", "Write virtual particles: a small descriptor per micrograph instead of the "
+			"particle stack; the particles are recombined from the movie, bit for bit, when they are read "
+			"(default from RELION_VIRTUAL_POLISH=1)");
+		const bool refuse = parser.checkOption("--no_virtual", "Write particle stacks even if RELION_VIRTUAL_POLISH is set");
+		write_virtual = !refuse && (want || vcache::envTruthy(getenv("RELION_VIRTUAL_POLISH")));
+	}
 	k0a = textToDouble(parser.getOption("--bfac_minfreq", "Min. frequency used in B-factor fit [Angst]", "20"));
 	k1a = textToDouble(parser.getOption("--bfac_maxfreq", "Max. frequency used in B-factor fit [Angst]", "-1"));
 	bfacFn = parser.getOption("--bfactors", "A .star file with external B/k-factors", "");
@@ -120,6 +263,11 @@ void FrameRecombiner::read(IOParser& parser, int argc, char* argv[])
 	if (scale_arg > 0 && scale_arg % 2 != 0)
 	{
 		REPORT_ERROR_STR("The rescaled window size (--scale) has to be an even number.\n");
+	}
+
+	if (write_virtual && !doCombineFrames)
+	{
+		REPORT_ERROR("--virtual needs --combine_frames");
 	}
 
 	if (crop_arg > 0 && !do_ctf_multiply)
@@ -220,6 +368,7 @@ void FrameRecombiner::init(
 	angpix_out.resize(nog);
 	data_angpix.resize(nog);
 	freqWeights.resize(nog);
+	bkFactors.clear();
 
 	const double angpix_mov = micrographHandler->movie_angpix; // TODO: TAKANORI: make sure the movie_angpix is the same for all micrographs
 
@@ -239,6 +388,32 @@ void FrameRecombiner::init(
 		{
 			s_out[og] = 2 * (int)(0.5 * s_mov[og] * angpix_mov / angpix_ref + 0.5);
 			angpix_out[og] = angpix_ref;
+		}
+
+		// --ctf_multiply without --window/--scale: combine in a window as large as the largest defocus needs
+		// (the delocalised signal stays in the box) and crop to the particle box afterwards
+		if (do_ctf_multiply && doCombineFrames && box_arg <= 0 && scale_arg <= 0 && crop_arg <= 0)
+		{
+			crop_auto.resize(nog, 0);
+			const int crop = s_out[og];
+			int window = crop;
+			for (size_t m = 0; m < allMdts.size(); m++)
+			for (long p = 0; p < (long)allMdts[m].numberOfObjects(); p++)
+			{
+				if (obsModel->getOpticsGroup(allMdts[m], p) != og) continue;
+				CTF ctf;
+				ctf.readByGroup(allMdts[m], obsModel, p);
+				window = std::max(window, vparticles::autoPremultiplySize(vparticles::ParticleCtf{ctf.DeltafU, ctf.DeltafV,
+					ctf.azimuthal_angle, ctf.kV, ctf.Cs, ctf.Q0, ctf.Bfac, ctf.scale, ctf.phase_shift, {}},
+					angpix_out[og], crop, crop));
+			}
+			s_mov[og] = 2 * (int)(0.5 * window * angpix_out[og] / angpix_mov + 0.5);
+			s_out[og] = 2 * (int)(0.5 * s_mov[og] * angpix_mov / angpix_out[og] + 0.5);
+			crop_auto[og] = crop;
+			if (verb > 0)
+				std::cout << " + CTF premultiplication, optics group " << og + 1 << ": particles combined in a window of "
+				          << s_out[og] << " px (what the largest defocus needs), then cropped to the particle box of "
+				          << crop << " px (--window and --crop set them)" << std::endl;
 		}
 
 		sh_out[og] = s_out[og]/2 + 1;
@@ -291,8 +466,6 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 		barstep = XMIPP_MAX(1, my_nr_micrographs/ 60);
 	}
 
-	std::vector<ParFourierTransformer> fts(nr_omp_threads);
-
 	int pctot = 0;
 	long nr_done = 0;
 
@@ -329,15 +502,14 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 		FileName fn_root = MotionRefiner::getOutputFileNameRoot(outPath, mdtOut);
 		std::vector<std::vector<d2Vector>> priorShift;
 		priorShift = MotionHelper::readTracksInPix(fn_root + "_tracks.star", angpix_out[ogmg]);
-		micrographHandler->expectNext(g < g_end? &mdts[g+1] : afterLast,
-			g + 1 < g_end? &mdts[g+2] : g + 1 == g_end? afterLast : 0);
+		if (readsMovies())
+		{
+			micrographHandler->expectNext(g < g_end? &mdts[g+1] : afterLast,
+				g + 1 < g_end? &mdts[g+2] : g + 1 == g_end? afterLast : 0);
+		}
 
 		const std::string movieFn = micrographHandler->getMovieFilename(mdtOut);
-		const bool isCompressedMRC = CompressedMRCReader::isCompressedMRC(movieFn);
-		const bool readAtOnce = isCompressedMRC;
 
-		std::vector<std::vector<d2Vector>> shift(pc);
-			
 		for (int p = 0; p < pc; p++)
 		{
 			int og = obsModel->getOpticsGroup(mdtOut, p);
@@ -351,8 +523,7 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 			{
 				obsModel->setPixelSize(og, angpix_out[og]);
 			}
-			
-			shift[p].resize(fc, d2Vector(0));
+
 		}
 		
 		if (do_recenter)
@@ -360,124 +531,125 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 			recenterParticles(mdtOut, ref_angpix, coords_angpix);
 		}
 		
-		const int out_size = crop_arg > 0 ? crop_arg : s_out[ogmg];
-		
-		
-		BufferedImage<Complex> sumStack(sh_out[ogmg], s_out[ogmg], pc);
-		sumStack.fill(Complex(0,0));
+		const int out_size = crop_arg > 0 ? crop_arg : !crop_auto.empty() ? crop_auto[ogmg] : s_out[ogmg];
 
-		// A movie kept in memory: each particle's frames extracted and added in turn, no frame of all particles kept
-		bool fromMemory = false;
+		// Premultiplied: the CTF as the particle STAR file gives it, at the output box and pixel size
+		std::vector<vparticles::ParticleCtf> ctfs;
 
-		if (!readAtOnce)
+		if (do_ctf_multiply)
 		{
-			polishtiming::Scope t("rec: extract, shift + sum");
-
-			fromMemory = micrographHandler->combineFromMemory(
-				mdtOut, s_out[ogmg], angpix_out[ogmg], nr_omp_threads, &priorShift, &shift, data_angpix[ogmg],
-				[&](int p, int f, Image<Complex>& frame)
-				{
-					addShifted(frame, -shift[p][f].x, -shift[p][f].y, freqWeights[ogmg][f], sumStack, p);
-				});
-		}
-
-		// This is an ugly code duplication.
-		// Frame-by-frame reading (the normal route) is more memory efficient but
-		// calling loadMovie every frame is prohibitively slow for compressed MRC.
-		// Ideally, loadMovie should be refactored to take an existing
-		// CompressedMRCReader (and probably EERRenderer).
-		if (readAtOnce)
-		{
-			std::vector<std::vector<Image<Complex>>> fullFrame = micrographHandler->loadMovie(
-						mdtOut, s_out[ogmg], angpix_out[ogmg], fts,
-						&priorShift, &shift, data_angpix[ogmg]);
-
-			for (int f = 0; f < fc; f++)
-			{
-				#pragma omp parallel for num_threads(nr_omp_threads)
-				for (int p = 0; p < pc; p++)
-				{
-					addShifted(fullFrame[p][f], -shift[p][f].x, -shift[p][f].y, freqWeights[ogmg][f], sumStack, p);
-				}
-			}
-		}
-		else if (!fromMemory)
-		{
-			for (int f = 0; f < fc; f++)
-			{
-				std::vector<std::vector<gravis::d2Vector>> priorShift_f(pc);
-				
-				for (int p = 0; p < pc; p++)
-				{
-					priorShift_f[p] = {priorShift[p][f]};
-				}
-
-				std::vector<std::vector<Image<Complex>>> fullFrame;
-				{
-					polishtiming::Scope tl("rec: load frame");
-					fullFrame = micrographHandler->loadMovie(
-							mdtOut, s_out[ogmg], angpix_out[ogmg], fts,
-							&priorShift_f, &shift, data_angpix[ogmg], f);
-				}
-
-				polishtiming::Scope tss("rec: shift + sum");
-				#pragma omp parallel for num_threads(nr_omp_threads)
-				for (int p = 0; p < pc; p++)
-				{
-					addShifted(fullFrame[p][0], -shift[p][0].x, -shift[p][0].y, freqWeights[ogmg][f], sumStack, p);
-				}
-			}
-		}
-
-		// The stack goes to disc on the background writer, which then owns it
-		std::shared_ptr<Image<RFLOAT> > outStack_ptr(new Image<RFLOAT>(out_size, out_size, 1, pc));
-		Image<RFLOAT> &outStack_xmipp = *outStack_ptr;
-		RawImage<RFLOAT> outStack(outStack_xmipp);
-
-		polishtiming::Scope tfin("rec: CTF, normalise, iFFT");
-		#pragma omp parallel for num_threads(nr_omp_threads)
-		for (int p = 0; p < pc; p++)
-		{
-			BufferedImage<Complex> sumCopy = sumStack.getSliceRef(p);
-			
-			if (do_ctf_multiply)
+			for (int p = 0; p < pc; p++)
 			{
 				CTF ctf;
 				ctf.readByGroup(mdtOut, obsModel, p);
-				int og = obsModel->getOpticsGroup(mdtOut, p);
-				
-				MultidimArray<RFLOAT> ctfImg_xmipp;
-				ctfImg_xmipp.resize(s_out[og], sh_out[og]);
-				
-				ctf.getFftwImage(
-						ctfImg_xmipp, s_out[og], s_out[og], angpix_out[og], 
-						false,  // do_abs
-						false,  // do_only_flip_phases
-						false,  // do_intact_until_first_peak
-						true,   // do_damping
-						false );// do_ctf_padding
-				
-				RawImage<RFLOAT> ctfImg(ctfImg_xmipp);
-				
-				sumCopy *= ctfImg;
+				ctfs.push_back(vparticles::ParticleCtf{ctf.DeltafU, ctf.DeltafV, ctf.azimuthal_angle, ctf.kV, ctf.Cs,
+					ctf.Q0, ctf.Bfac, ctf.scale, ctf.phase_shift,
+					vparticles::opticsAberrations(*obsModel, obsModel->getOpticsGroup(mdtOut, p))});
 			}
-			
-			RFLOAT scale2 = StackHelper::computePower(sumCopy, false);
-			sumCopy /= out_size * sqrt(scale2);
-			
-			BufferedImage<RFLOAT> real(s_out[ogmg], s_out[ogmg]);
-			FFT::inverseFourierTransform(sumCopy, real);
-			
-			RawImage<RFLOAT> outSlice = outStack.getSliceRef(p);
-			Padding::copyUnpaddedCenter2D_full(real, outSlice);
 		}
-		
-		std::string stackFn = fn_root + "_shiny" + suffix + ".mrcs";
-		
-		outStack_xmipp.setSamplingRateInHeader(angpix_out[ogmg]);
+
+		// Premultiplied: each particle combined in a window of its own, as large as its CTF needs (the lower the
+		// defocus, the smaller), at most the maximum window of the job; RELION_VPOLISH_PARTICLE_WINDOWS=0: every
+		// particle in the maximum window. Stacks and virtual particles alike.
+		std::vector<int> windows;
+		const char* win_env = getenv("RELION_VPOLISH_PARTICLE_WINDOWS");
+		if (do_ctf_multiply && !(win_env != NULL && win_env[0] == '0'))
 		{
+			for (int p = 0; p < pc; p++)
+				windows.push_back(std::min(s_out[ogmg],
+					vparticles::autoPremultiplySize(ctfs[p], angpix_out[ogmg], out_size, out_size)));
+
+			if (verb > 0 && nr_done == 0)
+				std::cout << " + Per-particle windows (RELION_VPOLISH_PARTICLE_WINDOWS=0 turns them off): "
+				          << *std::min_element(windows.begin(), windows.end()) << " to "
+				          << *std::max_element(windows.begin(), windows.end())
+				          << " pixels in the first micrograph, from each particle's defocus (at most the maximum window, "
+				          << s_out[ogmg] << ")" << std::endl;
+		}
+
+		std::string stackFn;
+
+		if (write_virtual)
+		{
+			// Only what makes the particles: they are recombined from the movie when read
+			vparticles::PolishRecipe r;
+			r.corr_mic = micrographHandler->corrMicFn;
+			r.meta_fn = micrographHandler->getMicrographMetadataFilename(mdtOut, true);
+			r.first_frame = micrographHandler->firstFrame;
+			r.last_frame = micrographHandler->lastFrame;
+			r.eer_upsampling = micrographHandler->eer_upsampling;
+			r.eer_grouping = micrographHandler->eer_grouping;
+			r.movie_angpix = micrographHandler->movie_angpix;
+			r.coords_angpix = micrographHandler->coords_angpix;
+			r.data_angpix = data_angpix[ogmg];
+			r.hot_cutoff = micrographHandler->hotCutoff;
+			r.s = s_out[ogmg];
+			r.angpix = angpix_out[ogmg];
+			r.out_size = out_size;
+			r.float16 = write_float16;
+			r.bk = bkFactors[ogmg];
+
+			stackFn = fn_root + "_shiny" + suffix + ".vstack";
+			vparticles::writePolishedDescriptor(stackFn, movieFn, r, mdtOut, priorShift, ctfs, windows);
+
+			// The frame sums go to the cache now, while the movie is at hand: readers then never need it
+			if (readsMovies()) vparticles::storePolishedSum(stackFn, *micrographHandler, nr_omp_threads);
+		}
+		else
+		{
+			// The stack goes to disc on the background writer, which then owns it
+			std::shared_ptr<Image<RFLOAT> > outStack_ptr(new Image<RFLOAT>(out_size, out_size, 1, pc));
+
+			if (windows.empty())
+			{
+				recombineMicrograph(mdtOut, *micrographHandler, priorShift, s_out[ogmg], angpix_out[ogmg],
+					data_angpix[ogmg], freqWeights[ogmg], nr_omp_threads,
+					[&](int p, MultidimArray<RFLOAT>& ctfImg)
+					{
+						if (!do_ctf_multiply) return false;
+						vparticles::ctfImage(ctfs[p], s_out[ogmg], angpix_out[ogmg], ctfImg);
+						return true;
+					},
+					RawImage<RFLOAT>(*outStack_ptr));
+			}
+			else
+			{
+				// One pass over the movie per window size, as the virtual particles' reader does
+				std::map<int, std::vector<int> > groups;
+				for (int p = 0; p < pc; p++) groups[windows[p]].push_back(p);
+				RawImage<RFLOAT> out(*outStack_ptr);
+				for (const auto& g : groups)
+				{
+					const int s = g.first;
+					MetaDataTable sub;
+					std::vector<std::vector<d2Vector> > tracks;
+					for (int p : g.second)
+					{
+						sub.addObject(mdtOut.getObject(p));
+						tracks.push_back(priorShift[p]);
+					}
+					// The dose weights fall off over the same resolution in every window
+					std::vector<d2Vector> bk = bkFactors[ogmg];
+					if (s != s_out[ogmg]) for (d2Vector& b : bk) b.x = b.x * s / s_out[ogmg];
+					const std::vector<Image<RFLOAT> > weights = DamageHelper::computeWeights(bk, s / 2 + 1);
+					BufferedImage<Complex> sums = sumMicrograph(sub, *micrographHandler, tracks, s, angpix_out[ogmg],
+						data_angpix[ogmg], weights, nr_omp_threads);
+					#pragma omp parallel for num_threads(nr_omp_threads)
+					for (long i = 0; i < (long)g.second.size(); i++)
+					{
+						BufferedImage<Complex> sum = sums.getSliceRef(i);
+						MultidimArray<RFLOAT> ctfImg;
+						vparticles::ctfImage(ctfs[g.second[i]], s, angpix_out[ogmg], ctfImg);
+						finishParticle(sum, &ctfImg, out.getSliceRef(g.second[i]));
+					}
+				}
+			}
+
+			stackFn = fn_root + "_shiny" + suffix + ".mrcs";
+
+			outStack_ptr->setSamplingRateInHeader(angpix_out[ogmg]);
 			const DataType datatype = write_float16 ? Float16: Float;
-			AsyncFileWriter::putFile(stackFn, MULTIDIM_SIZE(outStack_xmipp()) * sizeof(RFLOAT), [outStack_ptr, datatype](const std::string &tmp)
+			AsyncFileWriter::putFile(stackFn, MULTIDIM_SIZE((*outStack_ptr)()) * sizeof(RFLOAT), [outStack_ptr, datatype](const std::string &tmp)
 			{
 				outStack_ptr->write(tmp, -1, true, WRITE_OVERWRITE, datatype);
 			});
@@ -690,6 +862,7 @@ std::vector<Image<RFLOAT>> FrameRecombiner::weightsFromFCC(
 
 	std::vector<Image<RFLOAT>> freqWeights;
 	freqWeights = DamageHelper::computeWeights(bkFacsRescaled, sh);
+	bkFactors.push_back(bkFacsRescaled);
 
 	const double cf = 8.0 * angpix_ref * angpix_ref * sh_ref * sh_ref;
 
@@ -798,6 +971,7 @@ std::vector<Image<RFLOAT>> FrameRecombiner::weightsFromBfacs(
 	}
 
 	freqWeights = DamageHelper::computeWeights(bkFacs, sh);
+	bkFactors.push_back(bkFacs);
 
 	if (bfac_diag)
 	{
@@ -867,6 +1041,8 @@ int FrameRecombiner::getOutputBoxSize(int opticsGroup)
 {
 	if (crop_arg > 0)
 		return crop_arg;
+	else if (!crop_auto.empty())
+		return crop_auto[opticsGroup];
 	else
 		return s_out[opticsGroup];
 }
@@ -893,6 +1069,6 @@ std::string FrameRecombiner::getOutputSuffix()
 
 bool FrameRecombiner::isJobFinished(std::string filenameRoot)
 {
-	return exists(filenameRoot+"_shiny" + suffix + ".mrcs")
+	return (exists(filenameRoot+"_shiny" + suffix + ".mrcs") || exists(filenameRoot+"_shiny" + suffix + ".vstack"))
 	    && exists(filenameRoot+"_shiny" + suffix + ".star");
 }

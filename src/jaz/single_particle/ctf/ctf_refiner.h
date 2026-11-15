@@ -24,6 +24,7 @@
 #include <src/jaz/single_particle/obs_model.h>
 #include <src/jaz/single_particle/reference_map.h>
 #include <src/image.h>
+#include <functional>
 
 #include "tilt_estimator.h"
 #include "defocus_estimator.h"
@@ -55,6 +56,9 @@ class CtfRefiner
 		ObservationModel obsModel;
 		ReferenceMap reference;
 
+		// premultiplied optics groups of virtual particles, read and fitted as plain particles
+		std::vector<int> plain_virtual_groups;
+
 		TiltEstimator tiltEstimator;
 		DefocusEstimator defocusEstimator;
 		BFactorRefiner bfactorEstimator;
@@ -85,6 +89,17 @@ class CtfRefiner
 
 		// Fit CTF parameters for all particles on a subset of the micrographs micrograph
 		void processSubsetMicrographs(long g_start, long g_end);
+
+		/* Premultiplied particles are CTF_star * CTF_true * signal, where CTF_star is the CTF the
+		   STAR file gives (what they were multiplied with); every fit models obs = CTF * prediction,
+		   so the predictions of those particles are multiplied with CTF_star first. Their noise is
+		   CTF_star * noise too, so observation and prediction are both divided by sqrt(CTF_star^2 + eps)
+		   (weighted least squares; unweighted, the fits ignore the CTF zeros, where the defocus
+		   information is). */
+		void forEachPremultipliedCtf(const MetaDataTable& mdt,
+				const std::function<void(int, const Image<RFLOAT>&, const Image<RFLOAT>&)>& f);
+		void whitenPremultiplied(const MetaDataTable& mdt, std::vector<Image<Complex>>& obs,
+				std::vector<Image<Complex>>& predT, std::vector<Image<Complex>>& predNT);
 
 		// Combine all .stars and .eps files
 		std::vector<MetaDataTable> merge(const std::vector<MetaDataTable>& mdts, std::vector <FileName> &fn_eps);

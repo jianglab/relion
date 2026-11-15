@@ -19,6 +19,13 @@
 #include "src/cache_manager.h"
 #include "src/fused_extract.h"
 #include "src/resource_report.h"
+#include "src/ctf.h"
+#include "src/jaz/single_particle/obs_model.h"
+#include "src/jaz/single_particle/micrograph_handler.h"
+#include "src/micrograph_model.h"
+#include "src/async_file_writer.h"
+#include "src/jaz/single_particle/damage_helper.h"
+#include "src/jaz/single_particle/motion/frame_recombiner.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -35,7 +42,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <fstream>
+#include <future>
+#include <chrono>
 #include <iostream>
 #include <list>
 #include <memory>
@@ -144,11 +154,16 @@ namespace vparticles {
 
 namespace {
 
-// Version 1 is square, upright boxes; version 2 adds rectangular boxes and turned boxes. A
-// descriptor is written as version 1 whenever it needs nothing of version 2, so that
-// builds that predate rectangular particles keep reading everything they always could.
+// Version 1 is square, upright boxes; version 2 adds rectangular boxes and turned boxes;
+// version 3 CTF-premultiplied particles; version 4 polished particles (recombined from movie frames). A descriptor is written with the lowest version
+// it needs, so that older builds keep reading everything they always could (and refuse,
+// rather than misread, premultiplied particles).
 const int DESCRIPTOR_VERSION = 2;
 const int DESCRIPTOR_VERSION_SQUARE = 1;
+const int DESCRIPTOR_VERSION_PREMULT = 3;
+const int DESCRIPTOR_VERSION_POLISH = 4;
+const int DESCRIPTOR_VERSION_POLISH_WINDOWS = 6; // polished, each particle combined in a window of its own
+const int DESCRIPTOR_VERSION_POLISH_SUM16 = 5;   // polished, the frame sums rounded to 16 bits before the CTF (so that they can be cached)
 
 /* First line of every descriptor. A converted stack keeps its ".mrcs" name so
  * that no STAR file downstream has to change; the reader tells it apart from a
@@ -184,6 +199,24 @@ std::string exactString(double v)
 	return buf;
 }
 
+/// The numbers of a space-separated list; an error if anything else is in it.
+std::vector<double> parseNumbers(const std::string& text)
+{
+	std::vector<double> out;
+	const char* q = text.c_str();
+	for (;;)
+	{
+		char* end;
+		const double x = strtod(q, &end);
+		if (end == q) break;
+		out.push_back(x);
+		q = end;
+	}
+	while (*q == ' ') q++;
+	if (*q != 0) REPORT_ERROR("Not a list of numbers: " + text);
+	return out;
+}
+
 using vcache::envTruthy;
 using vcache::makeDirs;
 
@@ -192,6 +225,7 @@ using vcache::makeDirs;
 // ---------------------------------------------------------------------------
 
 struct Micrograph;
+struct Polished;
 
 /// Set when the background builders are to stop (the program is ending): entries still being written are given up
 std::atomic<bool> g_builds_stopping(false);
@@ -204,6 +238,7 @@ struct EntryBuild {
 	bool prepared = false, finished = false;
 	std::atomic<bool> failed{false};
 	std::shared_ptr<Micrograph> mic;
+	std::shared_ptr<Polished> pol;   // polished stacks: the particles being written, held until the entry is done
 	int fd = -1;
 	std::string path, tmp;
 	std::vector<size_t> order;   // particles sorted by (y, x), so the micrograph's pages are read in file order
@@ -219,8 +254,16 @@ struct VStack {
 	std::vector<long> x, y;      // integer centres, as extraction truncated them
 	std::vector<double> psi;     // helical: each segment's in-plane angle
 	std::vector<double> cx, cy, angle;   // rotated: exact centre and box angle of each particle
+	std::vector<ParticleCtf> ctf;        // premultiplied: the CTF in effect for each particle
+	// polished: how the frames are recombined, the movie and each particle's track (also as written, for the key)
+	std::shared_ptr<PolishRecipe> polish;
+	std::string movie, meta, polish_text, weights_text;
+	std::vector<std::string> track_text;
+	std::vector<std::vector<gravis::d2Vector> > tracks;
+	std::vector<int> win;        // polished: the box each particle's frames are combined in (polish->s unless it has its own)
 	int version;                 // descriptor version as read
 	std::string key;             // cache key: everything that determines the pixels
+	std::string sum_key;         // polished: cache key of the frame sums (everything but the CTF and the output)
 
 	std::mutex build;            // guards `building`
 	std::shared_ptr<EntryBuild> building;   // the cache entry being written, if any
@@ -233,6 +276,33 @@ std::mutex g_mutex;
 std::unordered_map<std::string, std::shared_ptr<VStack> > g_vstacks;
 std::set<std::string> g_verified;       // "mic|checksum" pairs checked in this process
 std::map<std::string, time_t> g_unwritable;   // cache directory whose write failed -> when to try again; warned once
+// Premultiplied particles: the CTF their particle STAR file gives now, by stack and index (defU NaN: not given)
+// shortcut: ~72 bytes per premultiplied particle held for the whole run; key by micrograph if that ever matters
+std::unordered_map<std::string, std::vector<ParticleCtf> > g_current_ctfs;
+bool g_read_unpremultiplied = false;
+
+std::string ctfString(const ParticleCtf& c)
+{
+	const double v[9] = {c.defU, c.defV, c.angle, c.kV, c.Cs, c.Q0, c.bfac, c.scale, c.phase};
+	std::string s;
+	for (int k = 0; k < 9; k++) s += (k ? " " : "") + exactString(v[k]);
+	for (double a : c.aberr) s += " " + exactString(a);
+	return s;
+}
+
+// A value read back from a particle STAR file differs from the recorded one by text round-off
+// (6 decimals, or 6 significant digits); a real change, e.g. by CTF refinement, is far larger
+bool sameCtf(const ParticleCtf& a, const ParticleCtf& b)
+{
+	const double x[9] = {a.defU, a.defV, a.angle, a.kV, a.Cs, a.Q0, a.bfac, a.scale, a.phase};
+	const double y[9] = {b.defU, b.defV, b.angle, b.kV, b.Cs, b.Q0, b.bfac, b.scale, b.phase};
+	for (int k = 0; k < 9; k++)
+		if (!(std::fabs(x[k] - y[k]) <= 1e-5 + 1e-6 * std::fabs(y[k]))) return false;
+	if (a.aberr.size() != b.aberr.size()) return false;
+	for (size_t k = 0; k < a.aberr.size(); k++)
+		if (!(std::fabs(a.aberr[k] - b.aberr[k]) <= 1e-5 + 1e-6 * std::fabs(b.aberr[k]))) return false;
+	return true;
+}
 
 std::string recipeKeyString(const VStack& v)
 {
@@ -247,11 +317,17 @@ std::string recipeKeyString(const VStack& v)
 	if (r.helical) s << "helical " << exactString(r.helical_radius) << "|";
 	if (r.rectangular()) s << "rect " << r.extract_size_y << "|";
 	if (r.rotated) s << "rotated " << resampleMethodName(r.interpolation) << "|";
+	if (r.premultiplied())
+		s << "premultiply " << r.premultiply_size << " " << r.ctf_intact_first_peak << " " << exactString(r.ctf_angpix) << "|";
+	if (v.polish) s << "polish " << v.polish_text << "|" << v.weights_text << "|";
 	for (size_t i = 0; i < v.x.size(); i++)
 	{
 		s << v.x[i] << "," << v.y[i];
+		if (v.polish) s << "," << exactString(v.cx[i]) << "," << exactString(v.cy[i]) << "," << v.track_text[i];
+		if (v.polish && v.win[i] != v.polish->s) s << ",w" << v.win[i];
 		if (r.helical) s << "," << exactString(v.psi[i]);
 		if (r.rotated) s << "," << exactString(v.cx[i]) << "," << exactString(v.cy[i]) << "," << exactString(v.angle[i]);
+		if (r.premultiplied()) s << "," << ctfString(v.ctf[i]);
 		s << ";";
 	}
 	return s.str();
@@ -275,10 +351,10 @@ std::shared_ptr<VStack> getVStack(const std::string& path)
 	v->path = path;
 	int version = 0;
 	head.getValue(EMDL_VSTACK_VERSION, version, 0);
-	if (version != DESCRIPTOR_VERSION_SQUARE && version != DESCRIPTOR_VERSION)
+	if (version < DESCRIPTOR_VERSION_SQUARE || version > DESCRIPTOR_VERSION_POLISH_WINDOWS)
 		REPORT_ERROR("Virtual particle stack " + path + " has version " + integerToString(version)
-		             + "; this RELION reads versions " + integerToString(DESCRIPTOR_VERSION_SQUARE) + " and "
-		             + integerToString(DESCRIPTOR_VERSION) + ".");
+		             + "; this RELION reads versions " + integerToString(DESCRIPTOR_VERSION_SQUARE) + " to "
+		             + integerToString(DESCRIPTOR_VERSION_POLISH_WINDOWS) + ".");
 	v->version = version;
 
 	Recipe& r = v->recipe;
@@ -309,6 +385,37 @@ std::shared_ptr<VStack> getVStack(const std::string& path)
 		std::string method;
 		head.getValue(EMDL_VSTACK_INTERPOLATION, method, 0);
 		r.interpolation = parseResampleMethod(method);
+	}
+	head.getValue(EMDL_VSTACK_PREMULTIPLY_SIZE, r.premultiply_size, 0);
+	if (r.premultiplied())
+	{
+		std::string a;
+		head.getValue(EMDL_VSTACK_CTF_INTACT_FIRST_PEAK, r.ctf_intact_first_peak, 0);
+		if (!head.getValue(EMDL_VSTACK_CTF_ANGPIX, a, 0))
+			REPORT_ERROR("Virtual particle stack " + path + " is premultiplied but has no rlnVirtualCtfPixelSize.");
+		r.ctf_angpix = strtod(a.c_str(), NULL);
+	}
+	if (version >= DESCRIPTOR_VERSION_POLISH)
+	{
+		PolishRecipe* pr = new PolishRecipe();
+		v->polish.reset(pr);
+		if (!head.getValue(EMDL_MICROGRAPH_MOVIE_NAME, v->movie, 0) || !head.getValue(EMDL_MICROGRAPH_METADATA_NAME, v->meta, 0)
+		    || !head.getValue(EMDL_VSTACK_POLISH, v->polish_text, 0)
+		    || !head.getValue(EMDL_VSTACK_FRAME_WEIGHTS, v->weights_text, 0))
+			REPORT_ERROR("Virtual particle stack " + path + " is polished but lacks rlnMicrographMovieName, rlnMicrographMetadata, rlnVirtualPolish or rlnVirtualFrameWeights.");
+		pr->meta_fn = v->meta;
+		std::istringstream in(v->polish_text);
+		in >> pr->corr_mic >> pr->first_frame >> pr->last_frame >> pr->eer_upsampling >> pr->eer_grouping
+		   >> pr->movie_angpix >> pr->coords_angpix >> pr->data_angpix >> pr->hot_cutoff >> pr->s >> pr->angpix >> pr->out_size;
+		if (!in || pr->s <= 0 || pr->out_size <= 0 || pr->out_size > pr->s || pr->last_frame < pr->first_frame)
+			REPORT_ERROR("Virtual particle stack " + path + " has a malformed rlnVirtualPolish: " + v->polish_text);
+		const std::vector<double> w = parseNumbers(v->weights_text);
+		if (w.size() != 2 * (size_t)(pr->last_frame - pr->first_frame + 1))
+			REPORT_ERROR("Virtual particle stack " + path + " needs a sigma and a scale per frame in rlnVirtualFrameWeights.");
+		for (size_t f = 0; f < w.size(); f += 2) pr->bk.push_back(gravis::d2Vector(w[f], w[f + 1]));
+		pr->float16 = r.float16;
+		r.extract_size = pr->out_size;
+		r.angpix = pr->angpix;
 	}
 	if (r.extract_size <= 0)
 		REPORT_ERROR("Virtual particle stack " + path + " has no valid rlnVirtualExtractSize.");
@@ -345,9 +452,61 @@ std::shared_ptr<VStack> getVStack(const std::string& path)
 			v->cy.push_back(strtod(sy.c_str(), NULL));
 			v->angle.push_back(strtod(sa.c_str(), NULL));
 		}
+		if (v->polish)
+		{
+			std::string sx, sy, st;
+			if (!parts.getValue(EMDL_VSTACK_CENTRE_X, sx) || !parts.getValue(EMDL_VSTACK_CENTRE_Y, sy)
+			    || !parts.getValue(EMDL_VSTACK_TRACK, st))
+				REPORT_ERROR("Virtual particle stack " + path + " is polished but lacks rlnVirtualCentreX/Y or rlnVirtualTrack.");
+			v->cx.push_back(strtod(sx.c_str(), NULL));
+			v->cy.push_back(strtod(sy.c_str(), NULL));
+			const std::vector<double> t = parseNumbers(st);
+			if (t.size() != 2 * v->polish->bk.size())
+				REPORT_ERROR("Virtual particle stack " + path + " needs an x and y shift per frame in rlnVirtualTrack.");
+			std::vector<gravis::d2Vector> track;
+			for (size_t f = 0; f < t.size(); f += 2) track.push_back(gravis::d2Vector(t[f], t[f + 1]));
+			v->tracks.push_back(track);
+			v->track_text.push_back(st);
+			int w = v->polish->s;
+			parts.getValue(EMDL_VSTACK_PREMULTIPLY_SIZE, w);
+			if (w % 2 != 0 || w < v->polish->out_size || w > v->polish->s)
+				REPORT_ERROR("Virtual particle stack " + path + " has a particle window (rlnVirtualPremultiplySize) that is odd or not between the output box and the window of the stack.");
+			v->win.push_back(w);
+		}
+		if (r.premultiplied())
+		{
+			std::string sc;
+			if (!parts.getValue(EMDL_VSTACK_CTF, sc))
+				REPORT_ERROR("Virtual particle stack " + path + " is premultiplied but lacks rlnVirtualCtf.");
+			const std::vector<double> c = parseNumbers(sc);
+			if (c.size() < 9 || (c.size() > 9 && c.size() < 14))
+				REPORT_ERROR("Virtual particle stack " + path + " has a malformed rlnVirtualCtf: " + sc);
+			v->ctf.push_back(ParticleCtf{c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8],
+			                             std::vector<double>(c.begin() + 9, c.end())});
+		}
+	}
+
+	if (g_read_unpremultiplied) r.premultiply_size = -1;
+
+	// Premultiplied: the CTF the particle STAR file gives now replaces the recorded one where it changed
+	if (r.premultiplied())
+	{
+		std::unordered_map<std::string, std::vector<ParticleCtf> >::const_iterator c = g_current_ctfs.find(path);
+		if (c != g_current_ctfs.end())
+			for (size_t i = 0; i < v->ctf.size() && i < c->second.size(); i++)
+				if (!std::isnan(c->second[i].defU) && !sameCtf(c->second[i], v->ctf[i]))
+					v->ctf[i] = c->second[i];
 	}
 
 	v->key = CacheManager::hashString(recipeKeyString(*v));
+	if (v->polish)
+	{
+		std::string s = "sum|v" + integerToString(v->version) + "|" + v->mic_checksum + "|" + v->polish_text + "|" + v->weights_text + "|";
+		for (size_t i = 0; i < v->cx.size(); i++)
+			s += exactString(v->cx[i]) + "," + exactString(v->cy[i]) + "," + v->track_text[i]
+			   + (v->win[i] != v->polish->s ? ",w" + integerToString(v->win[i]) : std::string()) + ";";
+		v->sum_key = CacheManager::hashString(s);
+	}
 	g_vstacks[path] = v;
 	return v;
 }
@@ -372,6 +531,9 @@ struct Micrograph {
 
 	std::unique_ptr<Image<RFLOAT> > img;
 
+	mutable std::once_flag mean_once;
+	mutable RFLOAT mean_value;
+
 	Micrograph() : nx(0), ny(0), fd(-1), len(0), base(NULL), data(NULL), mode(0), bytes(0) {}
 	~Micrograph()
 	{
@@ -390,6 +552,20 @@ struct Micrograph {
 		case 1:  { int16_t s; memcpy(&s, q, 2); return s; }
 		default: { uint16_t u; memcpy(&u, q, 2); return u; }   // mode 6
 		}
+	}
+
+	/// The micrograph's average, summed in the order MultidimArray::computeAvg sums it
+	RFLOAT mean() const
+	{
+		std::call_once(mean_once, [this]() {
+			if (img) { mean_value = (*img)().computeAvg(); return; }
+			RFLOAT sum = 0;
+			for (long y = 0; y < ny; y++)
+				for (long x = 0; x < nx; x++)
+					sum += at(y, x);
+			mean_value = sum / (nx * ny);
+		});
+		return mean_value;
 	}
 };
 
@@ -495,16 +671,18 @@ std::shared_ptr<Micrograph> openMicrograph(const std::string& fn)
 /// The micrograph must be the one the particles were extracted from.
 void verifyMicrograph(const VStack& v)
 {
-	const std::string tag = v.mic + "|" + v.mic_checksum;
+	// polished particles come from the movie
+	const std::string& source = v.polish ? v.movie : v.mic;
+	const std::string tag = source + "|" + v.mic_checksum;
 	{
 		std::lock_guard<std::mutex> guard(g_mutex);
 		if (g_verified.count(tag)) return;
 	}
-	const std::string now = micrographChecksum(v.mic);
+	const std::string now = v.polish ? polishSourceChecksum(v.movie, v.meta) : micrographChecksum(source);
 	if (now != v.mic_checksum)
-		REPORT_ERROR("Micrograph " + v.mic + " has changed since the virtual particles in " + v.path
-		             + " were extracted from it (checksum " + now + ", expected " + v.mic_checksum
-		             + "). Restore the original micrograph, or re-extract the particles.");
+		REPORT_ERROR((v.polish ? "Movie " : "Micrograph ") + source + " has changed since the virtual particles in " + v.path
+		             + " were made from it (checksum " + now + ", expected " + v.mic_checksum
+		             + "). Restore the original file, or make the particles again.");
 	std::lock_guard<std::mutex> guard(g_mutex);
 	g_verified.insert(tag);
 }
@@ -513,6 +691,58 @@ void verifyMicrograph(const VStack& v)
 // Extraction: the plain 2D path of relion_preprocess, bit for bit
 // ---------------------------------------------------------------------------
 
+// The CTF with magnification and symmetric aberrations, read exactly as relion_preprocess reads it:
+// CTF::readByGroup through an optics group with that pixel size, voltage, Cs, Q0, box P and aberrations
+// (one ObservationModel per optics and box, kept for the run: it also keeps the Zernike phases)
+void readAberratedCtf(const ParticleCtf& p, long P, CTF& c)
+{
+	// never destroyed: background cache builders may still read particles while the process exits
+	static std::mutex& mutex = *new std::mutex;
+	static std::map<std::string, std::unique_ptr<ObservationModel> >& models = *new std::map<std::string, std::unique_ptr<ObservationModel> >;
+	const std::vector<double>& a = p.aberr;
+	std::ostringstream key;
+	key.precision(17);
+	key << P << " " << p.kV << " " << p.Cs << " " << p.Q0;
+	for (double x : a) key << " " << x;
+	ObservationModel* om;
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		std::unique_ptr<ObservationModel>& slot = models[key.str()];
+		if (!slot)
+		{
+			MetaDataTable optics;
+			optics.setName("optics");
+			optics.addObject();
+			optics.setValue(EMDL_IMAGE_OPTICS_GROUP_NAME, std::string("opticsGroup1"));
+			optics.setValue(EMDL_IMAGE_OPTICS_GROUP, 1);
+			optics.setValue(EMDL_IMAGE_PIXEL_SIZE, a[0]);
+			optics.setValue(EMDL_IMAGE_SIZE, (int)P);
+			optics.setValue(EMDL_IMAGE_DIMENSIONALITY, 2);
+			optics.setValue(EMDL_CTF_VOLTAGE, p.kV);
+			optics.setValue(EMDL_CTF_CS, p.Cs);
+			optics.setValue(EMDL_CTF_Q0, p.Q0);
+			optics.setValue(EMDL_IMAGE_MAG_MATRIX_00, a[1]);
+			optics.setValue(EMDL_IMAGE_MAG_MATRIX_01, a[2]);
+			optics.setValue(EMDL_IMAGE_MAG_MATRIX_10, a[3]);
+			optics.setValue(EMDL_IMAGE_MAG_MATRIX_11, a[4]);
+			if (a.size() > 5)
+				optics.setValue(EMDL_IMAGE_EVEN_ZERNIKE_COEFFS, std::vector<double>(a.begin() + 5, a.end()));
+			slot.reset(new ObservationModel(optics));
+		}
+		om = slot.get();
+	}
+	MetaDataTable part;
+	part.addObject();
+	part.setValue(EMDL_IMAGE_OPTICS_GROUP, 1);
+	part.setValue(EMDL_CTF_DEFOCUSU, p.defU);
+	part.setValue(EMDL_CTF_DEFOCUSV, p.defV);
+	part.setValue(EMDL_CTF_DEFOCUS_ANGLE, p.angle);
+	part.setValue(EMDL_CTF_BFACTOR, p.bfac);
+	part.setValue(EMDL_CTF_SCALEFACTOR, p.scale);
+	part.setValue(EMDL_CTF_PHASESHIFT, p.phase);
+	c.readByGroup(part, om, 0);
+}
+
 /* Preprocessing::extractParticlesFromOneMicrograph windows the box out of the
  * micrograph filling out-of-range pixels with the micrograph mean, then
  * overwrites every one of those with the nearest edge pixel (x first, then y);
@@ -520,7 +750,7 @@ void verifyMicrograph(const VStack& v)
  * performPerImageOperations then rescales, re-windows, normalises and inverts,
  * and the stack writer rounds to float or half. */
 void extractOne(const Micrograph& m, const Recipe& r, long xpos, long ypos, double psi,
-                double cx, double cy, double angle, MultidimArray<RFLOAT>& out)
+                double cx, double cy, double angle, const ParticleCtf* ctf, MultidimArray<RFLOAT>& out)
 {
 	Image<RFLOAT> I;
 	if (r.rectangular() || r.rotated)
@@ -533,6 +763,62 @@ void extractOne(const Micrograph& m, const Recipe& r, long xpos, long ypos, doub
 			extractrect::cutRotatedBox(at, m.nx, m.ny, cx, cy, r.extract_size, ny, angle, r.interpolation, I());
 		else
 			extractrect::cutBox(at, m.nx, m.ny, xpos, ypos, r.extract_size, ny, I());
+	}
+	else if (r.premultiplied())
+	{
+		/* relion_preprocess --premultiply_ctf: the premultiply_size box, with the
+		 * micrograph average off the micrograph, times the CTF, cut to extract_size;
+		 * then pixels off the micrograph take the nearest edge pixel (x first, then y). */
+		const long e = r.extract_size;
+		const long P = r.premultiply_size == Recipe::PREMULTIPLY_AUTO
+		             ? autoPremultiplySize(*ctf, r.ctf_angpix, r.extract_size, r.scale > 0 ? r.scale : r.extract_size)
+		             : r.premultiply_size;
+		const long first = FIRST_XMIPP_INDEX(P);
+		const bool off = xpos + first < 0 || xpos + LAST_XMIPP_INDEX(P) >= m.nx
+		              || ypos + first < 0 || ypos + LAST_XMIPP_INDEX(P) >= m.ny;
+		const RFLOAT avg = off ? m.mean() : 0.;
+		I = Image<RFLOAT>(P, P);
+		for (long i = 0; i < P; i++)
+		{
+			const long y = ypos + first + i;
+			for (long j = 0; j < P; j++)
+			{
+				const long x = xpos + first + j;
+				DIRECT_A2D_ELEM(I(), i, j) = (y < 0 || y >= m.ny || x < 0 || x >= m.nx) ? avg : m.at(y, x);
+			}
+		}
+		I().setXmippOrigin();
+
+		FourierTransformer transformer;
+		MultidimArray<Complex> FT;
+		transformer.FourierTransform(I(), FT, false);
+		MultidimArray<RFLOAT> Fctf(YSIZE(FT), XSIZE(FT));
+		CTF c;
+		if (ctf->aberr.empty())
+			c.setValues(ctf->defU, ctf->defV, ctf->angle, ctf->kV, ctf->Cs, ctf->Q0, ctf->bfac, ctf->scale, ctf->phase);
+		else
+			readAberratedCtf(*ctf, P, c);
+		c.getFftwImage(Fctf, P, P, r.ctf_angpix, false, false, r.ctf_intact_first_peak, true, false);
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(FT)
+			DIRECT_MULTIDIM_ELEM(FT, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
+		transformer.inverseFourierTransform(FT, I());
+		if (e != P)
+			I().window(FIRST_XMIPP_INDEX(e), FIRST_XMIPP_INDEX(e), LAST_XMIPP_INDEX(e), LAST_XMIPP_INDEX(e));
+
+		if (off)
+		{
+			MultidimArray<RFLOAT>& A = I();
+			FOR_ALL_ELEMENTS_IN_ARRAY2D(A)
+			{
+				if (j + xpos < 0) A2D_ELEM(A, i, j) = A2D_ELEM(A, i, -xpos);
+				else if (j + xpos >= m.nx) A2D_ELEM(A, i, j) = A2D_ELEM(A, i, m.nx - xpos - 1);
+			}
+			FOR_ALL_ELEMENTS_IN_ARRAY2D(A)
+			{
+				if (i + ypos < 0) A2D_ELEM(A, i, j) = A2D_ELEM(A, -ypos, j);
+				else if (i + ypos >= m.ny) A2D_ELEM(A, i, j) = A2D_ELEM(A, m.ny - ypos - 1, j);
+			}
+		}
 	}
 	else
 	{
@@ -573,11 +859,236 @@ void extractOne(const Micrograph& m, const Recipe& r, long xpos, long ypos, doub
 
 inline double psiOf(const VStack& v, size_t i) { return v.psi.empty() ? 0. : v.psi[i]; }
 
-void extractIndex(const Micrograph& m, const VStack& v, size_t i, MultidimArray<RFLOAT>& out)
+// ---------------------------------------------------------------------------
+// Polished particles: recombined from the movie frames, by the function Polish uses
+// ---------------------------------------------------------------------------
+
+/// Cores this process may use, shared with the other ranks on its node.
+int localCores()
 {
+	// Ranks of one node share its cores, and each sees them all unless the launcher binds them
+	int local_ranks = 1;
+	for (const char* var : {"OMPI_COMM_WORLD_LOCAL_SIZE", "SLURM_NTASKS_PER_NODE", "MPI_LOCALNRANKS"})
+	{
+		const char* r = getenv(var);
+		if (r != NULL && atoi(r) > 0) { local_ranks = atoi(r); break; }
+	}
+	return std::max(1, (int)resrep::allowedCores().size() / local_ranks);
+}
+
+/// Polished: the frame sums of a micrograph's particles (Fourier space), those with the same window in one stack
+struct Sums {
+	std::vector<BufferedImage<Complex> > stack;      // one per window size, smallest first
+	std::vector<std::vector<int> > members;          // the particles of each stack
+	std::vector<std::pair<int, int> > at;            // particle -> (stack, slice)
+
+	explicit Sums(const VStack& v) : at(v.win.size())
+	{
+		std::map<int, int> index;
+		for (int w : v.win) index[w] = 0;
+		int n = 0;
+		for (auto& i : index) i.second = n++;
+		members.resize(n);
+		stack.resize(n);
+		for (size_t p = 0; p < v.win.size(); p++)
+		{
+			const int g = index[v.win[p]];
+			at[p] = std::make_pair(g, (int)members[g].size());
+			members[g].push_back(p);
+		}
+	}
+	Complex* of(int p) { return &stack[at[p].first](0, 0, at[p].second); }
+};
+
+bool readSum(const VStack& v, Sums& sums);
+void storeSum(const VStack& v, Sums& sums, int threads);
+
+/// The frame sums of `v` from its movie, read by `mh`: one pass over the particles of each window size
+void makeSums(const VStack& v, MicrographHandler& mh, Sums& sums, int threads)
+{
+	const PolishRecipe& r = *v.polish;
+	for (size_t g = 0; g < sums.stack.size(); g++)
+	{
+		const int s = v.win[sums.members[g][0]];
+		MetaDataTable mdt;
+		std::vector<std::vector<gravis::d2Vector> > tracks;
+		for (int p : sums.members[g])
+		{
+			mdt.addObject();
+			mdt.setValue(EMDL_MICROGRAPH_NAME, v.mic);
+			mdt.setValue(EMDL_IMAGE_COORD_X, (RFLOAT)v.cx[p]);
+			mdt.setValue(EMDL_IMAGE_COORD_Y, (RFLOAT)v.cy[p]);
+			tracks.push_back(v.tracks[p]);
+		}
+		// The dose weights fall off over the same resolution in every window: sigma is in pixels of box r.s
+		std::vector<gravis::d2Vector> bk = r.bk;
+		if (s != r.s) for (gravis::d2Vector& b : bk) b.x = b.x * s / r.s;
+		const std::vector<Image<RFLOAT> > weights = DamageHelper::computeWeights(bk, s / 2 + 1);
+		sums.stack[g] = FrameRecombiner::sumMicrograph(mdt, mh, tracks, s, r.angpix, r.data_angpix, weights, threads);
+	}
+}
+
+/// Every particle of a polished stack, rounded as the stack would be, one after the other.
+void computePolished(const VStack& v, std::vector<float>& pixels)
+{
+	const PolishRecipe& r = *v.polish;
+
+	// A MicrographHandler is not thread-safe: one micrograph at a time, all cores on it
+	// (never destroyed: background cache builders may still read particles while the process exits)
+	static std::mutex& mutex = *new std::mutex;
+	static std::map<std::string, std::unique_ptr<MicrographHandler> >& handlers = *new std::map<std::string, std::unique_ptr<MicrographHandler> >;
+	std::lock_guard<std::mutex> guard(mutex);
+
+	const int threads = localCores();
+	// From version 5 the sums are rounded to 16 bits, read from the cache or made now: the same particles either way
+	const bool rounded = v.version >= DESCRIPTOR_VERSION_POLISH_SUM16;
+	Sums sums(v);
+	if (!(rounded && readSum(v, sums)))
+	{
+		std::ostringstream key;
+		key.precision(17);
+		key << r.corr_mic << " " << r.first_frame << " " << r.last_frame << " " << r.eer_upsampling << " " << r.eer_grouping
+		    << " " << r.movie_angpix << " " << r.coords_angpix << " " << r.hot_cutoff;
+		std::unique_ptr<MicrographHandler>& mh = handlers[key.str()];
+		if (!mh)
+		{
+			MetaDataTable mdt;
+			mdt.addObject();
+			mdt.setValue(EMDL_MICROGRAPH_NAME, v.mic);
+			MicrographHandler* h = new MicrographHandler();
+			h->corrMicFn = r.corr_mic;
+			h->firstFrame = r.first_frame;
+			h->lastFrame = r.last_frame;
+			h->eer_upsampling = r.eer_upsampling;
+			h->eer_grouping = r.eer_grouping;
+			h->movie_angpix = r.movie_angpix;
+			h->coords_angpix = r.coords_angpix;
+			h->hotCutoff = r.hot_cutoff;
+			int fc;
+			double dose;
+			std::string metaFn;
+			h->init(std::vector<MetaDataTable>(1, mdt), false, threads, fc, dose, metaFn);
+			mh.reset(h);
+		}
+
+		// Several window sizes: the movie is decoded once and kept for the passes after the first, if it fits
+		mh->keepForCombination = sums.stack.size() > 1;
+		makeSums(v, *mh, sums, threads);
+		mh->releaseKept();
+		if (rounded) storeSum(v, sums, threads);
+	}
+	Image<RFLOAT> stack(r.out_size, r.out_size, 1, v.cx.size());
+	RawImage<RFLOAT> out(stack);
+	#pragma omp parallel for num_threads(threads)
+	for (long p = 0; p < (long)v.cx.size(); p++)
+	{
+		BufferedImage<Complex> sum = sums.stack[sums.at[p].first].getSliceRef(sums.at[p].second);
+		MultidimArray<RFLOAT> ctf;
+		const bool has_ctf = v.recipe.premultiplied();
+		if (has_ctf) ctfImage(v.ctf[p], v.win[p], r.angpix, ctf);
+		FrameRecombiner::finishParticle(sum, has_ctf ? &ctf : NULL, out.getSliceRef(p));
+	}
+
+	pixels.resize(MULTIDIM_SIZE(stack()));
+	for (size_t n = 0; n < pixels.size(); n++)
+	{
+		const RFLOAT x = DIRECT_MULTIDIM_ELEM(stack(), n);
+		pixels[n] = r.float16 ? half2float(float2half((float)x)) : (float)x;
+	}
+}
+
+/// A polished stack's particles, computed once for all of them (the movie has to be read whole)
+struct Polished {
+	std::string key;
+	std::mutex m;
+	bool done = false;
+	std::vector<float> pixels;
+};
+
+/// How many bytes of recombined micrographs are kept: RELION_VPOLISH_MEMORY_GB, else a tenth of the memory
+/// that is free now, but room for two micrographs at least (a reader may alternate between two). Said once.
+size_t polishedBudget(size_t one_stack_bytes)
+{
+	const char* e = getenv("RELION_VPOLISH_MEMORY_GB");
+	long long budget;
+	std::string why;
+	if (e != NULL && e[0] != '\0')
+	{
+		budget = (long long)(atof(e) * 1073741824.);
+		why = "RELION_VPOLISH_MEMORY_GB";
+	}
+	else
+	{
+		const long long avail = asyncwrite::memoryAvailableBytes();
+		budget = avail >= 0 ? avail / 10 : 1LL << 30;
+		why = "a tenth of the free memory";
+	}
+	const long long least = 2 * (long long)one_stack_bytes;
+	static std::once_flag said;
+	std::call_once(said, [&]()
+	{
+		std::cout << " Virtual polished particles: up to " << std::max(budget, least) / 1048576
+		          << " MB of recombined micrographs kept in memory (" << why << ", at least two micrographs; "
+		          << "RELION_VPOLISH_MEMORY_GB sets it)" << std::endl;
+	});
+	return (size_t)std::max(budget, least);
+}
+
+/// The recombined particles of `v`'s micrograph, from memory or computed now; the most recently used are
+/// kept (see polishedBudget). The caller holds the result while it copies from it.
+std::shared_ptr<Polished> polishedPixels(const VStack& v)
+{
+	// never destroyed: background cache builders may still read particles while the process exits
+	static std::mutex& mutex = *new std::mutex;
+	static std::list<std::shared_ptr<Polished> >& recent = *new std::list<std::shared_ptr<Polished> >;
+	std::shared_ptr<Polished> p;
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		for (std::list<std::shared_ptr<Polished> >::iterator it = recent.begin(); it != recent.end(); ++it)
+			if ((*it)->key == v.key) { p = *it; recent.erase(it); break; }
+		if (!p) { p.reset(new Polished()); p->key = v.key; }
+		recent.push_front(p);
+		// whole micrographs at a time; one being computed has no pixels yet and counts as one stack
+		const size_t one = sizeof(float) * (size_t)v.polish->out_size * v.polish->out_size * v.x.size();
+		const size_t budget = polishedBudget(one);
+		size_t used = 0;
+		for (std::list<std::shared_ptr<Polished> >::iterator it = recent.begin(); it != recent.end();)
+		{
+			used += std::max(one, (*it)->pixels.size() * sizeof(float));
+			if (used > budget && it != recent.begin() && it != ++recent.begin()) it = recent.erase(it);
+			else ++it;
+		}
+	}
+	std::lock_guard<std::mutex> guard(p->m);
+	if (!p->done)
+	{
+		computePolished(v, p->pixels);
+		p->done = true;
+	}
+	return p;
+}
+
+void copyPolished(const VStack& v, const Polished& p, size_t i, MultidimArray<RFLOAT>& out)
+{
+	const int n = v.polish->out_size;
+	out.resize(n, n);
+	for (size_t k = 0; k < (size_t)n * n; k++)
+		DIRECT_MULTIDIM_ELEM(out, k) = p.pixels[(size_t)n * n * i + k];
+	out.setXmippOrigin();
+}
+
+void extractIndex(const Micrograph* m, const VStack& v, size_t i, MultidimArray<RFLOAT>& out, const Polished* pinned = NULL)
+{
+	if (v.polish)
+	{
+		if (pinned != NULL) copyPolished(v, *pinned, i, out);
+		else copyPolished(v, *polishedPixels(v), i, out);
+		return;
+	}
 	const bool rot = v.recipe.rotated;
-	extractOne(m, v.recipe, v.x[i], v.y[i], psiOf(v, i),
-	           rot ? v.cx[i] : 0., rot ? v.cy[i] : 0., rot ? v.angle[i] : 0., out);
+	extractOne(*m, v.recipe, v.x[i], v.y[i], psiOf(v, i),
+	           rot ? v.cx[i] : 0., rot ? v.cy[i] : 0., rot ? v.angle[i] : 0.,
+	           v.ctf.empty() ? NULL : &v.ctf[i], out);
 }
 
 // ---------------------------------------------------------------------------
@@ -745,12 +1256,256 @@ bool cacheUnwritable(const std::string& dir)
 	return it != g_unwritable.end() && time(NULL) < it->second;
 }
 
+// ---------------------------------------------------------------------------
+// Polished particles: the frame sums, kept so that a new CTF does not need the movie again
+// ---------------------------------------------------------------------------
+
+const char SUM_MAGIC[8] = {'R', 'V', 'P', 'C', 'S', 'U', 'M', 'S'};
+
+/// False with RELION_VPOLISH_SUMS=0: the sums are then made from the movie whenever they are needed.
+bool sumsKept()
+{
+	const char* e = getenv("RELION_VPOLISH_SUMS");
+	return !(e != NULL && e[0] == '0');
+}
+
+/// The frame sums of `v` from the cache, as storeSum left them; false if they are not there.
+/// File: the header, each particle's window (uint32), then each particle's sum (re, im as float16).
+/// `max_bytes` > 0: not if the sums are larger. Reads only (called from a background thread too).
+bool loadSumFile(const VStack& v, std::vector<float16>& buf, double max_bytes = 0.)
+{
+	const std::string dir = cacheDirectory();
+	if (dir.empty() || !sumsKept()) return false;
+	const size_t pc = v.win.size();
+	std::vector<size_t> start(pc + 1, 0);   // in float16 values
+	for (size_t p = 0; p < pc; p++) start[p + 1] = start[p] + (size_t)(v.win[p] / 2 + 1) * v.win[p] * 2;
+	if (max_bytes > 0. && start[pc] * sizeof(float16) > max_bytes) return false;
+	const size_t table = pc * sizeof(uint32_t);
+	int fd = open(entryPath(dir, v.sum_key).c_str(), O_RDONLY);
+	if (fd < 0) return false;
+	EntryHeader h;
+	struct stat st;
+	std::vector<uint32_t> win(pc);
+	bool ok = pread(fd, &h, sizeof(h), 0) == (ssize_t)sizeof(h)
+	       && fstat(fd, &st) == 0
+	       && memcmp(h.magic, SUM_MAGIC, 8) == 0
+	       && h.version == 2 && h.dtype == 12u && h.n == (uint64_t)pc && h.box == (uint32_t)v.polish->s
+	       && strncmp(h.key, v.sum_key.c_str(), sizeof(h.key)) == 0
+	       && (size_t)st.st_size == sizeof(h) + table + start[pc] * sizeof(float16)
+	       && pread(fd, win.data(), table, sizeof(h)) == (ssize_t)table;
+	for (size_t p = 0; ok && p < pc; p++) ok = win[p] == (uint32_t)v.win[p];
+	if (ok)
+	{
+		buf.resize(start[pc]);
+		size_t got = 0;
+		const size_t want = buf.size() * sizeof(float16);
+		while (got < want)
+		{
+			const ssize_t n = pread(fd, (char*)buf.data() + got, want - got, sizeof(h) + table + got);
+			if (n <= 0) break;
+			got += n;
+		}
+		ok = got == want;
+		if (ok) futimens(fd, NULL);   // recency for eviction
+	}
+	close(fd);
+	return ok;
+}
+
+// The sum files a reader will want next, being read in the background, by key: up to sumAheadDepth()
+// started while the current one (started earlier) is still waiting to be taken.
+std::mutex g_sum_ahead_mutex;
+std::map<std::string, std::shared_future<std::shared_ptr<std::vector<float16> > > > g_sum_ahead;
+// What the readers waited for sum files (seconds x 1e6) and how many they read, for the report
+std::atomic<long long> g_sum_wait_us(0), g_sum_reads(0), g_sum_reads_ahead(0);
+
+// Read-ahead depth, chosen from the measured wait unless RELION_VPOLISH_SUM_READ_AHEAD sets it: start at one
+// file, try one more after each window of SUM_WINDOW reads that still waited, keep it only if the wait per
+// file fell by a fifth (on a slow disc more files in flight only share the same bandwidth), else go back and stop.
+const int SUM_WINDOW = 8;
+std::atomic<int> g_sum_depth(-1);
+bool g_sum_depth_settled = false;
+long long g_win_us = 0, g_win_reads = 0;
+double g_prev_per_file = -1.;   // seconds per file at the depth before, -1: none yet
+
+/// How many sum files are read ahead (0 = off).
+int sumAheadDepth()
+{
+	int d = g_sum_depth;
+	if (d < 0)
+	{
+		const char* e = getenv("RELION_VPOLISH_SUM_READ_AHEAD");
+		const bool set = e != NULL && e[0] != '\0';
+		d = set ? std::max(0, atoi(e)) : 1;
+		std::lock_guard<std::mutex> guard(g_sum_ahead_mutex);
+		if (g_sum_depth < 0) { g_sum_depth_settled = set; g_sum_depth = d; }
+		d = g_sum_depth;
+	}
+	return d;
+}
+
+/// One read waited `us`; at the end of a window, try a deeper read-ahead or settle. `bytes`: one file's size.
+void adaptSumDepth(long long us, size_t bytes)
+{
+	sumAheadDepth();
+	std::lock_guard<std::mutex> guard(g_sum_ahead_mutex);
+	if (g_sum_depth_settled) return;
+	g_win_us += us;
+	if (++g_win_reads < SUM_WINDOW) return;
+	const double per_file = g_win_us / 1e6 / g_win_reads;
+	g_win_us = g_win_reads = 0;
+	const long long avail = asyncwrite::memoryAvailableBytes();
+	const int cap = std::min(8, (int)std::max(1., (avail < 0 ? 1e9 : 0.25 * avail) / std::max<size_t>(bytes, 1)));
+	if (g_prev_per_file >= 0. && per_file > 0.8 * g_prev_per_file)
+	{
+		g_sum_depth = g_sum_depth - 1;   // the deeper read-ahead did not help
+		g_sum_depth_settled = true;
+		return;
+	}
+	g_prev_per_file = per_file;
+	if (per_file > 0.02 && g_sum_depth < cap) g_sum_depth = g_sum_depth + 1;
+	else g_sum_depth_settled = true;
+}
+
+/// Start reading the frame sums of `v` in the background, for a readSum that follows: the file read then
+/// costs the reader no time. Not if the files read ahead would take more than a quarter of the free memory.
+void sumAhead(const std::shared_ptr<VStack>& v)
+{
+	const int depth = sumAheadDepth();
+	if (!v->polish || v->version < DESCRIPTOR_VERSION_POLISH_SUM16 || depth == 0) return;
+	const long long avail = asyncwrite::memoryAvailableBytes();   // -1: unknown
+	const double max_bytes = (avail < 0 ? 1e9 : 0.25 * avail) / depth;
+	std::lock_guard<std::mutex> guard(g_sum_ahead_mutex);
+	if (g_sum_ahead.count(v->sum_key)) return;
+	if ((int)g_sum_ahead.size() > depth) g_sum_ahead.erase(g_sum_ahead.begin());   // one nobody took
+	g_sum_ahead[v->sum_key] = std::async(std::launch::async, [v, max_bytes]
+	{
+		std::shared_ptr<std::vector<float16> > buf(new std::vector<float16>());
+		if (!loadSumFile(*v, *buf, max_bytes)) buf.reset();
+		return buf;
+	});
+}
+
+bool readSum(const VStack& v, Sums& sums)
+{
+	const size_t pc = v.win.size();
+	std::vector<size_t> start(pc + 1, 0);   // in float16 values
+	for (size_t p = 0; p < pc; p++) start[p + 1] = start[p] + (size_t)(v.win[p] / 2 + 1) * v.win[p] * 2;
+	std::shared_ptr<std::vector<float16> > ahead;
+	const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+	{
+		std::lock_guard<std::mutex> guard(g_sum_ahead_mutex);
+		std::map<std::string, std::shared_future<std::shared_ptr<std::vector<float16> > > >::iterator
+			it = g_sum_ahead.find(v.sum_key);
+		if (it != g_sum_ahead.end()) { ahead = it->second.get(); g_sum_ahead.erase(it); }
+	}
+	std::vector<float16> own;
+	if (!ahead && !loadSumFile(v, own)) return false;
+	const long long waited = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+	g_sum_wait_us += waited;
+	g_sum_reads++;
+	if (ahead) g_sum_reads_ahead++;
+	const std::vector<float16>& buf = ahead ? *ahead : own;
+	adaptSumDepth(waited, buf.size() * sizeof(float16));
+
+	for (size_t g = 0; g < sums.stack.size(); g++)
+	{
+		const int s = v.win[sums.members[g][0]];
+		sums.stack[g] = BufferedImage<Complex>(s / 2 + 1, s, sums.members[g].size());
+	}
+	#pragma omp parallel for num_threads(localCores())
+	for (long p = 0; p < (long)pc; p++)
+	{
+		const float16* b = &buf[start[p]];
+		Complex* d = sums.of(p);
+		for (size_t k = 0; k < (start[p + 1] - start[p]) / 2; k++)
+		{
+			d[k].real = half2float(b[2 * k]);
+			d[k].imag = half2float(b[2 * k + 1]);
+		}
+	}
+	return true;
+}
+
+/* Round the frame sums to 16 bits and write them to the cache (best effort, in the background). Each particle
+ * is first scaled by a power of two that brings its largest value to 16384..32768: the particle is normalised
+ * by its own power afterwards, so the scale drops out exactly, and no sum overflows or underflows 16 bits. */
+void storeSum(const VStack& v, Sums& sums, int threads)
+{
+	const size_t pc = v.win.size();
+	std::vector<size_t> start(pc + 1, 0);
+	for (size_t p = 0; p < pc; p++) start[p + 1] = start[p] + (size_t)(v.win[p] / 2 + 1) * v.win[p] * 2;
+	std::shared_ptr<std::vector<float16> > buf(new std::vector<float16>(start[pc]));
+	#pragma omp parallel for num_threads(threads)
+	for (long p = 0; p < (long)pc; p++)
+	{
+		Complex* d = sums.of(p);
+		const size_t n = (start[p + 1] - start[p]) / 2;
+		double top = 0.;
+		for (size_t k = 0; k < n; k++) top = std::max(top, std::max(std::fabs(d[k].real), std::fabs(d[k].imag)));
+		const double scale = (top > 0. && std::isfinite(top)) ? std::ldexp(1., 14 - std::ilogb(top)) : 1.;
+		float16* b = &(*buf)[start[p]];
+		for (size_t k = 0; k < n; k++)
+		{
+			b[2 * k] = float2half((float)(d[k].real * scale));
+			b[2 * k + 1] = float2half((float)(d[k].imag * scale));
+			d[k].real = half2float(b[2 * k]);
+			d[k].imag = half2float(b[2 * k + 1]);
+		}
+	}
+
+	const std::string dir = cacheDirectory();
+	if (dir.empty() || !sumsKept() || cacheUnwritable(dir)) return;
+	const std::string path = entryPath(dir, v.sum_key);
+	makeDirs(path.substr(0, path.find_last_of('/')));
+	static std::atomic<long> counter(0);
+	char host[256] = "host";
+	gethostname(host, sizeof(host) - 1);
+	std::ostringstream tmps;
+	tmps << path << ".tmp." << host << "." << getpid() << "." << counter++;
+	const std::string tmp = tmps.str();
+
+	EntryHeader h;
+	memset(&h, 0, sizeof(h));
+	memcpy(h.magic, SUM_MAGIC, 8);
+	h.version = 2;
+	h.dtype = 12;
+	h.n = pc;
+	h.box = v.polish->s;
+	strncpy(h.key, v.sum_key.c_str(), sizeof(h.key) - 1);
+	const std::vector<uint32_t> win(v.win.begin(), v.win.end());
+
+	// On the background writer (which waits when too much is queued), so that the caller goes on computing
+	const size_t want = buf->size() * sizeof(float16);
+	AsyncFileWriter::instance().submit([=]
+	{
+		const int fd = open(tmp.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0664);
+		bool ok = fd >= 0 && write(fd, &h, sizeof(h)) == (ssize_t)sizeof(h)
+		       && write(fd, win.data(), win.size() * sizeof(uint32_t)) == (ssize_t)(win.size() * sizeof(uint32_t));
+		for (size_t done = 0; ok && done < want;)
+		{
+			const ssize_t n = write(fd, (const char*)buf->data() + done, want - done);
+			if (n <= 0) ok = false; else done += n;
+		}
+		const int e = errno;
+		if (fd >= 0 && close(fd) != 0) ok = false;
+		if (ok && rename(tmp.c_str(), path.c_str()) == 0)
+			enforceCacheLimit(dir, (long long)(sizeof(h) + want));
+		else
+		{
+			unlink(tmp.c_str());
+			warnUnwritable(dir, strerror(e));
+		}
+	}, want);
+}
+
 /* Set up the cache entry of `v`: the micrograph, the temporary file and its header. False if the file cannot
  * be written. */
 bool prepareBuild(const std::string& dir, VStack& v, EntryBuild& b)
 {
 	verifyMicrograph(v);
-	b.mic = openMicrograph(v.mic);
+	if (v.polish) b.pol = polishedPixels(v);   // held by the entry, so that no other micrograph's reads push it out
+	else b.mic = openMicrograph(v.mic);
 	b.path = entryPath(dir, v.key);
 	makeDirs(b.path.substr(0, b.path.find_last_of('/')));
 
@@ -812,7 +1567,7 @@ bool helpBuild(VStack& v, EntryBuild& b, long idx, MultidimArray<RFLOAT>& out)
 		const size_t i = b.order[k];
 		try
 		{
-			extractIndex(*b.mic, v, i, img);
+			extractIndex(b.mic.get(), v, i, img, b.pol.get());
 			encode(img, v.recipe, buf);
 			if (pwrite(b.fd, buf.data(), b.one, sizeof(EntryHeader) + b.one * i) != (ssize_t)b.one)
 				b.failed = true;
@@ -861,6 +1616,7 @@ void finishBuild(const std::string& dir, VStack& v, EntryBuild& b)
 		std::lock_guard<std::mutex> g(v.build);
 		v.building.reset();
 	}
+	b.pol.reset();
 	std::lock_guard<std::mutex> l(b.m);
 	b.finished = true;
 	b.cv.notify_all();
@@ -1069,7 +1825,8 @@ BackgroundBuilds g_builds;
 Recipe::Recipe()
 	: extract_size(-1), scale(-1), window(-1), normalise(false), bg_radius(-1), ramp(true),
 	  white_dust(-1), black_dust(-1), invert_contrast(false), float16(false), angpix(1.),
-	  helical(false), helical_radius(-1.), extract_size_y(-1), rotated(false), interpolation(RESAMPLE_LINEAR)
+	  helical(false), helical_radius(-1.), extract_size_y(-1), rotated(false), interpolation(RESAMPLE_LINEAR),
+	  premultiply_size(-1), ctf_intact_first_peak(false), ctf_angpix(-1.)
 {}
 
 int Recipe::outputSize() const
@@ -1077,6 +1834,35 @@ int Recipe::outputSize() const
 	if (window > 0) return window;
 	if (scale > 0) return scale;
 	return extract_size;
+}
+
+// shortcut: the delocalisation ignores magnification and symmetric aberrations (c.aberr); a 4th-order Zernike term large enough to matter would need its own term
+int autoPremultiplySize(const ParticleCtf& c, double angpix, int extract_size, int output_size)
+{
+	const double V = c.kV * 1e3;
+	const double lambda = 12.2643247 / sqrt(V * (1. + V * 0.978466e-6));
+	const double Cs = c.Cs * 1e7;
+	const double smax = 0.5 / angpix * std::min(1., (double)output_size / extract_size);
+	double deloc = 0.;
+	for (double df : {c.defU, c.defV})
+	{
+		auto d = [&](double s) { return std::abs(lambda * df * s - Cs * lambda * lambda * lambda * s * s * s); };
+		deloc = std::max(deloc, d(smax));
+		if (Cs > 0. && df > 0.)
+		{
+			const double s_turn = sqrt(df / (3. * Cs * lambda * lambda));
+			if (s_turn < smax) deloc = std::max(deloc, d(s_turn));
+		}
+	}
+	const int cap = 4 * extract_size;
+	int P = extract_size + 2 * (int)std::ceil(deloc / angpix);
+	if (P >= cap) return cap;
+	for (P += P % 2; ; P += 2)
+	{
+		int n = P;
+		for (int f : {2, 3, 5}) while (n % f == 0) n /= f;
+		if (n == 1) return std::min(P, cap);
+	}
 }
 
 int Recipe::outputSizeY() const
@@ -1111,7 +1897,7 @@ void computeParticles(const std::string& fn_vstack, std::vector<MultidimArray<RF
 {
 	std::shared_ptr<VStack> v = getVStack(fn_vstack);
 	verifyMicrograph(*v);
-	std::shared_ptr<Micrograph> m = openMicrograph(v->mic);
+	std::shared_ptr<Micrograph> m = v->polish ? std::shared_ptr<Micrograph>() : openMicrograph(v->mic);
 
 	std::vector<size_t> order(v->x.size());
 	for (size_t i = 0; i < order.size(); i++) order[i] = i;
@@ -1121,13 +1907,229 @@ void computeParticles(const std::string& fn_vstack, std::vector<MultidimArray<RF
 
 	out.assign(v->x.size(), MultidimArray<RFLOAT>());
 	for (size_t k = 0; k < order.size(); k++)
-		extractIndex(*m, *v, order[k], out[order[k]]);
+		extractIndex(m.get(), *v, order[k], out[order[k]]);
 }
 
 void forget(const std::string& fn_vstack)
 {
 	std::lock_guard<std::mutex> guard(g_mutex);
 	g_vstacks.erase(fn_vstack);
+}
+
+void ctfImage(const ParticleCtf& c, int s, double angpix, MultidimArray<RFLOAT>& out)
+{
+	CTF ctf;
+	if (c.aberr.empty())
+		ctf.setValues(c.defU, c.defV, c.angle, c.kV, c.Cs, c.Q0, c.bfac, c.scale, c.phase);
+	else
+		readAberratedCtf(c, s, ctf);
+	out.resize(s, s / 2 + 1);
+	ctf.getFftwImage(out, s, s, angpix,
+		false,  // do_abs
+		false,  // do_only_flip_phases
+		false,  // do_intact_until_first_peak
+		true,   // do_damping
+		false); // do_ctf_padding
+}
+
+std::string polishSourceChecksum(const std::string& movie, const std::string& meta_fn)
+{
+	std::string out = micrographChecksum(movie);
+
+	// the whole motion record: small, and a re-run motion correction changes it
+	std::ifstream in(meta_fn.c_str(), std::ios::binary);
+	if (!in) REPORT_ERROR("Cannot read the motion record " + meta_fn + " of virtual polished particles.");
+	uint64_t h = 1469598103934665603ULL;
+	char buf[65536];
+	while (in.read(buf, sizeof(buf)) || in.gcount() > 0)
+		h = fnv1a((const unsigned char*)buf, (size_t)in.gcount(), h);
+	out += ":" + hex16(h);
+
+	// the gain reference and defect file it names: missing ones are part of the identity too
+	::Micrograph record(meta_fn);   // (the motion record class; vparticles has its own Micrograph)
+	for (const std::string& f : {std::string(record.getGainFilename()), std::string(record.fnDefect)})
+		out += ":" + (f.empty() ? std::string("-") : exists(f) ? micrographChecksum(f) : std::string("missing"));
+	return out;
+}
+
+void writePolishedDescriptor(const std::string& fn_vstack, const std::string& fn_movie, const PolishRecipe& r,
+                             const MetaDataTable& particles,
+                             const std::vector<std::vector<gravis::d2Vector> >& tracks,
+                             const std::vector<ParticleCtf>& ctf,
+                             const std::vector<int>& windows)
+{
+	const long n = particles.numberOfObjects();
+	if (!windows.empty() && (long)windows.size() != n)
+		REPORT_ERROR("writePolishedDescriptor: a window per particle (or none) is needed.");
+	const size_t fc = r.bk.size();
+	if ((long)tracks.size() != n || (!ctf.empty() && (long)ctf.size() != n) || fc != (size_t)(r.last_frame - r.first_frame + 1))
+		REPORT_ERROR("writePolishedDescriptor: a track per particle, a CTF per particle (or none) and a dose weight per frame are needed.");
+
+	std::ostringstream ps;
+	ps << r.corr_mic << " " << r.first_frame << " " << r.last_frame << " " << r.eer_upsampling << " " << r.eer_grouping
+	   << " " << exactString(r.movie_angpix) << " " << exactString(r.coords_angpix) << " " << exactString(r.data_angpix)
+	   << " " << exactString(r.hot_cutoff) << " " << r.s << " " << exactString(r.angpix) << " " << r.out_size;
+	std::string weights;
+	for (size_t f = 0; f < fc; f++)
+		weights += (f ? " " : "") + exactString(r.bk[f].x) + " " + exactString(r.bk[f].y);
+
+	std::string mic;
+	particles.getValue(EMDL_MICROGRAPH_NAME, mic, 0);
+
+	MetaDataTable head;
+	head.setIsList(true);
+	head.setName("vstack");
+	head.addObject();
+	head.setValue(EMDL_VSTACK_VERSION, windows.empty() ? DESCRIPTOR_VERSION_POLISH_SUM16 : DESCRIPTOR_VERSION_POLISH_WINDOWS);
+	head.setValue(EMDL_MICROGRAPH_NAME, mic);
+	head.setValue(EMDL_MICROGRAPH_MOVIE_NAME, fn_movie);
+	head.setValue(EMDL_MICROGRAPH_METADATA_NAME, r.meta_fn);
+	head.setValue(EMDL_VSTACK_MICROGRAPH_CHECKSUM, polishSourceChecksum(fn_movie, r.meta_fn));
+	head.setValue(EMDL_IMAGE_SIZE, r.out_size);
+	head.setValue(EMDL_IMAGE_PIXEL_SIZE, r.angpix);
+	head.setValue(EMDL_VSTACK_FLOAT16, r.float16);
+	head.setValue(EMDL_VSTACK_POLISH, ps.str());
+	head.setValue(EMDL_VSTACK_FRAME_WEIGHTS, weights);
+	if (!ctf.empty())
+	{
+		head.setValue(EMDL_VSTACK_PREMULTIPLY_SIZE, r.s);
+		head.setValue(EMDL_VSTACK_CTF_ANGPIX, exactString(r.angpix));
+	}
+
+	MetaDataTable parts;
+	parts.setName("particles");
+	for (long i = 0; i < n; i++)
+	{
+		RFLOAT x, y;
+		particles.getValue(EMDL_IMAGE_COORD_X, x, i);
+		particles.getValue(EMDL_IMAGE_COORD_Y, y, i);
+		std::string track;
+		for (size_t f = 0; f < fc; f++)
+			track += (f ? " " : "") + exactString(tracks[i][f].x) + " " + exactString(tracks[i][f].y);
+		parts.addObject();
+		parts.setValue(EMDL_IMAGE_COORD_X, (RFLOAT)std::floor(x + 0.5));
+		parts.setValue(EMDL_IMAGE_COORD_Y, (RFLOAT)std::floor(y + 0.5));
+		parts.setValue(EMDL_VSTACK_CENTRE_X, exactString(x));
+		parts.setValue(EMDL_VSTACK_CENTRE_Y, exactString(y));
+		parts.setValue(EMDL_VSTACK_TRACK, track);
+		if (!ctf.empty()) parts.setValue(EMDL_VSTACK_CTF, ctfString(ctf[i]));
+		if (!windows.empty()) parts.setValue(EMDL_VSTACK_PREMULTIPLY_SIZE, windows[i]);
+	}
+
+	const std::string tmp = fn_vstack + ".tmp." + integerToString(getpid());
+	{
+		std::ofstream fh(tmp.c_str());
+		if (!fh) REPORT_ERROR("Cannot write virtual particle stack " + fn_vstack);
+		fh << DESCRIPTOR_MAGIC;
+		head.write(fh);
+		parts.write(fh);
+	}
+	if (rename(tmp.c_str(), fn_vstack.c_str()) != 0)
+		REPORT_ERROR("Cannot write virtual particle stack " + fn_vstack + ": " + std::string(strerror(errno)));
+
+	std::lock_guard<std::mutex> guard(g_mutex);
+	g_vstacks.erase(fn_vstack);
+}
+
+std::vector<double> opticsAberrations(const ObservationModel& obs, int og)
+{
+	if (!obs.hasMagMatrices && !obs.hasEvenZernike) return std::vector<double>();
+	const Matrix2D<RFLOAT>& M = obs.getMagMatrix(og);
+	std::vector<double> a = {obs.getPixelSize(og), M(0,0), M(0,1), M(1,0), M(1,1)};
+	std::vector<double> z;
+	if (obs.hasEvenZernike && obs.opticsMdt.getValue(EMDL_IMAGE_EVEN_ZERNIKE_COEFFS, z, og))
+		a.insert(a.end(), z.begin(), z.end());
+	return a;
+}
+
+void setCurrentCtfs(const MetaDataTable& particles, ObservationModel& obs)
+{
+	if (!particles.containsLabel(EMDL_IMAGE_NAME) || !obs.opticsMdt.containsLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED))
+		return;
+	std::unordered_map<std::string, std::vector<ParticleCtf> > found;
+	for (long i = 0; i < (long)particles.numberOfObjects(); i++)
+	{
+		const int og = obs.getOpticsGroup(particles, i);
+		if (!obs.getCtfPremultiplied(og)) continue;
+		FileName fn_img, fn_stack;
+		long int no;
+		particles.getValue(EMDL_IMAGE_NAME, fn_img, i);
+		fn_img.decompose(no, fn_stack);
+		if (no < 1) continue;
+		CTF c;
+		c.readByGroup(particles, &obs, i);
+		std::vector<ParticleCtf>& list = found[fn_stack];
+		if ((long)list.size() < no)
+			list.resize(no, ParticleCtf{NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN});
+		list[no - 1] = ParticleCtf{c.DeltafU, c.DeltafV, c.azimuthal_angle, c.kV, c.Cs, c.Q0, c.Bfac, c.scale, c.phase_shift,
+		                           opticsAberrations(obs, og)};
+	}
+
+	std::lock_guard<std::mutex> guard(g_mutex);
+	for (std::unordered_map<std::string, std::vector<ParticleCtf> >::iterator it = found.begin(); it != found.end(); ++it)
+	{
+		g_current_ctfs[it->first].swap(it->second);
+		g_vstacks.erase(it->first);   // the next read takes the new CTF (and with it the new cache key)
+	}
+}
+
+void prebuildEntries(const MetaDataTable& particles, int rank, int nr_ranks)
+{
+	const char* off = getenv("RELION_VPARTICLE_PREBUILD");
+	if (nr_ranks < 2 || (off != NULL && off[0] == '0') || !particles.containsLabel(EMDL_IMAGE_NAME)) return;
+	const std::string dir = cacheDirectory();
+	if (dir.empty() || cacheUnwritable(dir)) return;
+
+	// Every rank sees the same table, so every rank makes the same list and the same shares
+	std::map<std::string, long> count;
+	for (long i = 0; i < (long)particles.numberOfObjects(); i++)
+	{
+		FileName fn_img, fn_stack;
+		long int no;
+		particles.getValue(EMDL_IMAGE_NAME, fn_img, i);
+		fn_img.decompose(no, fn_stack);
+		if (no >= 1 && isVirtualStackFormat(fn_stack.getExtension())) count[fn_stack]++;
+	}
+
+	std::vector<std::pair<long, std::string> > todo;   // (particles, stack) of the entries that are missing
+	for (std::map<std::string, long>::const_iterator it = count.begin(); it != count.end(); ++it)
+	{
+		const std::shared_ptr<VStack> v = getVStack(it->first);
+		struct stat st;
+		if (v->polish && stat(entryPath(dir, v->key).c_str(), &st) != 0)
+			todo.push_back(std::make_pair(-it->second, it->first));
+	}
+	if (todo.empty()) return;
+
+	// Largest first, each to the rank with the least so far: the work is about proportional to the particles
+	std::sort(todo.begin(), todo.end());
+	std::vector<long> load(nr_ranks, 0);
+	std::vector<std::string> mine;
+	for (size_t k = 0; k < todo.size(); k++)
+	{
+		const int r = (int)(std::min_element(load.begin(), load.end()) - load.begin());
+		load[r] += 1 - todo[k].first;   // +1: reading a movie costs something for any number of particles
+		if (r == rank) mine.push_back(todo[k].second);
+	}
+	if (rank == 0)
+		std::cout << " Virtual polished particles: " << todo.size() << " micrographs are recombined once, shared by "
+		          << nr_ranks << " processes, before the first iteration (RELION_VPARTICLE_PREBUILD=0 lets the readers do it)"
+		          << std::endl;
+
+	MultidimArray<RFLOAT> scratch;
+	for (size_t k = 0; k < mine.size(); k++)
+	{
+		for (size_t d = 1; d <= (size_t)sumAheadDepth() && k + d < mine.size(); d++) sumAhead(getVStack(mine[k + d]));
+		try { readThroughEntry(dir, *getVStack(mine[k]), 0, scratch); }
+		catch (...) {}   // a reader that needs these particles cuts them itself and reports real errors
+	}
+	if (rank == 1 && g_sum_reads > 0)
+		std::cout << " Virtual polished particles: process 1 read the frame sums of " << g_sum_reads << " micrographs ("
+		          << g_sum_reads_ahead << " ahead, in the background, " << sumAheadDepth() << " at a time, "
+		          << (getenv("RELION_VPOLISH_SUM_READ_AHEAD") ? "as RELION_VPOLISH_SUM_READ_AHEAD sets it"
+		                                                     : "chosen from the measured wait; RELION_VPOLISH_SUM_READ_AHEAD sets it, 0 = off")
+		          << ") and waited " << g_sum_wait_us / 1e6
+		          << " s for them" << std::endl;
 }
 
 std::string micrographChecksum(const std::string& fn_mic)
@@ -1172,8 +2174,12 @@ void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
                      const Recipe& r, const std::vector<std::pair<long, long> >& coords,
                      const std::vector<double>& psi,
                      const std::vector<double>& cx, const std::vector<double>& cy,
-                     const std::vector<double>& angle)
+                     const std::vector<double>& angle, const std::vector<ParticleCtf>& ctf)
 {
+	if (r.premultiplied() && (ctf.size() != coords.size() || (r.premultiply_size != Recipe::PREMULTIPLY_AUTO && r.premultiply_size < r.extract_size) || r.ctf_angpix <= 0.))
+		REPORT_ERROR("writeDescriptor: a premultiplied virtual stack needs a CTF per particle, a premultiply box at least the extraction box and a pixel size.");
+	if (r.premultiplied() && (r.rectangular() || r.rotated))
+		REPORT_ERROR("writeDescriptor: rectangular or rotated virtual particles cannot be CTF-premultiplied.");
 	if (r.rotated && (cx.size() != coords.size() || cy.size() != coords.size() || angle.size() != coords.size()))
 		REPORT_ERROR("writeDescriptor: a rotated virtual stack needs an exact centre and a box angle per particle.");
 	if ((r.rectangular() || r.rotated) && r.window > 0)
@@ -1189,7 +2195,7 @@ void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
 	head.setName("vstack");
 	head.addObject();
 	const bool v2 = r.rectangular() || r.rotated;
-	head.setValue(EMDL_VSTACK_VERSION, v2 ? DESCRIPTOR_VERSION : DESCRIPTOR_VERSION_SQUARE);
+	head.setValue(EMDL_VSTACK_VERSION, r.premultiplied() ? DESCRIPTOR_VERSION_PREMULT : v2 ? DESCRIPTOR_VERSION : DESCRIPTOR_VERSION_SQUARE);
 	head.setValue(EMDL_MICROGRAPH_NAME, fn_mic);
 	head.setValue(EMDL_VSTACK_MICROGRAPH_CHECKSUM, micrographChecksum(fn_mic));
 	head.setValue(EMDL_VSTACK_EXTRACT_SIZE, r.extract_size);
@@ -1221,6 +2227,12 @@ void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
 		head.setValue(EMDL_VSTACK_HELICAL, true);
 		head.setValue(EMDL_VSTACK_HELICAL_RADIUS, exactString(r.helical_radius));
 	}
+	if (r.premultiplied())
+	{
+		head.setValue(EMDL_VSTACK_PREMULTIPLY_SIZE, r.premultiply_size);
+		head.setValue(EMDL_VSTACK_CTF_INTACT_FIRST_PEAK, r.ctf_intact_first_peak);
+		head.setValue(EMDL_VSTACK_CTF_ANGPIX, exactString(r.ctf_angpix));
+	}
 
 	MetaDataTable parts;
 	parts.setName("particles");
@@ -1236,6 +2248,7 @@ void writeDescriptor(const std::string& fn_vstack, const std::string& fn_mic,
 			parts.setValue(EMDL_VSTACK_CENTRE_Y, exactString(cy[i]));
 			parts.setValue(EMDL_VSTACK_ANGLE, exactString(angle[i]));
 		}
+		if (r.premultiplied()) parts.setValue(EMDL_VSTACK_CTF, ctfString(ctf[i]));
 	}
 
 	// Written aside and renamed, so a reader never sees half a descriptor
@@ -1335,13 +2348,16 @@ void readParticle(const std::string& fn_vstack, long index, MultidimArray<RFLOAT
 
 	// No cache: cut just this particle; only the pages under its box are read
 	verifyMicrograph(*v);
-	std::shared_ptr<Micrograph> m = openMicrograph(v->mic);
-	extractIndex(*m, *v, index, out);
+	std::shared_ptr<Micrograph> m = v->polish ? std::shared_ptr<Micrograph>() : openMicrograph(v->mic);
+	extractIndex(m.get(), *v, index, out);
 }
 
 double micrographPixelSize(const std::string& fn_vstack)
 {
 	std::shared_ptr<VStack> v = getVStack(fn_vstack);
+	if (v->polish)
+		REPORT_ERROR("Virtual particle stack " + fn_vstack + " holds polished particles, which come from movie frames: "
+		             "fused extraction from the micrograph cannot make them.");
 	const Recipe& r = v->recipe;
 	return (r.scale > 0) ? r.angpix * r.scale / r.extract_size : r.angpix;
 }
@@ -1349,6 +2365,9 @@ double micrographPixelSize(const std::string& fn_vstack)
 void sameExtentBox(const std::string& fn_vstack, double angpix, int& nx, int& ny)
 {
 	std::shared_ptr<VStack> v = getVStack(fn_vstack);
+	if (v->polish)
+		REPORT_ERROR("Virtual particle stack " + fn_vstack + " holds polished particles, which come from movie frames: "
+		             "fused extraction from the micrograph cannot make them.");
 	const Recipe& r = v->recipe;
 	const double f = r.angpix / angpix;
 	nx = 2 * (int)std::ceil(r.outputSize() * f / 2. - 1e-9);
@@ -1378,6 +2397,8 @@ void readParticleFourier(const std::string& fn_vstack, long index, double angpix
 	const Recipe& r = v->recipe;
 	if (r.white_dust > 0. || r.black_dust > 0.)
 		REPORT_ERROR("Fused extraction does not support dust removal (" + fn_vstack + ").");
+	if (r.premultiplied())
+		REPORT_ERROR("Fused extraction does not support CTF-premultiplied particles (" + fn_vstack + ").");
 
 	verifyMicrograph(*v);
 	std::shared_ptr<Micrograph> m = openMicrograph(v->mic);
@@ -1462,6 +2483,25 @@ bool removeProjectCache(const std::string& project_dir)
 	// Leave Cache/ itself only if something else lives there
 	rmdir((project_dir + "/Cache").c_str());
 	return ok;
+}
+
+bool polishedSumsWanted()
+{
+	return sumsKept() && !cacheDirectory().empty();
+}
+
+void storePolishedSum(const std::string& fn_vstack, MicrographHandler& mh, int threads)
+{
+	const std::shared_ptr<VStack> v = getVStack(fn_vstack);
+	Sums sums(*v);
+	makeSums(*v, mh, sums, threads);
+	storeSum(*v, sums, threads);
+}
+
+void readUnpremultiplied()
+{
+	std::lock_guard<std::mutex> guard(g_mutex);
+	g_read_unpremultiplied = true;
 }
 
 void finishCacheBuilds()

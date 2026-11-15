@@ -785,6 +785,13 @@ enum EMDLabel
 	EMDL_VSTACK_CENTRE_X,
 	EMDL_VSTACK_CENTRE_Y,
 	EMDL_VSTACK_ANGLE,
+	EMDL_VSTACK_PREMULTIPLY_SIZE,
+	EMDL_VSTACK_CTF_INTACT_FIRST_PEAK,
+	EMDL_VSTACK_CTF_ANGPIX,
+	EMDL_VSTACK_CTF,
+	EMDL_VSTACK_POLISH,
+	EMDL_VSTACK_FRAME_WEIGHTS,
+	EMDL_VSTACK_TRACK,
 
 	EMDL_UNKNOWN_LABEL,
 
@@ -1385,6 +1392,13 @@ private:
 		EMDL::addLabel(EMDL_VSTACK_CENTRE_X, EMDL_STRING, "rlnVirtualCentreX", "Exact X-coordinate (micrograph pixels, full precision) a rotated virtual particle is centred on");
 		EMDL::addLabel(EMDL_VSTACK_CENTRE_Y, EMDL_STRING, "rlnVirtualCentreY", "Exact Y-coordinate (micrograph pixels, full precision) a rotated virtual particle is centred on");
 		EMDL::addLabel(EMDL_VSTACK_ANGLE, EMDL_STRING, "rlnVirtualAngle", "Angle (degrees, full precision) the box of a rotated virtual particle is turned by");
+		EMDL::addLabel(EMDL_VSTACK_PREMULTIPLY_SIZE, EMDL_INT, "rlnVirtualPremultiplySize", "Box (micrograph pixels) virtual particles are multiplied with their CTF in before being cut to rlnVirtualExtractSize; absent if not CTF-premultiplied");
+		EMDL::addLabel(EMDL_VSTACK_CTF_INTACT_FIRST_PEAK, EMDL_BOOL, "rlnVirtualCtfIntactFirstPeak", "Whether CTF premultiplication left frequencies up to the first CTF peak intact");
+		EMDL::addLabel(EMDL_VSTACK_CTF_ANGPIX, EMDL_STRING, "rlnVirtualCtfPixelSize", "Micrograph pixel size (A, full precision) the premultiplication CTF is computed at");
+		EMDL::addLabel(EMDL_VSTACK_CTF, EMDL_STRING, "rlnVirtualCtf", "CTF a virtual particle was premultiplied with at extraction, full precision: defocus U, V, angle, voltage, Cs, Q0, B-factor, scale, phase shift");
+		EMDL::addLabel(EMDL_VSTACK_POLISH, EMDL_STRING, "rlnVirtualPolish", "How Polish recombines the frames of a virtual polished stack, full precision: corrected micrographs STAR file, first and last frame, EER upsampling and grouping, movie, coordinate and particle pixel sizes, hot pixel threshold, box, pixel size and output size");
+		EMDL::addLabel(EMDL_VSTACK_FRAME_WEIGHTS, EMDL_STRING, "rlnVirtualFrameWeights", "Per-frame dose weights of a virtual polished stack, full precision: sigma (pixels) and scale of each frame");
+		EMDL::addLabel(EMDL_VSTACK_TRACK, EMDL_STRING, "rlnVirtualTrack", "Motion track of a virtual polished particle, full precision: x and y shift (pixels at the particle pixel size) per frame");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_SOURCE_CLASSES, EMDL_INT, "rlnClass2DConsensusSourceClasses", "Number of classes in each source replica");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_OCCUPIED_CLASSES, EMDL_INT, "rlnClass2DConsensusOccupiedClasses", "Number of consensus classes with assigned particles");
 		EMDL::addLabel(EMDL_CLASS2D_CONSENSUS_PATTERNS, EMDL_INT, "rlnClass2DConsensusPatterns", "Number of distinct cross-run assignment patterns");

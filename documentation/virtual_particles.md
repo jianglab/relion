@@ -107,9 +107,10 @@ recentring) — not the raw coordinates. Storing the raw values would let text
 round-off move a particle by a pixel: 1829.9999999 truncates to 1829, but
 prints as 1830.000000.
 
-The recipe covers plain 2D extraction and helical segments. CTF
-premultiplication, phase flipping and 3D sub-tomograms are refused in virtual
-mode with a clear error rather than approximated; they can be added later.
+The recipe covers plain 2D extraction, helical segments, rectangular and turned
+boxes, and CTF premultiplication (below). Phase flipping and 3D sub-tomograms
+are refused in virtual mode with a clear error rather than approximated; they
+can be added later.
 
 **Helical segments** normalise against the background outside a tube rather than
 a circle, so the recipe also records the tube radius in pixels of the extracted
@@ -118,6 +119,56 @@ stored as `%.17g` strings, not as STAR doubles, because `%12.6f` would move the
 tube mask by a rounding step and change pixels. The radius is computed by the
 same helper `relion_preprocess` uses for real stacks,
 `helicalBackgroundRadius()`, including its integer division when downscaling.
+
+**CTF premultiplication** (`--premultiply_ctf`, optionally
+`--premultiply_extract_size`, `--ctf_intact_first_peak`) multiplies each particle
+with its CTF in a box bigger than the final one and then cuts it down. The CTF
+moves high-resolution signal sideways by about λΔf·s (at 3 Å and 1.3 µm defocus
+on the tutorial, ~40 Å); a plain cut loses what moved out of the box, while
+multiplying in the big box brings that signal back to the particle before the
+cut (`relion_refine` then weights with CTF², as for any premultiplied optics
+group). The descriptor (version 3; older builds refuse it) records the box, the
+flag and the micrograph pixel size in the header, and each particle's CTF as a
+`%.17g` string `rlnVirtualCtf` (defocus U, V, angle, voltage, Cs, Q0, B-factor,
+scale, phase shift). The reader repeats `relion_preprocess` exactly: the big box
+with the micrograph average off the micrograph, times the CTF, cut to the
+extraction box, then pixels off the micrograph take the nearest edge pixel.
+
+`--premultiply_extract_size auto` (stacks and virtual particles) gives each
+particle its own big box: the extraction box plus twice the largest
+delocalisation |λΔf·s − Cs·λ³s³| up to the output Nyquist, for the larger of
+its two defoci, rounded up to an even size with factors 2, 3 and 5 only, at
+most 4× the extraction box (`vparticles::autoPremultiplySize`, shared by both).
+The descriptor records `-2` as the box, and the reader computes the box from the
+CTF in effect, so a defocus change from CTF refinement changes the box too.
+Extraction prints the range of boxes it chose.
+
+The CTF follows the particle STAR file. `ObservationModel::loadSafely`, which
+every program uses to read particles, hands the CTF of every particle of a
+premultiplied optics group to `vparticles::setCurrentCtfs()`. Where it differs
+from the recorded one by more than STAR-file round-off (1e-5 + 1e-6·|value|),
+the particle is computed with the new CTF, and the CTF values are part of the
+cache key, so after CTF refinement the particles are rebuilt once and the old
+entries simply stop being used. A real premultiplied stack cannot do this: it
+keeps the CTF it was extracted with while refinement weights with the new one.
+Programs that read images without a particle STAR file (`relion_image_handler`
+on the descriptor) get the recorded CTF. The CTF includes the optics group's
+anisotropic magnification and symmetric (even Zernike) aberrations, as
+`relion_preprocess` applies them, read through the same `CTF::readByGroup` path
+(`ParticleCtf::aberr`, recorded in `rlnVirtualCtf` after the 9 CTF values), so
+when CTF refinement fits them the particles follow too. The auto box ignores them.
+Fused extraction in `relion_reconstruct` refuses premultiplied stacks.
+
+CTF refinement fits premultiplied virtual particles as the plain particles the
+same extraction gives without premultiplication (`vparticles::readUnpremultiplied()`,
+called by `relion_ctf_refine` before it reads anything; the output STAR file stays
+premultiplied). On premultiplied pixels the fit is poor: on EMPIAR-10940 (box 256)
+the per-particle defocus scattered 152 Å within a micrograph against 61 Å on plain
+stacks, and Refine3D after CtfRefine fell from 2.67 to 2.74 Å; with the defocus
+fitted on plain particles it reached 2.54 Å. `RELION_CTF_REFINE_VIRTUAL_PLAIN=0`
+fits the premultiplied pixels instead. Real premultiplied stacks have no plain
+version: CtfRefine multiplies their predictions by the STAR file's CTF and weights
+by 1/(CTF² + 0.1) (`RELION_CTF_REFINE_PREMULT_EPS`), which helps only a little.
 
 **Dust removal is refused permanently, not just for now.** `removeDust()`
 replaces each dust pixel with `rnd_gaus(avg, stddev)` from a process-wide random
@@ -209,9 +260,104 @@ writes the same `particles.star` with the same CTF and optics columns — except
 that it reads only the micrograph *header*, and writes a `.vstack` instead of
 cutting and writing pixels. It is metadata-only and finishes in seconds.
 
-Opt-in, as with every new behaviour in this fork: the GUI's Extract job has a
-"Write virtual particles?" option whose default comes from
-`RELION_VIRTUAL_PARTICLES` (unset or `0` = No).
+The GUI's Extract job has "Write virtual particles?" and "Premultiply with the
+CTF?", both Yes for new jobs (`RELION_VIRTUAL_PARTICLES=0` makes No the default
+for the first). Premultiplication passes `--premultiply_ctf
+--premultiply_extract_size auto`: each particle is multiplied by its CTF in a box
+as large as its defocus needs, then cut to the particle box. It is left off for
+rectangular and rotated boxes, which `relion_preprocess` cannot premultiply. Job
+files saved before these defaults (no such option in them) keep both No. On the
+command line `relion_preprocess` is unchanged: virtual and premultiplied only when
+asked.
+
+### Writing (Polish): virtual polished particles
+
+`relion_motion_refine --combine_frames --virtual` (or `RELION_VIRTUAL_POLISH=1`
+as the default) estimates the motion as usual, then writes, per micrograph, a
+descriptor `<mic>_shiny.vstack` instead of `<mic>_shiny.mrcs`; the movies are
+not read a second time for the frame combination. The descriptor (version 4)
+records what Polish combines the frames with:
+
+- the corrected micrographs STAR file (micrograph -> motion record), the frame
+  range, EER upsampling and grouping, the movie, coordinate and particle pixel
+  sizes and the hot-pixel threshold (`rlnVirtualPolish`);
+- the box the frames are combined in, the output pixel size and the size the
+  particles are cut to (`--crop`);
+- the dose weight of every frame as (sigma, scale) (`rlnVirtualFrameWeights`),
+  from which `DamageHelper::computeWeights` gives the weights Polish used;
+- per particle its exact coordinates (after `--recenter`), its motion track in
+  pixels (`rlnVirtualTrack`, the values Polish reads back from `_tracks.star`)
+  and, with `--ctf_multiply`, its CTF (`rlnVirtualCtf`, with magnification and
+  even Zernike terms);
+- an identity checksum of the movie, the whole motion record, and the gain
+  reference and defect file that record names: if any of them has changed (a
+  re-run motion correction, a new gain), reading is an error, never a
+  silently different particle.
+
+Reading a particle recombines the whole micrograph (the movie has to be read
+anyway) with `FrameRecombiner::recombineMicrograph`, the function Polish itself
+now uses for its stacks. From descriptor version 5 on, each particle's frame sum
+is rounded to 16 bits before the CTF is applied, so that the sums can be cached at
+half the size; the particles therefore equal Polish's to within that rounding
+(about 5e-4 of the largest pixel value), not bit for bit. They are bit for bit the
+same whether the sums come from the cache or are made from the movie, so a
+virtual particle never depends on the cache
+(`tests/integration/test_polish_premultiplied.py`). Version-4 descriptors keep
+the unrounded sums and are Polish's bit for bit.
+The recombined micrographs are kept in memory, as many as fit in a tenth of the free
+memory (at least two; the size is printed once, `RELION_VPOLISH_MEMORY_GB` sets it); a
+cache entry being written holds its own micrograph, so readers elsewhere cannot push
+it out and force a recombination per particle. The on-disk cache holds them as it
+holds extracted particles. Premultiplied polished particles follow the
+CTF of their STAR file like premultiplied extracted ones, and CtfRefine reads
+them plain (unmultiplied) in the same way. Fused extraction refuses them. The GUI's Polish job has "Write virtual polished
+particles?" and "Premultiply with the CTF?", both Yes for new jobs
+(`RELION_VIRTUAL_POLISH=0` makes No the default for the first; the job always passes
+`--virtual` or `--no_virtual`, and `--ctf_multiply` when asked). Job files saved
+before these defaults keep both No.
+
+#### CTF premultiplication in Polish: window, per-particle windows, frame sums
+
+- **Window and box, chosen by the program.** `--ctf_multiply` without `--window`,
+  `--scale` or `--crop` combines the frames in a window as large as the largest
+  defocus of the optics group needs (`autoPremultiplySize`, the rule
+  `--premultiply_extract_size auto` uses), then crops to the particle box of the
+  input; both are printed. Giving `--window`/`--crop` (or the GUI's extraction and
+  re-scaled sizes) sets them by hand, e.g. a smaller final box than the input's.
+- **Per-particle windows** (with `--ctf_multiply`, stacks and virtual polished
+  particles alike, on by default; `RELION_VPOLISH_PARTICLE_WINDOWS=0` combines every
+  particle in the maximum window): each particle is combined in a window of its
+  own, as large as its own defocus needs and at most the maximum window (the one
+  above, which the largest defocus needs). Less work for the lower defoci; the
+  particles differ slightly from maximum-window premultiplication (correlation
+  0.999 on EMPIAR-10940 at 384 px, 0.965 on the test's noise-only 64 px particles,
+  where the weak CTF tails reach different noise) but keep the signal their CTF
+  spreads. Polish makes them in one pass over the movie per window size. Virtual
+  particles record the window per particle (`rlnVirtualPremultiplySize`,
+  descriptor version 6). On EMPIAR-10940 (286 movies, windows 576-1080 px) the
+  end-to-end run gave the same resolution as the maximum window,
+  and a 256 px final box the same final resolution as 384 px at about a tenth of
+  the refinement time.
+- **Frame sums cache** (`RELION_VPOLISH_SUMS=0` makes them from the movie whenever
+  needed): each particle's frame sum before the CTF, rounded to 16 bits, kept as
+  one `.vpc` file per micrograph in the virtual-particle cache, so that a new CTF
+  (CtfRefine) does not need the movie again. They are large: about 0.2 GB per
+  micrograph with windows up to 1080 px (61-86 GB for 286 micrographs). The cache
+  has no size limit unless `RELION_VPARTICLE_CACHE_MAX_GB` sets one, and can be
+  deleted at any time.
+- **Pre-build before the first iteration** (`relion_refine_mpi`;
+  `RELION_VPARTICLE_PREBUILD=0` lets the readers build entries as they go): the
+  missing cache entries are shared out over all processes, largest micrograph
+  first. Each process reads the frame sums of its next micrographs in the
+  background; how many at a time is chosen from the measured wait (start at one,
+  one more while the wait per file falls by a fifth, at most a quarter of the
+  free memory and 8; `RELION_VPOLISH_SUM_READ_AHEAD=N` fixes it, `0` turns it
+  off). Process 1 prints the reads, the read-ahead depth and the time it waited.
+  Measured on a network file system (65 GB of sums, cold): 630 s without
+  read-ahead, about 510 s with it, the rest bounded by the disc (~125 MB/s).
+- **Background cache writers**: `RELION_VPARTICLE_BUILDERS` threads (default half
+  the cores a process may use, shared by the processes on a node; `0` makes
+  readers write the entries themselves).
 
 ### Converting existing projects: `relion_stacks_to_virtual`
 
@@ -259,8 +405,8 @@ and stops with "unsupported MRC mode"; external programs (cryoSPARC, cryoDRGN,
 particles. That is the export path for external tools (cryoSPARC, cryoDRGN) and
 the thing to run before deleting micrographs.
 
-Derived particles — subtraction output, polished ("shiny") particles, simulations
-— are not windows of a micrograph and stay real stacks. A STAR file can mix both
+Derived particles — subtraction output, simulations — are not windows of a
+micrograph and stay real stacks (polished particles can be virtual: see above). A STAR file can mix both
 kinds freely, since every name says what it is.
 
 ## What changes for the user
@@ -288,8 +434,8 @@ kinds freely, since every name says what it is.
 3. **Cache management** alongside the existing stack cache: size limit and LRU
    eviction and removal by the clean-up tools are done; a GUI entry under
    "Manage cache" is still open.
-4. **Recipe extensions**: helical segments are done; CTF premultiplication /
-   phase flip are open.
+4. **Recipe extensions**: helical segments and CTF premultiplication (with the
+   CTF following the STAR file) are done; phase flip is open.
 5. **Regenerable micrographs: micrographs become an accelerator too.**
    Implemented as virtual movie averages (`RELION_VIRTUAL_MOVIE_AVERAGES`):
    see `virtual_movie_averages.md`. A
@@ -323,7 +469,9 @@ Implemented and tested:
   removed by "Clean all jobs" and "Remove intermediate files".
 - Helical segments, in extraction and conversion.
 - `relion_stacks_to_virtual`, converting existing Extract jobs in place.
-- Refusal of unsupported recipes (phase flip / premultiply, dust removal, 3D,
+- CTF premultiplication in a big box, recomputed when the CTF in the particle
+  STAR file changes.
+- Refusal of unsupported recipes (phase flip, dust removal, 3D,
   `--operate_on`) and of writes to a `.vstack`.
 
 Measured on the RELION 5 tutorial re-extraction (Extract/job018: 4,452

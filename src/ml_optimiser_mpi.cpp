@@ -24,6 +24,7 @@
 #include "src/gpu_reconstruct.h"
 #include "src/gpu_switch.h"
 #include "src/mps_auto.h"
+#include "src/virtual_particles.h"
 #include "src/ml_optimiser.h"
 #ifdef _CUDA_ENABLED
 	#include "src/acc/cuda/cuda_ml_optimiser.h"
@@ -852,6 +853,9 @@ will still yield good performance and possibly a more stable execution. \n" << s
 	relionFftwPlanThreads(nr_threads);
 
 	MlOptimiser::initialiseGeneral(node->rank);
+
+	vparticles::prebuildEntries(mydata.MDimg, node->rank, node->size);
+	MPI_Barrier(MPI_COMM_WORLD);
 
 	initialiseWorkLoad();
 

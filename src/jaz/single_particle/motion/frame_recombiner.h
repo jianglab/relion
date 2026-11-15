@@ -22,6 +22,9 @@
 #define FRAME_RECOMBINER_H
 
 #include <src/image.h>
+#include <src/virtual_particles.h>
+#include <src/jaz/image/buffered_image.h>
+#include <functional>
 #include <vector>
 #include <string>
 
@@ -52,6 +55,37 @@ class FrameRecombiner
 		// afterLast: the micrograph whose movie will be loaded after g_end (for read-ahead), or 0
 		void process(const std::vector<MetaDataTable>& mdts, long g_start, long g_end,
 		             const MetaDataTable* afterLast = 0);
+		// The particles of one micrograph (mdt: their coordinates) as Polish writes them: the frames, each shifted
+		// by its track (priorShift, pixels at angpix) and weighted, summed; then times ctf(p, image) where that
+		// returns true, normalised, transformed back and cut to the size of `out` (one slice per particle).
+		// Polish and virtual polished particles are both made here, so that they are the same bit for bit.
+		static void recombineMicrograph(
+				const MetaDataTable& mdt, MicrographHandler& micrographHandler,
+				const std::vector<std::vector<gravis::d2Vector>>& priorShift,
+				int s, double angpix, double data_angpix,
+				const std::vector<Image<RFLOAT>>& weights, int threads,
+				const std::function<bool(int p, MultidimArray<RFLOAT>& ctf)>& ctf,
+				RawImage<RFLOAT> out);
+
+		// The two halves of recombineMicrograph: the weighted sum of the shifted frames of each particle (Fourier
+		// space, one slice per particle; all that needs the movie), and the particles made from those sums.
+		static BufferedImage<Complex> sumMicrograph(
+				const MetaDataTable& mdt, MicrographHandler& micrographHandler,
+				const std::vector<std::vector<gravis::d2Vector>>& priorShift,
+				int s, double angpix, double data_angpix,
+				const std::vector<Image<RFLOAT>>& weights, int threads);
+		static void finishParticles(
+				BufferedImage<Complex>& sumStack, int threads,
+				const std::function<bool(int p, MultidimArray<RFLOAT>& ctf)>& ctf,
+				RawImage<RFLOAT> out);
+		// One particle from its sum (changed in place), multiplied with `ctf` if given, into `out` (cut to its size)
+		static void finishParticle(
+				BufferedImage<Complex>& sum, MultidimArray<RFLOAT>* ctf, RawImage<RFLOAT> out);
+
+		bool writesVirtual() const { return write_virtual; }
+		// Virtual particles are only described, but their frame sums are cached if a cache is in use
+		bool readsMovies() const { return !write_virtual || vparticles::polishedSumsWanted(); }
+
 		void process_new(const std::vector<MetaDataTable>& mdts, long g_start, long g_end);
 
 		bool doingRecombination();
@@ -73,8 +107,9 @@ class FrameRecombiner
 		
 	protected:
 		// read from cmd. line:
-		bool doCombineFrames, bfac_diag, do_ctf_multiply, do_recenter, write_float16;
+		bool doCombineFrames, bfac_diag, do_ctf_multiply, do_recenter, write_float16, write_virtual;
 		int k0, k1, box_arg, scale_arg, crop_arg;
+		std::vector<int> crop_auto;   // per optics group: the particle box, when --ctf_multiply chose the window itself
 		double k0a, k1a, recenter_x, recenter_y, recenter_z;
 		std::string bfacFn, suffix;
 
@@ -94,6 +129,8 @@ class FrameRecombiner
 
 		// computed by weightsFromFCC or weightsFromBfacs:
 		std::vector<std::vector<Image<RFLOAT>>> freqWeights;
+		// and the per-frame (sigma, k) they were computed from, per optics group (for virtual particles)
+		std::vector<std::vector<gravis::d2Vector>> bkFactors;
 
 		std::vector<Image<RFLOAT>> weightsFromFCC(const std::vector<MetaDataTable>& allMdts,
 		                                          int s, double angpix, std::string og_name);

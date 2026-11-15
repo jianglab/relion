@@ -67,6 +67,9 @@ class MicrographHandler
 		// for its frames. Never with --sbs; RELION_POLISH_MOVIE_CACHE=0 turns it off.
 		bool keepForCombination;
 
+		// Let go of every kept movie now
+		void releaseKept() { kept.clear(); combiningMetaFn = ""; }
+
 		// One line on how often decoded movies were kept, or "" if never asked
 		std::string movieCacheReport() const;
 

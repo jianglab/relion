@@ -127,6 +127,11 @@ void MotionRefiner::init()
 	mdt0.read(starFn);	
 	
 	ObservationModel::loadSafely(starFn, obsModel, mdt0);
+
+	// Polish fits the movie frames, which are never CTF-premultiplied, whatever the particles were
+	// (the output's flag is set from --ctf_multiply when the particles are combined)
+	for (int og = 0; og < obsModel.numberOfOpticsGroups(); og++)
+		obsModel.setCtfPremultiplied(og, false);
 	
 	//@CHECK
 	if (!ObservationModel::containsAllColumnsNeededForPrediction(mdt0))
@@ -318,7 +323,8 @@ void MotionRefiner::init()
 	recombineFrames = frameRecombiner.doingRecombination() && 
 	                  (recombMdts.size() > 0 || !exists(outPath + "shiny" + frameRecombiner.getOutputSuffix() + ".star"));
 	generateStar = frameRecombiner.doingRecombination();
-	micrographHandler.keepForCombination = recombineFrames;
+	// (virtual particles are only described: without a cache their movies are not read again for the combination)
+	micrographHandler.keepForCombination = recombineFrames && frameRecombiner.readsMovies();
 	
 	bool doAnything = estimateParams || estimateMotion || recombineFrames;
 	bool needsReference = doAnything;

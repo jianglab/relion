@@ -21,6 +21,7 @@
 
 #ifndef PREPROCESSING_H_
 #define PREPROCESSING_H_
+#include <climits>
 #include  <glob.h>
 #include  <vector>
 #include  <string>
@@ -155,6 +156,9 @@ public:
 
 	// Box size to extract the particle for premultiplication with the CTF
 	int premultiply_ctf_extract_size;
+	// --premultiply_extract_size auto, and the range of boxes it chose on this process
+	bool premultiply_auto = false;
+	int premultiply_size_min = INT_MAX, premultiply_size_max = 0;
 
 	// Bias in picked coordinates in X and in Y direction (in pixels)
 	RFLOAT extract_bias_x, extract_bias_y;
@@ -235,6 +239,9 @@ public:
 	// join all STAR files into one
 	// This is done separate from runExtractParticles to allow particle extraction to be done in parallel...
 	void joinAllStarFiles();
+
+	// Print the range of boxes --premultiply_extract_size auto chose
+	void reportPremultiplySizes(int lo, int hi);
 
 	// Extract particles from the micrographs
 	void runExtractParticles();

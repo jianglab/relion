@@ -47,6 +47,7 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <src/virtual_particles.h>
 
 using namespace gravis;
 
@@ -135,7 +136,37 @@ void CtfRefiner::init()
 		outPath += "/";
 	}
 
+	// Premultiplied virtual particles are fitted as the plain particles their micrographs give
+	// (RELION_CTF_REFINE_VIRTUAL_PLAIN=0: on the premultiplied ones, which fits the defocus about twice as noisily)
+	const char* vplain = getenv("RELION_CTF_REFINE_VIRTUAL_PLAIN");
+	const bool virtual_plain = !(vplain && std::string(vplain) == "0");
+	if (virtual_plain) vparticles::readUnpremultiplied();
+
 	ObservationModel::loadSafely(starFn, obsModel, mdt0);
+
+	if (virtual_plain)
+	{
+		std::vector<int> nvirtual(obsModel.numberOfOpticsGroups(), 0), nall(obsModel.numberOfOpticsGroups(), 0);
+		for (long p = 0; p < mdt0.numberOfObjects(); p++)
+		{
+			const int og = obsModel.getOpticsGroup(mdt0, p);
+			FileName img;
+			mdt0.getValue(EMDL_IMAGE_NAME, img, p);
+			nall[og]++;
+			if (vparticles::isVirtualStackFormat(img.getExtension())) nvirtual[og]++;
+		}
+		for (int og = 0; og < obsModel.numberOfOpticsGroups(); og++)
+		{
+			if (!obsModel.getCtfPremultiplied(og) || nvirtual[og] == 0) continue;
+			if (nvirtual[og] != nall[og])
+				REPORT_ERROR("Optics group " + integerToString(og + 1) + " mixes virtual and real CTF-premultiplied particles: "
+					"put them in separate optics groups, or set RELION_CTF_REFINE_VIRTUAL_PLAIN=0.");
+			obsModel.setCtfPremultiplied(og, false);
+			plain_virtual_groups.push_back(og);
+		}
+		if (verb > 0 && !plain_virtual_groups.empty())
+			std::cout << " + CTF-premultiplied virtual particles are fitted as plain particles, computed from their micrographs" << std::endl;
+	}
 
 	if (!ObservationModel::containsAllColumnsNeededForPrediction(mdt0))
 	{
@@ -248,6 +279,50 @@ void CtfRefiner::init()
 	{
 		unfinishedMdts = allMdts;
 	}
+}
+
+// shortcut: CTF_star equals the extraction CTF only for virtual particles and the first CTF refinement of a stack; a stack refined twice is fitted against the CTF of the first round
+void CtfRefiner::forEachPremultipliedCtf(const MetaDataTable& mdt,
+		const std::function<void(int, const Image<RFLOAT>&, const Image<RFLOAT>&)>& f)
+{
+	static const double eps = getenv("RELION_CTF_REFINE_PREMULT_EPS") ? atof(getenv("RELION_CTF_REFINE_PREMULT_EPS")) : 0.1;
+	const int pc = mdt.numberOfObjects();
+	#pragma omp parallel for num_threads(nr_omp_threads)
+	for (int p = 0; p < pc; p++)
+	{
+		const int og = obsModel.getOpticsGroup(mdt, p);
+		if (!obsModel.getCtfPremultiplied(og)) continue;
+		const int s = obsModel.getBoxSize(og);
+		CTF ctf;
+		ctf.readByGroup(mdt, &obsModel, p);
+		Image<RFLOAT> predFactor(s/2 + 1, s), obsFactor(s/2 + 1, s);
+		// no CTF padding: for a premultiplied group that would give CTF squared
+		ctf.getFftwImage(predFactor(), s, s, obsModel.getPixelSize(og), false, false, false, true, false);
+		for (long y = 0; y < s; y++)
+		for (long x = 0; x < s/2 + 1; x++)
+		{
+			const double c = predFactor(y, x);
+			// the noise is CTF_star * noise too: weight by 1 / (CTF_star^2 + eps)
+			const double a = eps > 0 ? 1. / sqrt(c * c + eps) : 1.;
+			obsFactor(y, x) = a;
+			predFactor(y, x) = c * a;
+		}
+		f(p, predFactor, obsFactor);
+	}
+}
+
+void CtfRefiner::whitenPremultiplied(const MetaDataTable& mdt, std::vector<Image<Complex>>& obs,
+		std::vector<Image<Complex>>& predT, std::vector<Image<Complex>>& predNT)
+{
+	forEachPremultipliedCtf(mdt, [&](int p, const Image<RFLOAT>& predFactor, const Image<RFLOAT>& obsFactor)
+	{
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(obsFactor.data)
+		{
+			DIRECT_MULTIDIM_ELEM(obs[p].data, n) *= DIRECT_MULTIDIM_ELEM(obsFactor.data, n);
+			if (!predT.empty()) DIRECT_MULTIDIM_ELEM(predT[p].data, n) *= DIRECT_MULTIDIM_ELEM(predFactor.data, n);
+			if (!predNT.empty()) DIRECT_MULTIDIM_ELEM(predNT[p].data, n) *= DIRECT_MULTIDIM_ELEM(predFactor.data, n);
+		}
+	});
 }
 
 void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
@@ -369,6 +444,8 @@ void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
 				false, false, false, true, do_ctf_padding);
 		}
 
+		whitenPremultiplied(unfinishedMdts[g], obs, predT, predNT);
+
 		if (do_defocus_fit)
 		{
 			defocusEstimator.processMicrograph(g, unfinishedMdts[g], obs, predT);
@@ -397,6 +474,13 @@ void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
 				reference.predictAllComplexGradients(
 					unfinishedMdts[g], obsModel, ReferenceMap::Opposite, nr_omp_threads,
 					false, true, false, true, do_ctf_padding);
+			forEachPremultipliedCtf(unfinishedMdts[g], [&](int p, const Image<RFLOAT>& predFactor, const Image<RFLOAT>&)
+			{
+				Volume<t2Vector<Complex>>& v = predGradient[p];
+				for (long y = 0; y < v.dimy; y++)
+				for (long x = 0; x < v.dimx; x++)
+					v(x,y,0) *= Complex(predFactor(y,x), 0.);
+			});
 
 			magnificationEstimator.processMicrograph(g, unfinishedMdts[g], obs, predT, predGradient, do_ctf_padding);
 		}
@@ -496,6 +580,7 @@ void CtfRefiner::finalise()
 
 	MetaDataTable mdtOutAll = StackHelper::merge(mdtOut);
 
+	for (int og : plain_virtual_groups) obsModel.setCtfPremultiplied(og, true);
 	obsModel.save(mdtOutAll, outPath + "particles_ctf_refine.star");
 
 	if (verb > 0)

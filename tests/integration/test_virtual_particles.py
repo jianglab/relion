@@ -126,13 +126,13 @@ def project(tmp_path):
     return tmp_path
 
 
-def run(relion_bin, project, args, env_extra=None):
+def run(relion_bin, project, args, env_extra=None, prefix=()):
     env = dict(os.environ)
     env["RELION_VPARTICLE_CACHE"] = str(project / "vcache")
     env.pop("RELION_VIRTUAL_PARTICLES", None)
     if env_extra:
         env.update(env_extra)
-    r = subprocess.run([str(relion_bin / args[0])] + args[1:], cwd=project, env=env,
+    r = subprocess.run(list(prefix) + [str(relion_bin / args[0])] + args[1:], cwd=project, env=env,
                        capture_output=True, text=True, timeout=600)
     return r
 
@@ -303,6 +303,177 @@ def test_particles_survive_deleting_the_cache(relion_bin, project):
     subprocess.run(["rm", "-rf", str(project / "vcache")], check=True)
     again = materialise(relion_bin, project, virt, "cmp_again")
     assert np.array_equal(first, again)
+
+
+# ---------------------------------------------------------------------------
+# CTF premultiplication in a big box, then the cut: the CTF follows the STAR file
+# ---------------------------------------------------------------------------
+
+def set_micrograph_defocus(project, star, shift, fu, fv):
+    """micrographs_ctf.star with every defocus moved by `shift` + fu (U) or + fv (V) A."""
+    text = (project / "micrographs_ctf.star").read_text()
+    for u, v in [(12000, 11800), (12500, 12300)]:
+        text = text.replace(f" {u} {v} ", f" {u + shift + fu:.9f} {v + shift + fv:.9f} ")
+    (project / star).write_text(text)
+
+
+@pytest.mark.parametrize("options", [
+    ["--extract_size", "64", "--premultiply_extract_size", "128", "--scale", "48", "--norm",
+     "--bg_radius", "18", "--invert_contrast", "--float16"],
+    ["--extract_size", "56", "--norm", "--bg_radius", "20", "--ctf_intact_first_peak"],
+    # per particle from its defocus, so the defocus edit below also changes the box
+    ["--extract_size", "64", "--premultiply_extract_size", "auto", "--scale", "48", "--norm",
+     "--bg_radius", "18", "--invert_contrast"],
+], ids=["big_box_binned", "same_box_intact_first_peak", "auto_box"])
+def test_premultiplied_virtual_particles_follow_the_ctf(relion_bin, project, options):
+    # More digits than the 6 decimals a STAR file keeps, so the read-back round-off must not
+    # count as a change; "b" is what the edit below writes, to the digit
+    set_micrograph_defocus(project, "mics_a.star", 0, 0.123456789, 0.987654321)
+    set_micrograph_defocus(project, "mics_b.star", 700, 0.123457, 0.987654)
+    opts = ["--coord_list", "coords.star", "--premultiply_ctf"] + options
+
+    def extract_from(mics, outdir, virtual):
+        (project / outdir).mkdir(parents=True, exist_ok=True)
+        r = run(relion_bin, project, ["relion_preprocess", "--i", mics, "--part_star", f"{outdir}/particles.star",
+                                      "--part_dir", f"{outdir}/", "--extract"] + opts
+                + (["--virtual"] if virtual else ["--no_virtual"]))
+        assert r.returncode == 0, r.stdout + r.stderr
+        return project / outdir / "particles.star"
+
+    real_a = extract_from("mics_a.star", "Extract/real_a", False)
+    real_b = extract_from("mics_b.star", "Extract/real_b", False)
+    virt = extract_from("mics_a.star", "Extract/virt", True)
+    assert "rlnVirtualCtf" in next((project / "Extract/virt").rglob("*.vstack")).read_text()
+
+    # Bitwise what relion_preprocess wrote, edge particles included
+    a = assert_same_particles(relion_bin, project, real_a, virt)
+    b = materialise(relion_bin, project, real_b, "cmp_b")
+    assert not np.array_equal(a, b)
+
+    # CTF refinement moved the defocus: the virtual particles are recomputed with it
+    labels, rows = read_particles(virt)
+    iu, iv = labels.index("DefocusU"), labels.index("DefocusV")
+    for r in rows:
+        r[iu], r[iv] = f"{float(r[iu]) + 700:.6f}", f"{float(r[iv]) + 700:.6f}"
+    optics = Path(virt).read_text().split("data_particles")[0]
+    write_loop(project / "virt_b.tmp", [("particles", labels, rows)])
+    (project / "virt_b.star").write_text(optics + (project / "virt_b.tmp").read_text())
+    assert np.array_equal(materialise(relion_bin, project, project / "virt_b.star", "cmp_vb"), b)
+
+    # and the old CTF still gives the old particles (not counting cache entries: a short run
+    # may exit before its background builders finish, which drops their entries by design)
+    assert np.array_equal(materialise(relion_bin, project, virt, "cmp_va"), a)
+
+
+def with_aberrations(star, out, mag, zernike):
+    """`star` with an anisotropic magnification and even Zernike coefficients in its optics group."""
+    head, body = Path(star).read_text().split("data_particles")
+    lines = head.splitlines()
+    n = sum(1 for l in lines if l.startswith("_rln"))
+    i = max(k for k, l in enumerate(lines) if l.startswith("_rln"))
+    labels = ["MagMat00", "MagMat01", "MagMat10", "MagMat11", "EvenZernike"]
+    lines[i + 1:i + 1] = [f"_rln{lab} #{n + 1 + k}" for k, lab in enumerate(labels)]
+    lines = [l + " " + " ".join(f"{m:.6f}" for m in mag) + " [" + ",".join(f"{z:.6f}" for z in zernike) + "]"
+             if l.split()[:1] == ["opticsGroup1"] else l for l in lines]
+    Path(out).write_text("\n".join(lines) + "\ndata_particles" + body)
+    return out
+
+
+def test_premultiplied_virtual_particles_with_aberrations(relion_bin, project):
+    """Anisotropic magnification and symmetric aberrations are part of the CTF a particle is
+    premultiplied with: bitwise what relion_preprocess writes, also after they change."""
+    base = extract(relion_bin, project, "Extract/base", ["--coord_list", "coords.star", "--extract_size", "64"],
+                   virtual=False)
+    a = with_aberrations(base, project / "ab_a.star", [1.01, 0.004, -0.003, 0.995], [0.3, -0.2, 2.5, 0.1, -0.4, 1.8])
+    b = with_aberrations(base, project / "ab_b.star", [0.99, -0.002, 0.005, 1.008], [-0.5, 0.4, -3.0, 0.2, 0.6, -2.2])
+    opts = ["--extract_size", "64", "--premultiply_ctf", "--premultiply_extract_size", "128", "--norm", "--bg_radius", "20"]
+
+    def reextract(data, outdir, virtual):
+        (project / outdir).mkdir(parents=True, exist_ok=True)
+        r = run(relion_bin, project, ["relion_preprocess", "--i", "micrographs_ctf.star", "--reextract_data_star", str(data),
+                                      "--part_star", f"{outdir}/particles.star", "--part_dir", f"{outdir}/", "--extract"]
+                + opts + (["--virtual"] if virtual else ["--no_virtual"]))
+        assert r.returncode == 0, r.stdout + r.stderr
+        return project / outdir / "particles.star"
+
+    real_a = reextract(a, "Extract/real_a", False)
+    real_b = reextract(b, "Extract/real_b", False)
+    virt = reextract(a, "Extract/virt", True)
+    pa = assert_same_particles(relion_bin, project, real_a, virt)
+    pb = materialise(relion_bin, project, real_b, "cmp_b")
+    plain = materialise(relion_bin, project, reextract(base, "Extract/plain_ctf", False), "cmp_plain")
+    assert not np.array_equal(pa, pb) and not np.array_equal(pa, plain)
+
+    # CTF refinement changed them: the virtual particles follow
+    optics_b = Path(real_b).read_text().split("data_particles")[0]
+    (project / "virt_b.star").write_text(optics_b + "data_particles" + Path(virt).read_text().split("data_particles")[1])
+    assert np.array_equal(materialise(relion_bin, project, project / "virt_b.star", "cmp_vb"), pb)
+
+
+def optics_row(star):
+    lines = [l.split() for l in Path(star).read_text().split("data_particles")[0].splitlines()]
+    labels = [l[0][4:] for l in lines if l and l[0].startswith("_rln")]
+    return dict(zip(labels, next(l for l in lines if l and l[0] == "opticsGroup1")))
+
+
+@pytest.mark.parametrize("fit, mpi, fitted", [
+    (["--fit_defocus", "--fit_mode", "fpmff", "--kmin_defocus", "10"], False, []),
+    (["--fit_defocus", "--fit_mode", "fpmff", "--kmin_defocus", "10", "--ctf_pad"], False, []),
+    (["--fit_beamtilt", "--kmin_tilt", "10", "--fit_aberr"], False, ["BeamTiltX", "BeamTiltY", "EvenZernike"]),
+    (["--fit_aniso", "--kmin_mag", "10"], False, ["MagMat00", "MagMat01"]),
+    (["--fit_defocus", "--fit_mode", "fpmff", "--kmin_defocus", "10", "--fit_beamtilt", "--kmin_tilt", "10"], True,
+     ["BeamTiltX"]),
+], ids=["defocus", "defocus_ctf_pad", "beamtilt_aberrations", "magnification", "defocus_beamtilt_mpi"])
+def test_ctf_refinement_fits_virtual_particles_as_plain(relion_bin, project, fit, mpi, fitted):
+    """CTF refinement fits premultiplied virtual particles as the plain particles their
+    micrographs give (on the premultiplied pixels the defocus fit is about twice as noisy):
+    every fitted value is the same to the digit as for plain extraction (serially), and the
+    output stays premultiplied."""
+    from fixtures import write_postprocess_star, write_volume_mrc
+    plain_opts = ["--coord_list", "coords.star", "--extract_size", "64", "--norm", "--bg_radius", "20"]
+    plain = extract(relion_bin, project, "Extract/plain", plain_opts, virtual=False)
+    virt = extract(relion_bin, project, "Extract/virt",
+                   plain_opts + ["--premultiply_ctf", "--premultiply_extract_size", "128"], virtual=True)
+
+    z, y, x = np.mgrid[-32:32, -32:32, -32:32]
+    rng = np.random.default_rng(7)
+    vol = sum(np.exp(-((x - c[0]) ** 2 + (y - c[1]) ** 2 + (z - c[2]) ** 2) / 8.0)
+              for c in rng.uniform(-12, 12, size=(30, 3)))
+    write_volume_mrc(vol.astype(np.float32), project / "ref.mrc", angpix=1.5)
+    write_volume_mrc(np.ones_like(vol, dtype=np.float32), project / "mask.mrc", angpix=1.5)
+    write_postprocess_star(project / "pp.star", "ref.mrc", "ref.mrc", size=64, angpix=1.5)
+
+    def refine(star, out, mpi=False):
+        text = Path(star).read_text()
+        labels, rows = read_particles(star)
+        extra = ["AngleRot", "AngleTilt", "AnglePsi", "OriginXAngst", "OriginYAngst", "RandomSubset"]
+        rows = [r + [f"{10 * k}", f"{7 * k}", f"{13 * k}", "0", "0", str(1 + k % 2)] for k, r in enumerate(rows)]
+        write_loop(project / "tmp.star", [("particles", labels + extra, rows)])
+        (project / f"{out}.star").write_text(text.split("data_particles")[0] + (project / "tmp.star").read_text())
+        r = run(relion_bin, project, ["relion_ctf_refine_mpi" if mpi else "relion_ctf_refine", "--i", f"{out}.star",
+                                      "--f", "pp.star", "--m1", "ref.mrc", "--m2", "ref.mrc", "--mask", "mask.mrc",
+                                      "--o", f"{out}/", "--j", "1"] + fit,
+                prefix=("mpirun", "-np", "3") if mpi else ())
+        assert r.returncode == 0, r.stdout + r.stderr
+        return project / f"{out}.star", project / out / "particles_ctf_refine.star", r.stdout
+
+    in_plain, out_plain, _ = refine(plain, "ctf_plain")
+    _, out_virt, log = refine(virt, "ctf_virt", mpi)
+    assert "fitted as plain particles" in log
+
+    # The fit changed something, and every fitted value is the same
+    lp, rp = read_particles(out_plain)
+    lv, rv = read_particles(out_virt)
+    li, ri = read_particles(in_plain)
+    same = [c for c in lp if c != "ImageName"]
+    assert set(same) <= set(lv)
+    op, ov, oi = optics_row(out_plain), optics_row(out_virt), optics_row(in_plain)
+    assert rp != [[r[li.index(c)] if c in li else None for c in lp] for r in ri] or set(op) - set(oi)
+    assert set(fitted) <= set(op) - set(oi)
+    assert [[r[lp.index(c)] for c in same] for r in rp] == [[r[lv.index(c)] for c in same] for r in rv]
+    assert {k: v for k, v in op.items() if k != "CtfDataAreCtfPremultiplied"} == \
+           {k: v for k, v in ov.items() if k != "CtfDataAreCtfPremultiplied"}
+    assert ov["CtfDataAreCtfPremultiplied"] == "1"
 
 
 # ---------------------------------------------------------------------------

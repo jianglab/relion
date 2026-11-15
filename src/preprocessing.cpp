@@ -140,7 +140,11 @@ void Preprocessing::read(int argc, char **argv, int rank)
 		interpolation_name = parser.getOption("--interpolation", "Resampling when the box is turned: linear, cubic or nufft (nufft needs a build with FINUFFT). Default from RELION_EXTRACT_INTERPOLATION, else linear", (env != NULL && env[0] != '\0') ? env : "linear");
 	}
 	do_premultiply_ctf = parser.checkOption("--premultiply_ctf", "Premultiply the micrograph/frame with its CTF prior to particle extraction");
-	premultiply_ctf_extract_size = textToInteger(parser.getOption("--premultiply_extract_size", "Size of the box to extract the particles in (in pixels) before CTF premultiplication", "-1"));
+	{
+		const std::string s = parser.getOption("--premultiply_extract_size", "Size of the box to extract the particles in (in pixels) before CTF premultiplication; auto: per particle, the box plus twice the CTF delocalisation at the output Nyquist", "-1");
+		premultiply_auto = (s == "auto");
+		premultiply_ctf_extract_size = premultiply_auto ? -1 : textToInteger(s);
+	}
 	if (premultiply_ctf_extract_size < 0)
 		premultiply_ctf_extract_size = extract_size;
 	do_ctf_intact_first_peak = parser.checkOption("--ctf_intact_first_peak", "When premultiplying with the CTF, leave frequencies intact until the first peak");
@@ -446,8 +450,8 @@ void Preprocessing::initialise()
 		{
 			if (fn_operate_in != "")
 				REPORT_ERROR("ERROR: --virtual applies to particle extraction only, not to --operate_on.");
-			if (do_phase_flip || do_premultiply_ctf)
-				REPORT_ERROR("ERROR: virtual particles do not support CTF phase flipping or premultiplication yet; extract without --virtual.");
+			if (do_phase_flip)
+				REPORT_ERROR("ERROR: virtual particles do not support CTF phase flipping yet; extract without --virtual.");
 			if (do_project_3d)
 				REPORT_ERROR("ERROR: virtual particles do not support --project3d; extract without --virtual.");
 			// Dust removal replaces the dust pixels with random numbers from a
@@ -783,9 +787,18 @@ void Preprocessing::runExtractParticles()
 	MDmics = MDoutMics;
 	if (verb > 0)
 		progress_bar(fn_coords.size());
+	if (verb > 0)
+		reportPremultiplySizes(premultiply_size_min, premultiply_size_max);
 
 	// Now combine all metadata in a single STAR file
 	joinAllStarFiles();
+}
+
+void Preprocessing::reportPremultiplySizes(int lo, int hi)
+{
+	if (premultiply_auto && lo <= hi)
+		std::cout << " CTF premultiplication box chosen per particle from its defocus (--premultiply_extract_size auto): "
+		          << lo << " to " << hi << " pixels" << std::endl;
 }
 
 void Preprocessing::readCoordinates(FileName fn_coord, MetaDataTable &MD)
@@ -1219,8 +1232,6 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 
 	// Rectangular and/or turned boxes take the shared path of extract_rect.h (also used by virtual particles)
 	const bool geom = do_rect || do_rotate_to_horizontal;
-	const int box_x = do_rect ? extract_size_x : my_extract_size;
-	const int box_y = do_rect ? extract_size_y : my_extract_size;
 	// Re-extracted particles from a turned box were moved back to the micrograph frame (getCoordinateMetaDataTable)
 	if (MD.containsLabel(EMDL_PARTICLE_EXTRACTION_ANGLE))
 		REPORT_ERROR("Preprocessing::extractParticlesFromOneMicrograph BUG: the particles still carry rlnParticleExtractionAngle from a turned box.");
@@ -1255,6 +1266,7 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	std::vector<std::pair<long, long> > virtual_centres;
 	std::vector<double> virtual_psi;   // helical segments only: orients the tube mask
 	std::vector<double> virtual_cx, virtual_cy, virtual_angle;   // turned boxes only
+	std::vector<vparticles::ParticleCtf> virtual_ctf;   // CTF-premultiplied only
 	// The particles of this micrograph go to its stack through the background writer (the stack is complete, or absent, under its name)
 	std::unique_ptr<AsyncMrcStack> stack;
 	if (!do_virtual)
@@ -1267,6 +1279,27 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	} stack_scope(this, stack.get());
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
 	{
+		// Read per-particle CTF
+		if (MDin_has_ctf && !keep_ctf_from_micrographs)
+		{
+			ctf.readByGroup(MD, &obsModelPart);
+			optics_group = obsModelPart.getOpticsGroup(MD);
+			if (!obsModelPart.hasBoxSizes || obsModelPart.getBoxSize(optics_group) != my_extract_size)
+				obsModelPart.setBoxSize(optics_group, my_extract_size);
+			obsModelPart.opticsMdt.getValue(EMDL_MICROGRAPH_PIXEL_SIZE, my_angpix, optics_group);
+		}
+
+		// --premultiply_extract_size auto: each particle's box follows its own CTF
+		if (premultiply_auto && (do_phase_flip || do_premultiply_ctf))
+		{
+			my_extract_size = vparticles::autoPremultiplySize(vparticles::ParticleCtf{ctf.DeltafU, ctf.DeltafV, ctf.azimuthal_angle,
+			                  ctf.kV, ctf.Cs, ctf.Q0, ctf.Bfac, ctf.scale, ctf.phase_shift}, my_angpix, extract_size, do_rescale ? scale : extract_size);
+			premultiply_size_min = std::min(premultiply_size_min, my_extract_size);
+			premultiply_size_max = std::max(premultiply_size_max, my_extract_size);
+		}
+		const int box_x = do_rect ? extract_size_x : my_extract_size;
+		const int box_y = do_rect ? extract_size_y : my_extract_size;
+
 		RFLOAT dxpos, dypos, dzpos;
 		long int xpos, ypos, zpos;
 		long int x0, xF, y0, yF, z0, zF;
@@ -1302,16 +1335,6 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
             }
         }
 
-		// Read per-particle CTF
-		if (MDin_has_ctf && !keep_ctf_from_micrographs)
-		{
-			ctf.readByGroup(MD, &obsModelPart);
-			optics_group = obsModelPart.getOpticsGroup(MD);
-			if (!obsModelPart.hasBoxSizes || obsModelPart.getBoxSize(optics_group) != my_extract_size)
-				obsModelPart.setBoxSize(optics_group, my_extract_size);
-			obsModelPart.opticsMdt.getValue(EMDL_MICROGRAPH_PIXEL_SIZE, my_angpix, optics_group);
-		}
-
 		// A turned box lies along -psi, so that a tube with psi prior psi ends up horizontal
 		// (see extract_rect.h). The prior becomes the angle that is left, i.e. zero.
 		double box_angle = 0.;
@@ -1338,6 +1361,15 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 				virtual_cx.push_back((double)dxpos);
 				virtual_cy.push_back((double)dypos);
 				virtual_angle.push_back(box_angle);
+			}
+			if (do_premultiply_ctf)
+			{
+				// The CTF read through the particles' optics group includes its magnification and symmetric aberrations
+				const bool part_ctf = MDin_has_ctf && !keep_ctf_from_micrographs;
+				virtual_ctf.push_back(vparticles::ParticleCtf{ctf.DeltafU, ctf.DeltafV, ctf.azimuthal_angle, ctf.kV,
+				                                              ctf.Cs, ctf.Q0, ctf.Bfac, ctf.scale, ctf.phase_shift,
+				                                              vparticles::opticsAberrations(part_ctf ? obsModelPart : obsModelMic,
+				                                                                            optics_group)});
 			}
 		}
 		else
@@ -1382,7 +1414,7 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 
 				transformer.inverseFourierTransform(FT, Ipart());
 
-				if (extract_size != premultiply_ctf_extract_size)
+				if (extract_size != my_extract_size)
 				{
 					Ipart().window(FIRST_XMIPP_INDEX(extract_size), FIRST_XMIPP_INDEX(extract_size),
 					               LAST_XMIPP_INDEX(extract_size),  LAST_XMIPP_INDEX(extract_size));
@@ -1565,8 +1597,14 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		recipe.angpix = output_angpix;
 		recipe.helical = do_extract_helix;
 		recipe.helical_radius = helicalBackgroundRadius();
+		if (do_premultiply_ctf)
+		{
+			recipe.premultiply_size = premultiply_auto ? vparticles::Recipe::PREMULTIPLY_AUTO : premultiply_ctf_extract_size;
+			recipe.ctf_intact_first_peak = do_ctf_intact_first_peak;
+			recipe.ctf_angpix = my_angpix;
+		}
 		vparticles::writeDescriptor(fn_output_img_root + ".vstack", fn_mic, recipe, virtual_centres, virtual_psi,
-		                            virtual_cx, virtual_cy, virtual_angle);
+		                            virtual_cx, virtual_cy, virtual_angle, virtual_ctf);
 	}
 }
 
