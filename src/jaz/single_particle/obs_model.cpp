@@ -220,10 +220,52 @@ ObservationModel::ObservationModel(const MetaDataTable &_opticsMdt, bool do_die_
 			opticsMdt.getValue(EMDL_IMAGE_MAG_MATRIX_01, magMatrices[i](0,1), i);
 			opticsMdt.getValue(EMDL_IMAGE_MAG_MATRIX_10, magMatrices[i](1,0), i);
 			opticsMdt.getValue(EMDL_IMAGE_MAG_MATRIX_11, magMatrices[i](1,1), i);
+
+			checkMagMatrix(i);
 		}
 	}
 
 	if (hasTilt) hasOddZernike = true;
+}
+
+// The projections are rotated with the inverse of (magnification * rotation): a magnification matrix
+// that cannot be inverted gives NaN coordinates there and reads outside the reference (a segfault).
+// Converters (e.g. from CryoSPARC .cs files) write all-zero rlnMagMat columns where there was no
+// anisotropic magnification: that is the identity. Anything else that cannot be inverted is an error.
+void ObservationModel::checkMagMatrix(int og)
+{
+	Matrix2D<RFLOAT> &M = magMatrices[og];
+	const RFLOAT m00 = M(0,0), m01 = M(0,1), m10 = M(1,0), m11 = M(1,1);
+	int group = og + 1;
+	opticsMdt.getValue(EMDL_IMAGE_OPTICS_GROUP, group, og);
+
+	if (m00 == 0. && m01 == 0. && m10 == 0. && m11 == 0.)
+	{
+		static bool warned = false;
+		if (!warned)
+		{
+			warned = true;
+			std::cerr << " + Warning: the magnification matrix (rlnMagMat00..11) of optics group " << group
+			          << " is all zeros; using the identity (no anisotropic magnification) instead."
+			          << " Remove these columns or set them to 1 0 0 1." << std::endl;
+		}
+		M.initIdentity();
+		opticsMdt.setValue(EMDL_IMAGE_MAG_MATRIX_00, (RFLOAT)1., og);
+		opticsMdt.setValue(EMDL_IMAGE_MAG_MATRIX_01, (RFLOAT)0., og);
+		opticsMdt.setValue(EMDL_IMAGE_MAG_MATRIX_10, (RFLOAT)0., og);
+		opticsMdt.setValue(EMDL_IMAGE_MAG_MATRIX_11, (RFLOAT)1., og);
+		return;
+	}
+
+	const RFLOAT det = m00 * m11 - m01 * m10;
+	if (!std::isfinite(m00) || !std::isfinite(m01) || !std::isfinite(m10) || !std::isfinite(m11)
+	    || !std::isfinite(det) || std::abs(det) < 1e-2)
+	{
+		REPORT_ERROR_STR("ERROR: the magnification matrix of optics group " << group
+		                 << " cannot be used (rlnMagMat00..11 = " << m00 << " " << m01 << " " << m10 << " " << m11
+		                 << ", determinant " << det << "). Without anisotropic magnification it is 1 0 0 1;"
+		                 << " remove the rlnMagMat columns or correct them.");
+	}
 }
 
 void ObservationModel::predictObservation_DC(

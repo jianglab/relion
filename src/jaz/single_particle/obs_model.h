@@ -233,6 +233,10 @@ class ObservationModel
 		*/
 		bool opticsGroupsSorted() const;
 
+		/* All-zero magnification matrix (written by some converters): use the identity.
+		   One that cannot be inverted otherwise: an error (it would crash the projections). */
+		void checkMagMatrix(int og);
+
 		/* Find all optics groups used in particles table partMdt
 		   that are not defined in opticsMdt (should return an empty vector) */
 		std::vector<int> findUndefinedOptGroups(const MetaDataTable& partMdt) const;
