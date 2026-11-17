@@ -6695,8 +6695,9 @@ void MlOptimiser::warnIdenticalStartingReferences() const
 
 bool MlOptimiser::sharedRefSeedsSupported() const
 {
-    // Seeding works through the class priors of the EM algorithm
-    return do_shared_ref_seeds && !gradient_refine && !do_som && !do_always_cc && !do_skip_align && !do_skip_rotate &&
+    // Seeding works through the class priors of the EM algorithm (with or without alignment: without, the prior of a
+    // class is its pdf_class, and the factor is applied to it in the same place)
+    return do_shared_ref_seeds && !gradient_refine && !do_som && !do_always_cc &&
            !do_fix_classes && mymodel.nr_bodies == 1 && mymodel.nr_classes > 1;
 }
 
@@ -6735,8 +6736,8 @@ void MlOptimiser::detectSharedReferenceGroups()
         REPORT_ERROR("ERROR: rlnReferenceSeedGroup needs a value for every class");
     updateSharedReferenceGroups();
     if (!group.empty() && shared_ref_groups.empty() && do_shared_ref_seeds && verb > 0 && !sharedRefSeedsSupported())
-        std::cerr << " WARNING: rlnReferenceSeedGroup is ignored: seeding among classes needs EM classification with alignments "
-                  << "(not --grad, --som, --always_cc, --skip_align or --skip_rotate)" << std::endl;
+        std::cerr << " WARNING: rlnReferenceSeedGroup is ignored: seeding among classes needs EM classification "
+                  << "(not --grad, --som or --always_cc)" << std::endl;
     if (shared_ref_groups.empty())
         return;
 

@@ -157,6 +157,19 @@ def test_same_map_seeded_within_its_classes(test_data_dir, relion_bin, relion_ru
     assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
     assert [r["rlnClassNumber"] for r in read_table(work / "cc_it002_data.star", "particles")] == seeded
 
+    # Also without alignment, and also for the same map with the same twist and rise
+    same = [(a, -1.1, 4.75), (a, -1.1, 4.75)]
+    out = run("skip", same, "--iter", "1", "--skip_align")
+    assert "Classes 1 and 2 start from the same map: in iteration 1" in out, out[-3000:]
+    counts = class_counts(work / "skip_it001_data.star", 2)
+    assert counts[0] > 0 and counts[1] > 0, counts
+    run("skipcc", same, "--iter", "2", "--skip_align", "--firstiter_cc")
+    counts = class_counts(work / "skipcc_it002_data.star", 2)
+    assert counts[0] > 0 and counts[1] > 0, counts
+    # (unseeded, the two classes score the same for every particle, which all count as class 1)
+    run("skip0", same, "--iter", "1", "--skip_align", "--no_shared_ref_seeds")
+    assert class_counts(work / "skip0_it001_data.star", 2) == [n, 0]
+
     # Without the seeding, --firstiter_cc puts every particle in the first of the identical classes
     out = run("noseed", [(a, -1.1, 4.75), (a, -1.1, 4.75)], "--iter", "1", "--firstiter_cc", "--no_shared_ref_seeds")
     assert "classes 1 and 2 start from identical maps with the same helical twist and rise" in out, out[-3000:]

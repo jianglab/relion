@@ -131,6 +131,11 @@ apart:
   - The groups are saved in model.star (`rlnReferenceSeedGroup`) until they have
     been seeded. You can also set this column in the `--ref` STAR file; a group
     then starts from the map of its first class.
+  - It works with and without alignment (`--skip_align`, `--skip_rotate`), and
+    also for rows with the same twist and rise. It is off with `--grad`,
+    `--som` and `--always_cc`. (On the GPU, `--firstiter_cc` with
+    `--skip_align` stops with RELION's "maxCC without oversampling" error,
+    seeded or not; use the CPU or a reference on absolute greyscale.)
   - `--no_shared_ref_seeds` switches this off.
 - **`--helical_symmetrise_refs` (optional).** Before the first iteration, each
   class's starting map is symmetrised with its own twist and rise, so the first
