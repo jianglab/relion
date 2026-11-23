@@ -57,7 +57,7 @@ public:
 	Fl_Group *tab1, *tab2, *tab3, *tab4, *tab5, *tab6, *tab7, *runtab;
 
 	// Groups
-	Fl_Group *group0, *group1, *group2, *group3, *group4, *group5, *group6, *group7, *group8, *group9, *group_ewald, *group_filctx, *queue_gpu_group, *queue_group;
+	Fl_Group *group0, *group1, *group2, *group3, *group4, *group5, *group6, *group7, *group8, *group9, *group_ewald, *group_filctx, *group_helctx, *queue_gpu_group, *queue_group;
 
 	// Class3D: the table of one reference map per class (NULL for other jobs)
 	ReferenceTable *reference_table;
@@ -131,6 +131,7 @@ private:
 	void initialiseSelect2DWindow();
 	void initialiseCoOccurrenceWindow();
 	void initialiseClass2DConsensusWindow();
+	void initialiseHelixSubclassifyWindow();
 	void initialiseClass2DWindow();
 	void initialiseInimodelWindow();
 	void initialiseClass3DWindow();

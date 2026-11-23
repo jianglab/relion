@@ -31,6 +31,7 @@
 #include <FL/Fl_Table.H>
 #include <FL/Fl_Tabs.H>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -42,7 +43,7 @@ static const std::vector<std::pair<int, std::string> > &allGuiJobTypes()
 		{PROC_IMPORT, "Import"}, {PROC_MOTIONCORR, "MotionCorr"}, {PROC_CTFFIND, "CtfFind"},
 		{PROC_MANUALPICK, "ManualPick"}, {PROC_AUTOPICK, "AutoPick"}, {PROC_EXTRACT, "Extract"},
 		{PROC_CLASSSELECT, "Select"}, {PROC_SELECT2D, "Select2D"}, {PROC_COOCCURRENCE, "CoOccurrence"},
-		{PROC_CLASS2D_CONSENSUS, "Class2DConsensus"}, {PROC_2DCLASS, "Class2D"},
+		{PROC_CLASS2D_CONSENSUS, "Class2DConsensus"}, {PROC_HELIX_SUBCLASSIFY, "HelixSubClassify"}, {PROC_2DCLASS, "Class2D"},
 		{PROC_3DCLASS, "Class3D"}, {PROC_3DAUTO, "Refine3D"}, {PROC_MASKCREATE, "MaskCreate"},
 		{PROC_JOINSTAR, "JoinStar"}, {PROC_SUBTRACT, "Subtract"}, {PROC_POST, "PostProcess"},
 		{PROC_RESMAP, "LocalRes"}, {PROC_INIMODEL, "InitialModel"}, {PROC_MULTIBODY, "MultiBody"},
@@ -328,8 +329,9 @@ TEST_CASE("GUI: Class3D one reference per class is a table of K classes on the I
 			INFO(key);
 			CHECK_FALSE(window.guientries[key].inp->active());
 		}
-		// automatic masks of the classes marked "auto" use their resolution
-		CHECK(window.guientries["auto_mask_start_res"].inp->active_r());
+		// automatic masks of the classes marked "auto" use their resolution, soft edge, and mass
+		for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
+			CHECK(window.guientries[key].inp->active_r());
 		// options the table does not hold stay
 		CHECK(window.guientries["ini_high"].inp->active());
 
@@ -501,15 +503,12 @@ TEST_CASE("GUI: Class3D one reference per class is a table of K classes on the I
 
 TEST_CASE("GUI: no tab of any job window has overlapping or out-of-tab widgets", "[gui][layout]")
 {
-	for (const auto &t : allGuiJobTypes())
-	{
-		JobWindow window;
-		window.initialise(t.first, false);
+	auto checkWindowTabs = [](const std::string &name, JobWindow &window) {
 		for (int k = 0; k < window.tabs->children(); k++)
 		{
 			Fl_Group *tab = window.tabs->child(k)->as_group();
 			if (!tab) continue;
-			INFO("job type " << t.second << ", tab " << (tab->label() ? tab->label() : "?"));
+			INFO("job type " << name << ", tab " << (tab->label() ? tab->label() : "?"));
 			const auto problems = layoutProblems(tab);
 			std::string all;
 			for (const auto &p : problems)
@@ -517,31 +516,129 @@ TEST_CASE("GUI: no tab of any job window has overlapping or out-of-tab widgets",
 			INFO("layout problems:" << all);
 			CHECK(problems.empty());   // every tab reported, not only the first
 		}
+	};
+
+	for (const auto &t : allGuiJobTypes())
+	{
+		JobWindow window;
+		window.initialise(t.first, false);
+		checkWindowTabs(t.second, window);
+	}
+
+	for (const auto &t : allTomoGuiJobTypes())
+	{
+		JobWindow window;
+		window.initialise(t.first, true);
+		checkWindowTabs(t.second, window);
+	}
+
+	const std::vector<std::pair<int, std::string> > tomoSharedTypes = {
+		{PROC_MOTIONCORR, "TomoMotionCorr"}, {PROC_CTFFIND, "TomoCtfFind"},
+		{PROC_INIMODEL, "TomoInitialModel"}, {PROC_3DCLASS, "TomoClass3D"},
+		{PROC_3DAUTO, "TomoRefine3D"}, {PROC_RECONSTRUCT3D, "TomoReconstruct3D"},
+		{PROC_POST, "TomoPostProcess"},
+	};
+	for (const auto &t : tomoSharedTypes)
+	{
+		JobWindow window;
+		window.initialise(t.first, true);
+		checkWindowTabs(t.second, window);
+		if (t.first == PROC_3DCLASS)
+		{
+			pick(window.guientries["ref_mode"], job_ref_mode_options[1]);
+			checkWindowTabs(t.second + " (per class)", window);
+		}
+	}
+
+	struct SchedulerGuard
+	{
+		bool prev = create_scheduler_gui;
+		SchedulerGuard() { create_scheduler_gui = true; }
+		~SchedulerGuard() { create_scheduler_gui = prev; }
+	} scheduler_guard;
+	for (const auto &t : std::vector<std::pair<int, std::string> >{
+		     {PROC_2DCLASS, "SchedulerClass2D"},
+		     {PROC_3DCLASS, "SchedulerClass3D"},
+		     {PROC_CLASS2D_CONSENSUS, "SchedulerClass2DConsensus"},
+		     {PROC_HELIX_SUBCLASSIFY, "SchedulerHelixSubClassify"}})
+	{
+		JobWindow window;
+		window.initialise(t.first, false);
+		checkWindowTabs(t.second, window);
 	}
 }
 
-TEST_CASE("GUI: Class2D filament context parameters are greyed out while Off or Helical types", "[gui][layout][filament_context]")
+TEST_CASE("GUI: Class2D filament context parameters match the active context mode", "[gui][layout][filament_context]")
 {
+	unsetenv("RELION_HELICAL_AUTO_DIAMETER");
+	unsetenv("RELION_HELICAL_TRACK_SMOOTH");
+	unsetenv("RELION_HELICAL_POLARITY");
+	unsetenv("RELION_SORT_CLASSES");
 	JobWindow window;
 	window.initialise(PROC_2DCLASS, false);
 	REQUIRE(window.guientries.find("filctx_mode") != window.guientries.end());
 	REQUIRE(window.group_filctx != nullptr);
-	for (const char *name : {"filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
+	REQUIRE(window.group_helctx != nullptr);
+	for (const char *name : {"filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha",
+	                          "helctx_types_min", "helctx_types_max", "helctx_start", "helctx_agree",
+	                          "helctx_temper", "helctx_exclude", "helctx_track_smooth", "helctx_polarity"})
 		REQUIRE(window.guientries.find(name) != window.guientries.end());
 
 	REQUIRE(std::string(window.guientries["filctx_mode"].inp->value()) == job_filament_context_options[0]);
 	REQUIRE_FALSE(window.group_filctx->active());
+	REQUIRE_FALSE(window.group_helctx->visible());
 
-	SECTION("loading a job that uses a mode activates them")
+	SECTION("loading a job that uses a mode activates the matching parameter group")
 	{
 		window.guientries["filctx_mode"].setValue(job_filament_context_options[1]);
 		REQUIRE(window.group_filctx->active());
+		REQUIRE(window.group_filctx->visible());
+		REQUIRE_FALSE(window.group_helctx->visible());
 		window.guientries["filctx_mode"].setValue(job_filament_context_options[2]);
 		REQUIRE(window.group_filctx->active());
+		REQUIRE_FALSE(window.group_helctx->visible());
 		window.guientries["filctx_mode"].setValue(job_filament_context_options[0]);
 		REQUIRE_FALSE(window.group_filctx->active());
+		REQUIRE_FALSE(window.group_helctx->visible());
 		window.guientries["filctx_mode"].setValue(job_filament_context_options_2d[3]);
-		REQUIRE_FALSE(window.group_filctx->active());
+		REQUIRE_FALSE(window.group_filctx->visible());
+		REQUIRE(window.group_helctx->visible());
+		REQUIRE(window.group_helctx->active());
+	}
+
+	SECTION("Helical types polarity control greys out when bimodal psi or alignment is off")
+	{
+		window.guientries["do_helix"].setValue("Yes");
+		window.guientries["filctx_mode"].setValue(job_filament_context_options_2d[3]);
+		CHECK(window.guientries["helctx_polarity"].inp->active_r());
+		window.guientries["do_bimodal_psi"].setValue("No");
+		CHECK_FALSE(window.guientries["helctx_polarity"].inp->active_r());
+		window.guientries["do_bimodal_psi"].setValue("Yes");
+		CHECK(window.guientries["helctx_polarity"].inp->active_r());
+		window.guientries["dont_skip_align"].setValue("No");
+		CHECK_FALSE(window.guientries["helctx_polarity"].inp->active_r());
+	}
+
+	SECTION("Class2D Helix tab has no layout overlaps or out-of-tab widgets in any context mode")
+	{
+		Fl_Group *helix = nullptr;
+		for (int k = 0; k < window.tabs->children(); k++)
+		{
+			Fl_Group *tab = window.tabs->child(k)->as_group();
+			if (tab && tab->label() && std::string(tab->label()) == "Helix") helix = tab;
+		}
+		REQUIRE(helix != nullptr);
+		for (const char *helical : {"No", "Yes"})
+			for (const std::string &mode : job_filament_context_options_2d)
+			{
+				window.guientries["do_helix"].setValue(helical);
+				window.guientries["filctx_mode"].setValue(mode);
+				const auto problems = layoutProblems(helix);
+				std::string all;
+				for (const auto &p : problems) all += "\n  " + p;
+				INFO("do_helix " << helical << ", mode " << mode << all);
+				REQUIRE(problems.empty());
+			}
 	}
 }
 
@@ -554,24 +651,35 @@ static void pickMenu(GuiEntry &entry, const char *item)
 	GuiEntry::cb_menu(entry.menu, &entry);
 }
 
-TEST_CASE("GUI: Class2D helical segments default to EM with helical types", "[gui][filament_context]")
+TEST_CASE("GUI: Class2D helical segments default to EM with helical types and class sorting", "[gui][filament_context]")
 {
+	unsetenv("RELION_SORT_CLASSES");
+	unsetenv("RELION_HELICAL_AUTO_DIAMETER");
 	JobWindow window;
 	window.initialise(PROC_2DCLASS, false);
 	auto value = [&window](const char *key) { return std::string(window.guientries[key].inp->value()); };
 	REQUIRE(value("do_em") == "No");
+	REQUIRE(value("do_sort_classes") == "No");
+	REQUIRE(value("helical_cylindrical_mask") == "Yes");
+	REQUIRE(value("helical_auto_diameter") == "Yes");
 	REQUIRE(value("filctx_mode") == job_filament_context_options[0]);
 
 	pickMenu(window.guientries["do_helix"], "Yes");
 	CHECK(value("do_em") == "Yes");
 	CHECK(value("do_grad") == "No");
+	CHECK(value("do_sort_classes") == "Yes");
+	CHECK(value("helctx_track_smooth") == "Yes");
+	CHECK(value("helctx_polarity") == "Yes");
 	CHECK(value("filctx_mode") == job_filament_context_options_2d[3]);
+	CHECK(window.group_helctx->visible());
+	CHECK_FALSE(window.group_filctx->visible());
 
-	SECTION("back to No: VDAM and Off again")
+	SECTION("back to No: VDAM, Off, and unsorted again")
 	{
 		pickMenu(window.guientries["do_helix"], "No");
 		CHECK(value("do_em") == "No");
 		CHECK(value("do_grad") == "Yes");
+		CHECK(value("do_sort_classes") == "No");
 		CHECK(value("filctx_mode") == job_filament_context_options[0]);
 	}
 	SECTION("back to No after the user chose another mode: the user's choices stay")
@@ -612,8 +720,9 @@ TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while
 	Fl_Group *helix = tabWithLabel("Helix");
 	REQUIRE(helix != nullptr);
 
-	// All five fields live on the Helix tab and nowhere else
-	for (const char *name : {"filctx_mode", "filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha"})
+	// All helical context fields live on the Helix tab and nowhere else
+	for (const char *name : {"filctx_mode", "filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha",
+	                         "helctx_track_smooth", "helctx_polarity"})
 	{
 		const Fl_Widget *w = window.guientries[name].inp;
 		REQUIRE(w != nullptr);
@@ -622,6 +731,20 @@ TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while
 		REQUIRE(w->y() >= helix->y());
 		REQUIRE(w->y() + w->h() <= helix->y() + helix->h());
 		REQUIRE(w->y() + w->h() <= window.tabs->y() + window.tabs->h());   // and above the bottom of the window
+	}
+	std::vector<Leaf> helix_leaves;
+	collectLeaves(helix, "", helix_leaves);
+	REQUIRE_FALSE(helix_leaves.empty());
+	for (const Leaf &leaf : helix_leaves)
+	{
+		const Fl_Widget *a = leaf.w;
+		INFO("widget " << describe(a));
+		CHECK(a->y() + a->h() + 12 <= window.tabs->y() + window.tabs->h());
+		if (dynamic_cast<const Fl_Input *>(a) && a->label() && a->label()[0]
+		    && (a->align() & FL_ALIGN_LEFT) && !(a->align() & FL_ALIGN_INSIDE))
+		{
+			CHECK(std::strlen(a->label()) <= 44);
+		}
 	}
 
 	REQUIRE_FALSE(window.group_filctx->active());
@@ -660,6 +783,33 @@ TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while
 		window.guientries["do_helix"].setValue("Yes");
 		REQUIRE(window.group_filctx->active());
 	}
+
+	SECTION("picking do_helix selects Per filament and greys out polarity when alignment restricts psi")
+	{
+		pickMenu(window.guientries["do_helix"], "Yes");
+		CHECK(std::string(window.guientries["filctx_mode"].inp->value()) == job_filament_context_options[2]);
+		CHECK(window.group_filctx->active());
+		CHECK(window.guientries["helctx_track_smooth"].inp->active_r());
+		CHECK(window.guientries["helctx_polarity"].inp->active_r());
+
+		window.guientries["dont_skip_align"].setValue("No");
+		CHECK_FALSE(window.guientries["helctx_polarity"].inp->active_r());
+		window.guientries["dont_skip_align"].setValue("Yes");
+		CHECK(window.guientries["helctx_polarity"].inp->active_r());
+
+		window.guientries["do_local_ang_searches"].setValue("Yes");
+		CHECK_FALSE(window.guientries["helctx_polarity"].inp->active_r());
+		window.guientries["do_local_ang_searches"].setValue("No");
+		CHECK(window.guientries["helctx_polarity"].inp->active_r());
+
+		window.guientries["range_psi"].setValue("0");
+		CHECK_FALSE(window.guientries["helctx_polarity"].inp->active_r());
+		window.guientries["range_psi"].setValue("10");
+		CHECK(window.guientries["helctx_polarity"].inp->active_r());
+
+		pickMenu(window.guientries["do_helix"], "No");
+		CHECK(std::string(window.guientries["filctx_mode"].inp->value()) == job_filament_context_options[0]);
+	}
 }
 
 TEST_CASE("GUI: Class3D coarser-sampling options grey each other out", "[gui][layout][coarse_early]")
@@ -693,4 +843,192 @@ TEST_CASE("GUI: Class3D coarser-sampling options grey each other out", "[gui][la
 		REQUIRE(allow.menu->active_r());
 		REQUIRE_FALSE(early.menu->active_r());
 	}
+}
+
+TEST_CASE("GUI: Class2D, Class3D, and Refine3D expose auto-mask resolution, soft edge, and mass", "[gui][layout][auto_mask]")
+{
+	for (int type : {PROC_2DCLASS, PROC_3DCLASS, PROC_3DAUTO})
+	{
+		INFO("job type " << type);
+		JobWindow window;
+		window.initialise(type, false);
+		REQUIRE(layoutProblemsOfWindow(window).empty());
+
+		for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
+		{
+			REQUIRE(window.guientries.find(key) != window.guientries.end());
+			CHECK_FALSE(window.guientries[key].inp->active_r());
+		}
+
+		pickMenu(window.guientries["do_auto_mask"], "Yes");
+		for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
+			CHECK(window.guientries[key].inp->active_r());
+
+		pickMenu(window.guientries["do_auto_mask"], "No");
+		for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
+			CHECK_FALSE(window.guientries[key].inp->active_r());
+	}
+}
+
+TEST_CASE("GUI: Class2D helical mask fields grey each other out consistently", "[gui][helix][auto_mask]")
+{
+	unsetenv("RELION_HELICAL_AUTO_DIAMETER");
+	JobWindow window;
+	window.initialise(PROC_2DCLASS, false);
+	pickMenu(window.guientries["do_helix"], "Yes");
+
+	GuiEntry &cyl = window.guientries["helical_cylindrical_mask"];
+	GuiEntry &aut = window.guientries["helical_auto_diameter"];
+	GuiEntry &diam = window.guientries["helical_tube_outer_diameter"];
+	REQUIRE(cyl.menu->active_r());
+	REQUIRE(aut.menu->active_r());
+	CHECK(std::string(aut.inp->value()) == "Yes");
+	CHECK(diam.inp->active_r());
+
+	pickMenu(aut, "No");
+	CHECK(aut.menu->active_r());
+	CHECK(diam.inp->active_r());
+
+	pickMenu(aut, "Yes");
+	CHECK(diam.inp->active_r());
+
+	pickMenu(cyl, "No");
+	CHECK_FALSE(aut.menu->active_r());
+	CHECK(diam.inp->active_r());
+
+	pickMenu(cyl, "Yes");
+	CHECK(aut.menu->active_r());
+	CHECK(diam.inp->active_r());
+
+	pickMenu(aut, "No");
+	CHECK(diam.inp->active_r());
+}
+
+TEST_CASE("GUI: Class2DConsensus exposes helical types controls with layout checks", "[gui][layout][consensus][filament_context]")
+{
+	unsetenv("RELION_CONSENSUS_HELICAL_TYPES");
+	JobWindow window;
+	window.initialise(PROC_CLASS2D_CONSENSUS, false);
+	REQUIRE(layoutProblemsOfWindow(window).empty());
+	REQUIRE(window.guientries.find("do_helical_types") != window.guientries.end());
+	REQUIRE(window.guientries.find("helical_types_max") != window.guientries.end());
+	REQUIRE(window.guientries.find("helical_types_jaccard") != window.guientries.end());
+
+	CHECK(std::string(window.guientries["do_helical_types"].inp->value()) == "Yes");
+	CHECK(window.guientries["helical_types_max"].inp->active_r());
+	CHECK(window.guientries["helical_types_jaccard"].inp->active_r());
+
+	pickMenu(window.guientries["do_helical_types"], "No");
+	CHECK_FALSE(window.guientries["helical_types_max"].inp->active_r());
+	CHECK_FALSE(window.guientries["helical_types_jaccard"].inp->active_r());
+
+	pickMenu(window.guientries["do_helical_types"], "Yes");
+	CHECK(window.guientries["helical_types_max"].inp->active_r());
+	CHECK(window.guientries["helical_types_jaccard"].inp->active_r());
+}
+
+TEST_CASE("GUI: HelixSubClassify window exposes controls, greying, and clean layout", "[gui][layout][helix_subclassify]")
+{
+	JobWindow window;
+	window.initialise(PROC_HELIX_SUBCLASSIFY, false);
+	REQUIRE(layoutProblemsOfWindow(window).empty());
+
+	for (const char *key : {"fn_img", "do_retype", "types_min", "types_max", "types_agree", "min_segs", "do_prepare_only",
+	                        "extract_size", "scale_size", "angpix", "do_premultiply", "ctf_intact_first_peak",
+	                        "do_invert", "do_float16", "nr_classes", "nr_iter", "tau_fudge", "random_seed",
+	                        "particle_diameter", "helical_tube_outer_diameter", "helical_rise", "highres_limit",
+	                        "psi_sampling", "sigma_psi", "do_bimodal_psi", "offset_range", "offset_step",
+	                        "helical_context_weight", "do_auto_mask", "auto_mask_start_res", "auto_mask_soft",
+	                        "auto_mask_mass", "nr_pool", "keep_all_iter", "use_gpu", "gpu_ids"})
+		REQUIRE(window.guientries.find(key) != window.guientries.end());
+
+	for (int k = 0; k < window.tabs->children(); k++)
+	{
+		Fl_Group *tab = window.tabs->child(k)->as_group();
+		if (!tab) continue;
+		std::vector<Leaf> leaves;
+		collectLeaves(tab, "", leaves);
+		for (const Leaf &leaf : leaves)
+		{
+			const Fl_Widget *a = leaf.w;
+			INFO("tab " << (tab->label() ? tab->label() : "?") << ", widget " << describe(a));
+			CHECK(a->y() + a->h() + 12 <= window.tabs->y() + window.tabs->h());
+			if (dynamic_cast<const Fl_Input *>(a) && a->label() && a->label()[0]
+			    && (a->align() & FL_ALIGN_LEFT) && !(a->align() & FL_ALIGN_INSIDE))
+			{
+				CHECK(std::strlen(a->label()) <= 44);
+			}
+		}
+	}
+
+	CHECK(window.guientries["ctf_intact_first_peak"].inp->active_r());
+	pickMenu(window.guientries["do_premultiply"], "No");
+	CHECK_FALSE(window.guientries["ctf_intact_first_peak"].inp->active_r());
+	pickMenu(window.guientries["do_premultiply"], "Yes");
+	CHECK(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	CHECK_FALSE(window.guientries["auto_mask_start_res"].inp->active_r());
+	pickMenu(window.guientries["do_auto_mask"], "Yes");
+	for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
+		CHECK(window.guientries[key].inp->active_r());
+	pickMenu(window.guientries["do_auto_mask"], "No");
+	for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
+		CHECK_FALSE(window.guientries[key].inp->active_r());
+
+	CHECK_FALSE(window.guientries["gpu_ids"].inp->active_r());
+	pickMenu(window.guientries["use_gpu"], "Yes");
+	CHECK(window.guientries["gpu_ids"].inp->active_r());
+	pickMenu(window.guientries["use_gpu"], "No");
+	CHECK_FALSE(window.guientries["gpu_ids"].inp->active_r());
+}
+
+TEST_CASE("GUI: Extract window places ctf_intact_first_peak and greys it out when unavailable", "[gui][jobwindow][extract]")
+{
+	JobWindow window;
+	window.initialise(PROC_EXTRACT, false);
+	REQUIRE(layoutProblemsOfWindow(window).empty());
+	REQUIRE(window.guientries.find("do_premultiply") != window.guientries.end());
+	REQUIRE(window.guientries.find("ctf_intact_first_peak") != window.guientries.end());
+	CHECK(std::string(window.guientries["do_premultiply"].inp->value()) == "Yes");
+	CHECK(std::string(window.guientries["ctf_intact_first_peak"].inp->value()) == "No");
+	CHECK(window.guientries["do_premultiply"].inp->active_r());
+	CHECK(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	pick(window.guientries["do_premultiply"], "No");
+	CHECK(window.guientries["do_premultiply"].inp->active_r());
+	CHECK_FALSE(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	pick(window.guientries["do_premultiply"], "Yes");
+	CHECK(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	pick(window.guientries["do_rect_box"], "Yes");
+	CHECK_FALSE(window.guientries["do_premultiply"].inp->active_r());
+	CHECK_FALSE(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	pick(window.guientries["do_rect_box"], "No");
+	CHECK(window.guientries["do_premultiply"].inp->active_r());
+	CHECK(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	pick(window.guientries["do_extract_helix"], "Yes");
+	pick(window.guientries["do_rotate_horizontal"], "Yes");
+	CHECK_FALSE(window.guientries["do_premultiply"].inp->active_r());
+	CHECK_FALSE(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	pick(window.guientries["do_rotate_horizontal"], "No");
+	CHECK(window.guientries["do_premultiply"].inp->active_r());
+	CHECK(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	window.toggle_new_continue(true);
+	CHECK_FALSE(window.guientries["do_premultiply"].inp->active_r());
+	CHECK_FALSE(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	window.toggle_new_continue(false);
+	CHECK(window.guientries["do_premultiply"].inp->active_r());
+	CHECK(window.guientries["ctf_intact_first_peak"].inp->active_r());
+
+	pick(window.guientries["do_premultiply"], "No");
+	window.toggle_new_continue(true);
+	window.toggle_new_continue(false);
+	CHECK(window.guientries["do_premultiply"].inp->active_r());
+	CHECK_FALSE(window.guientries["ctf_intact_first_peak"].inp->active_r());
 }

@@ -360,6 +360,7 @@ enum EMDLabel
 	EMDL_OPTIMISER_COARSE_SIZE,
 	EMDL_OPTIMISER_DATA_ARE_CTF_PHASE_FLIPPED,
     EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED,
+    EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK,
     EMDL_OPTIMISER_DATA_ARE_CTF_CORRECTED,
 	EMDL_OPTIMISER_DATA_STARFILE,
 	EMDL_OPTIMISER_DO_AUTO_REFINE,
@@ -443,7 +444,30 @@ enum EMDLabel
 	EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE,
 	EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM,
 	EMDL_OPTIMISER_HELICAL_KEEP_TILT_PRIOR_FIXED,
+	EMDL_OPTIMISER_HELICAL_KEEP_FULL_FILAMENTS,
+	EMDL_OPTIMISER_DO_BIMODAL_PSI,
+	EMDL_OPTIMISER_DO_SORT_CLASSES,
+	EMDL_OPTIMISER_SORT_CLASSES_JUNK,
+	EMDL_OPTIMISER_DO_HELICAL_CONTEXT,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_START,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_MIN,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_MAX,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_SELECTED,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_LAST_ITER,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TEMPER,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_EXCLUDE,
+	EMDL_OPTIMISER_DO_HELICAL_POLARITY,
+	EMDL_OPTIMISER_HELICAL_POLARITY_START,
+	EMDL_OPTIMISER_DO_HELICAL_TRACK_SMOOTH,
+	EMDL_OPTIMISER_HELICAL_TILT_WEIGHT_SIGMA,
 	EMDL_OPTIMISER_LOWRES_LIMIT_EXP,
+	EMDL_OPTIMISER_DO_FIX_GPU_BIMODAL_PSI,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_TOL,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_AGREE,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_EVERY,
+	EMDL_OPTIMISER_HELICAL_CONTEXT_WARM,
+	EMDL_OPTIMISER_HELICAL_TRACK_SIGMA_ANGSTROM,
 	EMDL_OPTIMISER_HIGHRES_LIMIT_EXP,
 	EMDL_OPTIMISER_HIGHRES_LIMIT_SGD,
 	EMDL_OPTIMISER_IGNORE_CTF_UNTIL_FIRST_PEAK,
@@ -513,6 +537,7 @@ enum EMDLabel
 	EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM,
 	EMDL_PARTICLE_HELICAL_TYPE,
 	EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY,
+	EMDL_PARTICLE_HELICAL_TYPE_POSTERIOR,
 	EMDL_PARTICLE_HELICAL_SECTION_ID,
 	EMDL_PARTICLE_HELICAL_CONTEXT_PROBABILITY,
 	EMDL_PARTICLE_HELICAL_POLARITY_FLIP_PROBABILITY,
@@ -1176,6 +1201,7 @@ private:
 		EMDL::addLabel(EMDL_OPTIMISER_CHANGES_OPTIMAL_CLASSES, EMDL_DOUBLE, "rlnChangesOptimalClasses", "The number of particles that changed their optimal clsas assignment in the last iteration");
 		EMDL::addLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PHASE_FLIPPED, EMDL_BOOL, "rlnCtfDataArePhaseFlipped", "Flag to indicate that the input images have been phase-flipped");
         EMDL::addLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED, EMDL_BOOL, "rlnCtfDataAreCtfPremultiplied", "Flag to indicate that the input images have been premultiplied with their CTF");
+        EMDL::addLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK, EMDL_BOOL, "rlnCtfDataAreCtfPremultipliedIntactFirstPeak", "Flag to indicate that CTF-premultiplied images left CTF phases untouched before the first peak");
         EMDL::addLabel(EMDL_OPTIMISER_DATA_ARE_CTF_CORRECTED, EMDL_BOOL, "rlnCtfDataAreCtfCorrected", "Flag to indicate that the input images have been corrected for their CTFs already");
 		EMDL::addLabel(EMDL_OPTIMISER_DATA_STARFILE, EMDL_STRING, "rlnExperimentalDataStarFile", "STAR file with metadata for the experimental images");
 		EMDL::addLabel(EMDL_OPTIMISER_DO_CORRECT_CTF, EMDL_BOOL, "rlnDoCorrectCtf", "Flag to indicate that CTF-correction should be performed");
@@ -1259,7 +1285,30 @@ private:
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE, EMDL_DOUBLE, "rlnHelicalSigmaDistance", "Sigma of distance along the helical tracks, as a fraction of the box size (older runs)");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM, EMDL_DOUBLE, "rlnHelicalSigmaDistanceAngst", "Sigma of distance along the helical tracks (Angstroms)");
 		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_KEEP_TILT_PRIOR_FIXED, EMDL_BOOL, "rlnHelicalKeepTiltPriorFixed", "Flag to indicate that helical tilt priors are kept fixed (at 90 degrees) in global angular searches");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_KEEP_FULL_FILAMENTS, EMDL_BOOL, "rlnHelicalKeepFullFilaments", "Flag to indicate that all segments from the same full filament are assigned to the same 3D class");
+		EMDL::addLabel(EMDL_OPTIMISER_DO_BIMODAL_PSI, EMDL_BOOL, "rlnDoBimodalPsi", "Flag to indicate that bimodal searches of psi angle are enabled");
+		EMDL::addLabel(EMDL_OPTIMISER_DO_SORT_CLASSES, EMDL_BOOL, "rlnDoSortClasses", "Flag to sort 2D classes by helical type, size, and junk after the last iteration");
+		EMDL::addLabel(EMDL_OPTIMISER_SORT_CLASSES_JUNK, EMDL_DOUBLE, "rlnSortClassesJunk", "Resolution factor above median at which classes are sorted as junk");
+		EMDL::addLabel(EMDL_OPTIMISER_DO_HELICAL_CONTEXT, EMDL_BOOL, "rlnDoHelicalContext", "Flag to use the helical filament Markov-chain context prior in 2D classification");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_START, EMDL_INT, "rlnHelicalContextStart", "First iteration that uses the helical filament context prior");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES, EMDL_INT, "rlnHelicalContextTypes", "Current number of helical types in the filament context");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_MIN, EMDL_INT, "rlnHelicalContextTypesMin", "Minimum number of helical types searched in the filament context");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_MAX, EMDL_INT, "rlnHelicalContextTypesMax", "Maximum number of helical types searched in the filament context");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_SELECTED, EMDL_BOOL, "rlnHelicalContextTypesSelected", "Whether the number of helical types has been selected from cross-validation");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_LAST_ITER, EMDL_INT, "rlnHelicalContextTypesLastIter", "Last iteration at which the number of helical types was selected");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TEMPER, EMDL_DOUBLE, "rlnHelicalContextTemper", "Temper factor on class log-likelihoods in the helical filament chain");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_EXCLUDE, EMDL_DOUBLE, "rlnHelicalContextExclude", "Leave-out radius (A) along the filament track for helical context");
+		EMDL::addLabel(EMDL_OPTIMISER_DO_HELICAL_POLARITY, EMDL_BOOL, "rlnDoHelicalPolarity", "Flag to enforce coherent helical filament polarity prior in 2D classification");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_POLARITY_START, EMDL_INT, "rlnHelicalPolarityStart", "First iteration that uses the helical filament polarity prior");
+		EMDL::addLabel(EMDL_OPTIMISER_DO_HELICAL_TRACK_SMOOTH, EMDL_BOOL, "rlnDoHelicalTrackSmooth", "Flag to smooth picked helical centerlines and psi tangents along each filament");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_TILT_WEIGHT_SIGMA, EMDL_DOUBLE, "rlnHelicalTiltWeightSigma", "Gaussian sigma (degrees) for down-weighting off-90 tilt angles in 3D helical reconstruction");
 		EMDL::addLabel(EMDL_OPTIMISER_LOWRES_LIMIT_EXP, EMDL_DOUBLE, "rlnLowresLimitExpectation", "Low-resolution-limit (in Angstrom) for the expectation step");
+		EMDL::addLabel(EMDL_OPTIMISER_DO_FIX_GPU_BIMODAL_PSI, EMDL_BOOL, "rlnDoFixGpuBimodalPsi", "Flag to enable fixed GPU bimodal psi searches in 2D classification");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_TOL, EMDL_DOUBLE, "rlnHelicalContextTypesTol", "Log-likelihood tolerance per segment when selecting number of helical types");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_AGREE, EMDL_DOUBLE, "rlnHelicalContextTypesAgree", "Minimum adjusted Rand index agreement across filament thirds when selecting number of helical types");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_EVERY, EMDL_INT, "rlnHelicalContextTypesEvery", "Interval of iterations between re-evaluating the number of helical types");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_CONTEXT_WARM, EMDL_BOOL, "rlnHelicalContextWarm", "Flag to warm-start the helical filament context model from the previous iteration");
+		EMDL::addLabel(EMDL_OPTIMISER_HELICAL_TRACK_SIGMA_ANGSTROM, EMDL_DOUBLE, "rlnHelicalTrackSigmaAngstrom", "Transverse offset prior sigma (A) around smoothed filament centerline");
 		EMDL::addLabel(EMDL_OPTIMISER_HIGHRES_LIMIT_EXP, EMDL_DOUBLE, "rlnHighresLimitExpectation", "High-resolution-limit (in Angstrom) for the expectation step");
 		EMDL::addLabel(EMDL_OPTIMISER_HIGHRES_LIMIT_SGD, EMDL_DOUBLE, "rlnHighresLimitSGD", "High-resolution-limit (in Angstrom) for Stochastic Gradient Descent");
 		EMDL::addLabel(EMDL_OPTIMISER_IGNORE_CTF_UNTIL_FIRST_PEAK, EMDL_BOOL, "rlnDoIgnoreCtfUntilFirstPeak", "Flag to indicate that the CTFs should be ignored until their first peak");
@@ -1331,6 +1380,7 @@ private:
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_FILAMENT_LENGTH_ANGSTROM, EMDL_DOUBLE, "rlnHelicalFilamentLengthAngst", "Length (in A) of the filament this helical segment was extracted from: the picked length for start-end or line coordinates, otherwise the distance between the first and last segments of the filament");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TYPE, EMDL_INT, "rlnHelicalType", "Helical type of a segment from the filament context of 2D classification (0: none)");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TYPE_PROBABILITY, EMDL_DOUBLE, "rlnHelicalTypeProbability", "Posterior probability of rlnHelicalType given the whole filament");
+		EMDL::addLabel(EMDL_PARTICLE_HELICAL_TYPE_POSTERIOR, EMDL_DOUBLE, "rlnHelicalTypePosterior", "Per-filament type purity and posterior probability of the filament's dominant rlnHelicalType");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_SECTION_ID, EMDL_INT, "rlnHelicalSectionID", "Section of a filament with one helical type (unique over the data set; 0: none)");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_CONTEXT_PROBABILITY, EMDL_DOUBLE, "rlnHelicalContextProbability", "Probability of the assigned class from the segments of the same filament only (filament context prior)");
 		EMDL::addLabel(EMDL_PARTICLE_HELICAL_POLARITY_FLIP_PROBABILITY, EMDL_DOUBLE, "rlnHelicalPolarityFlipProbability", "Probability (given the whole filament) that the polarity of a helical segment is opposite to its picking direction (psi = psi prior + 180)");

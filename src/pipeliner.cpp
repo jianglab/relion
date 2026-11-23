@@ -1593,6 +1593,22 @@ bool PipeLine::cleanupJob(int this_job, bool do_harsh, std::string &error_messag
 			}
 		} //end loop over ifile (i.e. the _data.star files from all iterations)
 	} // end if refine job
+	else if (processList[this_job].type == PROC_HELIX_SUBCLASSIFY)
+	{
+		FileName fn_vcache = processList[this_job].name + "vcache";
+		if (exists(fn_vcache))
+			fns_del.push_back(fn_vcache);
+		for (int idir = 0; idir < fns_subdir.size(); idir++)
+		{
+			if (fns_subdir[idir].contains("type_"))
+			{
+				fn_pattern = processList[this_job].name + fns_subdir[idir] + "run.out";
+				fn_pattern.globFiles(fns_del, false);
+				fn_pattern = processList[this_job].name + fns_subdir[idir] + "run.err";
+				fn_pattern.globFiles(fns_del, false);
+			}
+		}
+	} // end if helix_subclassify
 	else if (processList[this_job].type == PROC_CTFREFINE)
 	{
 		for (int idir = 0; idir < fns_subdir.size(); idir++)

@@ -72,7 +72,7 @@ double offsetAcross(const MultidimArray<RFLOAT> &img, double angle_deg)
 	return -XX(com) * sin(t) + YY(com) * cos(t);
 }
 
-double classDiameter(const MultidimArray<RFLOAT> &img, double gap_px, double frac, double pad)
+double classDiameter(const MultidimArray<RFLOAT> &img, double gap_px, double frac, double pad, double smooth_sigma_px)
 {
 	const int ny = YSIZE(img), nx = XSIZE(img);
 	const int x0 = (int)(0.15 * nx), x1 = std::max(x0 + 1, (int)(0.85 * nx));
@@ -84,23 +84,38 @@ double classDiameter(const MultidimArray<RFLOAT> &img, double gap_px, double fra
 			raw[i] += DIRECT_A2D_ELEM(img, i, j);
 		raw[i] /= x1 - x0;
 	}
-	// Gaussian of sigma 0.7 pixels, renormalised at the ends
+	// Gaussian of sigma max(0.7, smooth_sigma_px) pixels, renormalised at the ends
+	const double sig = std::max(0.7, smooth_sigma_px);
+	const double inv2s2 = 0.5 / (sig * sig);
+	const int rad = std::max(3, (int)std::ceil(3. * sig));
 	for (int i = 0; i < ny; i++)
 	{
 		double s = 0., w = 0.;
-		for (int d = -3; d <= 3; d++)
+		for (int d = -rad; d <= rad; d++)
 			if (i + d >= 0 && i + d < ny)
 			{
-				const double g = exp(-0.5 * d * d / 0.49);
+				const double g = exp(-d * d * inv2s2);
 				s += g * raw[i + d], w += g;
 			}
 		p[i] = s / w;
+	}
+	// Support dark-protein (un-inverted contrast) classes as well as bright-protein classes
+	{
+		double min_c = 1e30, max_c = -1e30;
+		for (int i = 0; i < ny; i++)
+			if (std::fabs(y[i]) < 0.3 * ny)
+			{
+				min_c = std::min(min_c, p[i]);
+				max_c = std::max(max_c, p[i]);
+			}
+		if (min_c < 0. && -min_c > 1.2 * std::max(0., max_c))
+			for (double &v : p) v = -v;
 	}
 	// Straight background through the outer bands; points more than 3 MADs above it (other filaments) left out
 	std::vector<char> bg(ny);
 	for (int i = 0; i < ny; i++)
 		bg[i] = std::fabs(y[i]) > 0.35 * ny;
-	double a = 0., b = 0.;
+	double a = 0., b = 0., bg_mad = 0.;
 	for (int it = 0; it < 3; it++)
 	{
 		double n = 0., sy = 0., sp = 0., syy = 0., syp = 0.;
@@ -122,11 +137,13 @@ double classDiameter(const MultidimArray<RFLOAT> &img, double gap_px, double fra
 		for (double &x : s)
 			x = std::fabs(x - med);
 		std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end());
-		const double mad = s[s.size() / 2] + 1e-12;
+		bg_mad = s[s.size() / 2];
+		const double mad = bg_mad + 1e-12;
 		for (int i = 0; i < ny; i++)
 			if (bg[i] && p[i] - a - b * y[i] >= med + 3. * mad)
 				bg[i] = 0;
 	}
+	const double bg_sigma = (bg_mad > 0.) ? 1.4826 * bg_mad : 0.;
 	std::vector<double> q(ny);
 	int pk = -1;
 	for (int i = 0; i < ny; i++)
@@ -138,8 +155,8 @@ double classDiameter(const MultidimArray<RFLOAT> &img, double gap_px, double fra
 	double pmax = 0.;
 	for (double v : p)
 		pmax = std::max(pmax, std::fabs(v));
-	// rounding errors of the background are not a peak
-	if (pk < 0 || !(q[pk] > 1e-6 * pmax))
+	// rounding errors or flat background noise are not a peak
+	if (pk < 0 || !(q[pk] > std::max(1e-6 * pmax, 4.0 * bg_sigma)))
 		return ny;
 	const double thr = frac * q[pk];
 	const int gap = std::max(2, (int)std::lround(gap_px));

@@ -599,6 +599,9 @@ void MotionRefiner::combineEPSAndSTARfiles()
 			obsModel.opticsMdt.setValue(EMDL_IMAGE_PIXEL_SIZE, frameRecombiner.getOutputPixelSize(og), og);
 			obsModel.opticsMdt.setValue(EMDL_IMAGE_SIZE, frameRecombiner.getOutputBoxSize(og), og);
 			obsModel.opticsMdt.setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED, frameRecombiner.isCtfMultiplied(og), og);
+			if (!obsModel.opticsMdt.containsLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK))
+				obsModel.opticsMdt.addLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK);
+			obsModel.opticsMdt.setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK, false, og);
 			std::cout << " + Pixel size for optics group " << (og + 1) << ": " << frameRecombiner.getOutputPixelSize(og) << std::endl;
 		}
 

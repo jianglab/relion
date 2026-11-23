@@ -45,6 +45,7 @@
 #include <random>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -492,8 +493,13 @@ bool MetaDataTable::setValueFromString(
 
 		if (EMDL::isDouble(label))
 		{
-			double v;
-			i >> v;
+			char *endptr = NULL;
+			double v = std::strtod(value.c_str(), &endptr);
+			if (endptr == value.c_str())
+			{
+				v = 0.;
+				i >> v;
+			}
 			return setValue(label, v, objectID);
 		}
 		else if (EMDL::isInt(label))

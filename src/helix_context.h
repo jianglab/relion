@@ -76,22 +76,47 @@ double adjustedRand(const std::vector<int> &a, const std::vector<int> &b);
 // its best Jaccard index (filaments labelled in both) with one of their types; types without filaments are left out
 std::vector<double> typeJaccard(const std::vector<std::vector<int> > &labels, int T);
 
+// Summary statistics of per-type fold Jaccard indices across replicas: absolute minimum,
+// mean across replicas of each replica's second-minimum type Jaccard, and abundance-weighted mean Jaccard
+void typeJaccardStats(const std::vector<std::vector<int> > &labels, int T,
+                      double &min_jacc, double &second_min_jacc, double &weighted_jacc);
+
+// Ordered class-index sequences per filament (for first-order tempered Markov chain polymorph typing)
+struct FilamentChains
+{
+	std::vector<std::vector<int> > seqs;  // per filament: ordered non-junk states in [0, C)
+	std::vector<std::string> mics;        // per filament: micrograph ID (empty if unavailable)
+	double kappa = 1.0;                   // overlap tempering factor in (0, 1]
+	int C = 0;                            // number of states
+};
+
+// Cross-validation scan for T = tmin..tmax using a mixture of tempered first-order Markov chains
+void scanChains(const FilamentChains &X, int tmin, int tmax, int nfold, int nsplit,
+                std::vector<double> &score, std::vector<double> &agree,
+                std::vector<double> *min_jacc = NULL,
+                std::vector<double> *weighted_jacc = NULL,
+                std::vector<double> *second_min_jacc = NULL);
+
+// Fit a T-component tempered Markov chain mixture to all non-empty filaments; optionally return F x T posteriors
+std::vector<int> fitChainTypes(const FilamentChains &X, int T, unsigned seed, std::vector<double> *post_out = NULL);
+
 // Helical continuity of each class: two segments of one filament, d apart along the track, show the same helix shifted
 // by d, so the class average of the later one should continue the class average of the earlier one at that shift
 // along the axis (x). Each segment (filament >= 0, class >= 0) is paired with the one about 15% of the box further
-// along its filament; the overlap of their class averages (low-passed to 25 A, inside a circle of 0.9 x the box,
-// normalised by the energies in the overlap, best over +-2 pixels across the axis) is taken at the predicted shift.
+// along its filament; the overlap of their class averages (low-passed to >=22 A, inside the tube/circle mask,
+// normalised by the energies in the overlap, best over transverse shift) is taken at the predicted shift.
 // The direction of the track in the class frame is the one with the higher median overlap; pairs with opposite
 // polarity (flipped: psi turned by 180 from its prior) are left out. Returns per class the median over its pairs
 // (NaN: fewer than 20); note says what was used. Helical classes: 0.7 and more; ice, carbon edges and blobs much less.
 std::vector<RFLOAT> classContinuity(const std::vector<MultidimArray<RFLOAT> > &refs, RFLOAT apix, const std::vector<long int> &filament,
                                     const std::vector<RFLOAT> &track_angst, const std::vector<int> &cls,
-                                    const std::vector<char> &flipped, std::string &note);
+                                    const std::vector<char> &flipped, std::string &note, RFLOAT outer_diam = 0.);
 
 // Junk classes: resolution worse than res_factor x the median (or none), wider than 80% of the box (diam: per class,
-// may be empty), or not continuing the helix (cont: classContinuity, may be empty; below 0.6)
+// may be empty), or not continuing the helix (cont: classContinuity, may be empty; adaptive safety floor)
 std::vector<char> junkClasses(const std::vector<RFLOAT> &res, const std::vector<RFLOAT> &diam, RFLOAT box_angst, RFLOAT res_factor,
-                              const std::vector<RFLOAT> &cont = std::vector<RFLOAT>());
+                              const std::vector<RFLOAT> &cont = std::vector<RFLOAT>(),
+                              const std::vector<RFLOAT> &pdf = std::vector<RFLOAT>());
 }
 
 class HelicalContext
@@ -113,16 +138,26 @@ public:
 	RFLOAT pol_exclude_angst; // segments closer than this do not contribute to the polarity prior (< 0: diameter / 2)
 	RFLOAT pol_prior_max;     // polarity priors are within [1 - pol_prior_max, pol_prior_max]
 	bool use_polarity_order;  // run the class chain of a filament with flipped polarity backwards (the views follow the molecule, not the picking direction)
+	bool use_phase_ring;      // couple circular crossover phase along each filament (RELION_HELICAL_PHASE_RING=0 disables)
+	bool use_twist_rate_split;// split shared-view polymorph types by per-filament crossover period (RELION_HELICAL_TWIST_SPLIT=0 disables)
 
 	// Data
 	int K;                                  // number of classes
 	long int N;                             // number of segments
 	RFLOAT step;                            // segment spacing (A)
+	RFLOAT diameter;                        // particle / tube diameter (A)
 	int exclude_steps;
 	std::vector<std::vector<long int> > chains;  // per chain: segment index per grid position (-1: none)
 	std::vector<long int> filament_of_chain;
 	std::vector<std::string> filament_name; // micrograph:tube
 	std::vector<long int> seg_chain, seg_pos;
+	std::vector<RFLOAT> orig_psi_prior;     // original picked rlnAnglePsiPrior per segment
+	std::vector<float> pol_class_weight;    // K asymmetry weights [0.05, 1] for polarity evidence
+	std::vector<int> class_owner;           // K exclusive type owners (0..T-1, -1: junk)
+	std::vector<char> class_allowed;        // K x T allowed types per class (1: allowed, 0: disallowed)
+	std::vector<int> split_lock_owner;      // K temporary exclusive type locks after chimeric class splitting (-1: none)
+	int split_lock_until;
+	std::vector<int> class_equiv;           // K equivalence IDs for view condensation during typing
 
 	std::vector<float> loglik;    // N x K, log-likelihood of each class (NaN row: not seen yet)
 	std::vector<float> prior;     // N x K, class prior factors for the next E-step (max 1)
@@ -147,11 +182,15 @@ public:
 	std::vector<double> q;        // T x K
 	std::vector<double> pi0;      // T x K
 
-	// Types
+	// Types & continuous helical crossover phase / per-filament pitch
 	std::vector<int> seg_type, seg_section; // N (type 0-based, section global 0-based)
 	std::vector<float> seg_type_prob;
+	std::vector<float> fil_type_posterior;   // F: per-filament purity / posterior for dominant type
+	std::vector<double> fil_chain_post;      // F x T: tempered Markov chain filament posteriors aligned to tpost
 	std::vector<double> type_period, type_period_R, type_mass, type_section_angst;
 	std::vector<int> type_nr_filaments, type_nr_sections;
+	std::vector<double> class_phase_cos, class_phase_sin, class_phase_r; // T x K empirical class phase phasors
+	std::vector<double> fil_period, fil_period_R; // F: per-filament crossover period (A) and circular resultant
 	double loglik_total;
 	double loglik_test;              // log-likelihood of the held-out chains (cross-validation)
 	std::vector<char> chain_test;    // 1: chain held out from training (empty: none)
@@ -159,11 +198,26 @@ public:
 	HelicalContext():
 		nr_types(4), temper(1.), exclude_angst(-1.),
 		max_gap_steps(3.), prior_floor(1e-3), ll_floor(-6.9), nr_bw_iter(3), verb(1),
-		pol_switch(1e-4), pol_temper(-1.), pol_clamp(6.9), pol_exclude_angst(-1.), pol_prior_max(0.999), use_polarity_order(false),
+		pol_switch(1e-4), pol_temper(-1.), pol_clamp(6.9), pol_exclude_angst(-1.), pol_prior_max(0.98), use_polarity_order(false),
+		use_phase_ring(true), use_twist_rate_split(true),
 		pol_exclude_steps(1), pol_nr_switches(0), pol_nr_consistent(0), pol_frac_flipped(0.),
-		K(0), N(0), step(0.), exclude_steps(1), initialised_model(false), have_prior(false),
+		K(0), N(0), step(0.), diameter(0.), exclude_steps(1), split_lock_until(0), initialised_model(false), have_prior(false),
 		rho(1e-3), loglik_total(0.), loglik_test(0.)
 	{}
+
+	// Smooth filament tracks & tangents along each filament (IRLS Huber cubic spline on micrograph coordinates)
+	void smoothFilamentTracks(MetaDataTable &MD, const std::vector<long int> &seg_rows, RFLOAT angpix, RFLOAT max_offset_A, int iter, const MetaDataTable *MDopt = NULL, bool update_origin_priors = true);
+
+	// 1D IRLS Huber cubic spline centerline smoother shared across track smoothing and coordinate recentering
+	static void smoothCenterline1D(const std::vector<double> &y_obs, const std::vector<double> &init_w,
+	                               double step_A, double huber_delta, double alpha_pick,
+	                               const std::vector<double> &y_pick, std::vector<double> &y_hat);
+
+	// Post-hoc centerline smoothing (updates rlnCoordinateX/Y and resets rlnOriginX/YAngst) and coherent polarity (rlnAnglePsiPrior)
+	void smoothAndRecenterCoordinates(MetaDataTable &MD, const std::vector<long int> &seg_rows,
+	                                  const std::vector<int> *cls, RFLOAT img_angpix, RFLOAT max_offset_A,
+	                                  const MetaDataTable *MDopt = NULL, bool resolve_polarity = true,
+	                                  bool update_psi_also = false, bool smooth_coords = true);
 
 	// Build the chains from the micrograph names, tube ids and track lengths of the segments
 	// (seg_rows[i] is the row in MD of segment i). diameter_angst is the default of exclude_angst.
@@ -193,6 +247,12 @@ public:
 	// held-out log-likelihood (helixtypes::choose). Else (agree_min <= 0) the chain model itself is fitted per fold and the smallest number
 	// within tol (nats per segment) of the best held-out log-likelihood is used. Sets nr_types and returns it.
 	int selectNrTypes(int tmin, int tmax, int nfold = 3, RFLOAT tol = 0.01, RFLOAT agree_min = 0.75, bool keep = false);
+
+	// Build view-equivalence class clustering from low-passed references for defocus/shift stability during typing
+	void computeClassEquivalence(const std::vector<MultidimArray<RFLOAT> > &refs, RFLOAT apix, RFLOAT outer_diam = 0.);
+
+	// Build FilamentChains from current posteriors/logliks excluding junk_class (using class_equiv if populated)
+	helixtypes::FilamentChains buildFilamentChains(std::vector<int> *state_to_first_cls = NULL) const;
 
 	// Junk classes (K entries, 1: junk; empty: none): left out when choosing the number of types, no type evidence in
 	// the chain model, no context prior, and their segments get no type (0)
@@ -227,8 +287,20 @@ public:
 	void fitPeriods(const std::vector<RFLOAT> &psi, const std::vector<RFLOAT> &psi_prior,
 	                RFLOAT min_angst = 100., RFLOAT max_angst = 2000., RFLOAT step_angst = 10.);
 
-	// Per-segment labels into MD (rlnHelicalType, rlnHelicalTypeProbability, rlnHelicalSectionID,
-	// rlnHelicalContextProbability), using seg_rows as in initialise
+	// Couple segment class priors with leave-out circular crossover phase prediction from the same filament
+	void applyPhaseRingPriors(const std::vector<RFLOAT> &psi, const std::vector<RFLOAT> &psi_prior);
+
+	// Split shared-view types whose per-filament crossover periods show a cross-validated bimodal mixture (returns nr_types)
+	int splitTypesByTwistRate(int tmax);
+
+	// Recursive hierarchical tree splitting (selectNrTypes + splitTypesByTwistRate per node until leaves pick T=1 or < min_type_filaments)
+	int runHierarchicalTyping(const std::vector<RFLOAT> &psi, const std::vector<RFLOAT> &psi_prior,
+	                          int tmin, int tmax_per_node, int max_types_total, int min_type_filaments,
+	                          int nfold = 3, RFLOAT tol = 0.01, RFLOAT agree_min = 0.75,
+	                          bool do_twist_split = true);
+
+	// Per-segment labels into MD (rlnHelicalType, rlnHelicalTypeProbability, rlnHelicalTypePosterior,
+	// rlnHelicalSectionID, rlnHelicalContextProbability), using seg_rows as in initialise
 	void writeLabels(MetaDataTable &MD, const std::vector<long int> &seg_rows, const std::vector<int> *assigned_class = NULL) const;
 
 	// Tables of types and filaments

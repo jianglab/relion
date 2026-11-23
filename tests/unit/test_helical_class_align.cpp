@@ -10,6 +10,7 @@
 #include "src/helical_class_align.h"
 
 #include <cmath>
+#include <random>
 
 namespace
 {
@@ -102,4 +103,27 @@ TEST_CASE("helical class alignment: the diameter of a class across its axis", "[
 	MultidimArray<RFLOAT> flat(128, 128);
 	flat.initConstant(0.5);
 	CHECK(helixalign::classDiameter(flat, 4.) == 128.);
+
+	// coarse shape smoothing (smooth_sigma_px = 3.0) rejects pure Gaussian noise back to ny
+	std::mt19937 rng(42);
+	std::normal_distribution<double> noise(0.0, 0.5);
+	MultidimArray<RFLOAT> pure_noise(128, 128);
+	pure_noise.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY2D(pure_noise)
+		A2D_ELEM(pure_noise, i, j) = noise(rng);
+	CHECK(helixalign::classDiameter(pure_noise, 4., 0.1, 0.1, 3.0) == 128.);
+
+	// noisy filament with negative CTF side-lobes + neighboring outer filament stays within reasonable width
+	MultidimArray<RFLOAT> noisy_ctf(128, 128);
+	noisy_ctf.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY2D(noisy_ctf)
+	{
+		const double core = (ABS(i) <= 8 && ABS(i) > 1) ? 2.0 : 0.0;
+		const double sidelobe = (ABS(i) >= 11 && ABS(i) <= 15) ? -0.9 : 0.0;
+		const double other = (i >= 52 && i <= 58) ? 1.5 : 0.0;
+		A2D_ELEM(noisy_ctf, i, j) = 0.2 + core + sidelobe + other + 0.6 * noise(rng);
+	}
+	const double d_noisy = helixalign::classDiameter(noisy_ctf, 4., 0.1, 0.1, 3.0);
+	CHECK(d_noisy >= 20.0);
+	CHECK(d_noisy <= 48.0);
 }

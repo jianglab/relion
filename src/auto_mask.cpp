@@ -664,8 +664,8 @@ void autoMaskFromMap(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT res
 		const AutoMaskOptions &opt, MultidimArray<RFLOAT> &mask,
 		AutoMaskReport *report, int n_threads)
 {
-	if (ZSIZE(map) < 2)
-		REPORT_ERROR("autoMaskFromMap ERROR: the map is not 3D");
+	if (ZSIZE(map) < 1 || YSIZE(map) < 2 || XSIZE(map) < 2)
+		REPORT_ERROR("autoMaskFromMap ERROR: the map is not 2D or 3D");
 
 	AutoMaskReport rep;
 	rep.resolution = resolution;
@@ -686,4 +686,261 @@ void autoMaskFromMap(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT res
 	mask.setXmippOrigin();
 	if (report != NULL)
 		*report = rep;
+}
+
+namespace
+{
+
+struct Mask2DStats
+{
+	long int nr_bin = 0;
+	long int nr_in_tube = 0;
+	double mean_dx = 0.;
+	double mean_dy = 0.;
+	double axial_cov = 1.;
+};
+
+Mask2DStats measureMask2DStats(const MultidimArray<RFLOAT> &binary, RFLOAT angpix, RFLOAT helix_tube_diam)
+{
+	const long int nx = XSIZE(binary), ny = YSIZE(binary);
+	const double cx0 = 0.5 * (double)nx, cy0 = 0.5 * (double)ny;
+	const bool check_tube = (helix_tube_diam > 0.);
+	std::vector<unsigned char> col_covered(nx, 0);
+	double sum_x = 0., sum_y = 0.;
+	Mask2DStats st;
+
+	for (long int i = 0; i < ny; i++)
+	for (long int j = 0; j < nx; j++)
+	{
+		if (DIRECT_A2D_ELEM(binary, i, j) <= 0.5)
+			continue;
+		st.nr_bin++;
+		sum_x += (double)j - cx0;
+		sum_y += (double)i - cy0;
+		if (check_tube && std::fabs((double)i - cy0) * angpix <= 0.5 * helix_tube_diam)
+		{
+			st.nr_in_tube++;
+			col_covered[j] = 1;
+		}
+	}
+
+	if (st.nr_bin > 0)
+	{
+		st.mean_dx = sum_x / (double)st.nr_bin;
+		st.mean_dy = sum_y / (double)st.nr_bin;
+	}
+	if (check_tube)
+	{
+		long int central_cols = 0, covered_cols = 0;
+		for (long int j = 0; j < nx; j++)
+		{
+			if (std::fabs((double)j - cx0) <= 0.35 * (double)nx)
+			{
+				central_cols++;
+				if (col_covered[j] != 0)
+					covered_cols++;
+			}
+		}
+		st.axial_cov = (central_cols > 0) ? (double)covered_cols / (double)central_cols : 1.;
+	}
+	return st;
+}
+
+// Re-attach secondary helical strands separated by a dark central groove when they lie inside
+// the helical tube and span a substantial axial segment (missed when all brightest seeds land on one strand).
+void mergeHelicalInTubeComponents(const MultidimArray<RFLOAT> &lp, RFLOAT threshold, RFLOAT angpix,
+		RFLOAT helix_tube_diam, MultidimArray<RFLOAT> &binary, long int primary_bin)
+{
+	const long int nx = XSIZE(lp), ny = YSIZE(lp), ntot = MULTIDIM_SIZE(lp);
+	const double cx0 = 0.5 * (double)nx, cy0 = 0.5 * (double)ny;
+	const long int min_comp_size = std::max(8L, (long int)std::round(0.05 * (double)primary_bin));
+	long int central_cols = 0;
+	for (long int j = 0; j < nx; j++)
+		if (std::fabs((double)j - cx0) <= 0.35 * (double)nx)
+			central_cols++;
+
+	std::vector<unsigned char> visited(ntot, 0);
+	std::vector<long int> stack, comp;
+	std::vector<unsigned char> comp_cols(nx, 0);
+
+	for (long int start = 0; start < ntot; start++)
+	{
+		if (visited[start] || DIRECT_MULTIDIM_ELEM(binary, start) > 0.5 || DIRECT_MULTIDIM_ELEM(lp, start) <= threshold)
+			continue;
+
+		comp.clear();
+		stack.clear();
+		visited[start] = 1;
+		stack.push_back(start);
+
+		long int in_tube = 0;
+		double sum_dy = 0.;
+		std::fill(comp_cols.begin(), comp_cols.end(), 0);
+
+		while (!stack.empty())
+		{
+			const long int n = stack.back();
+			stack.pop_back();
+			comp.push_back(n);
+
+			const long int i = n / nx, j = n % nx;
+			const double dy = (double)i - cy0;
+			sum_dy += dy;
+			if (std::fabs(dy) * angpix <= 0.5 * helix_tube_diam)
+				in_tube++;
+			comp_cols[j] = 1;
+
+			for (long int ii = std::max(0L, i - 1); ii <= std::min(ny - 1, i + 1); ii++)
+			for (long int jj = std::max(0L, j - 1); jj <= std::min(nx - 1, j + 1); jj++)
+			{
+				const long int nn = ii * nx + jj;
+				if (!visited[nn] && DIRECT_MULTIDIM_ELEM(binary, nn) <= 0.5 && DIRECT_MULTIDIM_ELEM(lp, nn) > threshold)
+				{
+					visited[nn] = 1;
+					stack.push_back(nn);
+				}
+			}
+		}
+
+		const long int c_size = (long int)comp.size();
+		if (c_size < min_comp_size || 2L * in_tube < c_size)
+			continue;
+		const double c_mean_dy = sum_dy / (double)c_size;
+		if (std::fabs(c_mean_dy) * angpix > 0.45 * helix_tube_diam)
+			continue;
+
+		long int x_cov = 0;
+		for (long int j = 0; j < nx; j++)
+			if (comp_cols[j] != 0 && std::fabs((double)j - cx0) <= 0.35 * (double)nx)
+				x_cov++;
+		const double c_xspan = (central_cols > 0) ? (double)x_cov / (double)central_cols : 0.;
+		if (c_xspan < 0.25)
+			continue;
+
+		for (long int idx : comp)
+			DIRECT_MULTIDIM_ELEM(binary, idx) = 1.;
+	}
+}
+
+} // namespace
+
+bool autoMask2DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT resolution,
+		const AutoMask2DOptions &opt, MultidimArray<RFLOAT> &mask,
+		const MultidimArray<RFLOAT> *prev_mask,
+		AutoMaskReport *report, int n_threads)
+{
+	if (ZSIZE(ref) != 1 || YSIZE(ref) < 2 || XSIZE(ref) < 2)
+		REPORT_ERROR("autoMask2DClass ERROR: input reference must be 2D (ZSIZE == 1)");
+
+	const long int nx = XSIZE(ref), ny = YSIZE(ref), ntot = MULTIDIM_SIZE(ref);
+	auto fallbackAllOnes = [&]() -> bool
+	{
+		mask.resize(ref);
+		mask.setXmippOrigin();
+		mask.initConstant(1.);
+		if (report != NULL)
+		{
+			AutoMaskReport rep;
+			rep.resolution = resolution;
+			*report = rep;
+		}
+		return false;
+	};
+
+	if (ntot <= 0 || !(angpix > 0.))
+		return fallbackAllOnes();
+
+	// 1. Coarse shape-only low-pass FIRST on the unclipped reference so random background noise and dark CTF
+	//    lobes cancel instead of being rectified upward before smoothing.
+	const RFLOAT max_lp = (RFLOAT)(0.45 * std::min(nx, ny) * angpix);
+	const RFLOAT lp_floor = std::min(max_lp, std::max((RFLOAT)0., opt.min_lowpass));
+	const RFLOAT requested_lp = (opt.lowpass > 0.) ? opt.lowpass : (RFLOAT)0.;
+	const RFLOAT lp_A = std::min(max_lp, std::max(lp_floor, requested_lp));
+
+	MultidimArray<RFLOAT> lp = ref;
+	if (lp_A > 2. * angpix)
+		autoMaskGaussianLowPass(lp, lp_A, angpix);
+
+	// Zero-clip negative CTF troughs strictly AFTER coarse shape filtering
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(lp)
+		if (DIRECT_MULTIDIM_ELEM(lp, n) < 0.)
+			DIRECT_MULTIDIM_ELEM(lp, n) = 0.;
+
+	if (!(lp.computeMax() > 1e-12))
+		return fallbackAllOnes();
+
+	// 2. Binary contour extraction without double-filtering
+	AutoMaskOptions base_opt;
+	base_opt.lowpass = -1.;
+	base_opt.mass = opt.mass;
+	base_opt.nr_seeds = std::max(16, (int)std::min(1000L, ntot / 256L));
+	base_opt.verb = opt.verb;
+
+	AutoMaskReport rep;
+	MultidimArray<RFLOAT> binary;
+	autoMaskBinary(lp, angpix, -1., base_opt, binary, rep);
+	rep.lowpass = (lp_A > 2. * angpix) ? lp_A : -1.;
+	rep.resolution = resolution;
+
+	const bool check_tube = (opt.helix_tube_diam > 0.);
+	if (check_tube)
+	{
+		// Only attach secondary helical strands if the primary seeded component already lies inside the tube
+		const Mask2DStats primary_st = measureMask2DStats(binary, angpix, opt.helix_tube_diam);
+		if (primary_st.nr_bin > 0 && 2L * primary_st.nr_in_tube >= primary_st.nr_bin
+		    && std::fabs(primary_st.mean_dy) * angpix <= 0.45 * opt.helix_tube_diam)
+			mergeHelicalInTubeComponents(lp, rep.threshold, angpix, opt.helix_tube_diam, binary, primary_st.nr_bin);
+	}
+
+	// 3. Reject degenerate, tiny, over-broad, off-axis rim, or edge-hijacked artifact masks before dilation
+	const Mask2DStats st = measureMask2DStats(binary, angpix, opt.helix_tube_diam);
+	rep.mass = (RFLOAT)((double)st.nr_bin * angpix * angpix * angpix * 0.81e-3);
+
+	const double area_frac = (double)st.nr_bin / (double)ntot;
+	bool reject = (st.nr_bin == 0 || area_frac < opt.min_area_frac || area_frac > opt.max_area_frac);
+	if (!reject)
+	{
+		if (check_tube)
+		{
+			if (std::fabs(st.mean_dy) * angpix > 0.45 * opt.helix_tube_diam
+			    || 2L * st.nr_in_tube < st.nr_bin
+			    || (opt.min_axial_cov > 0. && st.axial_cov < opt.min_axial_cov))
+				reject = true;
+		}
+		else if (std::hypot(st.mean_dx, st.mean_dy) > 0.35 * (double)std::min(nx, ny))
+			reject = true;
+	}
+	if (reject)
+		return fallbackAllOnes();
+
+	// 4. Envelope extension + raised-cosine soft edge
+	MultidimArray<RFLOAT> dist, candidate;
+	const RFLOAT extend_px = std::max((RFLOAT)0., opt.extend_angst / angpix);
+	distanceToExtendedMask(binary, extend_px, dist, n_threads);
+	RFLOAT width = opt.soft_edge;
+	if (width < 0.)
+		width = std::max((RFLOAT)3., (resolution > 0.) ? (RFLOAT)(3. * resolution / angpix) : (RFLOAT)3.);
+	width = XMIPP_MIN(XMIPP_MAX(width, 0.), (RFLOAT)nx / 3.);
+	rep.soft_edge = width;
+	autoMaskSoftEdge(dist, width, candidate);
+	candidate.setXmippOrigin();
+
+	// 5. Asymmetric hysteresis: widen immediately (cand >= prev), narrow gradually (0.5 * prev + 0.5 * cand)
+	if (prev_mask != NULL && prev_mask->sameShape(candidate, true))
+	{
+		mask.resize(candidate);
+		mask.setXmippOrigin();
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(candidate)
+		{
+			const RFLOAT cand = DIRECT_MULTIDIM_ELEM(candidate, n);
+			const RFLOAT prev = DIRECT_MULTIDIM_ELEM(*prev_mask, n);
+			DIRECT_MULTIDIM_ELEM(mask, n) = (cand >= prev) ? cand : (RFLOAT)(0.5 * prev + 0.5 * cand);
+		}
+	}
+	else
+		mask = candidate;
+
+	if (report != NULL)
+		*report = rep;
+	return true;
 }

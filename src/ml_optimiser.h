@@ -351,6 +351,9 @@ public:
 	// Mask the references with automatic masks made from them (as trueFSC in helicon, see auto_mask.h)
 	bool do_auto_mask;
 
+	// True when --dont_auto_mask was explicitly given (overrides "auto" in --ref STAR file)
+	bool explicit_dont_auto_mask;
+
 	// Only once the resolution is better than this (A)
 	RFLOAT auto_mask_start_res;
 
@@ -445,6 +448,7 @@ public:
 
 	// Self-organizing map
 	bool do_init_blobs;
+	bool explicit_init_blobs = false;
 	bool do_som;
 	bool is_som_iter;
 	int som_starting_nodes;
@@ -660,7 +664,7 @@ public:
 	// Low-pass filter the references to this resolution (A) before the first iteration, if coarser than --ini_high
 	RFLOAT ref_lowpass = -1.;
 	// The options above; parsed the same way in both parse paths
-	void parseSortClassesAndRefLowpass();
+	void parseSortClassesAndRefLowpass(bool is_continue = false);
 	// Renumber the classes in the model and the particles (see do_sort_classes)
 	void sortClasses();
 
@@ -670,6 +674,8 @@ public:
 
 	/* Flag to assign all segments from the same helical filament to the same class */
 	bool do_keep_full_filaments;
+	// --keep_full_filaments / --dont_keep_full_filaments, over RELION_KEEP_FULL_FILAMENTS (or saved optimiser.star)
+	void parseKeepFullFilaments(bool is_continue);
 
 	/* Flag to align half-maps to each other (for auto-refine) */
 	bool do_align_halves;
@@ -745,8 +751,8 @@ public:
 	// the segments of a filament form a Markov chain, whose prior over the classes of a segment
 	// (from the other segments of its filament) is used as its class prior in the E-step
 	bool do_helical_context;
-	int helical_context_start_iter;
-	bool helical_context_warm;
+	int helical_context_start_iter = 4;
+	bool helical_context_warm = false;
 	int helical_context_types_max;     // > nr_types: choose the number of types by cross-validation (once)
 	RFLOAT helical_context_types_tol;  // ... the fewest types within this (nats per segment) of the best
 	RFLOAT helical_context_types_agree; // > 0: instead the most types whose folds agree to this (adjusted Rand index)
@@ -763,7 +769,20 @@ public:
 	// polarity (psi = psi prior or psi prior + 180); its prior from the rest of the filament is
 	// the flip ratio of the bimodal psi prior (see src/helix_context.h)
 	bool do_helical_polarity;
+	bool do_helical_polarity_off = false;
 	int helical_polarity_start_iter;
+
+	// Smooth filament tracks and tangents along each filament (writes updated
+	// rlnAnglePsiPrior and rlnOriginX/YPriorAngst and tightens transverse offset sigma)
+	bool do_helical_track_smooth = false;
+	bool do_helical_track_smooth_off = false;
+	RFLOAT helical_track_sigma_A = 3.5;
+	std::vector<RFLOAT> helical3d_orig_flip_ratio_;
+
+	void parseHelicalContextOptions(bool is_continue = false);
+	void initialiseHelical3DContext();
+	void updateHelical3DContextAfterIter();
+	void updateHelicalPolarity3D();
 
 	// Rectangular images: masks are ellipses along the box whose long axis is the mask
 	// diameter (--rect_mask_length). Otherwise the diameter applies to the box width.
@@ -925,7 +944,10 @@ public:
 	// log-priors computed from them for the next one (all nr_particles x nr_classes).
 	filctx::Options filctx_opt;
 	std::vector<std::vector<long int> > filctx_filaments;
-	std::vector<float> filctx_loglik, filctx_logprior;
+	std::vector<std::vector<double> > filctx_tracks;
+	double filctx_step = -1.;
+	std::vector<float> filctx_loglik, filctx_logprior, filctx_phase_bonus;
+	std::vector<unsigned char> filctx_visited;
 	std::vector<double> filctx_T;
 	double filctx_temper = 1.;
 	std::string exp_fn_img, exp_fn_ctf, exp_fn_recimg;
@@ -1106,6 +1128,7 @@ public:
             helical_polarity_start_iter(3),
             do_rect_mask_length(0),
             do_auto_mask(false),
+            explicit_dont_auto_mask(false),
             auto_mask_start_res(12.),
             auto_mask_soft_edge(-1.),
             auto_mask_mass(-1.),
@@ -1386,6 +1409,39 @@ public:
 	// Filament context: set up the chains, update them after the E-step, class prior factors
 	void initialiseHelicalContext();
 	void updateHelicalContext();
+	inline bool gpuBimodalPsiEnabled() const
+	{
+		static const bool enabled = []() {
+			const char *e = getenv("RELION_GPU_BIMODAL_PSI");
+			if (!e || !e[0])
+				return true;
+			std::string s(e);
+			return s != "0" && s != "off" && s != "OFF" && s != "false" && s != "no";
+		}();
+		return enabled;
+	}
+
+	inline RFLOAT helical2dClassFactor(long int part_id, int iclass) const
+	{
+		static const bool enabled = []() {
+			const char *e = getenv("RELION_HELICAL_CLASS_PDF");
+			if (!e || !e[0])
+				return true;
+			std::string s(e);
+			return s != "0" && s != "off" && s != "OFF" && s != "false" && s != "no";
+		}();
+		(void)part_id;
+		if (!enabled)
+			return 1.;
+		if (mymodel.ref_dim == 2 && !do_skip_align && !do_skip_rotate && mymodel.orientational_prior_mode != NOPRIOR)
+		{
+			const bool ctx_active = (do_helical_context && iter >= helical_context_start_iter && helical_context.have_prior);
+			if (!ctx_active)
+				return mymodel.pdf_class[iclass];
+		}
+		return 1.;
+	}
+
 	inline RFLOAT helicalContextPrior(long int part_id, int iclass) const
 	{
 		return (do_helical_context && iter >= helical_context_start_iter) ? helical_context.getPrior(part_id, iclass) : 1.;
@@ -1420,6 +1476,8 @@ public:
 				helicalPolarityFactor(part_id, 0), helicalPolarityFactor(part_id, 1));
 	}
 	void updateHelicalPolarity();
+	void splitChimericHelicalClasses();
+	bool helical_split_happened = false;
 	// One particle star file and one class-average stack per helical type, next to the data.star of this iteration
 	void writeHelicalTypeFiles();
 	// The frame of a 2D class is arbitrary up to a rotation by 180 degrees, so "flipped with respect
@@ -1739,7 +1797,7 @@ public:
 	// Command-line options (--filament_context etc.) over the RELION_FILAMENT_* environment defaults
 	void parseFilamentContext();
 	// --helical_tilt_weight_sigma, parsed the same in both parse paths so that --continue can switch it
-	void parseHelicalTiltWeight();
+	void parseHelicalTiltWeight(bool is_continue = false);
 	// Whether it applies: 3D references only (the tilt is 0 in 2D), and not to the residual
 	// orientations of multi-body refinement
 	bool doHelicalTiltWeight() const
@@ -1765,8 +1823,50 @@ public:
 			return 1.;
 		return helical_end_weight;
 	}
+	inline bool needPerClassMetadata() const
+	{
+		return mymodel.nr_classes > 1 && mymodel.nr_bodies == 1 &&
+		       (do_keep_full_filaments ||
+		        (filctx_opt.mode != filctx::OFF &&
+		         do_helical_refine && mymodel.ref_dim == 3 && !do_skip_align && !do_skip_rotate));
+	}
+	inline bool needFilamentLoglik() const
+	{
+		return mymodel.nr_classes > 1 && mymodel.nr_bodies == 1 && !mydata.is_tomo &&
+		       (filctx_opt.mode != filctx::OFF || do_keep_full_filaments);
+	}
+	inline bool isFilamentSeedIter() const
+	{
+		return do_fix_classes || shared_ref_seed_iter || (do_firstiter_cc && iter == 1) ||
+		       (do_generate_seeds && ((do_firstiter_cc && iter == 2) || (!do_firstiter_cc && iter == 1)));
+	}
+	inline bool shouldEnforceFilamentConsistencyThisIter() const
+	{
+		if (!do_keep_full_filaments || mymodel.nr_classes <= 1 || mymodel.nr_bodies > 1)
+			return false;
+		if (iter >= nr_iter)
+			return true;
+		if (isFilamentSeedIter())
+			return false;
+		static const bool force_every = []() {
+			const char *e = std::getenv("RELION_FILAMENT_ENFORCE_EVERY_ITER");
+			return e != NULL && e[0] && std::string(e) != "0" && std::string(e) != "off";
+		}();
+		if (do_helical_refine && !ignore_helical_symmetry && mymodel.ref_dim == 3 && !force_every)
+			return false;
+		return true;
+	}
 	void initialiseFilamentContext();
+	inline bool useCoarseFilamentScores() const
+	{
+		static const bool coarse = []() {
+			const char *e = std::getenv("RELION_FILAMENT_SCORE");
+			return e != NULL && std::string(e) == "coarse";
+		}();
+		return coarse;
+	}
 	void storeFilamentLoglik(long int part_id, const MultidimArray<RFLOAT> &Mdiff2, long int per_class, RFLOAT min_diff2);
+	void storeFilamentPosterior(long int part_id, const std::vector<RFLOAT> &class_post, long int metadata_offset = -1);
 	void updateFilamentContext();
 	inline RFLOAT filamentClassFactor(long int part_id, int iclass) const
 	{

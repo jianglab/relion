@@ -315,7 +315,10 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     if (parser.checkOption("--auto_mask", "Mask the references with automatic masks made from them", "OLD"))
         do_auto_mask = true;
     if (parser.checkOption("--dont_auto_mask", "Stop masking the references with automatic masks", "OLD"))
+    {
         do_auto_mask = false;
+        explicit_dont_auto_mask = true;
+    }
     fnt = parser.getOption("--auto_mask_start_res", "Make automatic masks only once the resolution is better than this (in A)", "OLD");
     if (fnt != "OLD")
         auto_mask_start_res = textToFloat(fnt);
@@ -514,26 +517,6 @@ void MlOptimiser::parseContinue(int argc, char **argv)
         helical_sigma_distance = textToFloat(fnt_old_sigma);
         helical_sigma_distance_A = -1.;
     }
-    do_helical_context = parser.checkOption("--helical_context", "Use the other segments of each filament as a prior on the class of a segment (helical 2D classification)");
-    helical_context_start_iter = textToInteger(parser.getOption("--helical_context_start", "First iteration that uses the filament context prior", "6"));
-    helical_context.temper = textToFloat(parser.getOption("--helical_context_temper", "Factor on the class log-likelihoods in the filament chain", "1"));
-    helical_context.exclude_angst = textToFloat(parser.getOption("--helical_context_exclude", "The prior of a segment comes from segments at least this far away (A, default: particle diameter)", "-1"));
-    helical_context.nr_types = textToInteger(parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", "4"));
-    helical_context_types_max = textToInteger(parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", "-1"));
-    helical_context_types_tol = textToFloat(parser.getOption("--helical_context_types_tol", "With --helical_context_types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
-    helical_context_types_agree = textToFloat(parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", "0.75"));
-    helical_context_types_every = textToInteger(parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now)", "5"));
-    helical_context_types_min = helical_context.nr_types;
-    helical_context.nr_bw_iter = textToInteger(parser.getOption("--helical_context_bw_iter", "Baum-Welch iterations of the filament chain per iteration", "3"));
-    helical_context_warm = parser.checkOption("--helical_context_warm", "Continue the filament chain model from the last iteration (default: start again from the current classes)");
-    helical_context.use_polarity_order = parser.checkOption("--helical_context_polarity_order", "With --helical_polarity: run the class chain of filaments with flipped polarity backwards");
-    helical_context_class_min_frac = textToFloat(parser.getOption("--helical_context_class_min_frac", "Files per helical type: include a class if at least this fraction of its segments is of the type", "0.1"));
-    helical_context_class_min_segs = textToInteger(parser.getOption("--helical_context_class_min_segs", "Files per helical type: ... and at least this many of its segments", "20"));
-    do_helical_polarity = parser.checkOption("--helical_polarity", "All segments of a filament have the same polarity (helical 2D classification with --bimodal_psi)");
-    helical_polarity_start_iter = textToInteger(parser.getOption("--helical_polarity_start", "First iteration that uses the filament polarity prior", "3"));
-    helical_context.pol_switch = textToFloat(parser.getOption("--helical_polarity_switch", "Probability per segment step that the polarity changes along a filament (picking errors)", "1e-4"));
-    helical_context.pol_temper = textToFloat(parser.getOption("--helical_polarity_temper", "Factor on the polarity log-likelihood ratios of the segments (default: segment step / particle diameter)", "-1"));
-    helical_context.pol_exclude_angst = textToFloat(parser.getOption("--helical_polarity_exclude", "The polarity prior of a segment comes from segments at least this far away (A, default: half the particle diameter)", "-1"));
     fnt = parser.getOption("--helical_outer_diameter", "Outer diameter of helical tubes in Angstroms (for masks of helical references and particles)", "OLD");
     if (fnt != "OLD")
     {
@@ -549,6 +532,7 @@ void MlOptimiser::parseContinue(int argc, char **argv)
         helical_auto_diameter = true;
     if (parser.checkOption("--dont_helical_auto_diameter", "Mask all classes with the tube of the job"))
         helical_auto_diameter = false;
+    parseKeepFullFilaments(true);
     fnt = parser.getOption("--perturb", "Perturbation factor for the angular sampling (0=no perturb; 0.5=perturb)", "OLD");
     if (fnt != "OLD")
     {
@@ -576,13 +560,16 @@ void MlOptimiser::parseContinue(int argc, char **argv)
 
     if (parser.checkOption("--bimodal_psi", "Do bimodal searches of psi angle?")) // Oct07,2015 - Shaoda, bimodal psi
         do_bimodal_psi = true;
-    else
+    if (parser.checkOption("--dont_bimodal_psi", "Do not do bimodal searches of psi angle"))
         do_bimodal_psi = false;
-    do_fix_gpu_bimodal_psi = parser.checkOption("--fix_gpu_bimodal_psi", "Also do the bimodal psi searches of --bimodal_psi on the GPU (2D)?");
+    if (parser.checkOption("--fix_gpu_bimodal_psi", "Also do the bimodal psi searches of --bimodal_psi on the GPU (2D)?"))
+        do_fix_gpu_bimodal_psi = true;
+    if (parser.checkOption("--dont_fix_gpu_bimodal_psi", "Do not use the fixed GPU bimodal psi search"))
+        do_fix_gpu_bimodal_psi = false;
 
     if (parser.checkOption("--center_classes", "Re-center classes based on their center-of-mass?"))
         do_center_classes = true;
-    else
+    if (parser.checkOption("--dont_center_classes", "Do not re-center classes based on their center-of-mass"))
         do_center_classes = false;
 
     // Aligning all classes to the largest class is ON by default.  --align_classes
@@ -595,10 +582,11 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
-    parseSortClassesAndRefLowpass();
+    parseSortClassesAndRefLowpass(true);
     parseCoarseEarly();
     parseFilamentContext();
-    parseHelicalTiltWeight();
+    parseHelicalContextOptions(true);
+    parseHelicalTiltWeight(true);
     parseHelicalEndWeight();
 
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
@@ -782,6 +770,8 @@ void MlOptimiser::parseContinue(int argc, char **argv)
     // (the groups are kept in model.star until they have been seeded: a run continued after the --firstiter_cc
     // iteration seeds them in its first iteration)
     do_shared_ref_seeds = !parser.checkOption("--no_shared_ref_seeds", "Do not seed randomly among classes that start from the same map");
+    parser.checkOption("--no_init_blobs", "Ignored when continuing (random-Gaussian initialisation only applies at iteration 0)");
+    parser.checkOption("--init_blobs", "Ignored when continuing (random-Gaussian initialisation only applies at iteration 0)");
 
     do_blush = parser.checkOption("--blush", "Perform the reconstruction with the Blush algorithm.");
     blush_model = parser.getOption("--blush_model", "File location of a non-standard blush model", "");
@@ -847,6 +837,9 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     fn_mask2 = parser.getOption("--solvent_mask2", "User-provided secondary mask (with its own average density)", "None");
     do_write_unmasked_maps = parser.checkOption("--write_unmasked_maps", "3D classification and auto-refinement: at every iteration also write the maps before the solvent mask (rootname_itNNN[_halfN]_classNNN_unmasked.mrc), next to the masked ones");
     do_auto_mask = parser.checkOption("--auto_mask", "Mask the 3D references at every iteration with masks made from them automatically, as trueFSC in helicon: low-pass filtered, thresholded (Otsu), the regions with the brightest voxels kept and a soft edge added (in auto-refinement made from the two half-maps, with the soft edge that best separates signal from noise). Needs --flatten_solvent; not with --solvent_mask");
+    explicit_dont_auto_mask = parser.checkOption("--dont_auto_mask", "Do not mask the 3D references with automatic masks (the default)");
+    if (explicit_dont_auto_mask)
+        do_auto_mask = false;
     auto_mask_start_res = textToFloat(parser.getOption("--auto_mask_start_res", "Make the automatic masks only once the resolution is better than this (in A); spherical masks until then", "12"));
     auto_mask_soft_edge = textToFloat(parser.getOption("--auto_mask_soft", "Width of the soft edge of the automatic masks (in A). Default: optimised from the half-maps in auto-refinement, 3 times the resolution of the class in classification", "-1"));
     auto_mask_mass = textToFloat(parser.getOption("--auto_mask_mass", "Binarise the automatic masks at the threshold that encloses this mass (in kDa) instead of at Otsu's threshold", "-1"));
@@ -857,6 +850,8 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     do_split_random_halves = parser.checkOption("--split_random_halves", "Refine two random halves of the data completely separately");
     low_resol_join_halves = textToFloat(parser.getOption("--low_resol_join_halves", "Resolution (in Angstrom) up to which the two random half-reconstructions will not be independent to prevent diverging orientations","-1"));
     do_center_classes = parser.checkOption("--center_classes", "Re-center classes based on their center-of-mass?");
+    if (parser.checkOption("--dont_center_classes", "Do not re-center classes based on their center-of-mass"))
+        do_center_classes = false;
     // Aligning all classes to the largest class is ON by default.  --align_classes
     // is still accepted - the GUI emits it, and it now simply asks for the default -
     // so existing job.star files and scripts keep working; --dont_align_classes is
@@ -867,10 +862,10 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     // Only the last iteration's files are kept by default (plus it000 of a run
     // that started from an initial reference); see pruneOldIterations().
     parseKeepAllIterations();
-    parseSortClassesAndRefLowpass();
+    parseSortClassesAndRefLowpass(false);
     parseCoarseEarly();
     parseFilamentContext();
-    parseHelicalTiltWeight();
+    parseHelicalTiltWeight(false);
     parseHelicalEndWeight();
     // Aligning the two half-maps to each other is ON by default.  --align_halves is
     // still accepted - the GUI emits it, and it now simply asks for the default -
@@ -998,7 +993,11 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     keep_first_iteration = (fn_ref != "None" && !is_3d_model) || do_fix_classes;
     do_skip_rotate = parser.checkOption("--skip_rotate", "Skip rotational assignment (only translate and classify)?");
     do_bimodal_psi = parser.checkOption("--bimodal_psi", "Do bimodal searches of psi angle?"); // Oct07,2015 - Shaoda, bimodal psi
+    if (parser.checkOption("--dont_bimodal_psi", "Do not do bimodal searches of psi angle"))
+        do_bimodal_psi = false;
     do_fix_gpu_bimodal_psi = parser.checkOption("--fix_gpu_bimodal_psi", "Also do the bimodal psi searches of --bimodal_psi on the GPU (2D)? Without it, the GPU only searches around the psi prior");
+    if (parser.checkOption("--dont_fix_gpu_bimodal_psi", "Do not use the fixed GPU bimodal psi search"))
+        do_fix_gpu_bimodal_psi = false;
     do_skip_maximization = false;
     keep_angular_priors_fixed = parser.checkOption("--keep_priors_fixed", "Keep priors fixed, even for local angular searches?");
 
@@ -1042,26 +1041,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     if (helical_sigma_distance_A >= 0. && helical_sigma_distance >= 0.)
         REPORT_ERROR("ERROR: give only one of --helical_sigma_distance_A and the older --helical_sigma_distance");
 
-    do_helical_context = parser.checkOption("--helical_context", "Use the other segments of each filament as a prior on the class of a segment (helical 2D classification)");
-    helical_context_start_iter = textToInteger(parser.getOption("--helical_context_start", "First iteration that uses the filament context prior", "6"));
-    helical_context.temper = textToFloat(parser.getOption("--helical_context_temper", "Factor on the class log-likelihoods in the filament chain", "1"));
-    helical_context.exclude_angst = textToFloat(parser.getOption("--helical_context_exclude", "The prior of a segment comes from segments at least this far away (A, default: particle diameter)", "-1"));
-    helical_context.nr_types = textToInteger(parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", "4"));
-    helical_context_types_max = textToInteger(parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", "-1"));
-    helical_context_types_tol = textToFloat(parser.getOption("--helical_context_types_tol", "With --helical_context_types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
-    helical_context_types_agree = textToFloat(parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", "0.75"));
-    helical_context_types_every = textToInteger(parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now)", "5"));
-    helical_context_types_min = helical_context.nr_types;
-    helical_context.nr_bw_iter = textToInteger(parser.getOption("--helical_context_bw_iter", "Baum-Welch iterations of the filament chain per iteration", "3"));
-    helical_context_warm = parser.checkOption("--helical_context_warm", "Continue the filament chain model from the last iteration (default: start again from the current classes)");
-    helical_context.use_polarity_order = parser.checkOption("--helical_context_polarity_order", "With --helical_polarity: run the class chain of filaments with flipped polarity backwards");
-    helical_context_class_min_frac = textToFloat(parser.getOption("--helical_context_class_min_frac", "Files per helical type: include a class if at least this fraction of its segments is of the type", "0.1"));
-    helical_context_class_min_segs = textToInteger(parser.getOption("--helical_context_class_min_segs", "Files per helical type: ... and at least this many of its segments", "20"));
-    do_helical_polarity = parser.checkOption("--helical_polarity", "All segments of a filament have the same polarity (helical 2D classification with --bimodal_psi)");
-    helical_polarity_start_iter = textToInteger(parser.getOption("--helical_polarity_start", "First iteration that uses the filament polarity prior", "3"));
-    helical_context.pol_switch = textToFloat(parser.getOption("--helical_polarity_switch", "Probability per segment step that the polarity changes along a filament (picking errors)", "1e-4"));
-    helical_context.pol_temper = textToFloat(parser.getOption("--helical_polarity_temper", "Factor on the polarity log-likelihood ratios of the segments (default: segment step / particle diameter)", "-1"));
-    helical_context.pol_exclude_angst = textToFloat(parser.getOption("--helical_polarity_exclude", "The polarity prior of a segment comes from segments at least this far away (A, default: half the particle diameter)", "-1"));
+    parseHelicalContextOptions(false);
     helical_keep_tilt_prior_fixed = parser.checkOption("--helical_keep_tilt_prior_fixed", "Keep helical tilt priors fixed (at 90 degrees) in global angular searches?");
     if (ignore_helical_symmetry)
     {
@@ -1080,7 +1060,7 @@ void MlOptimiser::parseInitial(int argc, char **argv)
         SWAP(mymodel.helical_twist_min, mymodel.helical_twist_max, tmp_RFLOAT);
     helical_fourier_mask_resols = parser.getOption("--helical_exclude_resols", "Resolutions (in A) along helical axis to exclude from refinement (comma-separated pairs, e.g. 50,5)", "");
     fn_fourier_mask = parser.getOption("--fourier_mask", "Originally-sized, FFTW-centred image with Fourier mask for Projector", "None");
-    do_keep_full_filaments = parser.checkOption("--keep_full_filaments", "Assign all segments from the same full filament to the same 3D class? (for helical Class3D)");
+    parseKeepFullFilaments(false);
 
     // CTF, norm, scale, bfactor correction etc.
     int corrections_section = parser.addSection("Corrections");
@@ -1142,6 +1122,9 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     write_every_grad_iter = textToInteger(parser.getOption("--grad_write_iter", "Write out model every so many iterations in SGD (default is writing out all iters)", "10"));
     maximum_significants_arg = textToInteger(parser.getOption("--maxsig", "Maximum number of most significant poses & translations to consider", "-1"));
     do_init_blobs = !parser.checkOption("--no_init_blobs", "Use this to switch off initializing models with random Gaussians (which is new in relion-4.0).");
+    explicit_init_blobs = parser.checkOption("--init_blobs", "Force initialising models with random Gaussians (even for helical 2D)");
+    if (explicit_init_blobs)
+        do_init_blobs = true;
     do_som = parser.checkOption("--som", "Calculate self-organizing map instead of classification.");
     som_starting_nodes = textToInteger(parser.getOption("--som_ini_nodes", "Number of initial SOM nodes.", "2"));
     som_connectivity = textToFloat(parser.getOption("--som_connectivity", "Number of average active neighbour connections.", "5.0"));
@@ -1488,6 +1471,56 @@ void MlOptimiser::read(FileName fn_in, int rank, bool do_prevent_preread)
         helical_sigma_distance = -1.;
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_KEEP_TILT_PRIOR_FIXED, helical_keep_tilt_prior_fixed))
             helical_keep_tilt_prior_fixed = false;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_KEEP_FULL_FILAMENTS, do_keep_full_filaments))
+        do_keep_full_filaments = false;
+    if (!MD.getValue(EMDL_OPTIMISER_DO_BIMODAL_PSI, do_bimodal_psi))
+        do_bimodal_psi = false;
+    if (!MD.getValue(EMDL_OPTIMISER_DO_SORT_CLASSES, do_sort_classes))
+        do_sort_classes = false;
+    if (!MD.getValue(EMDL_OPTIMISER_SORT_CLASSES_JUNK, sort_classes_junk))
+        sort_classes_junk = 1.5;
+    if (!MD.getValue(EMDL_OPTIMISER_DO_HELICAL_CONTEXT, do_helical_context))
+        do_helical_context = false;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_START, helical_context_start_iter))
+        helical_context_start_iter = 4;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES, helical_context.nr_types))
+        helical_context.nr_types = 4;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_MIN, helical_context_types_min))
+        helical_context_types_min = helical_context.nr_types;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_MAX, helical_context_types_max))
+        helical_context_types_max = -1;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_SELECTED, helical_context_types_selected))
+        helical_context_types_selected = false;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_LAST_ITER, helical_context_types_last_iter))
+        helical_context_types_last_iter = -1;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TEMPER, helical_context.temper))
+        helical_context.temper = -1.;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_EXCLUDE, helical_context.exclude_angst))
+        helical_context.exclude_angst = -1.;
+    if (!MD.getValue(EMDL_OPTIMISER_DO_FIX_GPU_BIMODAL_PSI, do_fix_gpu_bimodal_psi))
+        do_fix_gpu_bimodal_psi = false;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_TOL, helical_context_types_tol))
+        helical_context_types_tol = 0.01;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_AGREE, helical_context_types_agree))
+        helical_context_types_agree = 0.75;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_EVERY, helical_context_types_every))
+        helical_context_types_every = 5;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_CONTEXT_WARM, helical_context_warm))
+        helical_context_warm = false;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_TRACK_SIGMA_ANGSTROM, helical_track_sigma_A))
+        helical_track_sigma_A = 3.5;
+    if (!MD.getValue(EMDL_OPTIMISER_DO_HELICAL_POLARITY, do_helical_polarity))
+        do_helical_polarity = false;
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_POLARITY_START, helical_polarity_start_iter))
+        helical_polarity_start_iter = 3;
+    if (!MD.getValue(EMDL_OPTIMISER_DO_HELICAL_TRACK_SMOOTH, do_helical_track_smooth))
+    {
+        const char *env_ts = getenv("RELION_HELICAL_TRACK_SMOOTH");
+        const bool env_ts_off = (env_ts && env_ts[0] && (std::string(env_ts) == "0" || std::string(env_ts) == "off"));
+        do_helical_track_smooth = (do_helical_context && !env_ts_off);
+    }
+    if (!MD.getValue(EMDL_OPTIMISER_HELICAL_TILT_WEIGHT_SIGMA, helical_tilt_weight_sigma))
+        helical_tilt_weight_sigma = -1.;
     // New SGD (13Feb2018)
     if (!MD.getValue(EMDL_OPTIMISER_GRAD_REFINE, gradient_refine))
         gradient_refine = false;
@@ -1828,6 +1861,29 @@ void MlOptimiser::write(bool do_write_sampling, bool do_write_data, bool do_writ
         else
             MD.setValue(EMDL_OPTIMISER_HELICAL_SIGMA_DISTANCE_ANGSTROM, helical_sigma_distance_A);
         MD.setValue(EMDL_OPTIMISER_HELICAL_KEEP_TILT_PRIOR_FIXED, helical_keep_tilt_prior_fixed);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_KEEP_FULL_FILAMENTS, do_keep_full_filaments);
+        MD.setValue(EMDL_OPTIMISER_DO_BIMODAL_PSI, do_bimodal_psi);
+        MD.setValue(EMDL_OPTIMISER_DO_SORT_CLASSES, do_sort_classes);
+        MD.setValue(EMDL_OPTIMISER_SORT_CLASSES_JUNK, sort_classes_junk);
+        MD.setValue(EMDL_OPTIMISER_DO_HELICAL_CONTEXT, do_helical_context);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_START, helical_context_start_iter);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES, helical_context.nr_types);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_MIN, helical_context_types_min);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_MAX, helical_context_types_max);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_SELECTED, helical_context_types_selected);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_LAST_ITER, helical_context_types_last_iter);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TEMPER, helical_context.temper);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_EXCLUDE, helical_context.exclude_angst);
+        MD.setValue(EMDL_OPTIMISER_DO_FIX_GPU_BIMODAL_PSI, do_fix_gpu_bimodal_psi);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_TOL, helical_context_types_tol);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_AGREE, helical_context_types_agree);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_TYPES_EVERY, helical_context_types_every);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_CONTEXT_WARM, helical_context_warm);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_TRACK_SIGMA_ANGSTROM, helical_track_sigma_A);
+        MD.setValue(EMDL_OPTIMISER_DO_HELICAL_POLARITY, do_helical_polarity);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_POLARITY_START, helical_polarity_start_iter);
+        MD.setValue(EMDL_OPTIMISER_DO_HELICAL_TRACK_SMOOTH, do_helical_track_smooth);
+        MD.setValue(EMDL_OPTIMISER_HELICAL_TILT_WEIGHT_SIGMA, helical_tilt_weight_sigma);
         MD.setValue(EMDL_OPTIMISER_HAS_CONVERGED, has_converged);
         MD.setValue(EMDL_OPTIMISER_HAS_HIGH_FSC_AT_LIMIT, has_high_fsc_at_limit);
         MD.setValue(EMDL_OPTIMISER_HAS_LARGE_INCR_SIZE_ITER_AGO, has_large_incr_size_iter_ago);
@@ -2615,6 +2671,33 @@ void MlOptimiser::initialiseGeneral(int rank)
             std::cout << " + CTFs have already been corrected, switching off CTF correction ..." << std::endl;
 
     }
+    if (do_ctf_correction && mydata.hasCtfPremultiplied() && verb > 0)
+    {
+        if (mydata.obsModel.hasCtfPremultipliedIntactFirstPeak())
+        {
+            for (int og = 0; og < mydata.obsModel.numberOfOpticsGroups(); og++)
+            {
+                if (!mydata.obsModel.getCtfPremultiplied(og)) continue;
+                const bool data_intact = mydata.obsModel.getCtfPremultipliedIntactFirstPeak(og);
+                if (data_intact != intact_ctf_first_peak)
+                {
+                    std::cerr << "WARNING: Optics group " << (og + 1)
+                              << " was CTF-premultiplied with rlnCtfDataAreCtfPremultipliedIntactFirstPeak="
+                              << (data_intact ? "1" : "0") << ", which mismatches "
+                              << (intact_ctf_first_peak ? "--ctf_intact_first_peak" : "omitting --ctf_intact_first_peak")
+                              << " in this run; low-frequency CTF weighting before the first peak will be inconsistent!"
+                              << std::endl;
+                }
+            }
+        }
+        else if (intact_ctf_first_peak)
+        {
+            std::cerr << "WARNING: --ctf_intact_first_peak is enabled on CTF-premultiplied input whose optics table lacks "
+                      << "rlnCtfDataAreCtfPremultipliedIntactFirstPeak; verify the particles were also premultiplied "
+                      << "with --ctf_intact_first_peak so low frequencies before the first peak are consistent."
+                      << std::endl;
+        }
+    }
 
     if (mymodel.nr_classes > 1 && do_split_random_halves)
         REPORT_ERROR("ERROR: One cannot use --split_random_halves with more than 1 reference... You could first classify, and then refine each class separately using --random_halves.");
@@ -2813,14 +2896,15 @@ void MlOptimiser::initialiseGeneral(int rank)
     }
     else
         updateSharedReferenceGroups();
-    // Automatic class diameters: the job's tube only limits them, so it is the mask diameter (it also masks the images)
-    if (helical_auto_diameter && mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0. && particle_diameter > 0. &&
-        helical_tube_outer_diameter != particle_diameter && !rectMaskAlongLength())
+    // Automatic class diameters: keep experimental particle images masked at --helical_outer_diameter,
+    // while class references adapt up to max(helical_tube_outer_diameter, particle_diameter)
+    if (helical_auto_diameter && helical_cylindrical_mask && fn_mask == "None" &&
+        mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0. && particle_diameter > 0. &&
+        helical_tube_outer_diameter != particle_diameter && !rectMaskAlongLength() && verb > 0)
     {
-        if (verb > 0)
-            std::cout << " Helical tube diameter set to the mask diameter, " << particle_diameter << " A (was " << helical_tube_outer_diameter
-                      << " A): with --helical_auto_diameter each class's reference gets a tube as wide as its own average" << std::endl;
-        helical_tube_outer_diameter = particle_diameter;
+        std::cout << " Helical auto diameter: particle images stay masked at " << helical_tube_outer_diameter
+                  << " A while each class reference adapts up to " << std::max(helical_tube_outer_diameter, particle_diameter)
+                  << " A" << std::endl;
     }
     // (with --rect_mask_length: checkRectangularMask() checks the tube against the short axis of the elliptical mask)
     if ( (mymodel.ref_dim == 2) && (helical_tube_outer_diameter > 0.) && (particle_diameter < helical_tube_outer_diameter) && !rectMaskAlongLength() )
@@ -3076,6 +3160,8 @@ void MlOptimiser::initialiseGeneral(int rank)
             REPORT_ERROR("ERROR: you cannot use --fast_subsets together with --auto_refine.");
         if (gradient_refine)
             REPORT_ERROR("ERROR: you cannot use --fast_subsets together with --grad.");
+        if (mymodel.ref_dim == 2 && (do_helical_refine || helical_tube_outer_diameter > 0.) && verb > 0)
+            std::cerr << "WARNING: --fast_subsets in polymorphic helical 2D classification can collapse classes into featureless blobs/dominant attractors; full-dataset iterations are strongly recommended." << std::endl;
     }
 
     // Check mask angpix, boxsize and [0,1] compliance right away.
@@ -3085,7 +3171,7 @@ void MlOptimiser::initialiseGeneral(int rank)
     // An "auto" mask in --ref asks for automatic masks of that class; a continuation keeps what was saved
     // (so that --dont_auto_mask still switches them off)
     const bool auto_in_ref = std::count(mymodel.class_settings.mask.begin(), mymodel.class_settings.mask.end(), "auto") > 0;
-    if (iter == 0 && auto_in_ref)
+    if (iter == 0 && auto_in_ref && !explicit_dont_auto_mask)
         do_auto_mask = true;
     const std::string asked_by = auto_in_ref ? "automatic masks (\"auto\" in the --ref STAR file)" : "--auto_mask";
     if (do_auto_mask)
@@ -3093,8 +3179,8 @@ void MlOptimiser::initialiseGeneral(int rank)
         // Multi-body refinement masks each body with its own mask (also when it continues an auto-masked refinement)
         if (mymodel.nr_bodies > 1 || do_initialise_bodies)
             do_auto_mask = false;
-        else if (mymodel.ref_dim != 3)
-            REPORT_ERROR("ERROR: " + asked_by + " work only with 3D references (3D classification and auto-refinement)");
+        else if (mymodel.ref_dim != 2 && mymodel.ref_dim != 3)
+            REPORT_ERROR("ERROR: " + asked_by + " work only with 2D or 3D references");
         else if (fn_mask != "None")
             REPORT_ERROR("ERROR: give either a --solvent_mask or " + asked_by + ", not both (--dont_auto_mask switches automatic masks off in a continuation)");
         else if (!do_solvent)
@@ -3321,6 +3407,13 @@ void MlOptimiser::initialiseReferences()
             std::cout << " Low-pass filtering the references to " << ref_lowpass << " A (--ref_lowpass)" << std::endl;
         initialLowPassFilterReferences(fn_ref != "None" ? std::max(ini_high, ref_lowpass) : -1.);
 
+        if (do_init_blobs && !explicit_init_blobs && mymodel.ref_dim == 2 &&
+            (do_helical_refine || helical_tube_outer_diameter > 0.))
+        {
+            do_init_blobs = false;
+            if (verb > 0)
+                std::cout << " Note: disabling --init_blobs for helical 2D classification (use --init_blobs to override)." << std::endl;
+        }
         if (do_init_blobs && !do_fix_classes && fn_ref == "None" && !(mydata.is_tomo || mymodel.data_dim == 3))
         {
             bool is_helical_segment =
@@ -4263,6 +4356,16 @@ void MlOptimiser::initialiseHelicalContext()
     // both turn the classes of the other segments of a filament into a prior: together they would count that evidence twice
     if (do_helical_context && filctx_opt.mode != filctx::OFF)
         REPORT_ERROR("ERROR: use either --helical_context or --filament_context chain/filament, not both (check RELION_FILAMENT_CONTEXT too)");
+    // Auto-enable polarity tracking when helical context is run with bimodal psi searches
+    if (!do_helical_polarity && !do_helical_polarity_off && do_helical_context &&
+        do_bimodal_psi && mymodel.sigma2_psi > 0. && mymodel.orientational_prior_mode != NOPRIOR &&
+        !do_skip_align && !do_skip_rotate)
+    {
+        const char *env_pol = getenv("RELION_HELICAL_POLARITY");
+        const bool env_pol_off = (env_pol && env_pol[0] && (std::string(env_pol) == "0" || std::string(env_pol) == "off"));
+        if (!env_pol_off)
+            do_helical_polarity = true;
+    }
     if (do_helical_polarity)
     {
         if (!do_bimodal_psi || mymodel.sigma2_psi <= 0. || mymodel.orientational_prior_mode == NOPRIOR)
@@ -4278,8 +4381,22 @@ void MlOptimiser::initialiseHelicalContext()
     for (long int part_id = 0; part_id < nr_parts; part_id++)
         helical_context_rows[part_id] = mydata.particles[part_id].id;
     helical_context.verb = verb;
+    helical_context.pol_class_weight.assign(mymodel.nr_classes, 1.f);
     RFLOAT diameter = (particle_diameter > 0.) ? particle_diameter : mymodel.ori_size * mymodel.pixel_size;
+    if (helical_tube_outer_diameter > 0.)
+        diameter = std::min(diameter, helical_tube_outer_diameter);
     helical_context.initialise(mydata.MDimg, helical_context_rows, mymodel.nr_classes, diameter);
+    if (do_helical_track_smooth && mydata.MDimg.containsLabel(EMDL_IMAGE_COORD_X) && mydata.MDimg.containsLabel(EMDL_IMAGE_COORD_Y) &&
+        !mydata.MDimg.containsLabel(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM))
+    {
+        mydata.MDimg.addLabel(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM);
+        mydata.MDimg.addLabel(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM);
+        FOR_ALL_OBJECTS_IN_METADATA_TABLE(mydata.MDimg)
+        {
+            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_PRIOR_ANGSTROM, (RFLOAT)0.);
+            mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_PRIOR_ANGSTROM, (RFLOAT)0.);
+        }
+    }
 }
 
 void MlOptimiser::helicalContextStore(long int part_id, const std::vector<RFLOAT> &class_post)
@@ -4287,7 +4404,7 @@ void MlOptimiser::helicalContextStore(long int part_id, const std::vector<RFLOAT
     std::vector<RFLOAT> used(mymodel.nr_classes, 1.);
     for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
     {
-        used[iclass] = helicalContextPrior(part_id, iclass);
+        used[iclass] = helicalContextPrior(part_id, iclass) * helical2dClassFactor(part_id, iclass);
         if (do_skip_align || do_skip_rotate)
             used[iclass] *= mymodel.pdf_class[iclass];
         else if (mymodel.orientational_prior_mode == NOPRIOR && MULTIDIM_SIZE(mymodel.pdf_direction[iclass]) > 0)
@@ -4319,9 +4436,59 @@ void MlOptimiser::helicalPolarityGaugeSigns(std::vector<int> &sc)
         for (long int i : helical_context.pol_members[f])
             seg_fil[i] = f;
 
-    // B[c][f] = sum over the segments of filament f in class c of +1 (not flipped) / -1 (flipped)
+    // Measure each class's polar asymmetry weight [0.05, 1.0] and zero-mean low-passed tube template
+    helical_context.pol_class_weight.assign(K, 1.f);
+    const RFLOAT apix = mymodel.pixel_size;
+    const RFLOAT tube_half_y = (helical_tube_outer_diameter > 0.) ? (0.55 * helical_tube_outer_diameter / apix) : 1e9;
+    std::vector<std::vector<double> > img_normed(K);
+    std::vector<int> ny_c(K, 0), nx_c(K, 0);
+    for (int c = 0; c < K; c++)
+    {
+        if (c >= (int)mymodel.Iref.size() || MULTIDIM_SIZE(mymodel.Iref[c]) == 0 || mymodel.pdf_class[c] <= 0.)
+            continue;
+        MultidimArray<RFLOAT> fc = mymodel.Iref[c];
+        if (YSIZE(fc) >= 8 && apix > 0.)
+            lowPassFilterMap(fc, std::max((RFLOAT)12., (RFLOAT)(2.5 * apix)), apix);
+        const int ny = YSIZE(fc), nx = XSIZE(fc);
+        ny_c[c] = ny; nx_c[c] = nx;
+        const double max_x = 0.45 * nx;
+        double diff2 = 0., sum2 = 0., mean_v = 0.;
+        long int cnt_v = 0;
+        FOR_ALL_ELEMENTS_IN_ARRAY2D(fc)
+        {
+            if (fabs((double)i) > tube_half_y || fabs((double)j) > max_x) continue;
+            if (-i < STARTINGY(fc) || -i > FINISHINGY(fc) || -j < STARTINGX(fc) || -j > FINISHINGX(fc)) continue;
+            const double v = A2D_ELEM(fc, i, j);
+            const double vr = A2D_ELEM(fc, -i, -j);
+            diff2 += (v - vr) * (v - vr);
+            sum2 += v * v + vr * vr;
+            mean_v += v;
+            cnt_v++;
+        }
+        const double asym = (sum2 > 1e-20) ? std::sqrt(diff2 / sum2) : 0.;
+        helical_context.pol_class_weight[c] = (float)std::max(0.05, std::min(1.0, asym / 0.12));
+
+        if (cnt_v > 0)
+        {
+            mean_v /= cnt_v;
+            img_normed[c].assign((size_t)ny * nx, 0.);
+            double n2 = 0.;
+            FOR_ALL_ELEMENTS_IN_ARRAY2D(fc)
+            {
+                if (fabs((double)i) > tube_half_y || fabs((double)j) > max_x) continue;
+                const int yi = i - STARTINGY(fc), xj = j - STARTINGX(fc);
+                const double val = A2D_ELEM(fc, i, j) - mean_v;
+                img_normed[c][(size_t)yi * nx + xj] = val;
+                n2 += val * val;
+            }
+            const double nv = (n2 > 1e-20) ? std::sqrt(n2) : 1.;
+            for (double &x : img_normed[c]) x /= nv;
+        }
+    }
+
+    // B[c][f] = sum over the segments of filament f in class c of +-w_c
     std::vector<int> cls(nr_parts), flip(nr_parts);
-    std::vector<double> B(K * F, 0.);
+    std::vector<double> B((size_t)K * F, 0.);
     std::vector<double> class_count(K, 0.);
     for (long int i = 0; i < nr_parts; i++)
     {
@@ -4333,73 +4500,141 @@ void MlOptimiser::helicalPolarityGaugeSigns(std::vector<int> &sc)
         RFLOAT d = fmod(fabs(psi - prior), (RFLOAT)360.);
         flip[i] = ((d > 180.) ? 360. - d : d) > 90.;
         if (cls[i] >= 0 && cls[i] < K && seg_fil[i] >= 0)
-            B[cls[i] * F + seg_fil[i]] += flip[i] ? -1. : 1.;
+            B[(size_t)cls[i] * F + seg_fil[i]] += (flip[i] ? -1. : 1.) * (double)helical_context.pol_class_weight[cls[i]];
         if (cls[i] >= 0 && cls[i] < K)
             class_count[cls[i]] += 1.;
     }
 
-    // class signs from the leading eigenvector of B B^T, then alternate class / filament signs
-    std::vector<double> M(K * K, 0.), u(K), v(K);
+    // Similarity matrix M = B B^T + direct shift-maximizing low-pass correlation affinity on co-occurring classes
+    std::vector<double> M((size_t)K * K, 0.);
     for (int a = 0; a < K; a++)
-        for (int b = 0; b < K; b++)
-            for (long int f = 0; f < F; f++)
-                M[a * K + b] += B[a * F + f] * B[b * F + f];
-    for (int a = 0; a < K; a++)
-        u[a] = 1. + 0.01 * a;
-    for (int it = 0; it < 500; it++)
-    {
-        double norm = 0.;
-        for (int a = 0; a < K; a++)
+        for (int b = a; b < K; b++)
         {
-            v[a] = 0.;
-            for (int b = 0; b < K; b++)
-                v[a] += M[a * K + b] * u[b];
-            norm += v[a] * v[a];
+            double s = 0., co = 0., co_mass = 0.;
+            for (long int f = 0; f < F; f++)
+            {
+                const double ba = B[(size_t)a * F + f], bb = B[(size_t)b * F + f];
+                s += ba * bb;
+                if (ba != 0. && bb != 0.)
+                {
+                    co += 1.;
+                    co_mass += std::min(std::fabs(ba), std::fabs(bb));
+                }
+            }
+            if (a != b && co > 0. && !img_normed[a].empty() && !img_normed[b].empty() &&
+                ny_c[a] == ny_c[b] && nx_c[a] == nx_c[b])
+            {
+                const int ny = ny_c[a], nx = nx_c[a];
+                const int sx_max = std::min(nx / 4, std::max(1, (int)ROUND(30. / std::max(0.5, (double)apix))));
+                const int sx_step = std::max(1, sx_max / 8);
+                double best_same = -1., best_flip = -1.;
+                for (int sx = -sx_max; sx <= sx_max; sx += sx_step)
+                {
+                    const int x0 = std::max(0, -sx), x1 = std::min(nx, nx - sx);
+                    double ab_s = 0., aa_s = 0., bb_s = 0.;
+                    double ab_f = 0., aa_f = 0., bb_f = 0.;
+                    for (int y = 0; y < ny; y++)
+                    {
+                        const int yr = ny - 1 - y;
+                        const double *ra = &img_normed[a][(size_t)y * nx];
+                        const double *rbs = &img_normed[b][(size_t)y * nx];
+                        const double *rbf = &img_normed[b][(size_t)yr * nx];
+                        for (int x = x0; x < x1; x++)
+                        {
+                            const double va = ra[x];
+                            if (va == 0.) continue;
+                            const int xs = x + sx;
+                            const double vs = rbs[xs];
+                            if (vs != 0.) { ab_s += va * vs; aa_s += va * va; bb_s += vs * vs; }
+                            const double vf = rbf[nx - 1 - xs];
+                            if (vf != 0.) { ab_f += va * vf; aa_f += va * va; bb_f += vf * vf; }
+                        }
+                    }
+                    if (aa_s > 0. && bb_s > 0.) best_same = std::max(best_same, ab_s / std::sqrt(aa_s * bb_s));
+                    if (aa_f > 0. && bb_f > 0.) best_flip = std::max(best_flip, ab_f / std::sqrt(aa_f * bb_f));
+                }
+                if (best_same > -1. && best_flip > -1.)
+                {
+                    if (iter >= helical_polarity_start_iter)
+                        s = 0.25 * s + 2.0 * co_mass * (best_same - best_flip);
+                    else
+                        s += 0.50 * std::sqrt(class_count[a] * class_count[b]) * (best_same - best_flip);
+                }
+            }
+            M[(size_t)a * K + b] = M[(size_t)b * K + a] = s;
         }
-        norm = sqrt(norm);
-        if (norm <= 0.)
-            break;
-        for (int a = 0; a < K; a++)
-            u[a] = v[a] / norm;
-    }
+
+    // Solve Z2 synchronisation per connected component of M
     sc.assign(K, 1);
-    std::vector<int> tf(F);
-    for (int c = 0; c < K; c++)
-        sc[c] = (u[c] < 0.) ? -1 : 1;
-    for (int it = 0; it < 100; it++)
+    std::vector<char> vis(K, 0);
+    for (int root = 0; root < K; root++)
     {
-        bool changed = false;
-        for (long int f = 0; f < F; f++)
+        if (vis[root] || class_count[root] <= 0.) { vis[root] = 1; continue; }
+        std::vector<int> comp;
+        std::vector<int> q(1, root);
+        vis[root] = 1;
+        for (size_t qi = 0; qi < q.size(); qi++)
         {
-            double x = 0.;
-            for (int c = 0; c < K; c++)
-                x += B[c * F + f] * sc[c];
-            tf[f] = (x < 0.) ? -1 : 1;
+            const int a = q[qi];
+            comp.push_back(a);
+            for (int b = 0; b < K; b++)
+                if (!vis[b] && class_count[b] > 0. && std::fabs(M[(size_t)a * K + b]) > 1e-6)
+                {
+                    vis[b] = 1;
+                    q.push_back(b);
+                }
         }
-        for (int c = 0; c < K; c++)
+        const int m = (int)comp.size();
+        std::vector<double> u(m), v(m);
+        for (int ia = 0; ia < m; ia++) u[ia] = 1. + 0.01 * ia;
+        for (int it = 0; it < 500; it++)
         {
-            double x = 0.;
+            double norm = 0.;
+            for (int ia = 0; ia < m; ia++)
+            {
+                v[ia] = 0.;
+                for (int ib = 0; ib < m; ib++)
+                    v[ia] += M[(size_t)comp[ia] * K + comp[ib]] * u[ib];
+                norm += v[ia] * v[ia];
+            }
+            norm = std::sqrt(norm);
+            if (norm <= 1e-12) break;
+            for (int ia = 0; ia < m; ia++) u[ia] = v[ia] / norm;
+        }
+        for (int ia = 0; ia < m; ia++)
+            sc[comp[ia]] = (u[ia] < 0.) ? -1 : 1;
+        std::vector<int> tf(F, 1);
+        for (int it = 0; it < 100; it++)
+        {
+            bool changed = false;
             for (long int f = 0; f < F; f++)
-                x += B[c * F + f] * tf[f];
-            int sn = (x < 0.) ? -1 : (x > 0. ? 1 : sc[c]);
-            if (sn != sc[c])
-                changed = true;
-            sc[c] = sn;
+            {
+                double x = 0.;
+                for (int c : comp) x += B[(size_t)c * F + f] * sc[c];
+                tf[f] = (x < 0.) ? -1 : 1;
+            }
+            for (int c : comp)
+            {
+                double x = 0.;
+                for (long int f = 0; f < F; f++) x += B[(size_t)c * F + f] * tf[f];
+                int sn = (x < 0.) ? -1 : (x > 0. ? 1 : sc[c]);
+                if (sn != sc[c]) changed = true;
+                sc[c] = sn;
+            }
+            if (!changed) break;
         }
-        if (!changed)
-            break;
+        double mass_neg = 0., mass_all = 0.;
+        for (int c : comp)
+        {
+            mass_all += class_count[c];
+            if (sc[c] < 0) mass_neg += class_count[c];
+        }
+        if (mass_neg > 0.5 * mass_all)
+            for (int c : comp) sc[c] = -sc[c];
     }
-    // overall sign: rotate the classes with the smaller share of the segments
-    double mass_neg = 0., mass_all = 0.;
-    for (int c = 0; c < K; c++)
-    {
-        mass_all += class_count[c];
-        if (sc[c] < 0)
-            mass_neg += class_count[c];
-    }
-    if (mass_neg > 0.5 * mass_all)
+    if (iter > 4)
         for (int c = 0; c < K; c++)
-            sc[c] = -sc[c];
+            if (class_count[c] < 20.) sc[c] = 1;
 
     double before = 0., after = 0.;
     for (long int f = 0; f < F; f++)
@@ -4407,14 +4642,14 @@ void MlOptimiser::helicalPolarityGaugeSigns(std::vector<int> &sc)
         double x0 = 0., x1 = 0.;
         for (int c = 0; c < K; c++)
         {
-            x0 += B[c * F + f];
-            x1 += B[c * F + f] * sc[c];
+            x0 += B[(size_t)c * F + f];
+            x1 += B[(size_t)c * F + f] * sc[c];
         }
         before += fabs(x0);
         after += fabs(x1);
     }
-    helical_polarity_gauge_before = before / nr_parts;
-    helical_polarity_gauge_after = after / nr_parts;
+    helical_polarity_gauge_before = before / std::max(1L, nr_parts);
+    helical_polarity_gauge_after = after / std::max(1L, nr_parts);
 }
 
 void MlOptimiser::helicalPolarityGaugeModel(const std::vector<int> &sc)
@@ -4493,6 +4728,14 @@ void MlOptimiser::writeHelicalTypeFiles()
 void MlOptimiser::updateHelicalPolarity()
 {
     double t_start = omp_get_wtime();
+    if (iter < helical_polarity_start_iter)
+        helical_context.pol_prior_max = 0.50;
+    else if (iter < helical_polarity_start_iter + 2)
+        helical_context.pol_prior_max = 0.85;
+    else if (iter < helical_polarity_start_iter + 5)
+        helical_context.pol_prior_max = 0.95;
+    else
+        helical_context.pol_prior_max = 0.985;
     helical_context.updatePolarity();
     helical_context.writePolarityLabels(mydata.MDimg, helical_context_rows);
     if (verb > 0)
@@ -4512,11 +4755,17 @@ void MlOptimiser::updateHelicalContext()
     double t_start = omp_get_wtime();
     if (verb > 0)
         std::cout << " Updating the filament context ..." << std::endl;
+    if (do_helical_track_smooth && iter < nr_iter)
+        helical_context.smoothFilamentTracks(mydata.MDimg, helical_context_rows, mymodel.pixel_size,
+                                             (offset_range_x > 0. ? (RFLOAT)offset_range_x : std::max((RFLOAT)12., (RFLOAT)(1.5 * sampling.offset_range * mymodel.pixel_size))), iter, &mydata.obsModel.opticsMdt);
     // Start the chain model again from the current classes (they keep changing between
     // iterations, and a model that is carried over drifts: it explains the changed classes by
     // type switches), unless asked to continue from the last one after the prior is in use
     if (!helical_context_warm || iter + 1 < helical_context_start_iter)
         helical_context.initialised_model = false;
+    if (iter > helical_context.split_lock_until)
+        helical_context.split_lock_owner.assign(mymodel.nr_classes, -1);
+    helical_split_happened = false;
     long int nr_parts = helical_context_rows.size();
     std::vector<RFLOAT> psi(nr_parts), psi_prior(nr_parts);
     std::vector<int> cls(nr_parts);
@@ -4540,52 +4789,177 @@ void MlOptimiser::updateHelicalContext()
         std::vector<RFLOAT> res(mymodel.estimated_resolution.begin(), mymodel.estimated_resolution.begin() + K), track(nr_parts);
         std::vector<long int> chain(nr_parts);
         std::vector<char> flipped(nr_parts);
+        const bool use_smooth_pol = (do_helical_polarity && (long int)helical_context.pol_post.size() == nr_parts);
         for (long int i = 0; i < nr_parts; i++)
         {
             chain[i] = helical_context.seg_chain[i];
             track[i] = helical_context.seg_pos[i] * helical_context.step;
-            flipped[i] = fabs(remainder(psi[i] - psi_prior[i], 360.)) > 90.;
+            flipped[i] = use_smooth_pol ? (helical_context.pol_post[i] > 0.5f) : (fabs(remainder(psi[i] - psi_prior[i], 360.)) > 90.);
         }
         std::string note;
-        const std::vector<RFLOAT> cont = helixtypes::classContinuity(mymodel.Iref, mymodel.pixel_size, chain, track, cls, flipped, note);
+        const std::vector<RFLOAT> cont = helixtypes::classContinuity(mymodel.Iref, mymodel.pixel_size, chain, track, cls, flipped, note, helical_tube_outer_diameter);
         helical_context.junk_class = helixtypes::junkClasses(res, helical_class_diameter, YSIZE(mymodel.Iref[0]) * mymodel.pixel_size,
-                                                             sort_classes_junk > 0. ? sort_classes_junk : 1.5, cont);
+                                                             sort_classes_junk > 0. ? sort_classes_junk : 1.5, cont, mymodel.pdf_class);
+        std::vector<long int> cls_cnt(K, 0);
+        for (long int i = 0; i < nr_parts; i++)
+            if (cls[i] >= 0 && cls[i] < K)
+                cls_cnt[cls[i]]++;
+        const long int min_cls_segs = (nr_parts >= 2000) ? 5 : 1;
+        for (int k = 0; k < K; k++)
+            if (cls_cnt[k] < min_cls_segs)
+                helical_context.junk_class[k] = 1;
         if (verb > 0)
         {
             int nj = 0, nc = 0;
-            for (int k = 0; k < K; k++) nj += helical_context.junk_class[k], nc += (cont[k] < 0.6);
-            std::cout << " Filament context: " << nj << " junk classes, " << nc << " of them not continuing the helix (overlap with the class of a segment further along the filament below 0.6; "
+            for (int k = 0; k < K; k++) nj += helical_context.junk_class[k], nc += (std::isfinite(cont[k]) && cont[k] < 0.6);
+            std::cout << " Filament context: " << nj << " junk classes, " << nc << " below continuity 0.6 ("
                       << note << ")" << std::endl;
         }
     }
     double t_junk = omp_get_wtime();
-    // Number of types: chosen first in the iteration before the prior is used (full range), then again as the classes
-    // mature (near the current number; a full-range choice at the end could still jump to a split or merge)
-    if (helical_context_types_max > helical_context_types_min && iter + 1 >= helical_context_start_iter)
+
+    // Build view-equivalence class clustering for defocus/shift stability during typing
+    helical_context.computeClassEquivalence(mymodel.Iref, mymodel.pixel_size, helical_tube_outer_diameter);
+
+    // Number of types: select as soon as the context prior starts (and re-select over full range while classes sharpen)
+    const bool auto_select = (helical_context_types_max > helical_context_types_min);
+    if (auto_select && iter + 1 < helical_context_start_iter && !helical_context_types_selected)
+    {
+        helical_context.nr_types = 1;
+        helical_context.initialised_model = false;
+    }
+    else if (auto_select && iter + 1 >= helical_context_start_iter)
     {
         int tmin = helical_context_types_min, tmax = helical_context_types_max;
+        const int every = (helical_context.nr_types <= 1 && iter <= 12 && helical_context_types_every > 0)
+                        ? std::min(2, helical_context_types_every) : helical_context_types_every;
         bool do_select = false;
         if (!helical_context_types_selected)
             do_select = true;
-        else if (helical_context_types_every > 0 && iter - helical_context_types_last_iter >= helical_context_types_every)
+        else if (every > 0 && iter - helical_context_types_last_iter >= every)
         {
             do_select = true;
-            tmin = std::max(tmin, helical_context.nr_types - 1);
-            tmax = std::min(tmax, helical_context.nr_types + 2);
+            if (iter > 12 && helical_context.nr_types >= 2)
+            {
+                tmin = std::max(tmin, helical_context.nr_types - 1);
+                tmax = std::min(tmax, helical_context.nr_types + 2);
+            }
         }
         if (do_select)
         {
+            const int prev_ntypes = helical_context.nr_types;
             helical_context.selectNrTypes(tmin, tmax, 3, helical_context_types_tol, helical_context_types_agree, helical_context_types_selected);
+            if (helical_context.nr_types != prev_ntypes)
+                helical_context.split_lock_owner.assign(mymodel.nr_classes, -1);
             helical_context_types_selected = true;
             helical_context_types_last_iter = iter;
         }
     }
+
     helical_context.update();
+
+    // Split chimeric multi-polymorph crossover classes before late convergence iterations
+    helical_split_happened = false;
+    const char *env_split = getenv("RELION_HELICAL_SPLIT_CHIMERIC");
+    const bool allow_split = !(env_split && env_split[0] && std::string(env_split) == "0");
+    if (allow_split && (iter == 8 || iter == 12 || iter == 16 || iter == 20) && iter + 4 <= nr_iter && helical_context.nr_types >= 2)
+        splitChimericHelicalClasses();
+
     double t_update = omp_get_wtime();
+
+    // Final iteration: surgical flicker filter -- fix disallowed type-mismatches and isolated 1-/2-step chain flickers
+    const char *env_final = getenv("RELION_HELICAL_FINAL_SMOOTH");
+    const bool allow_final_smooth = !(env_final && env_final[0] && std::string(env_final) == "0");
+    auto runFinalSmooth = [&]()
+    {
+        const int K = mymodel.nr_classes, T = helical_context.nr_types;
+        const std::vector<int> orig_cls = cls;
+        auto is_junk_k = [&](int k) { return k < 0 || k >= K || (!helical_context.junk_class.empty() && helical_context.junk_class[k]); };
+        auto is_allowed_tk = [&](int k, int t) {
+            return !is_junk_k(k) && ((int)helical_context.class_allowed.size() != K * T || helical_context.class_allowed[(size_t)k * T + t]);
+        };
+        std::vector<int> fil_best_t(nr_parts, 0);
+        for (long int i = 0; i < nr_parts; i++)
+        {
+            int bt = 0;
+            if ((long int)helical_context.tpost.size() == nr_parts * (long int)T)
+                for (int t = 1; t < T; t++)
+                    if (helical_context.tpost[(size_t)i * T + t] > helical_context.tpost[(size_t)i * T + bt]) bt = t;
+            fil_best_t[i] = bt;
+        }
+        long int nr_smoothed = 0;
+        for (size_t c = 0; c < helical_context.chains.size(); c++)
+        {
+            const std::vector<long int> &grid = helical_context.chains[c];
+            const size_t G = grid.size();
+            for (size_t p = 0; p < G; p++)
+            {
+                const long int i = grid[p];
+                if (i < 0 || is_junk_k(orig_cls[i])) continue;
+                const int bt = fil_best_t[i];
+                int new_k = orig_cls[i];
+                if (!is_allowed_tk(orig_cls[i], bt))
+                {
+                    int best_k = -1;
+                    float best_p = 0.f;
+                    for (int k = 0; k < K; k++)
+                    {
+                        if (!is_allowed_tk(k, bt)) continue;
+                        const float pv = helical_context.post[(size_t)i * K + k];
+                        if (pv > best_p) { best_p = pv; best_k = k; }
+                    }
+                    if (best_k >= 0) new_k = best_k;
+                }
+                else if (p > 0 && p + 1 < G && grid[p - 1] >= 0 && grid[p + 1] >= 0 &&
+                         orig_cls[grid[p - 1]] == orig_cls[grid[p + 1]] &&
+                         orig_cls[grid[p - 1]] != orig_cls[i] && is_allowed_tk(orig_cls[grid[p - 1]], bt))
+                {
+                    new_k = orig_cls[grid[p - 1]];
+                }
+                else if (p > 0 && p + 2 < G && grid[p - 1] >= 0 && grid[p + 1] >= 0 && grid[p + 2] >= 0 &&
+                         orig_cls[grid[p + 1]] == orig_cls[i] &&
+                         orig_cls[grid[p - 1]] == orig_cls[grid[p + 2]] &&
+                         orig_cls[grid[p - 1]] != orig_cls[i] && is_allowed_tk(orig_cls[grid[p - 1]], bt))
+                {
+                    new_k = orig_cls[grid[p - 1]];
+                }
+                else if (p >= 2 && p + 1 < G && grid[p - 2] >= 0 && grid[p - 1] >= 0 && grid[p + 1] >= 0 &&
+                         orig_cls[grid[p - 1]] == orig_cls[i] &&
+                         orig_cls[grid[p - 2]] == orig_cls[grid[p + 1]] &&
+                         orig_cls[grid[p - 2]] != orig_cls[i] && is_allowed_tk(orig_cls[grid[p - 2]], bt))
+                {
+                    new_k = orig_cls[grid[p - 2]];
+                }
+                if (new_k != cls[i])
+                {
+                    cls[i] = new_k;
+                    mydata.MDimg.setValue(EMDL_PARTICLE_CLASS, new_k + 1, helical_context_rows[i]);
+                    nr_smoothed++;
+                }
+            }
+        }
+        if (verb > 0 && nr_smoothed > 0)
+            std::cout << " Filament context: surgical final filter updated " << nr_smoothed << " segments" << std::endl;
+    };
+    if (allow_final_smooth && iter == nr_iter && (long int)helical_context.post.size() == nr_parts * (long int)mymodel.nr_classes)
+        runFinalSmooth();
+
     helical_context.fitPeriods(psi, psi_prior);
+    if (iter + 1 >= helical_context_start_iter + 2 && iter < nr_iter)
+        helical_context.applyPhaseRingPriors(psi, psi_prior);
+    if (iter == nr_iter && helical_context_types_max > helical_context.nr_types)
+    {
+        const int prev_nt = helical_context.nr_types;
+        if (helical_context.splitTypesByTwistRate(helical_context_types_max) > prev_nt)
+        {
+            if (allow_final_smooth && (long int)helical_context.post.size() == nr_parts * (long int)mymodel.nr_classes)
+                runFinalSmooth();
+            helical_context.fitPeriods(psi, psi_prior);
+        }
+    }
     double t_periods = omp_get_wtime();
     helical_context.writeLabels(mydata.MDimg, helical_context_rows, &cls);
-    // the type of each class for model_classes: the most common type of its segments
+    // Exclusive class-to-type ownership for model_classes (or majority fallback if class_owner empty)
     {
         const int K = mymodel.nr_classes, T = helical_context.nr_types;
         std::vector<long int> count((size_t)K * T, 0), total(K, 0);
@@ -4595,12 +4969,25 @@ void MlOptimiser::updateHelicalContext()
         mymodel.helical_type_class.assign(K, 0);
         mymodel.helical_type_class_frac.assign(K, 0.);
         for (int k = 0; k < K; k++)
-            for (int t = 0; t < T && !helical_context.junk_class[k]; t++)  // junk classes: type 0
-                if (count[(size_t)k * T + t] > 0 && (mymodel.helical_type_class[k] == 0 || count[(size_t)k * T + t] > count[(size_t)k * T + mymodel.helical_type_class[k] - 1]))
-                {
-                    mymodel.helical_type_class[k] = t + 1;
-                    mymodel.helical_type_class_frac[k] = (RFLOAT)count[(size_t)k * T + t] / total[k];
-                }
+        {
+            if (!helical_context.junk_class.empty() && helical_context.junk_class[k])
+                continue;
+            const int ow = (k < (int)helical_context.class_owner.size()) ? helical_context.class_owner[k] : -1;
+            if (ow >= 0 && ow < T)
+            {
+                mymodel.helical_type_class[k] = ow + 1;
+                mymodel.helical_type_class_frac[k] = (total[k] > 0) ? (RFLOAT)count[(size_t)k * T + ow] / total[k] : (RFLOAT)1.;
+            }
+            else
+            {
+                for (int t = 0; t < T; t++)
+                    if (count[(size_t)k * T + t] > 0 && (mymodel.helical_type_class[k] == 0 || count[(size_t)k * T + t] > count[(size_t)k * T + mymodel.helical_type_class[k] - 1]))
+                    {
+                        mymodel.helical_type_class[k] = t + 1;
+                        mymodel.helical_type_class_frac[k] = (RFLOAT)count[(size_t)k * T + t] / total[k];
+                    }
+            }
+        }
     }
     helical_context.writeStar(fn_out + "_it" + integerToString(iter, 3) + "_filaments.star");
     double t_write = omp_get_wtime();
@@ -4608,7 +4995,7 @@ void MlOptimiser::updateHelicalContext()
     if (verb > 0)
     {
         std::cout << " Filament context: " << helical_context.nr_types << " helical types, type switch every "
-                  << helical_context.step / helical_context.rho << " A on average" << std::endl;
+                  << ((helical_context.rho > 0.) ? (helical_context.step / helical_context.rho) : 1e12) << " A on average" << std::endl;
         for (int t = 0; t < helical_context.nr_types; t++)
             std::cout << "   type " << t + 1 << ": " << ROUND(helical_context.type_mass[t]) << " segments, "
                       << helical_context.type_nr_filaments[t] << " filaments, " << helical_context.type_nr_sections[t]
@@ -4619,6 +5006,258 @@ void MlOptimiser::updateHelicalContext()
         std::cout << " Filament context: update took " << omp_get_wtime() - t_start << " s (reading psi/classes " << t_read - t_start
                   << ", junk classes " << t_junk - t_read << ", chain model " << t_update - t_junk << ", periods " << t_periods - t_update
                   << ", labels and filament table " << t_write - t_periods << ")" << std::endl;
+    }
+}
+
+void MlOptimiser::splitChimericHelicalClasses()
+{
+    const int K = mymodel.nr_classes, T = helical_context.nr_types;
+    const long int N = helical_context.N;
+    if (K < 4 || T < 2 || N <= 0 || (long int)helical_context.tpost.size() != N * T)
+        return;
+
+    // Tally soft filament-type segment counts per MAP-likelihood class k
+    std::vector<double> M_kt((size_t)K * T, 0.), M_tot(K, 0.);
+    for (long int i = 0; i < N; i++)
+    {
+        if (helical_context.seg_chain[i] < 0 || std::isnan(helical_context.loglik[i * K]))
+            continue;
+        int best_k = 0;
+        for (int k = 1; k < K; k++)
+            if (helical_context.loglik[i * K + k] > helical_context.loglik[i * K + best_k])
+                best_k = k;
+        if (!helical_context.junk_class.empty() && helical_context.junk_class[best_k])
+            continue;
+        for (int t = 0; t < T; t++)
+        {
+            const double w = helical_context.tpost[(size_t)i * T + t];
+            M_kt[(size_t)best_k * T + t] += w;
+            M_tot[best_k] += w;
+        }
+    }
+
+    // Collect chimeric candidates ranked by secondary type occupancy + transverse broadening
+    struct Cand { int k, t1, t2; double w1, w2, score; RFLOAT D_px, y_mid; };
+    std::vector<Cand> cands;
+    const RFLOAT apix = std::max((RFLOAT)1e-3, mymodel.pixel_size);
+    for (int k = 0; k < K; k++)
+    {
+        if (M_tot[k] < 40.0) continue;
+        int t1 = 0, t2 = 1;
+        if (M_kt[(size_t)k * T + 1] > M_kt[(size_t)k * T + 0]) std::swap(t1, t2);
+        for (int t = 2; t < T; t++)
+        {
+            const double v = M_kt[(size_t)k * T + t];
+            if (v > M_kt[(size_t)k * T + t1]) { t2 = t1; t1 = t; }
+            else if (v > M_kt[(size_t)k * T + t2]) { t2 = t; }
+        }
+        const double w1 = M_kt[(size_t)k * T + t1], w2 = M_kt[(size_t)k * T + t2];
+        if (w2 >= 25.0 && w2 / M_tot[k] > 0.20)
+        {
+            const RFLOAT ref_d_px = (k < (int)helical_class_diameter.size() && helical_class_diameter[k] > 0.)
+                ? (helical_class_diameter[k] / apix)
+                : ((helical_tube_outer_diameter > 0.) ? (helical_tube_outer_diameter / apix) : (0.5 * (RFLOAT)YSIZE(mymodel.Iref[k])));
+            const RFLOAT D_px = std::max((RFLOAT)4., ref_d_px);
+            const RFLOAT half_D = 0.5 * D_px;
+            const RFLOAT y_mid = (STARTINGY(mymodel.Iref[k]) == 0) ? (0.5 * (RFLOAT)YSIZE(mymodel.Iref[k])) : (RFLOAT)0.;
+            double sum_e = 0., sum_y2e = 0.;
+            FOR_ALL_ELEMENTS_IN_ARRAY2D(mymodel.Iref[k])
+            {
+                const RFLOAT yc = (RFLOAT)i - y_mid;
+                if (std::fabs(yc) > half_D) continue;
+                const double v = (double)A2D_ELEM(mymodel.Iref[k], i, j);
+                const double e = v * v;
+                sum_e += e;
+                sum_y2e += (double)yc * (double)yc * e;
+            }
+            const double mix_bal = 4.0 * w1 * w2 / std::max(1e-6, (w1 + w2) * (w1 + w2));
+            const double trans_var = (sum_e > 1e-12) ? std::min(2.0, sum_y2e / (sum_e * 0.25 * (double)half_D * (double)half_D)) : 0.0;
+            const double bonus = 0.5 * mix_bal + 0.25 * trans_var;
+            cands.push_back({k, t1, t2, w1, w2, w2 * (1.0 + bonus), D_px, y_mid});
+        }
+    }
+    if (cands.empty()) return;
+    std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b) { return a.score > b.score; });
+
+    // Donor slots: unused classes first, then tiny (<2.5%) junk classes (keeping >= 1 active junk class),
+    // then near-empty non-candidate micro-classes (<0.3% and <0.5% pdf_class)
+    std::vector<int> donors;
+    std::vector<char> used_donor(K, 0), is_cand(K, 0);
+    for (const Cand &cd : cands) is_cand[cd.k] = 1;
+    int junk_active = 0;
+    for (int k = 0; k < K; k++)
+        if (!helical_context.junk_class.empty() && helical_context.junk_class[k] && mymodel.pdf_class[k] > 1e-5)
+            junk_active++;
+    for (int k = 0; k < K; k++)
+        if (mymodel.pdf_class[k] <= 1e-5 && k < (int)mymodel.Iref.size() && MULTIDIM_SIZE(mymodel.Iref[k]) > 0)
+        {
+            donors.push_back(k);
+            used_donor[k] = 1;
+        }
+    std::vector<std::pair<RFLOAT, int> > small_junk;
+    for (int k = 0; k < K; k++)
+        if (!used_donor[k] && !is_cand[k] && !helical_context.junk_class.empty() && helical_context.junk_class[k] &&
+            mymodel.pdf_class[k] < 0.025 && k < (int)mymodel.Iref.size() && MULTIDIM_SIZE(mymodel.Iref[k]) > 0)
+            small_junk.push_back({mymodel.pdf_class[k], k});
+    std::sort(small_junk.begin(), small_junk.end());
+    for (size_t idx = 0; idx < small_junk.size() && junk_active > 1; idx++, junk_active--)
+    {
+        donors.push_back(small_junk[idx].second);
+        used_donor[small_junk[idx].second] = 1;
+    }
+    const double empty_thresh = std::max(15.0, 0.003 * (double)N);
+    std::vector<std::pair<RFLOAT, int> > near_empty;
+    for (int k = 0; k < K; k++)
+        if (!used_donor[k] && !is_cand[k] && M_tot[k] < empty_thresh && mymodel.pdf_class[k] < 0.005 &&
+            k < (int)mymodel.Iref.size() && MULTIDIM_SIZE(mymodel.Iref[k]) > 0)
+            near_empty.push_back({(RFLOAT)M_tot[k], k});
+    std::sort(near_empty.begin(), near_empty.end());
+    for (size_t idx = 0; idx < near_empty.size(); idx++)
+    {
+        donors.push_back(near_empty[idx].second);
+        used_donor[near_empty[idx].second] = 1;
+    }
+    if (donors.size() < 2 && (int)helical_context.class_equiv.size() == K)
+    {
+        std::map<int, std::pair<RFLOAT, int> > equiv_best;
+        std::map<int, int> equiv_count;
+        for (int k = 0; k < K; k++)
+        {
+            if (!helical_context.junk_class.empty() && helical_context.junk_class[k]) continue;
+            const int eq = helical_context.class_equiv[k];
+            equiv_count[eq]++;
+            auto it = equiv_best.find(eq);
+            if (it == equiv_best.end() || mymodel.pdf_class[k] > it->second.first)
+                equiv_best[eq] = {mymodel.pdf_class[k], k};
+        }
+        std::vector<std::pair<RFLOAT, int> > dup_minor;
+        for (int k = 0; k < K; k++)
+        {
+            if (used_donor[k] || is_cand[k]) continue;
+            if (!helical_context.junk_class.empty() && helical_context.junk_class[k]) continue;
+            if (mymodel.pdf_class[k] >= (RFLOAT)(0.75 / K)) continue;
+            const int eq = helical_context.class_equiv[k];
+            if (equiv_count[eq] >= 2 && equiv_best[eq].second != k &&
+                k < (int)mymodel.Iref.size() && MULTIDIM_SIZE(mymodel.Iref[k]) > 0)
+                dup_minor.push_back({mymodel.pdf_class[k], k});
+        }
+        std::sort(dup_minor.begin(), dup_minor.end());
+        for (size_t idx = 0; idx < dup_minor.size() && idx < 2; idx++)
+        {
+            donors.push_back(dup_minor[idx].second);
+            used_donor[dup_minor[idx].second] = 1;
+        }
+    }
+    if (donors.empty()) return;
+
+    int splits = 0;
+    const size_t max_splits = std::min((size_t)4, donors.size());
+    struct SplitDone { int k, k_new, t1, t2; };
+    std::vector<SplitDone> done_splits;
+    for (size_t cidx = 0; cidx < cands.size() && (size_t)splits < max_splits; cidx++)
+    {
+        const Cand &cd = cands[cidx];
+        const int k = cd.k, k_new = donors[splits];
+        if (k == k_new) continue;
+        if (MULTIDIM_SIZE(mymodel.Iref[k_new]) != MULTIDIM_SIZE(mymodel.Iref[k]))
+            continue;
+
+        // Deterministic transverse cosine mode inside the tube (2% RMS) so axial translations do not wash it out
+        const RFLOAT D_px = cd.D_px;
+        const RFLOAT half_D = 0.5 * D_px;
+        const RFLOAT y_mid = cd.y_mid;
+        double tube_sum2 = 0., cos2_sum = 0.;
+        long int tube_n = 0;
+        FOR_ALL_ELEMENTS_IN_ARRAY2D(mymodel.Iref[k])
+        {
+            const RFLOAT yc = (RFLOAT)i - y_mid;
+            if (std::fabs(yc) > half_D) continue;
+            const RFLOAT v = A2D_ELEM(mymodel.Iref[k], i, j);
+            const RFLOAT c = std::cos(2.0 * PI * yc / D_px);
+            tube_sum2 += (double)v * v;
+            cos2_sum += (double)c * c;
+            tube_n++;
+        }
+        const RFLOAT tube_rms = (tube_n > 0) ? (RFLOAT)std::sqrt(tube_sum2 / tube_n) : (RFLOAT)0.;
+        const RFLOAT cos_rms = (tube_n > 0) ? (RFLOAT)std::sqrt(cos2_sum / tube_n) : (RFLOAT)1.;
+        const RFLOAT amp = (cos_rms > 1e-12) ? (RFLOAT)(0.02 * tube_rms / cos_rms) : (RFLOAT)(0.02 * tube_rms);
+        mymodel.Iref[k_new] = mymodel.Iref[k];
+        FOR_ALL_ELEMENTS_IN_ARRAY2D(mymodel.Iref[k])
+        {
+            const RFLOAT yc = (RFLOAT)i - y_mid;
+            if (std::fabs(yc) > half_D) continue;
+            const RFLOAT eps = amp * (RFLOAT)std::cos(2.0 * PI * yc / D_px);
+            A2D_ELEM(mymodel.Iref[k], i, j) += eps;
+            A2D_ELEM(mymodel.Iref[k_new], i, j) -= eps;
+        }
+        const RFLOAT r1 = std::max((RFLOAT)0.2, std::min((RFLOAT)0.8, (RFLOAT)(cd.w1 / (cd.w1 + cd.w2))));
+        const RFLOAT p_k = std::max((RFLOAT)1e-4, mymodel.pdf_class[k]);
+        mymodel.pdf_class[k] = p_k * r1;
+        mymodel.pdf_class[k_new] = p_k * (1. - r1);
+        if (k < (int)mymodel.data_vs_prior_class.size() && k_new < (int)mymodel.data_vs_prior_class.size())
+            mymodel.data_vs_prior_class[k_new] = mymodel.data_vs_prior_class[k];
+        if (k < (int)mymodel.sigma2_class.size() && k_new < (int)mymodel.sigma2_class.size())
+            mymodel.sigma2_class[k_new] = mymodel.sigma2_class[k];
+        if (k < (int)mymodel.fourier_coverage_class.size() && k_new < (int)mymodel.fourier_coverage_class.size())
+            mymodel.fourier_coverage_class[k_new] = mymodel.fourier_coverage_class[k];
+        if (k < (int)mymodel.estimated_resolution.size() && k_new < (int)mymodel.estimated_resolution.size())
+            mymodel.estimated_resolution[k_new] = mymodel.estimated_resolution[k];
+        if (k < (int)helical_class_diameter.size() && k_new < (int)helical_class_diameter.size())
+            helical_class_diameter[k_new] = helical_class_diameter[k];
+        if (k < (int)mymodel.class_settings.outer_diameter.size() && k_new < (int)mymodel.class_settings.outer_diameter.size())
+            mymodel.class_settings.outer_diameter[k_new] = mymodel.class_settings.outer_diameter[k];
+
+        if ((int)helical_context.junk_class.size() == K) helical_context.junk_class[k_new] = 0;
+        if ((int)helical_context.class_owner.size() == K)
+        {
+            helical_context.class_owner[k] = cd.t1;
+            helical_context.class_owner[k_new] = cd.t2;
+        }
+        helical_context.split_lock_owner.resize(K, -1);
+        helical_context.split_lock_owner[k] = cd.t1;
+        helical_context.split_lock_owner[k_new] = cd.t2;
+        helical_context.split_lock_until = iter + 4;
+        if ((int)helical_context.class_allowed.size() == K * T)
+        {
+            for (int t = 0; t < T; t++)
+            {
+                helical_context.class_allowed[(size_t)k * T + t] = (t == cd.t1) ? 1 : 0;
+                helical_context.class_allowed[(size_t)k_new * T + t] = (t == cd.t2) ? 1 : 0;
+            }
+        }
+        // Copy segment emission evidence to k_new before update() so forward-backward does not read stale donor loglik
+        if ((long int)helical_context.loglik.size() == N * (long int)K)
+            for (long int i = 0; i < N; i++)
+                helical_context.loglik[(size_t)i * K + k_new] = helical_context.loglik[(size_t)i * K + k];
+        done_splits.push_back({k, k_new, cd.t1, cd.t2});
+        helical_split_happened = true;
+        splits++;
+        if (verb > 0)
+            std::cout << " Filament context: split chimeric class " << k + 1 << " into type " << cd.t1 + 1
+                      << " (class " << k + 1 << ") and type " << cd.t2 + 1 << " (class " << k_new + 1
+                      << "; raw counts " << ROUND(cd.w1) << " vs " << ROUND(cd.w2) << ")" << std::endl;
+    }
+    if (helical_split_happened)
+    {
+        helical_context.initialised_model = false;
+        helical_context.update();
+        // Route next E-step priors cleanly between k (t1) and k_new (t2) after update()
+        if ((long int)helical_context.prior.size() == N * (long int)K &&
+            (long int)helical_context.tpost.size() == N * (long int)T)
+        {
+            for (const SplitDone &sd : done_splits)
+            {
+                for (long int i = 0; i < N; i++)
+                {
+                    const float s1 = helical_context.tpost[(size_t)i * T + sd.t1];
+                    const float s2 = helical_context.tpost[(size_t)i * T + sd.t2];
+                    const float den = std::max(1e-6f, s1 + s2);
+                    const float p_sum = helical_context.prior[(size_t)i * K + sd.k] + helical_context.prior[(size_t)i * K + sd.k_new];
+                    helical_context.prior[(size_t)i * K + sd.k] = std::max((float)helical_context.prior_floor, p_sum * (s1 / den));
+                    helical_context.prior[(size_t)i * K + sd.k_new] = std::max((float)helical_context.prior_floor, p_sum * (s2 / den));
+                }
+            }
+        }
     }
 }
 
@@ -4660,8 +5299,10 @@ void MlOptimiser::iterate()
     // launch threads etc
     iterateSetup();
 
-    if (do_helical_context || do_helical_polarity)
+    if (mymodel.ref_dim == 2 && (do_helical_context || do_helical_polarity || do_helical_track_smooth))
         initialiseHelicalContext();
+    else if (mymodel.ref_dim == 3)
+        initialiseHelical3DContext();
 
 
     // Update the current resolution and image sizes, and precalculate resolution pointers
@@ -4854,14 +5495,6 @@ void MlOptimiser::iterate()
             }
         }
 
-        if (do_helical_polarity)
-        {
-            helicalPolarityGauge();
-            updateHelicalPolarity();
-        }
-        if (do_helical_context)
-            updateHelicalContext();
-
         // Skip center classes in the final stages of gradient descent steps
         if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
             centerClasses();
@@ -4894,6 +5527,25 @@ void MlOptimiser::iterate()
 #endif
         // Re-calculate the current resolution, do this before writing to get the correct values in the output files
         updateCurrentResolution();
+
+        if (mymodel.ref_dim == 2)
+        {
+            if (do_helical_polarity)
+            {
+                helicalPolarityGauge();
+                updateHelicalPolarity();
+            }
+            if (do_helical_context)
+                updateHelicalContext();
+            else if (do_helical_track_smooth)
+                helical_context.smoothFilamentTracks(mydata.MDimg, helical_context_rows, mymodel.pixel_size,
+                                                     (offset_range_x > 0. ? (RFLOAT)offset_range_x : std::max((RFLOAT)12., (RFLOAT)(1.5 * sampling.offset_range * mymodel.pixel_size))), iter, &mydata.obsModel.opticsMdt);
+        }
+        else if (mymodel.ref_dim == 3)
+        {
+            updateHelical3DContextAfterIter();
+        }
+
         if (do_sort_classes && iter == nr_iter)
             sortClasses();
 
@@ -4905,7 +5557,10 @@ void MlOptimiser::iterate()
         // Write output files
         write(DO_WRITE_SAMPLING, DO_WRITE_DATA, DO_WRITE_OPTIMISER, DO_WRITE_MODEL, 0);
         if (do_helical_context)
+        {
+            AsyncFileWriter::instance().wait();
             writeHelicalTypeFiles();
+        }
         pruneOldIterations(iter);
         IT_MARK(11); IT_REPORT(); stagetimer::reportAndReset(iter);
 
@@ -5645,12 +6300,15 @@ void MlOptimiser::expectationSetup()
                 1e3 * std::chrono::duration<double>(setup_t1 - setup_t0).count(), 1e3 * std::chrono::duration<double>(setup_t2 - setup_t1).count());
     }
 
-    // Initialise per-class orientation tracking for filament consistency
-    if (do_keep_full_filaments && mymodel.nr_classes > 1)
+    // Initialise per-class orientation tracking for filament consistency / 3D phase coherence
+    if (needPerClassMetadata())
         exp_per_class_metadata_.initZeros(mydata.numberOfParticles(), mymodel.nr_classes * METADATA_NR_CLASS_PARAMS);
 
-    if (filctx_opt.mode != filctx::OFF)
+    if (needFilamentLoglik())
+    {
         filctx_loglik.assign((size_t)mydata.numberOfParticles() * mymodel.nr_classes, 0.f);
+        filctx_visited.assign((size_t)mydata.numberOfParticles(), 0);
+    }
 }
 
 void MlOptimiser::expectationSetupCheckMemory(int myverb)
@@ -5798,10 +6456,38 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
     {
         // calculate the random class for these SomeParticles
         exp_random_class_some_particles.clear();
+        const char *env_sec_seed = getenv("RELION_HELICAL_SECTION_SEED");
+        const bool use_section_seed = (!do_som && do_helical_context && mymodel.ref_dim == 2 &&
+                                       helical_context.N == mydata.numberOfParticles() && helical_context.step > 0. &&
+                                       !(env_sec_seed && env_sec_seed[0] && std::string(env_sec_seed) == "0"));
         if (!do_som) {
+            const double sec_len = std::max(180., 1.2 * (double)helical_context.diameter);
             for (long int part_id = my_first_part_id; part_id <= my_last_part_id; part_id++) {
-                                init_random_generator(random_seed + part_id);
-                                int random_class = rand() % mymodel.nr_classes;
+                int random_class = 0;
+                if (use_section_seed)
+                {
+                    const long int real_id = mydata.sorted_idx[part_id];
+                    const long int ch = (real_id >= 0 && real_id < helical_context.N) ? helical_context.seg_chain[real_id] : -1;
+                    if (ch >= 0)
+                    {
+                        const long int sec = (long int)std::floor(helical_context.seg_pos[real_id] * helical_context.step / sec_len);
+                        uint64_t h = (uint64_t)(random_seed + 1315423911ULL) ^ ((uint64_t)(ch + 1) * 0x9e3779b97f4a7c15ULL) ^ ((uint64_t)(sec + 17) * 0xbf58476d1ce4e5b9ULL);
+                        h ^= (h >> 30); h *= 0xbf58476d1ce4e5b9ULL;
+                        h ^= (h >> 27); h *= 0x94d049bb133111ebULL;
+                        h ^= (h >> 31);
+                        random_class = (int)(h % (uint64_t)mymodel.nr_classes);
+                    }
+                    else
+                    {
+                        init_random_generator(random_seed + part_id);
+                        random_class = rand() % mymodel.nr_classes;
+                    }
+                }
+                else
+                {
+                    init_random_generator(random_seed + part_id);
+                    random_class = rand() % mymodel.nr_classes;
+                }
                 exp_random_class_some_particles.push_back(random_class);
             }
         }
@@ -7890,9 +8576,11 @@ void MlOptimiser::solventFlatten()
         else if (helical_cylindrical_mask && mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0.)
         {
             // 2D classes of helical segments (helical axis along X): as wide as the tube and as long
-            // as the mask diameter, as the particles
+            // as the mask diameter, as the particles. With --helical_auto_diameter, let class references
+            // span up to particle_diameter while per-class tubes in class_masks bound each class's width.
+            const RFLOAT ref_outer_w = helical_auto_diameter ? std::max(helical_tube_outer_diameter, particle_diameter) : helical_tube_outer_diameter;
             const RFLOAT half_length = particle_diameter / (2. * mymodel.pixel_size);
-            const RFLOAT half_width = helical_tube_outer_diameter / (2. * mymodel.pixel_size);
+            const RFLOAT half_width = ref_outer_w / (2. * mymodel.pixel_size);
             FOR_ALL_ELEMENTS_IN_ARRAY3D(Isolvent())
                 A3D_ELEM(Isolvent(), k, i, j) = std::min(softStep(ABS(j), half_length, width_mask_edge),
                                                          softStep(ABS(i), half_width, width_mask_edge));
@@ -7977,8 +8665,8 @@ void MlOptimiser::solventFlatten()
         }
     }
 
-    // 2D classes of helical segments: measure each class's diameter (and with --helical_auto_diameter mask it with its own tube)
-    if (mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0. && helical_cylindrical_mask && fn_mask == "None" && !mydata.is_tomo)
+    // 2D classes of helical segments: always measure each class's diameter (and with --helical_auto_diameter mask it with its own tube)
+    if (mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0. && !mydata.is_tomo)
         updateHelicalClassDiameters(class_masks);
 
     // Also read a second solvent mask if necessary
@@ -8041,35 +8729,46 @@ void MlOptimiser::updateHelicalClassDiameters(std::vector<MultidimArray<RFLOAT> 
 {
     const int K = mymodel.nr_classes;
     const RFLOAT apix = mymodel.pixel_size;
-    // Dark stripes inside a filament are narrower than this
+    // Dark stripes inside a filament are narrower than this; filter at ~35 A shape scale first
     const RFLOAT gap_px = 15. / apix;
+    const RFLOAT shape_sigma_px = std::max((RFLOAT)0.7, (RFLOAT)(35. / (3.81 * apix)));
     helical_class_diameter.assign(K, -1.);
     for (int k = 0; k < K; k++)
         if (mymodel.pdf_class[k] > 0.)
-            helical_class_diameter[k] = apix * helixalign::classDiameter(mymodel.Iref[k], gap_px);
-    if (!helical_auto_diameter)
+            helical_class_diameter[k] = apix * helixalign::classDiameter(mymodel.Iref[k], gap_px, 0.1, 0.1, shape_sigma_px);
+    if (!helical_auto_diameter || !helical_cylindrical_mask || fn_mask != "None")
         return;
 
-    // A class's tube: its measured diameter, between 6 pixels and the job's tube; it narrows to at most half per
+    // A class's tube: its measured diameter, between dmin and dmax; it narrows to at most 75% per
     // iteration (the average is measured before masking, so a narrow tube does not narrow the next one), widens at
-    // once. Not before iteration 2: the first class averages are mostly noise.
+    // once. Late-gated (default iter >= 6, override via RELION_HELICAL_AUTO_DIAMETER_START) until classes stabilize.
     std::vector<RFLOAT> &d = mymodel.class_settings.outer_diameter;
     if ((int)d.size() != K)
         d.assign(K, helical_tube_outer_diameter);
-    if (iter < 2)
+    int start_iter = 6;
+    if (const char *env = getenv("RELION_HELICAL_AUTO_DIAMETER_START"))
+        if (env[0] != '\0')
+            start_iter = std::max(0, std::atoi(env));
+    if (iter < start_iter)
         return;
-    const RFLOAT dmax = helical_tube_outer_diameter, dmin = std::min(dmax, 6. * apix);
+    const RFLOAT dmax = helical_auto_diameter ? std::max(helical_tube_outer_diameter, particle_diameter) : helical_tube_outer_diameter;
+    const RFLOAT dmin = std::min(helical_tube_outer_diameter, std::max((RFLOAT)(6. * apix), (RFLOAT)40.));
     std::vector<RFLOAT> used;
     for (int k = 0; k < K; k++)
     {
         const RFLOAT prev = (d[k] > 0.) ? std::min(d[k], dmax) : dmax;
-        if (helical_class_diameter[k] > 0.)
+        const RFLOAT box_A = (YSIZE(mymodel.Iref[k]) > 0) ? (RFLOAT)YSIZE(mymodel.Iref[k]) * apix : dmax;
+        if (helical_class_diameter[k] > 0. && std::isfinite(helical_class_diameter[k]) &&
+            helical_class_diameter[k] < (RFLOAT)(0.85 * box_A))
         {
             const RFLOAT target = std::max(dmin, std::min(dmax, helical_class_diameter[k]));
-            d[k] = (target < prev) ? std::max(target, 0.5 * prev) : target;
+            d[k] = (target < prev) ? std::max(target, (RFLOAT)(0.75 * prev)) : target;
         }
         else
-            d[k] = prev;
+        {
+            const RFLOAT target = (helical_tube_outer_diameter > 0.) ? std::min(helical_tube_outer_diameter, dmax) : dmax;
+            d[k] = (target < prev) ? std::max(target, (RFLOAT)(0.75 * prev)) : target;
+        }
         if (mymodel.pdf_class[k] > 0.)
             used.push_back(d[k]);
     }
@@ -8094,8 +8793,12 @@ void MlOptimiser::updateHelicalClassDiameters(std::vector<MultidimArray<RFLOAT> 
 
 bool MlOptimiser::autoMaskThisIteration() const
 {
-    return do_auto_mask && mymodel.ref_dim == 3 && mymodel.nr_bodies == 1 &&
-           mymodel.current_resolution > 0. && 1. / mymodel.current_resolution <= auto_mask_start_res;
+    const RFLOAT eff_start = (mymodel.ref_dim == 2)
+        ? std::max(auto_mask_start_res, (RFLOAT)(2.5 * mymodel.pixel_size))
+        : auto_mask_start_res;
+    return do_auto_mask && (mymodel.ref_dim == 2 || mymodel.ref_dim == 3) && mymodel.nr_bodies == 1 &&
+           (mymodel.ref_dim == 3 || iter >= 6) &&
+           mymodel.current_resolution > 0. && 1. / mymodel.current_resolution <= eff_start;
 }
 
 bool MlOptimiser::autoMaskClassResolution(int iclass, RFLOAT &resolution, RFLOAT &lowpass) const
@@ -8124,7 +8827,10 @@ bool MlOptimiser::autoMaskClassResolution(int iclass, RFLOAT &resolution, RFLOAT
     // With a mask column in --ref, only the classes marked "auto" get automatic masks
     const std::vector<std::string> &class_mask = mymodel.class_settings.mask;
     const bool wanted = class_mask.empty() || (iclass < (int)class_mask.size() && class_mask[iclass] == "auto");
-    return wanted && mymodel.pdf_class[iclass] > 0. && resolution <= auto_mask_start_res;
+    const RFLOAT eff_start = (mymodel.ref_dim == 2)
+        ? std::max(auto_mask_start_res, (RFLOAT)(2.5 * mymodel.pixel_size))
+        : auto_mask_start_res;
+    return wanted && mymodel.pdf_class[iclass] > 0. && resolution <= eff_start;
 }
 
 void MlOptimiser::calculateAutoMaskOfClass(int iclass, RFLOAT resolution, RFLOAT lowpass, AutoMaskReport &report)
@@ -8135,7 +8841,23 @@ void MlOptimiser::calculateAutoMaskOfClass(int iclass, RFLOAT resolution, RFLOAT
     opt.soft_edge = (auto_mask_soft_edge >= 0.) ? auto_mask_soft_edge / mymodel.pixel_size : -1.;
     if ((int)auto_masks.size() != mymodel.nr_classes)
         auto_masks.resize(mymodel.nr_classes);
-    autoMaskFromMap(mymodel.Iref[iclass], mymodel.pixel_size, resolution, opt, auto_masks[iclass], &report, nr_threads);
+    if (mymodel.ref_dim == 2)
+    {
+        AutoMask2DOptions opt2d;
+        opt2d.lowpass = lowpass;
+        opt2d.min_lowpass = 35.;
+        opt2d.extend_angst = 18.;
+        opt2d.soft_edge = opt.soft_edge;
+        opt2d.mass = opt.mass;
+        opt2d.helix_tube_diam = (helical_tube_outer_diameter > 0.) ? helical_tube_outer_diameter : -1.;
+        const MultidimArray<RFLOAT> *prev_ptr =
+            auto_masks[iclass].sameShape(mymodel.Iref[iclass], true) ? &auto_masks[iclass] : NULL;
+        MultidimArray<RFLOAT> next_mask;
+        autoMask2DClass(mymodel.Iref[iclass], mymodel.pixel_size, resolution, opt2d, next_mask, prev_ptr, &report, nr_threads);
+        auto_masks[iclass] = next_mask;
+    }
+    else
+        autoMaskFromMap(mymodel.Iref[iclass], mymodel.pixel_size, resolution, opt, auto_masks[iclass], &report, nr_threads);
 }
 
 void MlOptimiser::printAutoMaskReport(int iclass, const AutoMaskReport &report) const
@@ -8173,7 +8895,11 @@ void MlOptimiser::calculateAutoMasks()
     {
         RFLOAT resolution, lowpass;
         if (!autoMaskClassResolution(iclass, resolution, lowpass))
+        {
+            if (iclass < (int)auto_masks.size())
+                auto_masks[iclass].clear();
             continue;
+        }
         AutoMaskReport report;
         calculateAutoMaskOfClass(iclass, resolution, lowpass, report);
         if (verb > 0)
@@ -10625,10 +11351,10 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
     // Initialising...
     exp_sum_weight = 0.;
     // Filament polarity: sums of the coarse weights over psi angles that are not / are flipped
-    bool do_polarity_evidence = do_helical_polarity && exp_ipass == 0 && !(do_skip_align || do_skip_rotate);
+    bool do_polarity_evidence = (mymodel.ref_dim == 2) && do_helical_polarity && exp_ipass == 0 && !(do_skip_align || do_skip_rotate);
     double polarity_wsum[2] = {0., 0.};
 
-    if (exp_ipass == 0 && filctx_opt.mode != filctx::OFF && !filctx_loglik.empty())
+    if (exp_ipass == 0 && useCoarseFilamentScores() && needFilamentLoglik() && !filctx_loglik.empty())
         storeFilamentLoglik(part_id, exp_Mweight, exp_nr_dir * exp_nr_psi * exp_nr_trans * exp_nr_oversampled_rot * exp_nr_oversampled_trans, exp_min_diff2);
 
     RFLOAT my_sigma2_offset_x, my_sigma2_offset_y, my_sigma2_offset_z;
@@ -10642,6 +11368,13 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
     {
         my_sigma2_offset_x = my_sigma2_offset_y = my_sigma2_offset_z = (mymodel.nr_bodies > 1) ?
             mymodel.sigma_offset_bodies[ibody]*mymodel.sigma_offset_bodies[ibody] : mymodel.sigma2_offset;
+    }
+    if (do_helical_track_smooth && do_helical_refine && !ignore_helical_symmetry &&
+        mymodel.ref_dim == 2 &&
+        iter >= 3 && helical_track_sigma_A > 0.)
+    {
+        const RFLOAT eff_track_sigma = std::max((RFLOAT)helical_track_sigma_A, (RFLOAT)(0.75 * sampling.offset_step * mymodel.pixel_size));
+        my_sigma2_offset_y = std::min(my_sigma2_offset_y, eff_track_sigma * eff_track_sigma);
     }
     RFLOAT my_offset_norm = 2. * PI * sqrt(my_sigma2_offset_x) * sqrt(my_sigma2_offset_y);
     if (mymodel.data_dim == 3 || mydata.is_tomo) my_offset_norm *= sqrt(2. * PI * my_sigma2_offset_z);
@@ -10778,7 +11511,7 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
             {
                 myprior_x = myprior_y = myprior_z = 0.;
             }
-            else if (mymodel.ref_dim == 2)
+            else if (mymodel.ref_dim == 2 && !do_helical_refine)
             {
                 myprior_x = XX(mymodel.prior_offset_class[exp_iclass]);
                 myprior_y = YY(mymodel.prior_offset_class[exp_iclass]);
@@ -10820,26 +11553,29 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
 
                     if (pdf_orientation_mean != 0.)
                         pdf_orientation /= pdf_orientation_mean;
-                    pdf_orientation *= filamentClassFactor(part_id, exp_iclass) * sharedRefSeedFactor(part_id, exp_iclass);
+                    pdf_orientation *= helical2dClassFactor(part_id, exp_iclass) * filamentClassFactor(part_id, exp_iclass) * sharedRefSeedFactor(part_id, exp_iclass);
 
-                    // Loop over all translations
-                    long int ihidden = iorientclass * exp_nr_trans;
-                    for (long int itrans = exp_itrans_min; itrans <= exp_itrans_max; itrans++, ihidden++)
+                    RFLOAT rot_myprior_x = myprior_x;
+                    RFLOAT rot_myprior_y = myprior_y;
+                    RFLOAT rot_myprior_z = myprior_z;
                     {
-                        // May18,2015 - Shaoda & Sjors - Helical refinement (translational searches)
-                        // Calculate the vector length of myprior
-                        RFLOAT mypriors_len2 = myprior_x * myprior_x + myprior_y * myprior_y;
+                        RFLOAT mypriors_len2 = rot_myprior_x * rot_myprior_x + rot_myprior_y * rot_myprior_y;
                         if (mymodel.data_dim == 3 || mydata.is_tomo)
-                            mypriors_len2 += myprior_z * myprior_z;
-                        // If it is doing helical refinement AND Cartesian vector myprior has a length > 0, transform the vector to its helical coordinates
+                            mypriors_len2 += rot_myprior_z * rot_myprior_z;
                         if ( (do_helical_refine) && (!ignore_helical_symmetry) && (mypriors_len2 > 0.00001) )
                         {
                             RFLOAT rot_deg = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_ROT);
                             RFLOAT tilt_deg = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_TILT);
                             RFLOAT psi_deg = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_PSI);
-                            transformCartesianAndHelicalCoords(myprior_x, myprior_y, myprior_z, myprior_x, myprior_y, myprior_z, rot_deg, tilt_deg, psi_deg, mymodel.data_dim, CART_TO_HELICAL_COORDS);
+                            transformCartesianAndHelicalCoords(rot_myprior_x, rot_myprior_y, rot_myprior_z, rot_myprior_x, rot_myprior_y, rot_myprior_z, rot_deg, tilt_deg, psi_deg, mymodel.data_dim, CART_TO_HELICAL_COORDS);
                         }
-                        // (For helical refinement) Now offset, old_offset, sampling.translations and myprior are all in helical coordinates
+                    }
+
+                    // Loop over all translations
+                    long int ihidden = iorientclass * exp_nr_trans;
+                    for (long int itrans = exp_itrans_min; itrans <= exp_itrans_max; itrans++, ihidden++)
+                    {
+                        // (For helical refinement) Now offset, old_offset, sampling.translations and rot_myprior are all in helical coordinates
 
                         // To speed things up, only calculate pdf_offset at the coarse sampling.
                         // That should not matter much, and that way one does not need to calculate all the OversampledTranslations
@@ -10847,13 +11583,13 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
                         RFLOAT offset_y = old_offset_y + sampling.translations_y[itrans];
                         RFLOAT tdiff2 = 0.;
                         if ( (!do_helical_refine) || (ignore_helical_symmetry) )
-                            tdiff2 += (offset_x - myprior_x) * (offset_x - myprior_x) / (-2. * my_sigma2_offset_x);
-                        tdiff2 += (offset_y - myprior_y) * (offset_y - myprior_y) / (-2. * my_sigma2_offset_y);
+                            tdiff2 += (offset_x - rot_myprior_x) * (offset_x - rot_myprior_x) / (-2. * my_sigma2_offset_x);
+                        tdiff2 += (offset_y - rot_myprior_y) * (offset_y - rot_myprior_y) / (-2. * my_sigma2_offset_y);
                         if (mymodel.data_dim == 3 || mydata.is_tomo)
                         {
                             RFLOAT offset_z = old_offset_z + sampling.translations_z[itrans];
                             if ( (!do_helical_refine) || (ignore_helical_symmetry) )
-                                tdiff2 += (offset_z - myprior_z) * (offset_z - myprior_z) / (-2. * my_sigma2_offset_z);
+                                tdiff2 += (offset_z - rot_myprior_z) * (offset_z - rot_myprior_z) / (-2. * my_sigma2_offset_z);
                         }
 
                         // As of version 3.1, sigma_offsets are in Angstroms!
@@ -10932,7 +11668,12 @@ void MlOptimiser::convertAllSquaredDifferencesToWeights(long int part_id, int ib
                                     // Later add all to exp_thisimage_sumweight, but inside this loop sum to local thisthread_sumweight first
                                     exp_thisimage_sumweight += weight;
                                     if (do_polarity_evidence)
-                                        polarity_wsum[polarity_mode] += weight;
+                                    {
+                                        RFLOAT w_pol = (!helical_context.pol_class_weight.empty() &&
+                                                        exp_iclass < (int)helical_context.pol_class_weight.size())
+                                                       ? (RFLOAT)helical_context.pol_class_weight[exp_iclass] : (RFLOAT)1.;
+                                        polarity_wsum[polarity_mode] += weight * w_pol;
+                                    }
                                 } // end if/else exp_Mweight < 0.
                             } // end loop iover_trans
                         }// end loop iover_rot
@@ -11373,7 +12114,7 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
                             RFLOAT myprior_x, myprior_y, myprior_z, old_offset_z;
                             RFLOAT old_offset_x = XX(exp_old_offset);
                             RFLOAT old_offset_y = YY(exp_old_offset);
-                            if (mymodel.ref_dim == 2 && mymodel.nr_bodies == 1)
+                            if (mymodel.ref_dim == 2 && mymodel.nr_bodies == 1 && !do_helical_refine)
                             {
                                 myprior_x = XX(mymodel.prior_offset_class[exp_iclass]);
                                 myprior_y = YY(mymodel.prior_offset_class[exp_iclass]);
@@ -11598,29 +12339,32 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
                                                 thr_wsum_prior_offsety_class[exp_iclass] += weight * my_pixel_size * (old_offset_y + oversampled_translations_y[iover_trans]);
                                             }
                                             // May18,2015 - Shaoda & Sjors, Helical refinement (translational searches)
-                                            // Calculate the vector length of myprior
-                                            RFLOAT mypriors_len2 = myprior_x * myprior_x + myprior_y * myprior_y;
+                                            // Transform a local copy of myprior so outer/subsequent iover_trans iterations never re-rotate it
+                                            RFLOAT rot_myprior_x = myprior_x;
+                                            RFLOAT rot_myprior_y = myprior_y;
+                                            RFLOAT rot_myprior_z = myprior_z;
+                                            RFLOAT mypriors_len2 = rot_myprior_x * rot_myprior_x + rot_myprior_y * rot_myprior_y;
                                             if (mymodel.data_dim == 3 || mydata.is_tomo)
-                                                mypriors_len2 += myprior_z * myprior_z;
+                                                mypriors_len2 += rot_myprior_z * rot_myprior_z;
                                             // If it is doing helical refinement AND Cartesian vector myprior has a length > 0, transform the vector to its helical coordinates
                                             if ( (do_helical_refine) && (!ignore_helical_symmetry) && (mypriors_len2 > 0.00001) )
                                             {
                                                 RFLOAT rot_deg = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_ROT);
                                                 RFLOAT tilt_deg = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_TILT);
                                                 RFLOAT psi_deg = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_PSI);
-                                                transformCartesianAndHelicalCoords(myprior_x, myprior_y, myprior_z, myprior_x, myprior_y, myprior_z, rot_deg, tilt_deg, psi_deg, mymodel.data_dim, CART_TO_HELICAL_COORDS);
+                                                transformCartesianAndHelicalCoords(rot_myprior_x, rot_myprior_y, rot_myprior_z, rot_myprior_x, rot_myprior_y, rot_myprior_z, rot_deg, tilt_deg, psi_deg, mymodel.data_dim, CART_TO_HELICAL_COORDS);
                                             }
 
                                             if ( (!do_helical_refine) || (ignore_helical_symmetry) )
                                             {
-                                                RFLOAT diffx = myprior_x - old_offset_x - oversampled_translations_x[iover_trans];
+                                                RFLOAT diffx = rot_myprior_x - old_offset_x - oversampled_translations_x[iover_trans];
                                                 thr_wsum_sigma2_offset += weight * my_pixel_size * my_pixel_size * diffx * diffx;
                                             }
-                                            RFLOAT diffy = myprior_y - old_offset_y - oversampled_translations_y[iover_trans];
+                                            RFLOAT diffy = rot_myprior_y - old_offset_y - oversampled_translations_y[iover_trans];
                                             thr_wsum_sigma2_offset += weight * my_pixel_size * my_pixel_size * diffy * diffy;
                                             if (mymodel.data_dim == 3 || mydata.is_tomo)
                                             {
-                                                RFLOAT diffz  = myprior_z - old_offset_z - oversampled_translations_z[iover_trans];
+                                                RFLOAT diffz  = rot_myprior_z - old_offset_z - oversampled_translations_z[iover_trans];
                                                 if ( (!do_helical_refine) || (ignore_helical_symmetry) )
                                                     thr_wsum_sigma2_offset += weight * my_pixel_size * my_pixel_size * diffz * diffz;
                                             }
@@ -11734,8 +12478,8 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
 #endif
                                         } // end if !do_skip_maximization
 
-                                        // Keep track of max_weight per class for filament consistency
-                                        if (img_id == 0 && do_keep_full_filaments && mymodel.nr_classes > 1)
+                                        // Keep track of max_weight per class for filament consistency and 3D phase coherence
+                                        if (img_id == 0 && needPerClassMetadata())
                                         {
                                             int class_base = METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS
                                                              + exp_iclass * METADATA_NR_CLASS_PARAMS;
@@ -12119,6 +12863,8 @@ void MlOptimiser::storeWeightedSums(long int part_id, int ibody,
 
         if (do_helical_context)
             helicalContextStore(part_id, thr_wsum_pdf_class);
+        if (needFilamentLoglik() && !useCoarseFilamentScores())
+            storeFilamentPosterior(part_id, thr_wsum_pdf_class, metadata_offset);
 
         for (int n = 0; n < mymodel.nr_classes; n++)
         {
@@ -13181,7 +13927,9 @@ void MlOptimiser::updateSubsetSize(bool myverb)
     long int old_subset_size = subset_size;
     if (do_fast_subsets)
     {
-        long int min_parts_per_class = (mymodel.ref_dim == 2) ? 100 : 1500;
+        long int min_parts_per_class = (mymodel.ref_dim == 2)
+            ? ((do_helical_refine || helical_tube_outer_diameter > 0.) ? 300 : 100)
+            : 1500;
         if (iter <= 5)
         {
             subset_size = min_parts_per_class*mymodel.nr_classes;
@@ -13463,8 +14211,8 @@ void MlOptimiser::setMetaDataSubset(long int first_part_id, long int last_part_i
             }
         }
 
-        // Extract per-class best orientations into global tracking array for filament consistency
-        if (do_keep_full_filaments && mymodel.nr_classes > 1)
+        // Extract per-class best orientations into global tracking array for filament consistency / 3D phase coherence
+        if (needPerClassMetadata())
         {
             int nr_class_params = mymodel.nr_classes * METADATA_NR_CLASS_PARAMS;
             int class_col_offset = METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS;
@@ -13554,6 +14302,140 @@ void MlOptimiser::reportResources(const std::vector<resrep::ProcessStats> &procs
     }
 }
 
+void MlOptimiser::parseKeepFullFilaments(bool is_continue)
+{
+    if (!is_continue)
+    {
+        const char *env = getenv("RELION_KEEP_FULL_FILAMENTS");
+        std::string v = (env == NULL) ? "" : env;
+        for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+        do_keep_full_filaments = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+    }
+    const bool keep_on = parser.checkOption("--keep_full_filaments", "Assign all segments from the same full filament to the same 3D class (helical Class3D)");
+    const bool keep_off = parser.checkOption("--dont_keep_full_filaments", "Do not force all segments of a filament into the same 3D class");
+    if (keep_on && keep_off)
+        REPORT_ERROR("ERROR: cannot specify both --keep_full_filaments and --dont_keep_full_filaments");
+    if (keep_on) do_keep_full_filaments = true;
+    if (keep_off) do_keep_full_filaments = false;
+}
+
+void MlOptimiser::parseHelicalContextOptions(bool is_continue)
+{
+    const bool ctx_on = parser.checkOption("--helical_context", "Use the other segments of each filament as a prior on the class of a segment (helical 2D classification)");
+    const bool ctx_off = parser.checkOption("--dont_helical_context", "Disable the filament context prior in helical 2D classification");
+    const bool context_just_enabled = (is_continue && !do_helical_context && ctx_on && !ctx_off);
+    if (!is_continue)
+        do_helical_context = ctx_on && !ctx_off;
+    else
+    {
+        if (ctx_on) do_helical_context = true;
+        if (ctx_off) do_helical_context = false;
+    }
+
+    const std::string s_start = parser.getOption("--helical_context_start", "First iteration that uses the filament context prior", is_continue ? "OLD" : "4");
+    if (!is_continue || s_start != "OLD")
+        helical_context_start_iter = textToInteger(s_start);
+
+    const std::string s_temper = parser.getOption("--helical_context_temper", "Factor on the class log-likelihoods in the filament chain (-1: auto)", is_continue ? "OLD" : "-1");
+    if (!is_continue || s_temper != "OLD")
+        helical_context.temper = textToFloat(s_temper);
+
+    const std::string s_excl = parser.getOption("--helical_context_exclude", "The prior of a segment comes from segments at least this far away (A, default: leave-one-out)", is_continue ? "OLD" : "-1");
+    if (!is_continue || s_excl != "OLD")
+        helical_context.exclude_angst = textToFloat(s_excl);
+
+    const std::string s_types = parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", is_continue ? "OLD" : "4");
+    if (!is_continue)
+    {
+        helical_context.nr_types = textToInteger(s_types);
+        helical_context_types_min = helical_context.nr_types;
+    }
+    else if (s_types != "OLD")
+    {
+        const int new_tmin = textToInteger(s_types);
+        if (new_tmin != helical_context_types_min)
+        {
+            helical_context_types_min = new_tmin;
+            helical_context.nr_types = new_tmin;
+            helical_context_types_selected = false;
+        }
+    }
+
+    const std::string s_tmax = parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", is_continue ? "OLD" : "-1");
+    if (!is_continue)
+    {
+        helical_context_types_max = textToInteger(s_tmax);
+    }
+    else if (s_tmax != "OLD")
+    {
+        const int new_tmax = textToInteger(s_tmax);
+        if (new_tmax != helical_context_types_max)
+        {
+            helical_context_types_max = new_tmax;
+            helical_context_types_selected = false;
+            if (helical_context_types_max > 0 && helical_context.nr_types > helical_context_types_max)
+                helical_context.nr_types = helical_context_types_min;
+        }
+    }
+
+    const std::string s_tol = parser.getOption("--helical_context_types_tol", "With --helical_context_types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", is_continue ? "OLD" : "0.01");
+    if (!is_continue || s_tol != "OLD")
+        helical_context_types_tol = textToFloat(s_tol);
+    const std::string s_agree = parser.getOption("--helical_context_types_agree", "With --helical_context_types_max: use the most types whose segment types, learnt from three separate thirds of the filaments, agree to at least this (adjusted Rand index; none does: the best agreement); 0: by log-likelihood (--helical_context_types_tol)", is_continue ? "OLD" : "0.75");
+    if (!is_continue || s_agree != "OLD")
+        helical_context_types_agree = textToFloat(s_agree);
+    const std::string s_every = parser.getOption("--helical_context_types_every", "With --helical_context_types_max: choose the number of types again every this many iterations (one fewer to two more than now)", is_continue ? "OLD" : "5");
+    if (!is_continue || s_every != "OLD")
+        helical_context_types_every = textToInteger(s_every);
+    helical_context.nr_bw_iter = textToInteger(parser.getOption("--helical_context_bw_iter", "Baum-Welch iterations of the filament chain per iteration", "3"));
+    const bool warm_on = parser.checkOption("--helical_context_warm", "Continue the filament chain model from the last iteration (default: start again from the current classes)");
+    const bool warm_off = parser.checkOption("--dont_helical_context_warm", "Start the filament chain model again from the current classes each iteration");
+    if (warm_on && warm_off)
+        REPORT_ERROR("ERROR: specify at most one of --helical_context_warm and --dont_helical_context_warm");
+    if (!is_continue)
+        helical_context_warm = warm_on && !warm_off;
+    else if (warm_on)
+        helical_context_warm = true;
+    else if (warm_off)
+        helical_context_warm = false;
+    helical_context.use_polarity_order = parser.checkOption("--helical_context_polarity_order", "With --helical_polarity: run the class chain of filaments with flipped polarity backwards");
+    helical_context_class_min_frac = textToFloat(parser.getOption("--helical_context_class_min_frac", "Files per helical type: include a class if at least this fraction of its segments is of the type", "0.1"));
+    helical_context_class_min_segs = textToInteger(parser.getOption("--helical_context_class_min_segs", "Files per helical type: ... and at least this many of its segments", "20"));
+    {
+        const bool opt_smooth = parser.checkOption("--helical_track_smooth", "Smooth picked filament centerlines and psi tangents along each filament (default with --helical_context or 3D --helix with --filament_context)");
+        do_helical_track_smooth_off = parser.checkOption("--dont_helical_track_smooth", "Disable filament centerline and tangent smoothing");
+        const std::string s_track_sigma = parser.getOption("--helical_track_sigma_A", "Transverse offset prior sigma (A) around smoothed filament centerline in 2D classification (from iteration 3; 3D track smoothing updates psi priors only)", is_continue ? "OLD" : "3.5");
+        if (!is_continue || s_track_sigma != "OLD")
+            helical_track_sigma_A = textToFloat(s_track_sigma);
+        const char *env_ts = getenv("RELION_HELICAL_TRACK_SMOOTH");
+        const bool env_ts_off = (env_ts && env_ts[0] && (std::string(env_ts) == "0" || std::string(env_ts) == "off"));
+        if (!is_continue)
+        {
+            const bool default_3d_on = (do_helical_refine && mymodel.nr_classes > 1 && filctx_opt.mode != filctx::OFF);
+            do_helical_track_smooth = !do_helical_track_smooth_off && (opt_smooth || ((do_helical_context || default_3d_on) && !env_ts_off));
+        }
+        else if (do_helical_track_smooth_off)
+            do_helical_track_smooth = false;
+        else if (opt_smooth || (context_just_enabled && !env_ts_off))
+            do_helical_track_smooth = true;
+    }
+    const bool opt_pol = parser.checkOption("--helical_polarity", "All segments of a filament have the same polarity (helical classification)");
+    do_helical_polarity_off = parser.checkOption("--dont_helical_polarity", "Disable automatic filament polarity prior with helical context");
+    if (!is_continue)
+        do_helical_polarity = opt_pol && !do_helical_polarity_off;
+    else
+    {
+        if (opt_pol) do_helical_polarity = true;
+        if (do_helical_polarity_off) do_helical_polarity = false;
+    }
+    const std::string s_pol_start = parser.getOption("--helical_polarity_start", "First iteration that uses the filament polarity prior", is_continue ? "OLD" : "3");
+    if (!is_continue || s_pol_start != "OLD")
+        helical_polarity_start_iter = textToInteger(s_pol_start);
+    helical_context.pol_switch = textToFloat(parser.getOption("--helical_polarity_switch", "Probability per segment step that the polarity changes along a filament (picking errors)", "1e-4"));
+    helical_context.pol_temper = textToFloat(parser.getOption("--helical_polarity_temper", "Factor on the polarity log-likelihood ratios of the segments (default: segment step / particle diameter)", "-1"));
+    helical_context.pol_exclude_angst = textToFloat(parser.getOption("--helical_polarity_exclude", "The polarity prior of a segment comes from segments at least this far away (A, default: half the particle diameter)", "-1"));
+}
+
 void MlOptimiser::parseFilamentContext()
 {
     filctx_opt = filctx::optionsFromEnvironment();
@@ -13581,11 +14463,29 @@ void MlOptimiser::parseFilamentContext()
     std::string alpha = parser.getOption("--filament_alpha", "Filament context, filament mode: weight of the global class distribution. Default: RELION_FILAMENT_ALPHA, else 1", "");
     if (!alpha.empty())
         filctx_opt.alpha = textToFloat(alpha);
+    std::string clip = parser.getOption("--filament_clip", "Filament context: Huber clamp (nats before temper) on per-segment log-likelihood contrast (<= 0: off). Default: RELION_FILAMENT_CLIP, else 12", "");
+    if (!clip.empty())
+        filctx_opt.clip = textToFloat(clip);
+    std::string excl = parser.getOption("--filament_exclude", "Filament context: physical leave-out radius along track (A; <= 0: step gap only). Default: RELION_FILAMENT_EXCLUDE", "");
+    if (!excl.empty())
+        filctx_opt.exclude_angst = textToFloat(excl);
+    std::string st = parser.getOption("--filament_start", "Filament context: first iteration after which filament priors are active (>= 1). Default: RELION_FILAMENT_START, else 1", "");
+    if (!st.empty())
+    {
+        if (textToInteger(st) < 1)
+            REPORT_ERROR("ERROR: --filament_start should be at least 1.");
+        filctx_opt.start_iter = textToInteger(st);
+    }
+    std::string pw = parser.getOption("--filament_phase_weight", "Filament context: weight on 3D helical azimuthal phase coherence along each filament (<= 0: off). Default: RELION_FILAMENT_PHASE_WEIGHT, else 1", "");
+    if (!pw.empty())
+        filctx_opt.phase_weight = textToFloat(pw);
 }
 
-void MlOptimiser::parseHelicalTiltWeight()
+void MlOptimiser::parseHelicalTiltWeight(bool is_continue)
 {
-    helical_tilt_weight_sigma = textToFloat(parser.getOption("--helical_tilt_weight_sigma", "Down-weight orientations with a tilt away from 90 degrees in the reconstruction (not in the alignment) by a Gaussian of this sigma (in degrees; <= 0: off)", "-1"));
+    const std::string s_tw = parser.getOption("--helical_tilt_weight_sigma", "Down-weight orientations with a tilt away from 90 degrees in the reconstruction (not in the alignment) by a Gaussian of this sigma (in degrees; <= 0: off)", is_continue ? "OLD" : "-1");
+    if (!is_continue || s_tw != "OLD")
+        helical_tilt_weight_sigma = textToFloat(s_tw);
 }
 
 void MlOptimiser::parseHelicalEndWeight()
@@ -13639,38 +14539,61 @@ void MlOptimiser::initialiseHelicalEndWeight()
 
 void MlOptimiser::initialiseFilamentContext()
 {
-    if (filctx_opt.mode == filctx::OFF)
+    const bool want_ctx = (filctx_opt.mode != filctx::OFF);
+    const bool want_keep = (do_keep_full_filaments && mymodel.nr_classes > 1 && mymodel.nr_bodies == 1 && !mydata.is_tomo);
+    if (!want_ctx && !want_keep)
         return;
-    if (mymodel.nr_classes < 2 || mymodel.nr_bodies > 1 || mydata.is_tomo)
+    if (want_ctx && (mymodel.nr_classes < 2 || mymodel.nr_bodies > 1 || mydata.is_tomo))
         REPORT_ERROR("ERROR: filament context is for 2D or 3D classification of helical segments (several classes, no multi-body or tomography).");
 
-    double step;
-    filctx_filaments = filctx::groupFilaments(mydata.MDimg, step);
-    if (filctx_filaments.empty())
+    double step = -1.;
+    filctx_filaments = filctx::groupFilamentsWithTracks(mydata.MDimg, step, filctx_tracks);
+    filctx_step = step;
+    if (want_ctx && filctx_filaments.empty())
         REPORT_ERROR("ERROR: filament context needs rlnHelicalTubeID (and rlnMicrographName) in the particle STAR file.");
+    if (filctx_filaments.empty())
+        return;
+
     long int nr_in_filaments = 0;
     for (const auto &f : filctx_filaments) nr_in_filaments += f.size();
 
     const bool step_in_angstrom = mydata.MDimg.containsLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM);
     const RFLOAT box_length = mymodel.ori_size * mymodel.pixel_size;
+    const RFLOAT eff_box = (mymodel.ref_dim == 3 && do_helical_refine && helical_z_percentage > 0.)
+                           ? box_length * std::max((RFLOAT)0.35, helical_z_percentage)
+                           : ((particle_diameter > 0. && particle_diameter < box_length) ? particle_diameter : box_length);
     if (filctx_opt.temper > 0.)
         filctx_temper = filctx_opt.temper;
-    else if (step > 0. && step_in_angstrom)
-        filctx_temper = std::min(1., step / box_length);
-    else
+    else if (step > 0. && step_in_angstrom && eff_box > 0.)
+        filctx_temper = std::min(1., step / eff_box);
+    else if (want_ctx)
         REPORT_ERROR("ERROR: filament context cannot work out the distance between segments (no rlnHelicalTrackLengthAngst); set --filament_temper (or RELION_FILAMENT_TEMPER).");
+    else
+        filctx_temper = 0.25;
 
-    if (verb > 0)
+    if (want_ctx && verb > 0)
         std::cout << " Filament context: " << filctx::modeName(filctx_opt.mode) << ", " << filctx_filaments.size()
                   << " filaments holding " << nr_in_filaments << " of " << mydata.numberOfParticles() << " segments"
                   << ", likelihood power " << filctx_temper << ", gap " << filctx_opt.gap
-                  << ", floor " << filctx_opt.floor << std::endl;
+                  << ", floor " << filctx_opt.floor
+                  << (filctx_opt.clip > 0. ? (", clip " + floatToString(filctx_opt.clip)) : "")
+                  << (filctx_opt.exclude_angst > 0. ? (", exclude " + floatToString(filctx_opt.exclude_angst) + " A") : "")
+                  << (filctx_opt.start_iter > 1 ? (", start " + integerToString(filctx_opt.start_iter)) : "")
+                  << (filctx_opt.phase_weight > 0. && do_helical_refine && mymodel.ref_dim == 3 ? (", phase_weight " + floatToString(filctx_opt.phase_weight)) : "")
+                  << std::endl;
 }
 
 void MlOptimiser::storeFilamentLoglik(long int part_id, const MultidimArray<RFLOAT> &Mdiff2, long int per_class, RFLOAT min_diff2)
 {
+    if (part_id >= 0 && part_id < (long int)filctx_visited.size())
+        filctx_visited[part_id] = 1;
     const int K = mymodel.nr_classes;
     float *row = &filctx_loglik[(size_t)part_id * K];
+    if (isFilamentSeedIter())
+    {
+        for (int k = 0; k < K; k++) row[k] = 0.f;
+        return;
+    }
     for (int k = 0; k < K; k++)
     {
         RFLOAT best = LARGE_NUMBER;
@@ -13685,24 +14608,212 @@ void MlOptimiser::storeFilamentLoglik(long int part_id, const MultidimArray<RFLO
     }
 }
 
+void MlOptimiser::storeFilamentPosterior(long int part_id, const std::vector<RFLOAT> &class_post, long int metadata_offset)
+{
+    if (!needFilamentLoglik() || filctx_loglik.empty() || mydata.numberOfImagesInParticle(part_id) != 1)
+        return;
+    const int K = mymodel.nr_classes;
+    if (part_id < 0 || (size_t)(part_id + 1) * K > filctx_loglik.size())
+        return;
+    if (part_id < (long int)filctx_visited.size())
+        filctx_visited[part_id] = 1;
+
+    float *row = &filctx_loglik[(size_t)part_id * K];
+    const bool is_seed_iter = isFilamentSeedIter();
+    if (is_seed_iter)
+    {
+        for (int k = 0; k < K; k++) row[k] = 0.f;
+        return;
+    }
+
+    const bool prior_includes_class = (do_skip_align || do_skip_rotate || mymodel.orientational_prior_mode == NOPRIOR);
+    std::vector<double> used_v(K, 0.);
+    for (int k = 0; k < K; k++)
+    {
+        if (mymodel.pdf_class[k] <= 0.) continue;
+        double u = (double)filamentClassFactor(part_id, k) *
+                   (double)sharedRefSeedFactor(part_id, k) *
+                   (double)helicalContextPrior(part_id, k) *
+                   (double)helical2dClassFactor(part_id, k);
+        if (prior_includes_class)
+            u *= (double)mymodel.pdf_class[k];
+        used_v[k] = u;
+    }
+
+    static const bool force_marginal = []() {
+        const char *e = std::getenv("RELION_FILAMENT_SCORE");
+        return e != NULL && std::string(e) == "marginal";
+    }();
+    std::vector<double> ll(K, -1e30);
+
+    // For 3D helical alignment, score each class by its best-pose weight (profile likelihood) rather than
+    // rot-marginalized class_post, avoiding phase-volume bias toward low-twist cylinders at low resolution.
+    if (!force_marginal && mymodel.ref_dim == 3 && do_helical_refine && needPerClassMetadata() &&
+        metadata_offset >= 0 && metadata_offset < (long int)YSIZE(exp_metadata))
+    {
+        const int col0 = METADATA_LINE_LENGTH_BEFORE_BODIES + mymodel.nr_bodies * METADATA_NR_BODY_PARAMS;
+        double mx = -1e30;
+        std::vector<char> has_bw(K, 0);
+        bool any_bw = false;
+        for (int k = 0; k < K; k++)
+        {
+            if (used_v[k] <= 0.) continue;
+            const RFLOAT bw = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, col0 + k * METADATA_NR_CLASS_PARAMS + 6);
+            if (bw > 0.)
+            {
+                ll[k] = std::log((double)bw / used_v[k]);
+                if (ll[k] > mx) mx = ll[k];
+                has_bw[k] = 1;
+                any_bw = true;
+            }
+        }
+        if (any_bw)
+        {
+            const double floor_pen = std::max(10., (double)(filctx_opt.clip > 0. ? filctx_opt.clip : 12.));
+            for (int k = 0; k < K; k++)
+            {
+                if (mymodel.pdf_class[k] <= 0.)
+                    row[k] = -1e30f;
+                else
+                {
+                    const double v = has_bw[k] ? ll[k] : (mx - floor_pen);
+                    row[k] = (float)(v - mx);
+                }
+            }
+            return;
+        }
+    }
+
+    double mx = -1e30;
+    bool any = false;
+    for (int k = 0; k < K; k++)
+    {
+        if (used_v[k] <= 0.) continue;
+        const double p = std::max((double)class_post[k], 1e-30);
+        ll[k] = std::log(p / used_v[k]);
+        if (ll[k] > mx) mx = ll[k];
+        any = true;
+    }
+    if (!any)
+    {
+        for (int k = 0; k < K; k++) row[k] = 0.f;
+        return;
+    }
+    for (int k = 0; k < K; k++)
+        row[k] = (mymodel.pdf_class[k] > 0.) ? (float)(ll[k] - mx) : -1e30f;
+}
+
 void MlOptimiser::updateFilamentContext()
 {
     if (filctx_opt.mode == filctx::OFF || filctx_loglik.empty())
         return;
     const int K = mymodel.nr_classes;
+    filctx_phase_bonus.clear();
+    const bool is_seed_iter = isFilamentSeedIter();
+    if (iter + 1 < filctx_opt.start_iter || is_seed_iter)
+    {
+        filctx_logprior.clear();
+        return;
+    }
+
+    const bool prior_includes_class = (do_skip_align || do_skip_rotate || mymodel.orientational_prior_mode == NOPRIOR);
     std::vector<double> pi(K, 0.);
-    double s = 0.;
-    for (int k = 0; k < K; k++) s += pi[k] = std::max((RFLOAT)0., mymodel.pdf_class[k]);
-    for (int k = 0; k < K; k++) pi[k] = (s > 0.) ? pi[k] / s : 1. / K;
+    if (prior_includes_class)
+    {
+        double s = 0.;
+        for (int k = 0; k < K; k++) s += pi[k] = std::max((RFLOAT)0., mymodel.pdf_class[k]);
+        for (int k = 0; k < K; k++) pi[k] = (s > 0.) ? pi[k] / s : 1. / K;
+    }
+    else
+    {
+        int n_act = 0;
+        for (int k = 0; k < K; k++) if (mymodel.pdf_class[k] > 0.) n_act++;
+        for (int k = 0; k < K; k++)
+            pi[k] = (mymodel.pdf_class[k] > 0. && n_act > 0) ? (1. / n_act) : (n_act == 0 ? 1. / K : 0.);
+    }
 
-    filctx::computePriors(filctx_filaments, filctx_loglik, K, pi, filctx_opt, filctx_temper, filctx_T, filctx_logprior);
+    const int first_ml_multi = do_generate_seeds ? (do_firstiter_cc ? 3 : 2) : (do_firstiter_cc ? 2 : 1);
+    double ramp = 1.;
+    if (first_ml_multi > 1)
+    {
+        if (iter == first_ml_multi) ramp = 0.50;
+        else if (iter == first_ml_multi + 1) ramp = 0.80;
+    }
+    if (coarse_early && mymodel.ref_dim == 3 && !do_auto_refine && !do_auto_sampling && !do_grad &&
+        !allow_coarser_samplings && !do_skip_align && !do_skip_rotate && sampling.healpix_order_ori >= 2 &&
+        (iter + 1) <= nr_iter - coarse_early_final_iters)
+    {
+        ramp = std::min(ramp, 0.55);
+    }
 
-    // A row of zeros was never scored (the context then ignores that segment): say so, it weakens the prior
-    long int nr_unscored = 0;
-    for (size_t i = 0; i < filctx_loglik.size(); i += K)
-        nr_unscored += std::all_of(&filctx_loglik[i], &filctx_loglik[i] + K, [](float v) { return v == 0.f; });
-    if (verb > 0 && nr_unscored > 0)
-        std::cout << " Filament context: WARNING " << nr_unscored << " of " << filctx_loglik.size() / K << " segments have no class scores" << std::endl;
+    if (!is_seed_iter && mymodel.ref_dim == 3 && do_helical_refine && !ignore_helical_symmetry &&
+        !do_skip_align && !do_skip_rotate && filctx_opt.phase_weight > 0. &&
+        mymodel.current_resolution > 0. && 1. / mymodel.current_resolution <= 16. &&
+        !filctx_tracks.empty() && exp_per_class_metadata_.getSize() > 0 && mydata.numberOfParticles() > 0)
+    {
+        const long int nr_parts = mydata.numberOfParticles();
+        std::vector<filctx::ClassHelixParams> hparams(K);
+        SymList SL;
+        for (int k = 0; k < K; k++)
+        {
+            hparams[k].twist_deg = (k < (int)mymodel.helical_twist.size()) ? mymodel.helical_twist[k] : 0.;
+            hparams[k].rise_angst = (k < (int)mymodel.helical_rise.size()) ? mymodel.helical_rise[k] : 0.;
+            std::string sym_name = (!mymodel.class_settings.sym.empty() && k < (int)mymodel.class_settings.sym.size() &&
+                                    !mymodel.class_settings.sym[k].empty()) ? mymodel.class_settings.sym[k] : std::string(sampling.fn_sym);
+            int pgGroup = pg_CI, pgOrder = 1;
+            int cn = 1;
+            if (!sym_name.empty() && SL.isSymmetryGroup(sym_name, pgGroup, pgOrder))
+            {
+                if (pgGroup == pg_CN || pgGroup == pg_CNV || pgGroup == pg_CNH ||
+                    pgGroup == pg_DN || pgGroup == pg_DNV || pgGroup == pg_DNH)
+                    cn = std::max(1, pgOrder);
+            }
+            hparams[k].sym_order = cn * std::max(1, helical_nstart);
+        }
+        std::vector<double> rot_v((size_t)nr_parts * K, 0.), psi_v((size_t)nr_parts * K, 0.),
+                            dx_v((size_t)nr_parts * K, 0.), dy_v((size_t)nr_parts * K, 0.),
+                            psi_prior_v(nr_parts, 999.);
+        std::vector<char> valid_v((size_t)nr_parts * K, 0);
+        const bool has_pp = mydata.MDimg.containsLabel(EMDL_ORIENT_PSI_PRIOR);
+        for (long int p = 0; p < nr_parts; p++)
+        {
+            const RFLOAT px = mydata.getImagePixelSize(p);
+            if (has_pp) mydata.MDimg.getValue(EMDL_ORIENT_PSI_PRIOR, psi_prior_v[p], p);
+            for (int k = 0; k < K; k++)
+            {
+                const int base = k * METADATA_NR_CLASS_PARAMS;
+                const RFLOAT bw = DIRECT_A2D_ELEM(exp_per_class_metadata_, p, base + 6);
+                if (bw == 0.) continue;
+                const size_t pk = (size_t)p * K + k;
+                rot_v[pk] = DIRECT_A2D_ELEM(exp_per_class_metadata_, p, base + 0);
+                psi_v[pk] = DIRECT_A2D_ELEM(exp_per_class_metadata_, p, base + 2);
+                dx_v[pk] = DIRECT_A2D_ELEM(exp_per_class_metadata_, p, base + 3) * px;
+                dy_v[pk] = DIRECT_A2D_ELEM(exp_per_class_metadata_, p, base + 4) * px;
+                valid_v[pk] = 1;
+            }
+        }
+        filctx::computeHelicalPhaseBonus(filctx_filaments, filctx_tracks, nr_parts, K,
+                                         rot_v, psi_v, dx_v, dy_v, valid_v, psi_prior_v,
+                                         hparams, filctx_opt.gap, filctx_opt.exclude_angst,
+                                         0.5 * filctx_opt.phase_weight * ramp, filctx_phase_bonus);
+    }
+
+    const float *extra_phase = (!filctx_phase_bonus.empty()) ? &filctx_phase_bonus[0] : NULL;
+    if (extra_phase != NULL)
+        filctx::computePriors(filctx_filaments, filctx_tracks, filctx_step, filctx_loglik, K, pi,
+                              filctx_opt, filctx_temper * ramp, filctx_T, filctx_logprior, &filctx_phase_bonus);
+    else
+        filctx::computePriors(filctx_filaments, filctx_tracks, filctx_step, filctx_loglik, K, pi,
+                              filctx_opt, filctx_temper * ramp, filctx_T, filctx_logprior, NULL);
+
+    if (subset_size < 0 && !is_seed_iter && !filctx_visited.empty())
+    {
+        long int nr_unscored = 0;
+        for (unsigned char v : filctx_visited)
+            if (!v) nr_unscored++;
+        if (verb > 0 && nr_unscored > 0)
+            std::cout << " Filament context: WARNING " << nr_unscored << " of " << filctx_visited.size() << " segments have no class scores" << std::endl;
+    }
 
     if (verb > 0 && filctx_opt.mode == filctx::CHAIN)
     {
@@ -13720,9 +14831,243 @@ void MlOptimiser::updateFilamentContext()
     }
 }
 
+void MlOptimiser::initialiseHelical3DContext()
+{
+    if (do_helical_context)
+        REPORT_ERROR("ERROR: --helical_context is for 2D classification; for 3D helical classification use --filament_context");
+    if (!do_helical_refine || mydata.is_tomo || mymodel.nr_bodies > 1 || mymodel.ref_dim != 3)
+    {
+        do_helical_track_smooth = false;
+        do_helical_polarity = false;
+        return;
+    }
+    if (do_auto_refine || mymodel.nr_classes <= 1)
+    {
+        if (do_helical_polarity) do_helical_polarity = false;
+        return;
+    }
+
+    const long int nr_parts = mydata.numberOfParticles();
+    const MetaDataTable &MD = mydata.MDimg;
+    const bool has_tla = MD.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID) &&
+                         MD.containsLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM);
+    const bool has_coords = has_tla && MD.containsLabel(EMDL_IMAGE_COORD_X) &&
+                            MD.containsLabel(EMDL_IMAGE_COORD_Y) &&
+                            MD.containsLabel(EMDL_ORIENT_PSI_PRIOR);
+
+    if (filctx_filaments.empty() && has_tla)
+        filctx_filaments = filctx::groupFilamentsWithTracks(MD, filctx_step, filctx_tracks);
+
+    bool has_multi = false;
+    for (const auto &f : filctx_filaments)
+        if (f.size() > 1) { has_multi = true; break; }
+
+    if (!has_tla || !has_multi || filctx_step <= 0.)
+    {
+        do_helical_track_smooth = false;
+        do_helical_polarity = false;
+        return;
+    }
+    if (!has_coords)
+        do_helical_track_smooth = false;
+
+    const bool unimodal_local_searches = do_auto_sampling ||
+        (mymodel.orientational_prior_mode == PRIOR_ROTTILT_PSI &&
+         mymodel.sigma2_rot > 0. && mymodel.sigma2_tilt > 0. && mymodel.sigma2_psi > 0.);
+    const bool can_pol_3d = !unimodal_local_searches && !do_skip_align && !do_skip_rotate &&
+                            mymodel.sigma2_psi > 0. && mymodel.orientational_prior_mode != NOPRIOR &&
+                            MD.containsLabel(EMDL_ORIENT_PSI_PRIOR) &&
+                            MD.containsLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO);
+    if (!do_helical_polarity && !do_helical_polarity_off && filctx_opt.mode != filctx::OFF && can_pol_3d)
+    {
+        const char *env_pol = getenv("RELION_HELICAL_POLARITY");
+        const bool env_pol_off = (env_pol && env_pol[0] && (std::string(env_pol) == "0" || std::string(env_pol) == "off"));
+        if (!env_pol_off)
+            do_helical_polarity = true;
+    }
+    if (do_helical_polarity && !can_pol_3d)
+        do_helical_polarity = false;
+
+    if (!do_helical_track_smooth && !do_helical_polarity)
+        return;
+
+    helical_context_rows.resize(nr_parts);
+    for (long int part_id = 0; part_id < nr_parts; part_id++)
+        helical_context_rows[part_id] = mydata.particles[part_id].id;
+    helical_context.verb = verb;
+    helical_context.pol_class_weight.assign(mymodel.nr_classes, 1.f);
+    RFLOAT diameter = (particle_diameter > 0.) ? particle_diameter : mymodel.ori_size * mymodel.pixel_size;
+    if (helical_tube_outer_diameter > 0.)
+        diameter = std::min(diameter, helical_tube_outer_diameter);
+    helical_context.initialise(mydata.MDimg, helical_context_rows, mymodel.nr_classes, diameter);
+
+    helical_context.orig_psi_prior.assign(nr_parts, 999.);
+    helical3d_orig_flip_ratio_.assign(nr_parts, 0.5);
+    for (long int part_id = 0; part_id < nr_parts; part_id++)
+    {
+        const long int r = helical_context_rows[part_id];
+        if (MD.containsLabel(EMDL_ORIENT_PSI_PRIOR))
+            MD.getValue(EMDL_ORIENT_PSI_PRIOR, helical_context.orig_psi_prior[part_id], r);
+        if (MD.containsLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO))
+            MD.getValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, helical3d_orig_flip_ratio_[part_id], r);
+    }
+
+    if (verb > 0)
+        std::cout << " Filament 3D context helpers: track_smooth=" << (do_helical_track_smooth ? "on" : "off")
+                  << ", polarity=" << (do_helical_polarity ? "on" : "off") << std::endl;
+}
+
+void MlOptimiser::updateHelical3DContextAfterIter()
+{
+    if (!do_helical_refine || mydata.is_tomo || mymodel.nr_bodies > 1 || mymodel.ref_dim != 3 || do_auto_refine)
+        return;
+    if (helicalSigmaDistanceAngst() >= 0.)
+        return;
+    if (do_helical_track_smooth)
+    {
+        const RFLOAT max_off_A = (offset_range_x > 0.) ? (RFLOAT)offset_range_x
+                                 : std::max((RFLOAT)12., (RFLOAT)(1.5 * sampling.offset_range * mymodel.pixel_size));
+        helical_context.smoothFilamentTracks(mydata.MDimg, helical_context_rows, mymodel.pixel_size,
+                                             max_off_A, iter, &mydata.obsModel.opticsMdt, false);
+    }
+    if (do_helical_polarity)
+        updateHelicalPolarity3D();
+}
+
+void MlOptimiser::updateHelicalPolarity3D()
+{
+    if (!do_helical_polarity || helical_context.pol_members.empty() || helical_context_rows.empty())
+        return;
+    MetaDataTable &MD = mydata.MDimg;
+    if (!MD.containsLabel(EMDL_ORIENT_PSI) || !MD.containsLabel(EMDL_ORIENT_PSI_PRIOR) ||
+        !MD.containsLabel(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO))
+        return;
+
+    const long int nr_parts = (long int)helical_context_rows.size();
+    const bool has_orig_psi = ((long int)helical_context.orig_psi_prior.size() == nr_parts);
+    const bool has_orig_flip = ((long int)helical3d_orig_flip_ratio_.size() == nr_parts);
+    const bool has_pmax = MD.containsLabel(EMDL_PARTICLE_PMAX);
+
+    double pmax = 0.50;
+    if (iter >= helical_polarity_start_iter + 2)
+        pmax = 0.95;
+    else if (iter == helical_polarity_start_iter + 1)
+        pmax = 0.90;
+    else if (iter == helical_polarity_start_iter)
+        pmax = 0.80;
+
+    // Gather inputs sequentially from MetaDataTable (race-free)
+    std::vector<double> seg_psi(nr_parts, 0.), seg_psi_pr(nr_parts, 0.), seg_pmax(nr_parts, 0.5);
+    for (long int idx = 0; idx < nr_parts; idx++)
+    {
+        const long int r = helical_context_rows[idx];
+        RFLOAT v = 0.;
+        MD.getValue(EMDL_ORIENT_PSI, v, r); seg_psi[idx] = v;
+        MD.getValue(EMDL_ORIENT_PSI_PRIOR, v, r);
+        if (has_orig_psi && !do_helical_track_smooth && std::fabs(helical_context.orig_psi_prior[idx]) <= 361.)
+        {
+            const double op = helical_context.orig_psi_prior[idx];
+            if (std::fabs(std::remainder(v - op, 360.)) > 90.)
+            {
+                v = (RFLOAT)std::remainder(v + 180., 360.);
+                MD.setValue(EMDL_ORIENT_PSI_PRIOR, v, r);
+            }
+        }
+        seg_psi_pr[idx] = v;
+        if (has_pmax) { MD.getValue(EMDL_PARTICLE_PMAX, v, r); seg_pmax[idx] = v; }
+    }
+
+    const int K = std::max(1, mymodel.nr_classes);
+    const long int nr_fil = (long int)helical_context.pol_members.size();
+    const double step_eff = std::max(1., (double)helical_context.step);
+    const double pol_temper = (helical_context.pol_temper > 0.) ? (double)helical_context.pol_temper
+                              : (step_eff / std::max(50., (double)helical_context.diameter));
+    const double excl_steps_d = (helical_context.pol_exclude_angst > 0.) ? (double)helical_context.pol_exclude_angst / step_eff
+                                : std::max(1.0, (0.5 * (double)helical_context.diameter) / step_eff);
+    const long int excl_steps = std::max(1L, (long int)std::llround(excl_steps_d));
+    const double sw = std::max(1e-6, std::min(0.005, (double)helical_context.pol_switch));
+    const double lmax = std::log(pmax / (1. - pmax));
+    const double pol_unit = 3.5 * pol_temper;
+
+    auto propagate = [&](double x, long int dsteps) -> double {
+        if (dsteps <= 0 || x == 0.) return x;
+        double p_sw = 0.5 * (1. - std::pow(1. - 2. * sw, (double)dsteps));
+        p_sw = std::max(1e-6, std::min(0.49, p_sw));
+        double a1 = std::exp(std::max(-30., std::min(30., x)));
+        double q = (a1 * (1. - p_sw) + p_sw) / (a1 * p_sw + (1. - p_sw));
+        return std::log(q);
+    };
+
+    std::vector<double> out_flip(nr_parts, -1.);
+    long int nr_consistent = 0, nr_switches = 0, nr_flipped_total = 0;
+
+    #pragma omp parallel for schedule(dynamic, 16) reduction(+ : nr_consistent, nr_switches, nr_flipped_total)
+    for (long int f = 0; f < nr_fil; f++)
+    {
+        const std::vector<long int> &m = helical_context.pol_members[f];
+        const std::vector<long int> &pos = helical_context.pol_pos[f];
+        const long int n = (long int)m.size();
+        if (n <= 1) continue;
+
+        bool is_unimodal = false;
+        if (has_orig_flip)
+            for (long int j = 0; j < n; j++)
+                if (helical3d_orig_flip_ratio_[m[j]] < 0.) { is_unimodal = true; break; }
+        if (is_unimodal) continue;
+
+        std::vector<double> e(n, 0.), a(n, 0.), b(n, 0.);
+        for (long int j = 0; j < n; j++)
+        {
+            const long int idx = m[j];
+            const bool flipped = (std::fabs(std::remainder(seg_psi[idx] - seg_psi_pr[idx], 360.)) > 90.);
+            const double conf = 0.75 + 0.5 * std::max(0., std::min(1., seg_pmax[idx]));
+            e[j] = (flipped ? 1. : -1.) * pol_unit * conf;
+        }
+
+        for (long int j = 0; j < n; j++)
+            a[j] = e[j] + ((j > 0) ? propagate(a[j - 1], pos[j] - pos[j - 1]) : 0.);
+        for (long int j = n - 1; j >= 0; j--)
+            b[j] = e[j] + ((j + 1 < n) ? propagate(b[j + 1], pos[j + 1] - pos[j]) : 0.);
+
+        long int jl = -1, jr = 0, sw_f = 0;
+        int last = -1;
+        for (long int j = 0; j < n; j++)
+        {
+            const long int idx = m[j];
+            const double post_x = a[j] + ((j + 1 < n) ? propagate(b[j + 1], pos[j + 1] - pos[j]) : 0.);
+            const int now = (post_x > 0.) ? 1 : 0;
+            nr_flipped_total += now;
+            if (last >= 0 && now != last) sw_f++;
+            last = now;
+
+            while (jl + 1 < n && pos[jl + 1] <= pos[j] - excl_steps) jl++;
+            while (jr < n && pos[jr] < pos[j] + excl_steps) jr++;
+            double c = 0.;
+            if (jl >= 0) c += propagate(a[jl], pos[j] - pos[jl]);
+            if (jr < n) c += propagate(b[jr], pos[jr] - pos[j]);
+            c = std::max(-lmax, std::min(lmax, c));
+            out_flip[idx] = 1. / (1. + std::exp(-c));
+        }
+        nr_switches += sw_f;
+        if (sw_f == 0) nr_consistent++;
+    }
+
+    for (long int idx = 0; idx < nr_parts; idx++)
+        if (out_flip[idx] >= 0.)
+            MD.setValue(EMDL_ORIENT_PSI_PRIOR_FLIP_RATIO, (RFLOAT)out_flip[idx], helical_context_rows[idx]);
+
+    if (verb > 0)
+    {
+        std::cout << " Filament 3D polarity: " << nr_consistent << " of " << nr_fil
+                  << " filaments without polarity switches (" << nr_switches << " switches); "
+                  << ROUND(1000. * ((nr_parts > 0) ? (double)nr_flipped_total / nr_parts : 0.)) / 10.
+                  << "% opposite to picking direction (max prior " << pmax << ")" << std::endl;
+    }
+}
+
 void MlOptimiser::enforceFilamentConsistency()
 {
-    if (!do_keep_full_filaments || mymodel.nr_classes <= 1)
+    if (!shouldEnforceFilamentConsistencyThisIter())
         return;
 
     // Save old class assignments before enforcing consistency
@@ -13731,14 +15076,21 @@ void MlOptimiser::enforceFilamentConsistency()
     for (long int part_id = 0; part_id < nr_parts; part_id++)
         mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, old_classes[part_id], part_id);
 
-    // Prototype: with the filament context's per-class scores, give each filament the class with the
-    // highest summed score of its segments (one class = one type in Class3D) instead of the most votes
+    // For iteration > 1 with scored segments, assign each filament using tempered, Huber-clipped
+    // log-likelihoods + 3D phase coherence; keep majority voting for iter == 1 or RELION_FILAMENT_VOTE=count.
     const char *vote_env = getenv("RELION_FILAMENT_VOTE");
-    const bool vote_ll = vote_env != NULL && std::string(vote_env) == "ll" && !filctx_loglik.empty() && !filctx_filaments.empty();
+    const bool force_count = (vote_env != NULL && std::string(vote_env) == "count");
+    const bool is_seed_iter = isFilamentSeedIter();
+    bool have_scores = false;
+    if (!force_count && !is_seed_iter && iter > 1 && !filctx_loglik.empty() && !filctx_filaments.empty())
+        for (float v : filctx_loglik)
+            if (v != 0.f) { have_scores = true; break; }
+    const bool vote_ll = have_scores;
     long int n_changed = 0;
     if (vote_ll)
     {
         const int K = mymodel.nr_classes;
+        const bool prior_includes_class = (do_skip_align || do_skip_rotate || mymodel.orientational_prior_mode == NOPRIOR);
         if (getenv("RELION_FILAMENT_VOTE_DUMP"))
         {
             std::ofstream fd((fn_out + "_it" + integerToString(iter, 3) + "_vote_dump.txt").c_str());
@@ -13750,12 +15102,36 @@ void MlOptimiser::enforceFilamentConsistency()
                     fd << "\n";
                 }
         }
+        const bool use_visited = ((long int)filctx_visited.size() == nr_parts);
         for (const auto &fil : filctx_filaments)
         {
-            std::vector<double> sum(K, 0.);
-            for (int k = 0; k < K; k++) sum[k] = std::log(std::max((RFLOAT)1e-30, mymodel.pdf_class[k]));
+            std::vector<double> sum(K, -1e300), phase_acc(K, 0.);
+            for (int k = 0; k < K; k++)
+                if (mymodel.pdf_class[k] > 0.)
+                    sum[k] = prior_includes_class ? std::log(std::max((RFLOAT)1e-30, mymodel.pdf_class[k])) : 0.;
+            int n_eval = 0;
             for (long int p : fil)
-                for (int k = 0; k < K; k++) sum[k] += std::max(-1e6f, filctx_loglik[(size_t)p * K + k]);
+            {
+                if (use_visited && !filctx_visited[p]) continue;
+                n_eval++;
+                double mx = -1e300;
+                for (int k = 0; k < K; k++)
+                    if (mymodel.pdf_class[k] > 0. && (double)filctx_loglik[(size_t)p * K + k] > mx)
+                        mx = filctx_loglik[(size_t)p * K + k];
+                for (int k = 0; k < K; k++)
+                {
+                    if (mymodel.pdf_class[k] <= 0.) continue;
+                    double d = (double)filctx_loglik[(size_t)p * K + k] - mx;
+                    if (filctx_opt.clip > 0. && d < -filctx_opt.clip) d = -filctx_opt.clip;
+                    sum[k] += filctx_temper * d;
+                    if (!filctx_phase_bonus.empty())
+                        phase_acc[k] += filctx_phase_bonus[(size_t)p * K + k];
+                }
+            }
+            if (n_eval == 0) continue;
+            for (int k = 0; k < K; k++)
+                if (mymodel.pdf_class[k] > 0.)
+                    sum[k] += phase_acc[k] / (double)n_eval;
             const int best = 1 + (int)(std::max_element(sum.begin(), sum.end()) - sum.begin());
             for (long int p : fil)
                 if (old_classes[p] != best)
@@ -13943,7 +15319,7 @@ void MlOptimiser::getMetaAndImageDataSubset(long int first_part_id, long int las
         long int part_id = mydata.sorted_idx[part_id_sorted];
         nr_images += mydata.numberOfImagesInParticle(part_id);
     }
-    int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
+    int nr_class_params = needPerClassMetadata() ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
     exp_metadata.initZeros(last_part_id-first_part_id+1, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 
     // This assumes all images in first_part_id to last_part_id have the same image_size
@@ -14443,17 +15819,22 @@ void MlOptimiser::sortClasses()
     }
 }
 
-void MlOptimiser::parseSortClassesAndRefLowpass()
+void MlOptimiser::parseSortClassesAndRefLowpass(bool is_continue)
 {
-    const char *env = getenv("RELION_SORT_CLASSES");
-    std::string v = (env == NULL) ? "" : env;
-    for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
-    do_sort_classes = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+    if (!is_continue)
+    {
+        const char *env = getenv("RELION_SORT_CLASSES");
+        std::string v = (env == NULL) ? "" : env;
+        for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+        do_sort_classes = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+    }
     if (parser.checkOption("--sort_classes", "Class2D: after the last iteration, renumber the classes by helical type (with --helical_context), then by size, junk last (RELION_SORT_CLASSES=1 makes this the default)"))
         do_sort_classes = true;
     if (parser.checkOption("--dont_sort_classes", "Keep the classes in their original order (the default, unless RELION_SORT_CLASSES=1)"))
         do_sort_classes = false;
-    sort_classes_junk = textToFloat(parser.getOption("--sort_classes_junk", "With --sort_classes: classes with a resolution worse than this times the median class are junk (sorted last)", "1.5"));
+    const std::string s_junk = parser.getOption("--sort_classes_junk", "With --sort_classes: classes with a resolution worse than this times the median class are junk (sorted last)", is_continue ? "OLD" : "1.5");
+    if (!is_continue || s_junk != "OLD")
+        sort_classes_junk = textToFloat(s_junk);
     ref_lowpass = textToFloat(parser.getOption("--ref_lowpass", "Low-pass filter the references to this resolution (A) before the first iteration, when coarser than --ini_high (e.g. 20 for class maps of an earlier run)", "-1"));
 }
 

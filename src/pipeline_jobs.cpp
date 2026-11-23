@@ -44,6 +44,13 @@ static bool envFlagDefault(const char *name)
 	for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
 	return !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
 }
+static bool envFlagDefaultOn(const char *name)
+{
+	const char *env = getenv(name);
+	std::string v = (env == NULL) ? "" : env;
+	for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+	return !(v == "0" || v == "no" || v == "off" || v == "false");
+}
 static bool keepAllIterationsDefault()
 {
 	return envFlagDefault("RELION_KEEP_ALL_ITERATIONS");
@@ -113,13 +120,24 @@ If set to anything but Off, each segment gets a prior over the classes from the 
 'Markov chain' (along the filament) learns, from the data, how likely the class of the next segment is given the class of this one (use it when the classes follow each other along the filament). \
 'Per filament' (one class distribution per filament) lets all segments of a filament share one class distribution (use it when every filament is of one kind). \
 Needs several classes and particles with rlnHelicalTubeID and rlnMicrographName (and rlnHelicalTrackLengthAngst, unless the likelihood power is given below), as written by helical extraction. " +
-	std::string(class2d ? "'Helical types' (needs the EM algorithm on the Optimisation tab) groups the classes into helical types (the views of one kind of filament) and uses the types of the other segments of the filament as the prior; it chooses the number of types (2 to 6) as the most that are found again from separate thirds of the filaments, and writes the type of each segment (rlnHelicalType) and one particle and class file per type (run_itNNN_typeK_*). It needs rlnHelicalTrackLengthAngst; the parameters below do not apply to it. Setting 'Classify 2D helical segments?' to Yes picks it, together with the EM algorithm." : "Off is the default.") +
+	std::string(class2d ? "'Helical types' (needs the EM algorithm on the Optimisation tab) groups the classes into helical types (the views of one kind of filament) and uses the types of the other segments of the filament as the prior; it chooses the number of types (2 to 10 by default, configurable below) as the most that are found again from separate thirds of the filaments, and writes the type of each segment (rlnHelicalType) and one particle and class file per type (run_itNNN_typeK_*). It needs rlnHelicalTrackLengthAngst. Setting 'Classify 2D helical segments?' to Yes picks it, together with the EM algorithm." : "Setting 'Do helical reconstruction?' to Yes picks 'Per filament'.") +
 	" The RELION_FILAMENT_CONTEXT environment variable does not apply to jobs started from this window.");
 	joboptions_["filctx_temper"] = JobOption("Likelihood power:", std::string("-1"), "Overlapping segments share pixels, so their likelihoods repeat the same noise. Each likelihood is raised to this power before it is used for the prior of its neighbours, so that every pixel of the filament counts about once. \
 A negative value (the default) uses the distance between consecutive segments divided by the box length, which needs rlnHelicalTrackLengthAngst in the particle STAR file.");
 	joboptions_["filctx_gap"] = JobOption("Gap (segments):", 1, 1, 20, 1, "Segments closer than this many steps along the filament are left out of a segment's prior. 1 leaves out only the segment itself. Larger values make the prior less dependent on the immediate neighbours, which share most of their pixels with the segment.");
 	joboptions_["filctx_floor"] = JobOption("Class floor:", 0.02, 0., 1., 0.01, "This fraction of the overall class distribution is mixed into every prior, so that no class can be ruled out completely by the other segments of the filament.");
 	joboptions_["filctx_alpha"] = JobOption("Global class weight:", 1., 0., 100., 1., "Only for 'Per filament': how strongly the overall class distribution counts against the evidence from the other segments of the filament. Larger values make filaments with few segments follow the overall distribution more.");
+	joboptions_["helctx_track_smooth"] = JobOption("Smooth filament tracks?", envFlagDefaultOn("RELION_HELICAL_TRACK_SMOOTH"), "If set to Yes, smooth picked filament centerlines and psi tangents along each filament and apply a transverse offset prior (--helical_track_smooth / --dont_helical_track_smooth). Default Yes unless RELION_HELICAL_TRACK_SMOOTH=0.");
+	joboptions_["helctx_polarity"] = JobOption("Propagate filament polarity?", envFlagDefaultOn("RELION_HELICAL_POLARITY"), "If set to Yes (with bimodal angular searches), enforce coherent filament polarity along each filament's picking order (--helical_polarity / --dont_helical_polarity). Default Yes unless RELION_HELICAL_POLARITY=0.");
+	if (class2d)
+	{
+		joboptions_["helctx_types_min"] = JobOption("Min helical types:", std::string("2"), "Minimum number of helical types for 'Helical types' (--helical_context_types). Set equal to the maximum to fix an exact number of types; when max > min, a single homogeneous type (1) is also checked automatically.");
+		joboptions_["helctx_types_max"] = JobOption("Max helical types:", std::string("10"), "Maximum number of helical types searched by 3-fold filament mixture cross-validation (--helical_context_types_max), capped at the number of classes K.");
+		joboptions_["helctx_start"] = JobOption("Start iteration:", std::string("4"), "First EM iteration that applies the helical-context prior (--helical_context_start), allowing unbiased 2D view classes to form first before progressive annealing.");
+		joboptions_["helctx_agree"] = JobOption("Min fold agreement:", std::string("0.75"), "Minimum 3-fold filament agreement (adjusted Rand index, 0 to 1) required when choosing the number of helical types (--helical_context_types_agree). Set to 0 to select purely by held-out log-likelihood.");
+		joboptions_["helctx_temper"] = JobOption("Context power:", std::string("-1"), "Factor on class log-likelihoods in the filament Markov chain (--helical_context_temper). -1 (the default) sets this automatically from segment step / box size with progressive annealing.");
+		joboptions_["helctx_exclude"] = JobOption("Exclude radius (A):", std::string("-1"), "Only segments at least this far away along the filament track (in Angstroms) contribute to a segment's context prior (--helical_context_exclude). -1 (the default) uses exact leave-one-out.");
+	}
 }
 
 // Down-weighting of helical segments at the ends of their filaments, shared by Class2D, Class3D and Refine3D
@@ -143,7 +161,7 @@ static bool addHelicalEndWeightCommand(std::map<std::string, JobOption> &jobopti
 }
 
 // One of --filament_context off / chain / filament is always emitted, so that an environment variable cannot decide behind the window's back
-static bool addFilamentContextCommand(std::map<std::string, JobOption> &joboptions_, std::string &command, std::string &error_message)
+static bool addFilamentContextCommand(std::map<std::string, JobOption> &joboptions_, std::string &command, std::string &error_message, bool is_2d = false)
 {
 	const std::string choice = joboptions_["filctx_mode"].getString();
 	if (choice == job_filament_context_options_2d[3])
@@ -153,21 +171,71 @@ static bool addFilamentContextCommand(std::map<std::string, JobOption> &joboptio
 			error_message = "ERROR: Filament context 'Helical types' needs the EM algorithm (Optimisation tab); with VDAM the types come out wrong.";
 			return false;
 		}
+		long long tmin_ll = 0, tmax_ll = 0, start_ll = 0;
+		if (!parseStrictInteger(joboptions_["helctx_types_min"].getString(), tmin_ll) || tmin_ll < 1 || tmin_ll > INT_MAX)
+		{
+			error_message = "ERROR: minimum helical types must be an integer at least 1.";
+			return false;
+		}
+		if (!parseStrictInteger(joboptions_["helctx_types_max"].getString(), tmax_ll) || tmax_ll < tmin_ll || tmax_ll > INT_MAX)
+		{
+			error_message = "ERROR: maximum helical types must be an integer at least the minimum.";
+			return false;
+		}
+		if (!parseStrictInteger(joboptions_["helctx_start"].getString(), start_ll) || start_ll < 1 || start_ll > INT_MAX)
+		{
+			error_message = "ERROR: helical context start iteration must be an integer at least 1.";
+			return false;
+		}
+		RFLOAT agree = joboptions_["helctx_agree"].getNumber(error_message);
+		if (error_message != "") return false;
+		if (agree < 0. || agree > 1.)
+		{
+			error_message = "ERROR: helical context fold agreement must be between 0 and 1.";
+			return false;
+		}
+		RFLOAT htemper = joboptions_["helctx_temper"].getNumber(error_message);
+		if (error_message != "") return false;
+		RFLOAT hexcl = joboptions_["helctx_exclude"].getNumber(error_message);
+		if (error_message != "") return false;
 		// more types than classes cannot be told apart
 		const int K = (int)joboptions_["nr_classes"].getNumber(error_message);
 		if (error_message != "") return false;
 		command += " --filament_context off";
 		if (K >= 2)
-			command += " --helical_context --helical_context_types 2 --helical_context_types_max " + integerToString(std::min(10, K));
+		{
+			const int eff_min = std::min((int)tmin_ll, K);
+			const int eff_max = std::min((int)tmax_ll, K);
+			command += " --helical_context --helical_context_types " + integerToString(eff_min)
+			         + " --helical_context_types_max " + integerToString(eff_max)
+			         + " --helical_context_start " + integerToString((int)start_ll)
+			         + " --helical_context_types_agree " + floatToString(agree)
+			         + " --helical_context_temper " + floatToString(htemper)
+			         + " --helical_context_exclude " + floatToString(hexcl);
+			command += joboptions_["helctx_track_smooth"].getBoolean() ? " --helical_track_smooth" : " --dont_helical_track_smooth";
+			RFLOAT range_psi = joboptions_["range_psi"].getNumber(error_message);
+			if (error_message != "") return false;
+			const bool can_pol = joboptions_["dont_skip_align"].getBoolean()
+			                  && joboptions_["do_bimodal_psi"].getBoolean()
+			                  && range_psi > 0.;
+			command += (can_pol && joboptions_["helctx_polarity"].getBoolean())
+			         ? " --helical_polarity" : " --dont_helical_polarity";
+		}
+		else if (is_2d)
+		{
+			command += " --dont_helical_context";
+		}
 		return true;
 	}
 	if (choice != job_filament_context_options[1] && choice != job_filament_context_options[2])
 	{
 		command += " --filament_context off";
+		if (is_2d) command += " --dont_helical_context";
 		return true;
 	}
 
 	command += (choice == job_filament_context_options[1]) ? " --filament_context chain" : " --filament_context filament";
+	if (is_2d) command += " --dont_helical_context";
 
 	RFLOAT temper = joboptions_["filctx_temper"].getNumber(error_message);
 	if (error_message != "") return false;
@@ -692,7 +760,7 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 			}
 			if (joboptions.find("auto_parallel") != joboptions.end())
 				joboptions["auto_parallel"].value = "No"; // run.job files predate it
-			for (const char* k : {"do_virtual", "do_premultiply", "do_ctf_multiply"})   // and these
+			for (const char* k : {"do_virtual", "do_premultiply", "do_ctf_multiply", "helical_auto_diameter", "do_helical_types", "helctx_track_smooth", "helctx_polarity"})   // and these
 				if (joboptions.find(k) != joboptions.end()) joboptions[k].value = "No";
 			have_read = true;
 		}
@@ -738,7 +806,7 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		bool read_cylindrical_mask = false;
 		// Saved before these options existed or became Yes by default: the job keeps what it did then
 		std::set<std::string> read_new_yes;
-		const char* new_yes[] = {"do_virtual", "do_premultiply", "do_ctf_multiply"};
+		const char* new_yes[] = {"do_virtual", "do_premultiply", "do_ctf_multiply", "helical_auto_diameter", "do_helical_types", "helctx_track_smooth", "helctx_polarity"};
 		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDvals)
 		{
 			MDvals.getValue(EMDL_JOBOPTION_VARIABLE, label);
@@ -779,6 +847,7 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		    type != PROC_CLASSSELECT &&
 		    type != PROC_SELECT2D &&
 		    type != PROC_CLASS2D_CONSENSUS &&
+		    type != PROC_HELIX_SUBCLASSIFY &&
 		    type != PROC_2DCLASS &&
 		    type != PROC_3DCLASS &&
 		    type != PROC_3DAUTO &&
@@ -1103,8 +1172,9 @@ slurmscript::Request RelionJob::slurmRequest()
 	r.partition = value("queuename", "");
 	r.mpi = std::max(1, (int)textToInteger(value("nr_mpi", "1")));
 	r.threads = std::max(1, (int)textToInteger(value("nr_threads", "1")));
-	// the leader of relion_refine_mpi only coordinates; in other programs every process works
-	r.leader_idle = parhint::kindOf(type, false) != parhint::Kind::Other;
+	// the leader of relion_refine_mpi (and helix_subclassify's internal relion_refine_mpi) only coordinates;
+	// in other programs every process works
+	r.leader_idle = parhint::kindOf(type, false) != parhint::Kind::Other || type == PROC_HELIX_SUBCLASSIFY;
 	// GPUs only for jobs that, as set up, run on them
 	if (usesGpu())
 	{
@@ -1337,6 +1407,11 @@ void RelionJob::initialise(int _job_type)
 	{
 		has_mpi = has_thread = true;
 		initialiseClass2DConsensusJob();
+	}
+	else if (type == PROC_HELIX_SUBCLASSIFY)
+	{
+		has_mpi = has_thread = true;
+		initialiseHelixSubclassifyJob();
 	}
 	else if (type == PROC_2DCLASS)
 	{
@@ -1725,6 +1800,10 @@ bool RelionJob::getCommands(std::string &outputname, std::vector<std::string> &c
 	else if (type == PROC_CLASS2D_CONSENSUS)
 	{
 		result = getCommandsClass2DConsensusJob(outputname, commands, final_command, do_makedir, job_counter, error_message);
+	}
+	else if (type == PROC_HELIX_SUBCLASSIFY)
+	{
+		result = getCommandsHelixSubclassifyJob(outputname, commands, final_command, do_makedir, job_counter, error_message);
 	}
 	else if (type == PROC_2DCLASS)
 	{
@@ -3299,6 +3378,7 @@ Pixels values higher than this many times the image stddev will be replaced with
 	joboptions["do_fom_threshold"] = JobOption("Use autopick FOM threshold?", false, "If set to Yes, only particles with rlnAutopickFigureOfMerit values below the threshold below will be extracted.");
 	joboptions["minimum_pick_fom"] = JobOption("Minimum autopick FOM: ", 0, -5, 10, 0.1, "The minimum value for the rlnAutopickFigureOfMerit for particles to be extracted.");
 
+	joboptions["ctf_intact_first_peak"] = JobOption("Ignore CTFs until first peak?", false, "If set to Yes (--ctf_intact_first_peak), leave frequencies intact until the first CTF peak when premultiplying particles by their CTF. Must match the setting used in later Class2D/3D jobs.");
 	joboptions["do_extract_helix"] = JobOption("Extract helical segments?", false, "Set to Yes if you want to extract helical segments. RELION (.star), EMAN2 (.box) and XIMDISP (.coords) formats of tube or segment coordinates are supported.");
 	joboptions["helical_tube_outer_diameter"] = JobOption("Tube diameter (A): ", 200, 100, 1000, 10, "Outer diameter (in Angstroms) of helical tubes. \
 This value should be slightly larger than the actual width of helical tubes.");
@@ -3439,7 +3519,11 @@ bool RelionJob::getCommandsExtractJob(std::string &outputname, std::vector<std::
 	// rectangular and rotated boxes cannot be premultiplied (relion_preprocess refuses): the option is off for them
 	const bool rotated = joboptions["do_extract_helix"].getBoolean() && joboptions["do_rotate_horizontal"].getBoolean();
 	if (joboptions["do_premultiply"].getBoolean() && !rect_box && !rotated)
+	{
 		command += " --premultiply_ctf --premultiply_extract_size auto ";
+		if (joboptions["ctf_intact_first_peak"].getBoolean())
+			command += "--ctf_intact_first_peak ";
+	}
 
 	// Operate stuff
 	// Get an integer number for the bg_radius
@@ -4084,8 +4168,10 @@ void RelionJob::initialiseClass2DConsensusJob()
 		"Positive integer seed for fresh images constructed from consensus members. No upstream images or fitted poses initialize refinement; supported priors are preserved.");
 	joboptions["nr_iter"] = JobOption("Number of refinement iterations:", 25, 1, 50, 1,
 		"Number of EM iterations to refine consensus class averages, keeping every particle in its assigned consensus class. Any positive integer is accepted, including values above the slider range.");
-	joboptions["do_helical_types"] = JobOption("Consensus helical types?", envFlagDefault("RELION_CONSENSUS_HELICAL_TYPES"),
-		"Helical Class2D replicas only: if set to Yes, the helical types of the filaments are found again across the replicas from their classes, using the most types on which the replicas agree (at most 10), and written as rlnHelicalType. The types of a single run are checked only on parts of the same classification; replicas redo the classification. If set to No, no types are written. The default can be set with the environment variable RELION_CONSENSUS_HELICAL_TYPES.");
+	joboptions["do_helical_types"] = JobOption("Consensus helical types?", envFlagDefaultOn("RELION_CONSENSUS_HELICAL_TYPES"),
+		"Helical Class2D replicas only: if set to Yes (the default unless RELION_CONSENSUS_HELICAL_TYPES=0), the helical types of the filaments are found again across the replicas from their classes, using the most types on which the replicas agree, and written as rlnHelicalType. The types of a single run are checked only on parts of the same classification; replicas redo the classification. If set to No, no types are written.");
+	joboptions["helical_types_max"] = JobOption("Max consensus types:", std::string("10"), "With Consensus helical types: maximum number of helical types searched across replicas (--types_max, integer >= 2).");
+	joboptions["helical_types_jaccard"] = JobOption("Min replica Jaccard:", std::string("0.6"), "With Consensus helical types: minimum filament Jaccard index across replicas required for every type (--types_jaccard, in (0, 1]).");
 	joboptions["do_reset_alignments"] = JobOption("Legacy reset alignments (ignored):", true,
 		"Accepted for old job files. Fresh initialization always resets fitted poses and preserves supported priors.");
 
@@ -4103,6 +4189,23 @@ void RelionJob::initialiseClass2DConsensusJob()
 	joboptions["do_combine_thru_disc"] = JobOption("Combine iterations through disc?", false, "Combine MPI weighted sums through disk instead of the network.");
 	joboptions["use_gpu"] = JobOption("Use GPU acceleration?", false, "Use the configured accelerator for the frozen-class refinement.");
 	joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string(""), "MPI processes are separated by ':' and threads by ','. Leave empty for automatic mapping.");
+}
+
+static bool appendAutoMaskCommand(std::map<std::string, JobOption> &joboptions, std::string &cmd, std::string &error_message)
+{
+	if (joboptions["do_auto_mask"].getBoolean())
+	{
+		joboptions["auto_mask_start_res"].getNumber(error_message);
+		joboptions["auto_mask_soft"].getNumber(error_message);
+		joboptions["auto_mask_mass"].getNumber(error_message);
+		if (error_message != "") return false;
+		cmd += " --auto_mask --auto_mask_start_res " + joboptions["auto_mask_start_res"].getString()
+		     + " --auto_mask_soft " + joboptions["auto_mask_soft"].getString()
+		     + " --auto_mask_mass " + joboptions["auto_mask_mass"].getString();
+	}
+	else
+		cmd += " --dont_auto_mask";
+	return true;
 }
 
 bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vector<std::string> &commands,
@@ -4212,9 +4315,23 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 	commands.push_back("`which relion_class2d_consensus` --i " + optimiser +
 		" --nr_runs " + integerToString(nr_runs) + " --K " + integerToString(nr_classes) + " --o " + outputname + "consensus --j " + joboptions["nr_threads"].getString());
 	commands.back() += " --method " + method;
+	long long tmax_val = 0;
+	if (!parseStrictInteger(joboptions["helical_types_max"].getString(), tmax_val) || tmax_val < 2 || tmax_val > INT_MAX)
+	{
+		error_message = "ERROR: maximum consensus helical types must be an integer at least 2.";
+		return false;
+	}
+	RFLOAT jacc_val = joboptions["helical_types_jaccard"].getNumber(error_message);
+	if (error_message != "") return false;
+	if (jacc_val <= 0. || jacc_val > 1.)
+	{
+		error_message = "ERROR: minimum replica Jaccard index must be between 0 and 1.";
+		return false;
+	}
 	// Emitted either way, so that the job does what the GUI shows whatever RELION_CONSENSUS_HELICAL_TYPES says
 	commands.back() += (joboptions["do_helical_types"].getBoolean() && source_job.joboptions["do_helix"].getBoolean()) ?
-		" --helical_types" : " --dont_helical_types";
+		(" --helical_types --types_max " + integerToString((int)tmax_val) + " --types_jaccard " + floatToString(jacc_val)) :
+		" --dont_helical_types";
 	if (!joboptions["do_reset_alignments"].getBoolean())
 		commands.back() += " --legacy_keep_alignments";
 
@@ -4237,6 +4354,12 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 		refine += " --strict_highres_exp " + source_job.joboptions["highres_limit"].getString();
 	if (error_message != "") return false;
 	if (source_job.joboptions["do_center"].getBoolean()) refine += " --center_classes";
+	else refine += " --dont_center_classes";
+	if (source_job.joboptions.find("do_auto_mask") != source_job.joboptions.end())
+	{
+		if (!appendAutoMaskCommand(source_job.joboptions, refine, error_message))
+			return false;
+	}
 	refine += " --psi_step " + floatToString(source_job.joboptions["psi_sampling"].getNumber(error_message) * 2.);
 	refine += " --offset_range " + source_job.joboptions["offset_range"].getString();
 	refine += " --offset_step " + floatToString(source_job.joboptions["offset_step"].getNumber(error_message) * 2.);
@@ -4247,10 +4370,15 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 	{
 		label += ".helical";
 		refine += " --helical_outer_diameter " + source_job.joboptions["helical_tube_outer_diameter"].getString();
-		if (source_job.joboptions.find("helical_cylindrical_mask") != source_job.joboptions.end())
-			refine += source_job.joboptions["helical_cylindrical_mask"].getBoolean() ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
+		const bool has_cyl = source_job.joboptions.find("helical_cylindrical_mask") != source_job.joboptions.end();
+		const bool cyl = !has_cyl || source_job.joboptions["helical_cylindrical_mask"].getBoolean();
+		if (has_cyl)
+			refine += cyl ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
+		if (source_job.joboptions.find("helical_auto_diameter") != source_job.joboptions.end())
+			refine += (cyl && source_job.joboptions["helical_auto_diameter"].getBoolean()) ? " --helical_auto_diameter" : " --dont_helical_auto_diameter";
 		refine += " --no_init_blobs";
 		if (source_job.joboptions["do_bimodal_psi"].getBoolean()) refine += " --bimodal_psi";
+		else refine += " --dont_bimodal_psi";
 		refine += " --sigma_psi " + floatToString(source_job.joboptions["range_psi"].getNumber(error_message) / 3.);
 		if (source_job.joboptions["do_restrict_xoff"].getBoolean())
 			refine += " --helix --helical_rise_initial " + source_job.joboptions["helical_rise"].getString();
@@ -4285,6 +4413,268 @@ bool RelionJob::getCommandsClass2DConsensusJob(std::string &outputname, std::vec
 	std::vector<Node> final_nodes = getOutputNodesRefine(outputname + "run", "Class2D", nr_iter, nr_classes, 2, 1, false);
 	outputNodes.insert(outputNodes.end(), final_nodes.begin(), final_nodes.end());
 	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message, false, 1, true);
+}
+
+void RelionJob::initialiseHelixSubclassifyJob()
+{
+	hidden_name = ".gui_helix_subclassify";
+
+	// I/O & Typing
+	joboptions["fn_img"] = JobOption("Input Stage-1 particles STAR:", LABEL_PARTS_CPIPE, 1, "", "STAR files (*.star)",
+		"Stage-1 _data.star (or _optimiser.star) containing helical segments with rlnCoordinateX, rlnCoordinateY, rlnMicrographName (and optionally rlnHelicalType from a Helical types Class2D job).");
+	joboptions["do_retype"] = JobOption("Re-estimate helical types?", false,
+		"If set to Yes (--retype), re-run HelicalContext HMM typing + twist-rate splitting even if rlnHelicalType is already present in the input STAR file.");
+	joboptions["types_min"] = JobOption("Min helical types:", std::string("2"),
+		"Minimum number of helical types when running Stage-1 typing (--types).");
+	joboptions["types_max"] = JobOption("Max helical types:", std::string("6"),
+		"Maximum number of helical types searched by cross-validation + twist-rate splitting (--types_max). Set equal to Min types for a fixed count.");
+	joboptions["types_agree"] = JobOption("Min fold agreement (ARI):", std::string("0.75"),
+		"Minimum 3-fold filament agreement (adjusted Rand index, 0 to 1) required when selecting the number of helical types (--types_agree).");
+	joboptions["min_segs"] = JobOption("Min segments per type:", 20, 5, 500, 5,
+		"Minimum number of non-junk segments required in a polymorph type to run Stage-2 sub-classification (--min_segs).");
+	joboptions["do_prepare_only"] = JobOption("Prepare virtual stacks only?", false,
+		"If set to Yes (--prepare_only), write re-centered virtual .vstack descriptors, per-type STAR files, and stage2_commands.sh without running Stage-2 relion_refine.");
+
+	// Extraction
+	joboptions["extract_size"] = JobOption("Micrograph box size (pix, -1=auto):", std::string("-1"),
+		"Extraction box size in original micrograph pixels (--extract_size, even integer >= 16, or -1 to match the Stage-1 field of view).");
+	joboptions["scale_size"] = JobOption("Re-scaled box size (pix, -1=none):", std::string("-1"),
+		"Stage-2 output box size in pixels (--scale, even integer >= 16, or -1 for unbinned --extract_size).");
+	joboptions["angpix"] = JobOption("Micrograph pixel size (A, -1=auto):", std::string("-1"),
+		"Original micrograph pixel size in Angstroms (--angpix, or -1 to read from optics / micrograph header).");
+	joboptions["do_premultiply"] = JobOption("Premultiply virtual stacks by CTF?", true,
+		"If set to Yes, premultiply virtual particles by their CTF in an expanded defocus-aware box when CTF metadata are available (--auto_premultiply_ctf); No emits --dont_premultiply_ctf.");
+	joboptions["ctf_intact_first_peak"] = JobOption("Ignore CTFs until first peak?", false,
+		"If set to Yes (--ctf_intact_first_peak), keep CTFs intact up to the first peak during premultiplication and Stage 2.");
+	joboptions["do_invert"] = JobOption("Invert contrast?", true,
+		"Invert particle contrast during virtual extraction (standard for cryo-EM; No emits --dont_invert_contrast).");
+	joboptions["do_float16"] = JobOption("Write float16 virtual stacks?", true,
+		"Store/round virtual particle stacks as float16 (No emits --dont_float16 for float32).");
+
+	// Classification
+	joboptions["nr_classes"] = JobOption("Sub-classes per type:", 12, 2, 100, 1,
+		"Number of Stage-2 2D sub-classes per polymorph type (--K).");
+	joboptions["nr_iter"] = JobOption("Number of EM iterations:", 25, 1, 50, 1,
+		"Number of Stage-2 EM iterations per polymorph type (--iter).");
+	joboptions["tau_fudge"] = JobOption("Regularisation parameter T:", std::string("2"),
+		"Regularisation parameter T passed to Stage-2 relion_refine (--tau2_fudge).");
+	joboptions["random_seed"] = JobOption("Base random seed:", std::string("1"),
+		"Base random seed (--random_seed; type T uses random_seed + T).");
+	joboptions["particle_diameter"] = JobOption("Mask diameter (A):", std::string("-1"),
+		"Mask diameter in Angstroms (--particle_diameter; -1 uses 90% of the Stage-2 box).");
+	joboptions["helical_tube_outer_diameter"] = JobOption("Outer tube diameter (A):", std::string("220"),
+		"Helical outer tube diameter in Angstroms (--outer_diameter).");
+	joboptions["helical_rise"] = JobOption("Helical rise (A):", std::string("4.75"),
+		"Helical rise in Angstroms for longitudinal offset restriction (--rise; <= 0 disables).");
+	joboptions["highres_limit"] = JobOption("Limit resolution E-step to (A):", std::string("-1"),
+		"High-resolution limit for Stage-2 alignment in Angstroms (--highres_limit; -1 for unlimited).");
+	joboptions["psi_sampling"] = JobOption("In-plane psi step (deg):", std::string("2"),
+		"Stage-2 relion_refine psi sampling step in degrees before oversampling=1 (--psi_step).");
+	joboptions["sigma_psi"] = JobOption("Local psi sigma (deg):", std::string("4"),
+		"Local psi prior sigma around the smoothed Stage-1 filament tangent and resolved polarity (--sigma_psi).");
+	joboptions["do_bimodal_psi"] = JobOption("Keep bimodal psi search?", false,
+		"Keep bimodal +/-180 deg psi search in Stage 2 instead of trusting Stage-1 resolved polarity (--bimodal_psi).");
+	joboptions["offset_range"] = JobOption("Offset search range (pix):", std::string("3"),
+		"Stage-2 translational search range in output pixels (--offset_range).");
+	joboptions["offset_step"] = JobOption("Offset search step (pix):", std::string("1"),
+		"Stage-2 translational search step in output pixels before oversampling=1 (--offset_step).");
+	joboptions["helical_context_weight"] = JobOption("Stage-2 context weight:", 0.5, 0., 2., 0.1,
+		"Local helical context prior weight in Stage-2 EM refinement (--helical_context_weight; 0 disables).");
+	joboptions["do_auto_mask"] = JobOption("Use automatic masks?", false,
+		"If set to Yes (--auto_mask), compute 2D contour masks from class averages once they reach the start resolution.");
+	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", std::string("12"),
+		"Start resolution in Angstroms for Stage-2 2D contour auto-masking (--auto_mask_start_res).");
+	joboptions["auto_mask_soft"] = JobOption("Automatic mask soft edge (A):", std::string("-1"),
+		"Width of the raised-cosine soft edge in Angstroms (--auto_mask_soft; -1 chooses 3x resolution).");
+	joboptions["auto_mask_mass"] = JobOption("Automatic mask mass (kDa):", std::string("-1"),
+		"Binarisation mass in kDa (--auto_mask_mass; -1 uses Otsu's threshold).");
+
+	// Compute
+	joboptions["nr_pool"] = JobOption("Number of pooled particles:", 30, 1, 100, 1,
+		"Number of particles pooled per thread in Stage-2 relion_refine (--pool).");
+	joboptions["keep_all_iter"] = JobOption("Keep all iterations?", keepAllIterationsDefault(),
+		"Keep all Stage-2 iteration files (--keep_all_iterations) or prune old iterations (--dont_keep_all_iterations).");
+	joboptions["use_gpu"] = JobOption("Use GPU acceleration?", false,
+		"Use GPU acceleration for Stage-2 relion_refine.");
+	joboptions["gpu_ids"] = JobOption("Which GPUs to use:", std::string(""),
+		"GPU device IDs for Stage 2 (--gpu). Leave empty for automatic GPU selection.");
+}
+
+bool RelionJob::getCommandsHelixSubclassifyJob(std::string &outputname, std::vector<std::string> &commands,
+		std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)
+{
+	commands.clear();
+	initialisePipeline(outputname, job_counter);
+
+	const std::string fn_img = joboptions["fn_img"].getString();
+	if (fn_img.empty())
+	{
+		error_message = "ERROR: empty field for Stage-1 particles STAR file...";
+		return false;
+	}
+
+	long long tmin_ll = 0, tmax_ll = 0, min_segs_ll = 0;
+	if (!parseStrictInteger(joboptions["types_min"].getString(), tmin_ll) || tmin_ll < 1 || tmin_ll > INT_MAX)
+	{
+		error_message = "ERROR: min helical types must be a positive integer.";
+		return false;
+	}
+	if (!parseStrictInteger(joboptions["types_max"].getString(), tmax_ll) || tmax_ll < tmin_ll || tmax_ll > INT_MAX)
+	{
+		error_message = "ERROR: max helical types must be an integer at least min helical types.";
+		return false;
+	}
+	const RFLOAT types_agree = joboptions["types_agree"].getNumber(error_message);
+	if (error_message != "") return false;
+	if (types_agree < 0. || types_agree > 1.)
+	{
+		error_message = "ERROR: min fold agreement (ARI) must be between 0 and 1.";
+		return false;
+	}
+	if (!parseStrictInteger(joboptions["min_segs"].getString(), min_segs_ll) || min_segs_ll < 1 || min_segs_ll > INT_MAX)
+	{
+		error_message = "ERROR: min segments per type must be a positive integer.";
+		return false;
+	}
+
+	long long ext_ll = 0, scale_ll = 0;
+	if (!parseStrictInteger(joboptions["extract_size"].getString(), ext_ll) ||
+	    !(ext_ll == -1 || (ext_ll >= 16 && ext_ll % 2 == 0 && ext_ll <= INT_MAX)))
+	{
+		error_message = "ERROR: micrograph box size must be -1 (auto) or an even integer >= 16.";
+		return false;
+	}
+	if (!parseStrictInteger(joboptions["scale_size"].getString(), scale_ll) ||
+	    !(scale_ll == -1 || (scale_ll >= 16 && scale_ll % 2 == 0 && scale_ll <= INT_MAX)))
+	{
+		error_message = "ERROR: re-scaled box size must be -1 (none) or an even integer >= 16.";
+		return false;
+	}
+	joboptions["angpix"].getNumber(error_message);
+	if (error_message != "") return false;
+
+	long long nr_classes_ll = 0, nr_iter_ll = 0, seed_ll = 0, pool_ll = 0;
+	if (!parseStrictInteger(joboptions["nr_classes"].getString(), nr_classes_ll) || nr_classes_ll < 2 || nr_classes_ll > INT_MAX)
+	{
+		error_message = "ERROR: sub-classes per type must be an integer >= 2.";
+		return false;
+	}
+	if (!parseStrictInteger(joboptions["nr_iter"].getString(), nr_iter_ll) || nr_iter_ll < 1 || nr_iter_ll > INT_MAX)
+	{
+		error_message = "ERROR: number of EM iterations must be a positive integer.";
+		return false;
+	}
+	const RFLOAT tau_fudge = joboptions["tau_fudge"].getNumber(error_message);
+	if (error_message != "") return false;
+	if (tau_fudge <= 0.)
+	{
+		error_message = "ERROR: regularisation parameter T must be positive.";
+		return false;
+	}
+	if (!parseStrictInteger(joboptions["random_seed"].getString(), seed_ll) || seed_ll < 1 || seed_ll > INT_MAX)
+	{
+		error_message = "ERROR: base random seed must be a positive integer.";
+		return false;
+	}
+	joboptions["particle_diameter"].getNumber(error_message);
+	joboptions["helical_tube_outer_diameter"].getNumber(error_message);
+	joboptions["helical_rise"].getNumber(error_message);
+	joboptions["highres_limit"].getNumber(error_message);
+	if (error_message != "") return false;
+
+	const RFLOAT psi_step = joboptions["psi_sampling"].getNumber(error_message);
+	if (error_message != "") return false;
+	const RFLOAT sigma_psi = joboptions["sigma_psi"].getNumber(error_message);
+	if (error_message != "") return false;
+	const RFLOAT offset_range = joboptions["offset_range"].getNumber(error_message);
+	if (error_message != "") return false;
+	const RFLOAT offset_step = joboptions["offset_step"].getNumber(error_message);
+	if (error_message != "") return false;
+	const RFLOAT ctx_weight = joboptions["helical_context_weight"].getNumber(error_message);
+	if (error_message != "") return false;
+	if (psi_step <= 0. || sigma_psi <= 0. || offset_range < 0. || offset_step <= 0. || ctx_weight < 0.)
+	{
+		error_message = "ERROR: psi step, sigma psi, offset step must be > 0; offset range and context weight must be >= 0.";
+		return false;
+	}
+	if (!parseStrictInteger(joboptions["nr_pool"].getString(), pool_ll) || pool_ll < 1 || pool_ll > INT_MAX)
+	{
+		error_message = "ERROR: number of pooled particles must be a positive integer.";
+		return false;
+	}
+	const int nr_mpi = (int)joboptions["nr_mpi"].getNumber(error_message);
+	if (error_message != "") return false;
+	const int nr_threads = (int)joboptions["nr_threads"].getNumber(error_message);
+	if (error_message != "") return false;
+	if (nr_mpi < 1 || nr_threads < 1)
+	{
+		error_message = "ERROR: MPI processes and threads must be at least 1.";
+		return false;
+	}
+
+	const std::string other = joboptions["other_args"].getString();
+	if (containsCommandLineOption(other, "--i") || containsCommandLineOption(other, "--o"))
+	{
+		error_message = "ERROR: Additional arguments may not override --i or --o.";
+		return false;
+	}
+
+	std::string command = "`which relion_helix_subclassify` --i " + fn_img + " --o " + outputname;
+	if (joboptions["do_retype"].getBoolean())
+		command += " --retype";
+	command += " --types " + integerToString((int)tmin_ll)
+	         + " --types_max " + integerToString((int)tmax_ll)
+	         + " --types_agree " + joboptions["types_agree"].getString()
+	         + " --min_segs " + integerToString((int)min_segs_ll);
+	command += " --extract_size " + integerToString((int)ext_ll)
+	         + " --scale " + integerToString((int)scale_ll)
+	         + " --angpix " + joboptions["angpix"].getString();
+	const bool premult = joboptions["do_premultiply"].getBoolean();
+	command += premult ? " --auto_premultiply_ctf" : " --dont_premultiply_ctf";
+	if (premult && joboptions["ctf_intact_first_peak"].getBoolean())
+		command += " --ctf_intact_first_peak";
+	if (!joboptions["do_invert"].getBoolean())
+		command += " --dont_invert_contrast";
+	if (!joboptions["do_float16"].getBoolean())
+		command += " --dont_float16";
+
+	command += " --K " + integerToString((int)nr_classes_ll)
+	         + " --iter " + integerToString((int)nr_iter_ll)
+	         + " --tau2_fudge " + joboptions["tau_fudge"].getString()
+	         + " --random_seed " + integerToString((int)seed_ll);
+	command += " --particle_diameter " + joboptions["particle_diameter"].getString()
+	         + " --outer_diameter " + joboptions["helical_tube_outer_diameter"].getString()
+	         + " --rise " + joboptions["helical_rise"].getString()
+	         + " --highres_limit " + joboptions["highres_limit"].getString();
+	command += " --psi_step " + joboptions["psi_sampling"].getString()
+	         + " --sigma_psi " + joboptions["sigma_psi"].getString();
+	if (joboptions["do_bimodal_psi"].getBoolean())
+		command += " --bimodal_psi";
+	command += " --offset_range " + joboptions["offset_range"].getString()
+	         + " --offset_step " + joboptions["offset_step"].getString()
+	         + " --helical_context_weight " + joboptions["helical_context_weight"].getString();
+	if (!appendAutoMaskCommand(joboptions, command, error_message))
+		return false;
+	command += " --pool " + integerToString((int)pool_ll);
+	command += joboptions["keep_all_iter"].getBoolean() ? " --keep_all_iterations" : " --dont_keep_all_iterations";
+	command += " --mpi " + integerToString(nr_mpi) + " --j " + integerToString(nr_threads);
+	if (!joboptions["use_gpu"].getBoolean())
+		command += " --gpu none";
+	else if (joboptions["gpu_ids"].getString().empty())
+		command += " --gpu auto";
+	else
+		command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";
+	if (joboptions["do_prepare_only"].getBoolean())
+		command += " --prepare_only";
+	if (!other.empty())
+		command += " " + other;
+
+	inputNodes.push_back(Node(fn_img, joboptions["fn_img"].node_type));
+	if (!joboptions["do_prepare_only"].getBoolean())
+		outputNodes.push_back(Node(outputname + "merged_particles.star", LABEL_CLASS2D_PARTS_HELIX));
+
+	commands.push_back(command);
+	return prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);
 }
 
 void RelionJob::initialiseClass2DJob()
@@ -4350,6 +4740,10 @@ High-resolution refinements (e.g. ribosomes or other large complexes in 3D auto-
 This is useful to prevent overfitting, as the classification runs in RELION are not to be guaranteed to be 100% overfitting-free (unlike the 3D auto-refine with its gold-standard FSC). In particular for very difficult data sets, e.g. of very small or featureless particles, this has been shown to give much better class averages. \
 In such cases, values in the range of 7-12 Angstroms have proven useful.");
 	joboptions["do_center"] = JobOption("Center class averages?", true, "If set to Yes, every iteration the class average images will be centered on their center-of-mass. This will only work for positive signals, so the particles should be white.");
+	joboptions["do_auto_mask"] = JobOption("Use automatic masks?", false, "If set to Yes, once classes reach the starting resolution below, 2D contour masks are computed automatically inside the particle/tube mask and applied to each class average.");
+	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", std::string("12"), "Spherical/tube masks are used until the resolution is better than this (in Angstroms, or 2.5 x pixel size for coarse pixels); from then on the automatic masks.");
+	joboptions["auto_mask_soft"] = JobOption("Automatic mask soft edge (A):", std::string("-1"), "Width of the raised-cosine soft edge of the automatic masks (in Angstroms). If negative (-1, the default), chosen automatically: 3 times the resolution of the class.");
+	joboptions["auto_mask_mass"] = JobOption("Automatic mask mass (kDa):", std::string("-1"), "Binarise the automatic masks at the threshold that encloses this mass (in kDa). If negative (-1, the default, recommended in 2D), Otsu's threshold is used.");
 
 	joboptions["dont_skip_align"] = JobOption("Perform image alignment?", true, "If set to No, then rather than \
 performing both alignment and classification, only classification will be performed. This allows the use of very focused masks.\
@@ -4374,10 +4768,10 @@ If negative value is provided, this option is disabled and ordinary circular mas
 	joboptions["helical_cylindrical_mask"] = JobOption("Use cylindrical mask?", true, "If set to Yes, helical segments are masked with a cylinder: as wide as the tube diameter \
 and as long as the mask diameter (Optimisation tab) along the helical axis, with soft edges in both directions. \
 If set to No, the tube is masked within a circle (sphere) of the mask diameter, as before.");
-	joboptions["helical_auto_diameter"] = JobOption("Measure tube diameter per class?", envFlagDefault("RELION_HELICAL_AUTO_DIAMETER"), "If set to Yes, each class gets its own tube: \
+	joboptions["helical_auto_diameter"] = JobOption("Measure tube diameter per class?", envFlagDefaultOn("RELION_HELICAL_AUTO_DIAMETER"), "If set to Yes (the default unless RELION_HELICAL_AUTO_DIAMETER=0), each class gets its own tube: \
 from iteration 2 on, its width is measured across the axis of the class average (where the profile falls to 10% of its peak, plus 10% on each side), \
-and the class is masked with a tube that wide. The tube diameter above is then ignored: the mask diameter (Optimisation tab) is the widest tube. \
-Useful when the types in the data set have very different widths. The default can be set with the environment variable RELION_HELICAL_AUTO_DIAMETER.");
+and the class is masked with a tube that wide, up to the mask diameter (Optimisation tab). Particle images stay tightly masked by the Tube diameter above. \
+Useful when the types in the data set have very different widths, and helps detect oversized junk classes.");
 	joboptions["do_bimodal_psi"] = JobOption("Do bimodal angular searches?", true, "Do bimodal search for psi angles? \
 Set to Yes if you want to classify 2D helical segments with priors of psi angles. The priors should be bimodal due to unknown polarities of the segments. \
 Set to No if the 3D helix looks the same when rotated upside down. If it is set to No, ordinary angular searches will be performed.\n\nThis option will be invalid if you choose not to perform image alignment on 'Sampling' tab.");
@@ -4609,6 +5003,12 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 	{
 		command_after_scratch += " --center_classes ";
 	}
+	else
+	{
+		command_after_scratch += " --dont_center_classes ";
+	}
+	if (!appendAutoMaskCommand(joboptions, command_after_scratch, error_message))
+		return false;
 	// Sampling
 	int iover = 1;
 	command_after_scratch += " --oversampling " + floatToString((float)iover);
@@ -4642,14 +5042,18 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 		label += ".helical";
 
 		command_after_scratch += " --helical_outer_diameter " + joboptions["helical_tube_outer_diameter"].getString();
-		command_after_scratch += joboptions["helical_cylindrical_mask"].getBoolean() ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
-		command_after_scratch += joboptions["helical_auto_diameter"].getBoolean() ? " --helical_auto_diameter" : " --dont_helical_auto_diameter";
-        command_after_scratch += " --no_init_blobs";
+		const bool cyl = joboptions["helical_cylindrical_mask"].getBoolean();
+		command_after_scratch += cyl ? " --helical_cylindrical_mask" : " --dont_helical_cylindrical_mask";
+		command_after_scratch += (cyl && joboptions["helical_auto_diameter"].getBoolean()) ? " --helical_auto_diameter" : " --dont_helical_auto_diameter";
+		if (!is_continue)
+			command_after_scratch += " --no_init_blobs";
 
 		if (joboptions["dont_skip_align"].getBoolean())
 		{
 			if (joboptions["do_bimodal_psi"].getBoolean())
 				command_after_scratch += " --bimodal_psi";
+			else
+				command_after_scratch += " --dont_bimodal_psi";
 
 			RFLOAT val = joboptions["range_psi"].getNumber(error_message);
 			if (error_message != "") return false;
@@ -4665,7 +5069,7 @@ bool RelionJob::getCommandsClass2DJob(std::string &outputname, std::vector<std::
 		}
 
 		if (!addHelicalEndWeightCommand(joboptions, command_after_scratch, error_message)) return false;
-		if (!addFilamentContextCommand(joboptions, command_after_scratch, error_message)) return false;
+		if (!addFilamentContextCommand(joboptions, command_after_scratch, error_message, true)) return false;
 	}
 
 	// Always do norm and scale correction
@@ -5047,7 +5451,9 @@ To start each class from its own map, choose '" + job_ref_mode_options[1] + "' a
 its reference is masked at every iteration with a mask made automatically from the reference itself, as trueFSC in helicon: \
 low-pass filtered, binarised at Otsu's threshold, the regions that hold its brightest voxels kept, and a raised-cosine soft edge of 3 times the resolution of the class added. \
 The automatic mask is applied inside the spherical mask of the mask diameter. Each iteration writes them as _itNNN_classNNN_automask.mrc.");
-	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", 12, 3, 30, 1, "Spherical masks are used until the resolution is better than this (in Angstroms); from then on the automatic masks.");
+	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", std::string("12"), "Spherical masks are used until the resolution is better than this (in Angstroms); from then on the automatic masks.");
+	joboptions["auto_mask_soft"] = JobOption("Automatic mask soft edge (A):", std::string("-1"), "Width of the raised-cosine soft edge of the automatic masks (in Angstroms). If negative (-1, the default), chosen automatically: 3 times the resolution of the class.");
+	joboptions["auto_mask_mass"] = JobOption("Automatic mask mass (kDa):", std::string("-1"), "Binarise the automatic masks at the threshold that encloses this mass (in kDa, at 0.81 Da/A^3). If 0 or negative (-1, the default), Otsu's threshold is used.");
 	joboptions["do_write_unmasked"] = JobOption("Also write unmasked maps?", true, "If set to Yes, then at every iteration the maps are also written as they are before the reference mask (the mask above, the automatic masks or the spherical mask of the mask diameter) is applied, as run_itNNN_classNNN_unmasked.mrc, next to the masked ones. They are only written: the run uses the masked maps as before, so the results are the same. Like the other files of an iteration, they are deleted once the next iteration has been written, unless all iterations are kept.");
 	joboptions["fn_mask"] = JobOption("Reference mask (optional):", LABEL_MASK_CPIPE, 1, "", "Image Files (*.{spi,vol,msk,mrc})", "\
 If no mask is provided, a soft spherical mask based on the particle diameter will be used.\n\
@@ -5531,6 +5937,8 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 
 	if (joboptions["do_center"].getBoolean())
 		command += " --center_classes ";
+	else
+		command += " --dont_center_classes ";
 	if (joboptions["do_align"].getBoolean())
 		command += " --align_classes ";
 	else
@@ -5545,14 +5953,27 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 		inputNodes.push_back(node);
 	}
 
-	if (masks && option("do_auto_mask") == "Yes")
+	if (masks)
 	{
-		if (option("fn_mask").length() > 0)
+		if (option("do_auto_mask") == "Yes")
 		{
-			error_message = "ERROR: give either a reference mask or use automatic masks, not both.";
-			return false;
+			if (option("fn_mask").length() > 0)
+			{
+				error_message = "ERROR: give either a reference mask or use automatic masks, not both.";
+				return false;
+			}
+			joboptions["auto_mask_start_res"].getNumber(error_message);
+			joboptions["auto_mask_soft"].getNumber(error_message);
+			joboptions["auto_mask_mass"].getNumber(error_message);
+			if (error_message != "") return false;
+			command += " --auto_mask --auto_mask_start_res " + joboptions["auto_mask_start_res"].getString()
+			         + " --auto_mask_soft " + joboptions["auto_mask_soft"].getString()
+			         + " --auto_mask_mass " + joboptions["auto_mask_mass"].getString();
 		}
-		command += " --auto_mask --auto_mask_start_res " + joboptions["auto_mask_start_res"].getString();
+		else
+		{
+			command += " --dont_auto_mask";
+		}
 	}
 
 	// Not saved in the optimiser.star: given again in a continuation
@@ -5689,10 +6110,19 @@ bool RelionJob::getCommandsClass3DJob(std::string &outputname, std::vector<std::
 			command += " --helical_tilt_weight_sigma " + joboptions["helical_tilt_weight_sigma"].getString();
 		if (!addHelicalEndWeightCommand(joboptions, command, error_message)) return false;
 		if (!addFilamentContextCommand(joboptions, command, error_message)) return false;
+		command += joboptions["do_keep_full_filaments"].getBoolean()
+		         ? " --keep_full_filaments" : " --dont_keep_full_filaments";
+		command += joboptions["helctx_track_smooth"].getBoolean()
+		         ? " --helical_track_smooth" : " --dont_helical_track_smooth";
+		RFLOAT range_psi = 0.;
+		if (joboptions["dont_skip_align"].getBoolean() && !joboptions["do_local_ang_searches"].getBoolean())
+		{
+			range_psi = joboptions["range_psi"].getNumber(error_message);
+			if (error_message != "") return false;
+		}
+		command += (range_psi > 0. && joboptions["helctx_polarity"].getBoolean())
+		         ? " --helical_polarity" : " --dont_helical_polarity";
 	}
-
-	if ( (joboptions["do_helix"].getBoolean()) && (joboptions["do_keep_full_filaments"].getBoolean()) )
-		command += " --keep_full_filaments";
 
 	// Running stuff
 	command += " --j " + joboptions["nr_threads"].getString();
@@ -5769,7 +6199,9 @@ their average is low-pass filtered where their FSC drops below 0.8, binarised at
 and a raised-cosine soft edge is added whose width best separates signal from noise in the FSCs of the masked half-maps and of the masked phase-randomised half-maps. \
 The automatic mask is applied inside the spherical mask of the mask diameter. With solvent-flattened FSCs (Optimisation tab), the FSC of the next iteration is corrected for this mask. \
 Each iteration writes it as _itNNN_automask.mrc. Searching for the soft edge takes a few Fourier transforms of the box per step on the first MPI follower.");
-	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", 12, 3, 30, 1, "A spherical mask is used until the resolution is better than this (in Angstroms); from then on the automatic mask.");
+	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", std::string("12"), "A spherical mask is used until the resolution is better than this (in Angstroms); from then on the automatic mask.");
+	joboptions["auto_mask_soft"] = JobOption("Automatic mask soft edge (A):", std::string("-1"), "Width of the raised-cosine soft edge of the automatic masks (in Angstroms). If negative (-1, the default), chosen automatically: optimised from the two half-maps.");
+	joboptions["auto_mask_mass"] = JobOption("Automatic mask mass (kDa):", std::string("-1"), "Binarise the automatic mask at the threshold that encloses this mass (in kDa, at 0.81 Da/A^3). If 0 or negative (-1, the default), Otsu's threshold is used.");
 	joboptions["do_write_unmasked"] = JobOption("Also write unmasked maps?", true, "If set to Yes, then at every iteration the maps are also written as they are before the reference mask (the mask above, the automatic masks or the spherical mask of the mask diameter) is applied, as run_itNNN_half1_class001_unmasked.mrc and run_itNNN_half2_class001_unmasked.mrc, next to the masked ones. They are only written: the run uses the masked maps as before, so the results are the same. Like the other files of an iteration, they are deleted once the next iteration has been written, unless all iterations are kept. The final maps of a converged refinement are not masked, so they get no extra copy.");
 	joboptions["fn_mask"] = JobOption("Reference mask (optional):", LABEL_MASK_CPIPE, 1, "", "Image Files (*.{spi,vol,msk,mrc})", "\
 If no mask is provided, a soft spherical mask based on the particle diameter will be used.\n\
@@ -6159,9 +6591,19 @@ bool RelionJob::getCommandsAutorefineJob(std::string &outputname, std::vector<st
 			error_message = "ERROR: give either a reference mask or use automatic masks, not both.";
 			return false;
 		}
-		command += " --auto_mask --auto_mask_start_res " + joboptions["auto_mask_start_res"].getString();
+		joboptions["auto_mask_start_res"].getNumber(error_message);
+		joboptions["auto_mask_soft"].getNumber(error_message);
+		joboptions["auto_mask_mass"].getNumber(error_message);
+		if (error_message != "") return false;
+		command += " --auto_mask --auto_mask_start_res " + joboptions["auto_mask_start_res"].getString()
+		         + " --auto_mask_soft " + joboptions["auto_mask_soft"].getString()
+		         + " --auto_mask_mass " + joboptions["auto_mask_mass"].getString();
 		if (joboptions["do_solvent_fsc"].getBoolean())
 			command += " --solvent_correct_fsc ";
+	}
+	else
+	{
+		command += " --dont_auto_mask";
 	}
 
 	// Not saved in the optimiser.star: given again in a continuation

@@ -1559,9 +1559,9 @@ void HealpixSampling::selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalR
 	RFLOAT sumprior = 0.;
 	RFLOAT best_diff = 9999.;
 	long int best_ipsi = -999;
-	bool is_psi_flipped = false;
 	for (long int ipsi = 0; ipsi < psi_angles.size(); ipsi++)
 	{
+		bool is_psi_flipped = false;
 		if (sigma_psi > 0.)
 		{
 			RFLOAT diffpsi = ABS(psi_angles[ipsi] - prior_psi);

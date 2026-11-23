@@ -673,9 +673,15 @@ void Preprocessing::joinAllStarFiles()
 			myOutObsModel->opticsMdt.setValue(EMDL_IMAGE_DIMENSIONALITY, dimensionality);
 
 			if (do_premultiply_ctf)
+			{
 				myOutObsModel->opticsMdt.setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED, true);
+				myOutObsModel->opticsMdt.setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK, do_ctf_intact_first_peak);
+			}
 			else // we have to explicitly set this to false so that this is not inherited from the input run_data.star.
+			{
 				myOutObsModel->opticsMdt.setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED, false);
+				myOutObsModel->opticsMdt.setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK, false);
+			}
 
 			int igroup;
 			myOutObsModel->opticsMdt.getValue(EMDL_IMAGE_OPTICS_GROUP, igroup);

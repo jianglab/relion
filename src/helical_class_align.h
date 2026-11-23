@@ -48,11 +48,13 @@ double offsetAcross(const MultidimArray<RFLOAT> &img, double angle_deg);
 
 /// The diameter (pixels) of a tube centred on the axis that holds a class average whose axis lies along X
 /// through the centre (as after apply()). Profile across the axis: the mean over the central 70% along it,
-/// lightly smoothed, less a straight background fitted to the outer 15% on each side (outliers left out).
+/// smoothed by a Gaussian of sigma max(0.7, smooth_sigma_px) pixels, less a straight background fitted to the
+/// outer 15% on each side (outliers left out). Peaks below max(1e-6 * max, 4 * 1.4826 * bg_mad) count as no
+/// peak (noise/flat) and return the box height.
 /// From its peak (in the central 60%) each edge is where the profile stays below frac of the peak for gap_px
 /// pixels, so that dark stripes inside a filament do not end it. Diameter: twice the farther edge, widened by
 /// pad of it on each side. The box height if there is no peak.
-double classDiameter(const MultidimArray<RFLOAT> &img, double gap_px, double frac = 0.1, double pad = 0.1);
+double classDiameter(const MultidimArray<RFLOAT> &img, double gap_px, double frac = 0.1, double pad = 0.1, double smooth_sigma_px = 0.7);
 
 }
 

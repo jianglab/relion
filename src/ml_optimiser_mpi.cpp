@@ -25,6 +25,7 @@
 #include "src/gpu_switch.h"
 #include "src/mps_auto.h"
 #include "src/virtual_particles.h"
+#include "src/async_file_writer.h"
 #include "src/ml_optimiser.h"
 #ifdef _CUDA_ENABLED
 	#include "src/acc/cuda/cuda_ml_optimiser.h"
@@ -1461,7 +1462,7 @@ void MlOptimiserMpi::expectation()
 #endif
 
 	// Initialise per-class orientation tracking on the leader (followers were initialised in expectationSetup)
-	if (node->isLeader() && do_keep_full_filaments && mymodel.nr_classes > 1)
+	if (node->isLeader() && needPerClassMetadata())
 		exp_per_class_metadata_.initZeros(mydata.numberOfParticles(), mymodel.nr_classes * METADATA_NR_CLASS_PARAMS);
 
 	// Now perform real expectation step in parallel, use an on-demand leader-follower system
@@ -1746,7 +1747,7 @@ void MlOptimiserMpi::expectation()
 				{
 					job_time_sum += leader_now() - job_start[this_follower];
 					nr_jobs_timed++;
-					int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
+					int nr_class_params = needPerClassMetadata() ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
 					exp_metadata.resize(JOB_NIMG, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 					node->relion_MPI_Recv(MULTIDIM_ARRAY(exp_metadata), MULTIDIM_SIZE(exp_metadata), MY_MPI_DOUBLE, this_follower, MPITAG_METADATA, MPI_COMM_WORLD, status);
 
@@ -1995,7 +1996,7 @@ void MlOptimiserMpi::expectation()
 					timer.tic(TIMING_MPISLAVEWAIT2);
 #endif
 					// Also receive the imagedata and the metadata for these images from the leader
-					int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
+					int nr_class_params = needPerClassMetadata() ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
 					exp_metadata.resize(JOB_NIMG, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 					node->relion_MPI_Recv(MULTIDIM_ARRAY(exp_metadata), MULTIDIM_SIZE(exp_metadata), MY_MPI_DOUBLE, 0, MPITAG_METADATA, MPI_COMM_WORLD, status);
 
@@ -2300,16 +2301,41 @@ void MlOptimiserMpi::expectation()
 		progress_bar(my_nr_particles);
 	}
 
-	// Filament context: every rank needs all segments' per-class scores (each segment was
-	// scored by one follower, the other rows are zero), then each works out the priors
-	if (filctx_opt.mode != filctx::OFF)
+	// Filament context: gather every segment's scores and visited mask to the leader,
+	// solve the per-filament hidden Markov priors on the leader, and broadcast only
+	// `filctx_logprior` so every rank sees identical HMM priors during the E-step.
+	if (needFilamentLoglik())
 	{
 		if (node->isLeader()) // the leader does not score particles (and must not add last iteration's scores)
+		{
 			filctx_loglik.assign((size_t)mydata.numberOfParticles() * mymodel.nr_classes, 0.f);
-		const long int n = (long int)filctx_loglik.size(), chunk = 1L << 26;
+			filctx_visited.assign((size_t)mydata.numberOfParticles(), 0);
+		}
+		const long int chunk = 1L << 26;
+		const long int n = (long int)filctx_loglik.size();
 		for (long int off = 0; off < n; off += chunk)
-			MPI_Allreduce(MPI_IN_PLACE, &filctx_loglik[off], (int)std::min(chunk, n - off), MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-		updateFilamentContext();
+			MPI_Reduce(node->isLeader() ? MPI_IN_PLACE : &filctx_loglik[off], &filctx_loglik[off],
+			           (int)std::min(chunk, n - off), MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+		const long int nv = (long int)filctx_visited.size();
+		for (long int off = 0; off < nv; off += chunk)
+			MPI_Reduce(node->isLeader() ? MPI_IN_PLACE : &filctx_visited[off], &filctx_visited[off],
+			           (int)std::min(chunk, nv - off), MPI_UNSIGNED_CHAR, MPI_MAX, 0, MPI_COMM_WORLD);
+		if (filctx_opt.mode != filctx::OFF)
+		{
+			if (node->isLeader())
+				updateFilamentContext();
+			int have_prior = (node->isLeader() && !filctx_logprior.empty()) ? 1 : 0;
+			MPI_Bcast(&have_prior, 1, MPI_INT, 0, MPI_COMM_WORLD);
+			if (have_prior)
+			{
+				filctx_logprior.resize((size_t)mydata.numberOfParticles() * mymodel.nr_classes);
+				const long int np = (long int)filctx_logprior.size();
+				for (long int off = 0; off < np; off += chunk)
+					MPI_Bcast(&filctx_logprior[off], (int)std::min(chunk, np - off), MPI_FLOAT, 0, MPI_COMM_WORLD);
+			}
+			else
+				filctx_logprior.clear();
+		}
 	}
 
 	// If requested, enforce that all segments from the same filament have the same class
@@ -3386,6 +3412,12 @@ void MlOptimiserMpi::maximization()
 		RCTIC(timer,RCT_3);
 		maximizationOtherParameters();
 		RCTOC(timer,RCT_3);
+	}
+
+	if (node->size > 1 && mymodel.nr_classes > 0)
+	{
+		node->relion_MPI_Bcast(&mymodel.pdf_class[0], mymodel.nr_classes, MY_MPI_DOUBLE, 1, MPI_COMM_WORLD);
+		node->relion_MPI_Bcast(&mymodel.sigma2_offset, 1, MY_MPI_DOUBLE, 1, MPI_COMM_WORLD);
 	}
 
 	mt_lap("other_params");
@@ -4808,7 +4840,7 @@ void MlOptimiserMpi::calculateExpectedAngularErrors(long int my_first_part_id, l
 	{
 		// Follower has to receive all metadata from the leader!
 		node->relion_MPI_Recv(&my_nr_images, 1, MPI_INT, 0, MPITAG_JOB_REQUEST, MPI_COMM_WORLD, status);
-		int nr_class_params = (do_keep_full_filaments && mymodel.nr_classes > 1) ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
+		int nr_class_params = needPerClassMetadata() ? mymodel.nr_classes * METADATA_NR_CLASS_PARAMS : 0;
 		exp_metadata.resize(my_nr_images, METADATA_LINE_LENGTH_BEFORE_BODIES + (mymodel.nr_bodies) * METADATA_NR_BODY_PARAMS + nr_class_params);
 		node->relion_MPI_Recv(MULTIDIM_ARRAY(exp_metadata), MULTIDIM_SIZE(exp_metadata), MY_MPI_DOUBLE, 0, MPITAG_METADATA, MPI_COMM_WORLD, status);
 		node->relion_MPI_Recv(&length_fn_ctf, 1, MPI_INT, 0, MPITAG_JOB_REQUEST, MPI_COMM_WORLD, status);
@@ -5075,9 +5107,11 @@ void MlOptimiserMpi::iterate()
 	// Launch threads etc.
 	MlOptimiser::iterateSetup();
 
-	// Filament context / polarity: every rank builds the chains (the followers still have the metadata here)
-	if (do_helical_context || do_helical_polarity)
+	// Filament context / polarity / track smoothing: every rank builds the chains (the followers still have the metadata here)
+	if (mymodel.ref_dim == 2 && (do_helical_context || do_helical_polarity || do_helical_track_smooth))
 		initialiseHelicalContext();
+	else if (mymodel.ref_dim == 3)
+		initialiseHelical3DContext();
 
 
 	// Initialize the current resolution
@@ -5133,7 +5167,7 @@ void MlOptimiserMpi::iterate()
 			std::cerr << " WARNING: skipping randomisation of particle order because random_seed equals zero..." << std::endl;
 		}
 
-		if (do_helical_context || do_helical_polarity)
+		if (mymodel.ref_dim == 2 && (do_helical_context || do_helical_polarity))
 			helical_context.resetEvidence();
 		sclock.mark("pre_expectation", iter, node->rank);
 		// RELION_ASYNC_SERIAL: the half-map alignment of this iteration runs beside the E-step
@@ -5381,9 +5415,6 @@ void MlOptimiserMpi::iterate()
 		}
 		MPI_Barrier(MPI_COMM_WORLD);
 
-		if (do_helical_context || do_helical_polarity)
-			updateHelicalContextMpi();
-
 		// Skip center classes in the final stages of gradient refinement
 		if (do_center_classes && (!do_grad_next_iter || iter < grad_ini_iter + grad_inbetween_iter))
 		{
@@ -5428,6 +5459,12 @@ void MlOptimiserMpi::iterate()
         // Re-calculate the current resolution, do this before writing to get the correct values in the output files
         updateCurrentResolution();
 		sclock.mark("update_resolution", iter, node->rank);
+
+		if (mymodel.ref_dim == 2 && (do_helical_context || do_helical_polarity || do_helical_track_smooth))
+			updateHelicalContextMpi();
+		else if (mymodel.ref_dim == 3 && node->isLeader())
+			updateHelical3DContextAfterIter();
+
 		if (do_sort_classes && iter == nr_iter && mymodel.ref_dim == 2)
 		{
 			// every rank renumbers the same way: rank 1's class sizes (the model it writes); the
@@ -5461,9 +5498,10 @@ void MlOptimiserMpi::iterate()
 			MlOptimiser::write(DONT_WRITE_SAMPLING, DO_WRITE_DATA, DONT_WRITE_OPTIMISER, DONT_WRITE_MODEL, node->rank);
 		}
 
-		// Files per helical type: the leader has the labels, rank 1 has just written the class averages
+		// Files per helical type: wait until async writers on rank 1 have finished flushing _classes.mrcs
 		if (do_helical_context)
 		{
+			AsyncFileWriter::instance().wait();
 			MPI_Barrier(MPI_COMM_WORLD);
 			if (node->isLeader())
 				writeHelicalTypeFiles();
@@ -5601,6 +5639,9 @@ void MlOptimiserMpi::updateHelicalContextMpi()
 			updateHelicalPolarity();
 		}
 		node->relion_MPI_Bcast(&helical_context.pol_prior[0], N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+		helical_context.pol_class_weight.resize(mymodel.nr_classes, 1.f);
+		if (mymodel.nr_classes > 0)
+			node->relion_MPI_Bcast(&helical_context.pol_class_weight[0], mymodel.nr_classes, MPI_FLOAT, 0, MPI_COMM_WORLD);
 	}
 	if (do_helical_context)
 	{
@@ -5618,6 +5659,48 @@ void MlOptimiserMpi::updateHelicalContextMpi()
 		// and the junk classes, which --sort_classes puts last on every rank
 		helical_context.junk_class.resize(mymodel.nr_classes, 0);
 		node->relion_MPI_Bcast(&helical_context.junk_class[0], mymodel.nr_classes, MPI_CHAR, 0, MPI_COMM_WORLD);
+		helical_context.class_owner.resize(mymodel.nr_classes, -1);
+		if (mymodel.nr_classes > 0)
+			node->relion_MPI_Bcast(&helical_context.class_owner[0], mymodel.nr_classes, MPI_INT, 0, MPI_COMM_WORLD);
+		node->relion_MPI_Bcast(&helical_context.nr_types, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		int sel_flag = helical_context_types_selected ? 1 : 0;
+		node->relion_MPI_Bcast(&sel_flag, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		helical_context_types_selected = (sel_flag != 0);
+		node->relion_MPI_Bcast(&helical_context_types_last_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		node->relion_MPI_Bcast(&helical_context.temper, 1, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+		node->relion_MPI_Bcast(&helical_context.exclude_angst, 1, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+		const size_t kt_sz = (size_t)std::max(0, mymodel.nr_classes) * (size_t)std::max(1, helical_context.nr_types);
+		helical_context.class_allowed.resize(kt_sz, 0);
+		if (kt_sz > 0)
+			node->relion_MPI_Bcast(&helical_context.class_allowed[0], (int)kt_sz, MPI_CHAR, 0, MPI_COMM_WORLD);
+		int sh = (node->isLeader() && helical_split_happened) ? 1 : 0;
+		node->relion_MPI_Bcast(&sh, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		if (sh != 0 && mymodel.nr_classes > 0)
+		{
+			const int K = mymodel.nr_classes;
+			for (int k = 0; k < K; k++)
+			{
+				if (k < (int)mymodel.Iref.size() && MULTIDIM_SIZE(mymodel.Iref[k]) > 0)
+					node->relion_MPI_Bcast(MULTIDIM_ARRAY(mymodel.Iref[k]), MULTIDIM_SIZE(mymodel.Iref[k]), MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+				if (k < (int)mymodel.data_vs_prior_class.size() && MULTIDIM_SIZE(mymodel.data_vs_prior_class[k]) > 0)
+					node->relion_MPI_Bcast(MULTIDIM_ARRAY(mymodel.data_vs_prior_class[k]), MULTIDIM_SIZE(mymodel.data_vs_prior_class[k]), MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+				if (k < (int)mymodel.sigma2_class.size() && MULTIDIM_SIZE(mymodel.sigma2_class[k]) > 0)
+					node->relion_MPI_Bcast(MULTIDIM_ARRAY(mymodel.sigma2_class[k]), MULTIDIM_SIZE(mymodel.sigma2_class[k]), MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+				if (k < (int)mymodel.fourier_coverage_class.size() && MULTIDIM_SIZE(mymodel.fourier_coverage_class[k]) > 0)
+					node->relion_MPI_Bcast(MULTIDIM_ARRAY(mymodel.fourier_coverage_class[k]), MULTIDIM_SIZE(mymodel.fourier_coverage_class[k]), MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+			}
+			node->relion_MPI_Bcast(&mymodel.pdf_class[0], K, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+			node->relion_MPI_Bcast(&mymodel.estimated_resolution[0], K, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+			if ((int)helical_class_diameter.size() == K)
+				node->relion_MPI_Bcast(&helical_class_diameter[0], K, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+			if ((int)mymodel.class_settings.outer_diameter.size() == K)
+				node->relion_MPI_Bcast(&mymodel.class_settings.outer_diameter[0], K, MY_MPI_DOUBLE, 0, MPI_COMM_WORLD);
+			helical_context.initialised_model = false;
+			helical_split_happened = false;
+		}
 	}
+	else if (do_helical_track_smooth && node->isLeader())
+		helical_context.smoothFilamentTracks(mydata.MDimg, helical_context_rows, mymodel.pixel_size,
+		                                     (offset_range_x > 0. ? (RFLOAT)offset_range_x : std::max((RFLOAT)12., (RFLOAT)(1.5 * sampling.offset_range * mymodel.pixel_size))), iter);
 	MPI_Barrier(MPI_COMM_WORLD);
 }

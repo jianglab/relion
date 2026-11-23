@@ -58,7 +58,8 @@ class ObservationModel
 		// boxSizes holds the largest side (the nominal size); boxSizesX/Y hold the sides of
 		// rectangular images. For square images all three agree.
 		std::vector<int> boxSizes, boxSizesX, boxSizesY;
-		std::vector<bool> CtfPremultiplied, CtfCorrected;
+		std::vector<bool> CtfPremultiplied, CtfPremultipliedIntactFirstPeak, CtfCorrected;
+		bool hasCtfPremultipliedIntactFirstPeakLabel;
 		std::vector<std::vector<double> > evenZernikeCoeffs, oddZernikeCoeffs;
 		std::vector<Matrix2D<RFLOAT> > magMatrices;
 		std::vector<std::string> fnMtfs, groupNames;
@@ -215,8 +216,11 @@ class ObservationModel
 		int getOpticsGroup(const MetaDataTable& particlesMdt, long int particle = -1) const;
 
         bool getCtfPremultiplied(int og) const;
+        bool hasCtfPremultipliedIntactFirstPeak() const;
+        bool getCtfPremultipliedIntactFirstPeak(int og) const;
         bool getCtfCorrected(int og) const;
 		void setCtfPremultiplied(int og, bool val);
+		void setCtfPremultipliedIntactFirstPeak(int og, bool val);
 		void setCtfCorrected(int og, bool val);
 
 		std::string getGroupName(int og);

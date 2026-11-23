@@ -40,7 +40,7 @@ void JobWindow::clear()
 {
 	tabs = NULL;
 	tab1 = tab2 = tab3 = tab4 = tab5 = tab6 = tab7 = runtab = NULL;
-	group1 = group2 = group3 = group4 = group5 = group6 = group7 = group_ewald = group_filctx = queue_gpu_group = queue_group = NULL;
+	group1 = group2 = group3 = group4 = group5 = group6 = group7 = group_ewald = group_filctx = group_helctx = queue_gpu_group = queue_group = NULL;
 	reference_table = NULL;
 	refresh = nullptr;
 	current_y = start_y = 0;
@@ -873,6 +873,11 @@ void JobWindow::initialise(int my_job_type, bool _is_tomo)
 		myjob.initialise(my_job_type);
 		initialiseClass2DConsensusWindow();
 	}
+	else if (my_job_type == PROC_HELIX_SUBCLASSIFY)
+	{
+		myjob.initialise(my_job_type);
+		initialiseHelixSubclassifyWindow();
+	}
 	else if (my_job_type == PROC_2DCLASS)
 	{
 		myjob.initialise(my_job_type);
@@ -1595,7 +1600,7 @@ void JobWindow::initialiseExtractWindow()
 	place("do_invert", TOGGLE_DEACTIVATE); //(current_y, "Invert contrast?", true, "If set to Yes, the contrast in the particles will be inverted.");
 	Fl_Group *group_premultiply = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group_premultiply->begin();
-	place("do_premultiply", TOGGLE_DEACTIVATE);
+	place2("do_premultiply", "ctf_intact_first_peak", "Premultiply CTF, intact 1st peak?", TOGGLE_DEACTIVATE);
 	group_premultiply->end();
 	guientries["do_rect_box"].my_no_groups.push_back(group_premultiply); // a rectangular box cannot be premultiplied
 	guientries["do_rect_box"].cb_menu_i();
@@ -1680,6 +1685,39 @@ Pixels values higher than this many times the image stddev will be replaced with
 	guientries["do_extract_helix"].cb_menu_i();
 
 	tab3->end();
+
+	auto syncPremultIntact = [this]() {
+		const bool rect = std::string(guientries["do_rect_box"].inp->value()) == "Yes";
+		const bool rotated = std::string(guientries["do_extract_helix"].inp->value()) == "Yes"
+		                  && std::string(guientries["do_rotate_horizontal"].inp->value()) == "Yes";
+		const bool premult = std::string(guientries["do_premultiply"].inp->value()) == "Yes";
+		if (is_continue || rect || rotated)
+		{
+			guientries["do_premultiply"].deactivate(true);
+			guientries["ctf_intact_first_peak"].deactivate(true);
+		}
+		else
+		{
+			guientries["do_premultiply"].deactivate(false);
+			guientries["ctf_intact_first_peak"].deactivate(!premult);
+		}
+	};
+	guientries["do_premultiply"].on_pick = syncPremultIntact;
+	guientries["do_premultiply"].on_change = syncPremultIntact;
+	guientries["do_rect_box"].on_pick = syncPremultIntact;
+	guientries["do_rect_box"].on_change = [this, syncPremultIntact]() {
+		guientries["do_rect_box"].cb_menu_i();
+		syncPremultIntact();
+	};
+	guientries["do_extract_helix"].on_pick = syncPremultIntact;
+	guientries["do_extract_helix"].on_change = [this, syncPremultIntact]() {
+		guientries["do_extract_helix"].cb_menu_i();
+		syncPremultIntact();
+	};
+	guientries["do_rotate_horizontal"].on_pick = syncPremultIntact;
+	guientries["do_rotate_horizontal"].on_change = syncPremultIntact;
+	refresh = [syncPremultIntact](bool) { syncPremultIntact(); };
+	syncPremultIntact();
 }
 
 void JobWindow::initialiseSelectWindow()
@@ -1873,7 +1911,13 @@ void JobWindow::initialiseClass2DConsensusWindow()
 	place("random_seed");
 	place("nr_iter");
 	current_y += STEPY/2;
-	place("do_helical_types");
+	group1 = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group1->end();
+	place("do_helical_types", TOGGLE_LEAVE_ACTIVE, group1);
+	group1->begin();
+	place2("helical_types_max", "helical_types_jaccard", "Max types, min Jaccard:");
+	group1->end();
+	guientries["do_helical_types"].cb_menu_i();
 	tab2->end();
 
 	tab3->begin();
@@ -1902,6 +1946,81 @@ void JobWindow::initialiseClass2DConsensusWindow()
 	tab3->end();
 }
 
+void JobWindow::initialiseHelixSubclassifyWindow()
+{
+	setupTabs(4);
+
+	tab1->begin();
+	tab1->label("I/O");
+	resetHeight();
+	place("fn_img", TOGGLE_DEACTIVATE);
+	place("do_retype");
+	place2("types_min", "types_max", "Helical types (min, max):");
+	place("types_agree");
+	current_y += STEPY/2;
+	place("min_segs");
+	place("do_prepare_only");
+	tab1->end();
+
+	tab2->begin();
+	tab2->label("Extraction");
+	resetHeight();
+	place("extract_size");
+	place("scale_size");
+	place("angpix");
+	current_y += STEPY/2;
+	group2 = new Fl_Group(WCOL0, MENUHEIGHT, JOBWINDOW_WIDTH, h - MENUHEIGHT, "");
+	group2->end();
+	place("do_premultiply", TOGGLE_LEAVE_ACTIVE, group2);
+	group2->begin();
+	place("ctf_intact_first_peak");
+	group2->end();
+	guientries["do_premultiply"].on_change = [this]() { guientries["do_premultiply"].cb_menu_i(); };
+	guientries["do_premultiply"].cb_menu_i();
+	place2("do_invert", "do_float16", "Invert contrast, float16?");
+	tab2->end();
+
+	tab3->begin();
+	tab3->label("Classification");
+	resetHeight();
+	place2("nr_classes", "nr_iter", "Sub-classes per type, EM iters:");
+	place2("tau_fudge", "random_seed", "Regularisation T, random seed:");
+	current_y += STEPY/4;
+	place2("particle_diameter", "helical_tube_outer_diameter", "Mask, outer tube diameter (A):");
+	place2("helical_rise", "highres_limit", "Helical rise, E-step limit (A):");
+	current_y += STEPY/4;
+	place2("psi_sampling", "sigma_psi", "Psi step, prior sigma (deg):");
+	place("do_bimodal_psi");
+	place2("offset_range", "offset_step", "Offset range, step (pix):");
+	place("helical_context_weight");
+	current_y += STEPY/4;
+	Fl_Group *group_auto_mask = new Fl_Group(WCOL0, MENUHEIGHT, JOBWINDOW_WIDTH, h - MENUHEIGHT, "");
+	group_auto_mask->end();
+	place("do_auto_mask", TOGGLE_LEAVE_ACTIVE, group_auto_mask);
+	group_auto_mask->begin();
+	place3("auto_mask_start_res", "auto_mask_soft", "auto_mask_mass", "Auto-mask from (A), soft (A), mass (kDa):");
+	group_auto_mask->end();
+	guientries["do_auto_mask"].on_change = [this]() { guientries["do_auto_mask"].cb_menu_i(); };
+	guientries["do_auto_mask"].cb_menu_i();
+	tab3->end();
+
+	tab4->begin();
+	tab4->label("Compute");
+	resetHeight();
+	place("nr_pool");
+	place("keep_all_iter");
+	current_y += STEPY/2;
+	group6 = new Fl_Group(WCOL0, MENUHEIGHT, JOBWINDOW_WIDTH, h - MENUHEIGHT, "");
+	group6->end();
+	place("use_gpu", TOGGLE_LEAVE_ACTIVE, group6);
+	group6->begin();
+	place("gpu_ids", TOGGLE_LEAVE_ACTIVE);
+	group6->end();
+	guientries["use_gpu"].on_change = [this]() { guientries["use_gpu"].cb_menu_i(); };
+	guientries["use_gpu"].cb_menu_i();
+	tab4->end();
+}
+
 void JobWindow::initialiseClass2DWindow()
 {
 	setupTabs(6);
@@ -1919,6 +2038,15 @@ void JobWindow::initialiseClass2DWindow()
 	current_y += STEPY/2;
 
 	place("do_sort_classes");
+
+	Fl_Group *group_auto_mask = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_auto_mask->end();
+	place("do_auto_mask", TOGGLE_LEAVE_ACTIVE, group_auto_mask);
+	group_auto_mask->begin();
+	place3("auto_mask_start_res", "auto_mask_soft", "auto_mask_mass", "Auto-mask from (A), soft (A), mass (kDa):");
+	group_auto_mask->end();
+	guientries["do_auto_mask"].on_change = [this]() { guientries["do_auto_mask"].cb_menu_i(); };
+	guientries["do_auto_mask"].cb_menu_i();
 
 	tab1->end();
 
@@ -2037,7 +2165,7 @@ void JobWindow::initialiseClass2DWindow()
 	group4->begin();
 
 	place("helical_tube_outer_diameter");
-	place("helical_cylindrical_mask", TOGGLE_DEACTIVATE);
+	place("helical_cylindrical_mask");
 	place("helical_auto_diameter");
 	place("do_bimodal_psi");
 	place("range_psi");
@@ -2057,6 +2185,7 @@ void JobWindow::initialiseClass2DWindow()
 	group_filctx = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group_filctx->end();
 	place("filctx_mode", TOGGLE_LEAVE_ACTIVE, group_filctx);
+	const int filctx_y = current_y;
 
 	group_filctx->begin();
 	place("filctx_temper");
@@ -2065,21 +2194,72 @@ void JobWindow::initialiseClass2DWindow()
 	place("filctx_alpha");
 	group_filctx->end();
 
+	current_y = filctx_y;
+	group_helctx = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
+	group_helctx->begin();
+	place2("helctx_types_min", "helctx_types_max", "Helical types (min, max):");
+	place2("helctx_start", "helctx_agree", "Start iter, min fold ARI:");
+	place2("helctx_temper", "helctx_exclude", "Context power, exclude (A):");
+	place("helctx_track_smooth");
+	place("helctx_polarity");
+	group_helctx->end();
+
 	guientries["filctx_mode"].cb_menu_i(); // grey out the parameters while Off
 
 	group4->end();
 	guientries["do_helix"].cb_menu_i(); // to make default effective
 
-	// Helical segments default to EM with helical types (with VDAM the types come out wrong); back to VDAM if
-	// both are still as set here
-	guientries["do_helix"].on_pick = [this]()
+	auto update_helix_ui = [this]()
 	{
+		const bool cyl = std::string(guientries["helical_cylindrical_mask"].inp->value()) == "Yes";
+		guientries["helical_auto_diameter"].deactivate(!cyl);
+		guientries["helical_tube_outer_diameter"].deactivate(false);
+
+		const std::string mode = guientries["filctx_mode"].inp->value();
+		const bool hel_types = (mode == job_filament_context_options_2d[3]);
+		if (hel_types)
+		{
+			group_filctx->deactivate();
+			group_filctx->hide();
+			group_helctx->show();
+			group_helctx->activate();
+			const bool align = std::string(guientries["dont_skip_align"].inp->value()) == "Yes";
+			const bool bimodal = align && std::string(guientries["do_bimodal_psi"].inp->value()) == "Yes";
+			guientries["helctx_polarity"].deactivate(!bimodal);
+		}
+		else
+		{
+			group_helctx->deactivate();
+			group_helctx->hide();
+			group_filctx->show();
+			if (mode == job_filament_context_options[0])
+				group_filctx->deactivate();
+			else
+				group_filctx->activate();
+		}
+	};
+	for (const char *key : {"helical_cylindrical_mask", "helical_auto_diameter", "filctx_mode", "do_bimodal_psi", "dont_skip_align"})
+	{
+		guientries[key].on_pick = update_helix_ui;
+		guientries[key].on_change = update_helix_ui;
+	}
+	refresh = [update_helix_ui](bool) { update_helix_ui(); };
+	update_helix_ui();
+
+	// Helical segments default to EM with helical types and class sorting (with VDAM the types come out wrong);
+	// back to VDAM and Off if still as set here
+	guientries["do_helix"].on_pick = [this, update_helix_ui]()
+	{
+		update_helix_ui();
 		const bool helix = std::string(guientries["do_helix"].inp->value()) == "Yes";
 		if (!helix && std::string(guientries["filctx_mode"].inp->value()) != job_filament_context_options_2d[3])
 			return;
 		guientries["do_em"].setValue(helix ? "Yes" : "No");
 		guientries["do_grad"].setValue(helix ? "No" : "Yes");
 		guientries["filctx_mode"].setValue(helix ? job_filament_context_options_2d[3] : job_filament_context_options[0]);
+		const char *env_sort = getenv("RELION_SORT_CLASSES");
+		if (env_sort == NULL || env_sort[0] == '\0')
+			guientries["do_sort_classes"].setValue(helix ? "Yes" : "No");
 	};
 
 	tab5->end();
@@ -2264,8 +2444,9 @@ void JobWindow::initialiseClass3DWindow()
     group_auto_mask->end();
     place("do_auto_mask", TOGGLE_LEAVE_ACTIVE, group_auto_mask);
     group_auto_mask->begin();
-    place("auto_mask_start_res");
+    place3("auto_mask_start_res", "auto_mask_soft", "auto_mask_mass", "Auto-mask from (A), soft (A), mass (kDa):");
     group_auto_mask->end();
+    guientries["do_auto_mask"].on_change = [this, p = ui.get()]() { if (!p->perClass()) guientries["do_auto_mask"].cb_menu_i(); };
     guientries["do_auto_mask"].cb_menu_i(); // to make default effective
 	ui->auto_mask_group = group_auto_mask;
 	place("do_write_unmasked");
@@ -2458,14 +2639,13 @@ void JobWindow::initialiseClass3DWindow()
 	place2("helical_tilt_weight_sigma", "helical_end_weight", "Tilt sigma (deg), end-segment weight:");
 
 	// Add a little spacer
-	current_y += STEPY/2;
+	current_y += STEPY/4;
 
-	place("helical_nr_asu", TOGGLE_DEACTIVATE);
+	place2("helical_nr_asu", "helical_z_percentage", "Number of asym. units, central Z (%):", TOGGLE_DEACTIVATE);
 	place2("helical_twist_initial", "helical_rise_initial", "Initial twist (deg), rise (A):", TOGGLE_DEACTIVATE);
-	place("helical_z_percentage", TOGGLE_DEACTIVATE);
 
 	// Add a little spacer
-	current_y += STEPY/2;
+	current_y += STEPY/4;
 
 	group6 = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group6->end();
@@ -2477,7 +2657,9 @@ void JobWindow::initialiseClass3DWindow()
 	guientries["do_local_search_helical_symmetry"].cb_menu_i(); // to make default effective
 
 	// Add a little spacer
-	current_y += STEPY/2;
+	current_y += STEPY/4;
+
+	place2("helctx_track_smooth", "helctx_polarity", "Smooth tracks, polarity?", TOGGLE_DEACTIVATE);
 
 	group_filctx = new Fl_Group(WCOL0,  MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group_filctx->end();
@@ -2551,11 +2733,50 @@ void JobWindow::initialiseClass3DWindow()
 			p->remember();
 			p->showTable();
 		};
-	refresh = [ui](bool loaded)
+	auto update_class3d_helix_ui = [this]()
+	{
+		const bool align = std::string(guientries["dont_skip_align"].inp->value()) == "Yes";
+		const bool local_ang = std::string(guientries["do_local_ang_searches"].inp->value()) == "Yes";
+		char *endptr = nullptr;
+		const double range_psi = std::strtod(guientries["range_psi"].inp->value(), &endptr);
+		const bool can_pol = align && !local_ang && endptr != guientries["range_psi"].inp->value() && range_psi > 0.;
+		guientries["helctx_polarity"].deactivate(!can_pol);
+	};
+	for (const char *key : {"dont_skip_align", "do_local_ang_searches", "range_psi"})
+	{
+		auto prev_pick = guientries[key].on_pick;
+		auto prev_change = guientries[key].on_change;
+		guientries[key].on_pick = [prev_pick, update_class3d_helix_ui]()
+		{
+			if (prev_pick) prev_pick();
+			update_class3d_helix_ui();
+		};
+		guientries[key].on_change = [prev_change, update_class3d_helix_ui]()
+		{
+			if (prev_change) prev_change();
+			update_class3d_helix_ui();
+		};
+	}
+	guientries["range_psi"].inp->callback(GuiEntry::cb_changed, &guientries["range_psi"]);
+	guientries["range_psi"].inp->when(FL_WHEN_CHANGED);
+	auto prev_helix_pick = guientries["do_helix"].on_pick;
+	guientries["do_helix"].on_pick = [this, prev_helix_pick, update_class3d_helix_ui]()
+	{
+		if (prev_helix_pick) prev_helix_pick();
+		const bool helix = std::string(guientries["do_helix"].inp->value()) == "Yes";
+		const std::string mode = guientries["filctx_mode"].inp->value();
+		if (helix && mode == job_filament_context_options[0])
+			guientries["filctx_mode"].setValue(job_filament_context_options[2]);
+		else if (!helix && mode == job_filament_context_options[2])
+			guientries["filctx_mode"].setValue(job_filament_context_options[0]);
+		update_class3d_helix_ui();
+	};
+	refresh = [ui, update_class3d_helix_ui](bool loaded)
 	{
 		if (loaded)
 			ui->load();
 		ui->apply();
+		update_class3d_helix_ui();
 	};
 	refresh(false);
 }
@@ -2582,8 +2803,9 @@ void JobWindow::initialiseAutorefineWindow()
     group_auto_mask->end();
     place("do_auto_mask", TOGGLE_LEAVE_ACTIVE, group_auto_mask);
     group_auto_mask->begin();
-    place("auto_mask_start_res");
+    place3("auto_mask_start_res", "auto_mask_soft", "auto_mask_mass", "Auto-mask from (A), soft (A), mass (kDa):");
     group_auto_mask->end();
+    guientries["do_auto_mask"].on_change = [this]() { guientries["do_auto_mask"].cb_menu_i(); };
     guientries["do_auto_mask"].cb_menu_i(); // to make default effective
     place("do_write_unmasked");
 

@@ -526,3 +526,95 @@ def test_cpu_gpu_per_class_tracking_consistency(test_data_dir, relion_bin, relio
                     print(f"    [{i}] {c}: CPU={cv:.6f} GPU={gv:.6f}")
 
     print(f"  ✓ CPU/GPU agreement OK ({n} ptcls, {class_diffs} class diffs, {val_diffs} value diffs)")
+
+
+def test_class3d_keep_full_filaments_continue(test_data_dir, relion_bin, relion_runner):
+    """--keep_full_filaments persists in optimiser.star and respects --dont_keep_full_filaments on --continue."""
+    n_fil = 4
+    segs_per = 5
+    paths = generate_helical_dataset(
+        test_data_dir / "helical_data_cont",
+        relion_bin, relion_runner,
+        num_filaments=n_fil,
+        segments_per_filament=segs_per,
+        size=32, angpix=1.0,
+    )
+
+    common = [
+        "--ref", str(paths["initial_model"]),
+        "--K", "2",
+        "--ini_high", "50",
+        "--ctf",
+        "--tau2_fudge", "4",
+        "--particle_diameter", "25",
+        "--flatten_solvent",
+        "--zero_mask",
+        "--oversampling", "1",
+        "--healpix_order", "1",
+        "--offset_range", "5",
+        "--offset_step", "2",
+        "--sym", "c1",
+        "--norm",
+        "--scale",
+        "--j", "2",
+        "--random_seed", "7",
+    ]
+    out_prefix = test_data_dir / "run_cont"
+
+    # Iter 1: enable --keep_full_filaments
+    cmd1 = [
+        str(relion_bin / "relion_refine"),
+        "--i", str(paths["helical_star"]),
+        "--o", str(out_prefix),
+        "--iter", "1",
+        "--keep_full_filaments",
+        "--keep_all_iterations",
+    ] + common
+    r1 = relion_runner(cmd1, timeout=300)
+    assert r1.returncode == 0, f"Class3D iter 1 failed:\n{r1.stderr}"
+
+    import re
+
+    def read_star_field(path, key):
+        m = re.search(rf"(?m)^{re.escape(key)}\s+(\S+)", Path(path).read_text())
+        assert m, f"Missing {key} in {path}"
+        return m.group(1)
+
+    assert read_star_field(f"{out_prefix}_it001_optimiser.star", "_rlnHelicalKeepFullFilaments") == "1"
+
+    # Iter 2: continue WITHOUT passing --keep_full_filaments again -> stays active
+    cmd2 = [
+        str(relion_bin / "relion_refine"),
+        "--continue", f"{out_prefix}_it001_optimiser.star",
+        "--o", str(out_prefix),
+        "--iter", "2",
+        "--keep_all_iterations",
+    ]
+    r2 = relion_runner(cmd2, timeout=300)
+    assert r2.returncode == 0, f"Class3D continue iter 2 failed:\n{r2.stderr}"
+
+    assert read_star_field(f"{out_prefix}_it002_optimiser.star", "_rlnHelicalKeepFullFilaments") == "1"
+    fdata = parse_star_particles(
+        f"{out_prefix}_it002_data.star",
+        ["rlnMicrographName", "rlnHelicalTubeID", "rlnClassNumber"],
+    )
+    fil = defaultdict(set)
+    for i in range(len(fdata["rlnClassNumber"])):
+        fil[(fdata["rlnMicrographName"][i], fdata["rlnHelicalTubeID"][i])].add(
+            int(fdata["rlnClassNumber"][i])
+        )
+    assert all(len(v) == 1 for v in fil.values()), f"Mixed filament classes after continue: {fil}"
+
+    # Iter 3: continue WITH --dont_keep_full_filaments -> overrides persisted flag to 0
+    cmd3 = [
+        str(relion_bin / "relion_refine"),
+        "--continue", f"{out_prefix}_it002_optimiser.star",
+        "--o", str(out_prefix),
+        "--iter", "3",
+        "--dont_keep_full_filaments",
+        "--keep_all_iterations",
+    ]
+    r3 = relion_runner(cmd3, timeout=300)
+    assert r3.returncode == 0, f"Class3D continue iter 3 failed:\n{r3.stderr}"
+
+    assert read_star_field(f"{out_prefix}_it003_optimiser.star", "_rlnHelicalKeepFullFilaments") == "0"

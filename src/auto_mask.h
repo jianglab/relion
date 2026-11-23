@@ -97,4 +97,27 @@ void autoMaskFromMap(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT res
 		const AutoMaskOptions &opt, MultidimArray<RFLOAT> &mask,
 		AutoMaskReport *report = NULL, int n_threads = 1);
 
+struct AutoMask2DOptions
+{
+	RFLOAT lowpass = -1.;        // A (clamped to [min_lowpass, 0.45 * min_box_A])
+	RFLOAT min_lowpass = 35.;    // Coarse shape-only floor (A) applied before zero-clipping
+	RFLOAT extend_angst = 18.;   // Envelope margin (A) dilated onto binary mask before soft edge
+	RFLOAT soft_edge = -1.;      // Soft edge width (pixels; < 0: max(3 px, 3 * resolution / angpix))
+	RFLOAT mass = -1.;           // Binarisation mass (kDa; <= 0: Otsu)
+	double min_area_frac = 0.03; // Minimum allowed binary mask area fraction
+	double max_area_frac = 0.85; // Maximum allowed binary mask area fraction
+	RFLOAT helix_tube_diam = -1.; // A (> 0: reject off-axis/out-of-tube rim islands and preserve in-tube strands)
+	double min_axial_cov = 0.60; // With helix_tube_diam > 0: min covered fraction of central 70% X columns inside tube (<= 0 disables)
+	bool verb = false;
+};
+
+// Hardened 2D class-average automatic mask: coarse shape-only low-pass on the unclipped average,
+// zero-clipping only afterward, helical multi-strand preservation across dark grooves, explicit
+// envelope dilation, rejection of tiny/rim/edge-hijacked artifacts back to an all-ones baseline
+// mask (returning false), and asymmetric hysteresis (widen immediately, narrow gradually).
+bool autoMask2DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT resolution,
+		const AutoMask2DOptions &opt, MultidimArray<RFLOAT> &mask,
+		const MultidimArray<RFLOAT> *prev_mask = NULL,
+		AutoMaskReport *report = NULL, int n_threads = 1);
+
 #endif /* AUTO_MASK_H_ */

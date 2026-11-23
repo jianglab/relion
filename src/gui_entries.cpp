@@ -162,7 +162,7 @@ void GuiEntry::initialise(int x, int y, Fl_Group * deactivate_this_group, bool _
 
 		if (!create_scheduler_gui)
 		{
-			choice = new Fl_Choice(XCOL2, y, WCOL2, height);
+			choice = new Fl_Choice(x, y, wcol2, height);
 			if (joboption.joboption_type == JOBOPTION_RADIO)
 			{
 				// Add all items to the menu

@@ -509,6 +509,56 @@ void Experiment::shuffleMicrographs(std::vector<long int>::iterator first, std::
 	}
 }
 
+static bool wholeFilamentShuffleEnabled()
+{
+	static const bool enabled = []()
+	{
+		const char *e = getenv("RELION_WHOLE_FILAMENT_SHUFFLE");
+		if (e == NULL || *e == 0)
+			return true;
+		std::string s(e);
+		return s != "0" && s != "off" && s != "OFF" && s != "false" && s != "no";
+	}();
+	return enabled;
+}
+
+static void shuffleFilaments(const MetaDataTable &MDimg, const std::vector<ExpParticle> &particles,
+                             std::vector<long int>::iterator first, std::vector<long int>::iterator last, std::mt19937 &rng)
+{
+	double step = 0.;
+	const std::vector<std::vector<long int> > filaments = filctx::groupFilaments(MDimg, step);
+	std::map<long int, std::pair<long int, long int> > on_filament;
+	for (size_t f = 0; f < filaments.size(); f++)
+		for (size_t k = 0; k < filaments[f].size(); k++)
+			on_filament[filaments[f][k]] = std::make_pair((long int)f, (long int)k);
+
+	std::map<long int, std::vector<std::pair<long int, long int> > > by_fil;
+	std::vector<long int> order;
+	long int next_orphan = (long int)filaments.size() + 1;
+	for (auto it = first; it != last; ++it)
+	{
+		const long int rid = particles[*it].id;
+		auto f_it = on_filament.find(rid);
+		if (f_it == on_filament.end())
+			f_it = on_filament.find(*it);
+		const long int key = (f_it != on_filament.end()) ? f_it->second.first : next_orphan++;
+		const long int pos = (f_it != on_filament.end()) ? f_it->second.second : 0;
+		auto &v = by_fil[key];
+		if (v.empty())
+			order.push_back(key);
+		v.push_back(std::make_pair(pos, *it));
+	}
+	std::shuffle(order.begin(), order.end(), rng);
+	auto out = first;
+	for (long int key : order)
+	{
+		auto &v = by_fil[key];
+		std::sort(v.begin(), v.end());
+		for (const auto &p : v)
+			*out++ = p.second;
+	}
+}
+
 // By micrograph or filament: first the particle-level shuffle with the random numbers it gets without
 // (kept in random_sorted_idx), then the micrograph order from a generator seeded alike, so each order is
 // the one it would be on its own. rng must be fresh from seed.
@@ -589,6 +639,8 @@ void Experiment::randomiseParticlesOrder(int seed, bool do_split_random_halves, 
 			{
 				if (by_mic)
 					shuffleMicrographs(sorted_idx.begin(), sorted_idx.end(), r);
+				else if (wholeFilamentShuffleEnabled() && MDimg.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID))
+					shuffleFilaments(MDimg, particles, sorted_idx.begin(), sorted_idx.end(), r);
 				else
 					std::shuffle(sorted_idx.begin(), sorted_idx.end(), r);
 

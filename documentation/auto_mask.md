@@ -3,8 +3,8 @@
 Masks made from the map itself, after the masks of `trueFSC` in helicon
 (`src/helicon/commands/trueFSC.py` in https://github.com/jianglab/helicon).
 The code is in `src/auto_mask.h` and `src/auto_mask.cpp`; it is used by
-`relion_mask_create --auto` and by `relion_refine --auto_mask` (3D
-classification and 3D auto-refinement).
+`relion_mask_create --auto` and by `relion_refine --auto_mask` (2D
+classification, 3D classification and 3D auto-refinement).
 
 ## The recipe
 
@@ -77,6 +77,16 @@ extension of the binary mask is passed as set (set it to 0 for trueFSC's mask).
   signal-to-noise ratio (data_vs_prior, SSNR): the FSC between half-maps that
   goes with it is SSNR / (2 + SSNR). A class gets a mask only once its own
   resolution is better than `--auto_mask_start_res`.
+- 2D classification: `--auto_mask` (default off) extends the same per-class
+  SSNR contour mask to 2D references (`mymodel.ref_dim == 2`, `iter >= 2`),
+  activating once resolution is better than `max(auto_mask_start_res,
+  2.5 * pixel_size)` (handling coarsely binned pixel sizes whose Nyquist exceeds
+  12 A). Before calling `autoMaskFromMap()`, negative CTF side-lobes are
+  clamped at 0, `opt.nr_seeds` is scaled to the 2D box (`max(16, min(1000,
+  pixels / 256))`), and masks covering less than 1% of the box fall back to an
+  all-ones identity mask (`1.0`). When combined with helical `--helical_auto_diameter`,
+  the contour mask multiplies multiplicatively inside both the box/solvent mask
+  and the class's own tube.
 - `--auto_mask_soft` sets the soft edge (A) instead (no search);
   `--auto_mask_mass` binarises at the threshold that encloses this mass (kDa).
 - Every iteration writes the masks as `<out>_itNNN_automask.mrc`
@@ -90,20 +100,35 @@ extension of the binary mask is passed as set (set it to 0 for trueFSC's mask).
 - Not at the last iteration of auto-refinement (the references are not masked
   there for validation).
 
-GUI (3D classification and 3D auto-refine, I/O tab): "Use automatic masks?"
-and "Automatic masks from (A)". In auto-refine, "Use solvent-flattened FSCs?"
-(Optimisation tab) also works with automatic masks.
+GUI (2D classification, 3D classification and 3D auto-refine, I/O tab): "Use
+automatic masks?" (default No) and "Auto-mask from (A), soft (A), mass (kDa):"
+(`--auto_mask_start_res`, `--auto_mask_soft`, `--auto_mask_mass`; negative soft
+edge / mass chooses automatically / uses Otsu's threshold). Unchecking "Use
+automatic masks?" emits `--dont_auto_mask`, and **Class2D consensus** forwards
+the setting from the source Class2D job. In auto-refine, "Use
+solvent-flattened FSCs?" (Optimisation tab) also works with automatic masks.
 
 Cost: the soft-edge search on the first follower takes two masked FSCs (four
 Fourier transforms of the box) per step, about 10 steps, and holds about ten
 copies of the box in memory there; `--auto_mask_soft` skips it.
 
+### 2D helical gating and unified `autoMask2DClass`
+
+- **Late 2D gating (`ref_dim == 2`)**: `MlOptimiser::autoMaskThisIteration()`
+  waits until `iter >= 6` in 2D classification and compares `1 / current_resolution`
+  against `eff_start = std::max(auto_mask_start_res, 2.5 * pixel_size)` so
+  coarsely binned particles wait until genuine signal passes the Nyquist-safe
+  floor.
+- **Unified helical 2D mask geometry (`autoMask2DClass`)**: Per-class 2D masks
+  filter shape features at `min_lowpass = 35` A, extend mask support
+  `extend_angst = 18` A along the filament axis, blend smoothly with the
+  previous iteration's mask, and pair with `helixalign::classDiameter` when
+  `--helical_auto_diameter` (also late-gated at `iter >= 6`, override
+  `RELION_HELICAL_AUTO_DIAMETER_START`) is enabled.
+
 ## Status
 
-Not compiled or run here (no C++ compiler on the development machine). The
-distance transform, the bounded Brent search, Otsu's threshold, the
-seed-and-grow step and the FSC crossing were checked with a line-by-line
-Python transliteration against scipy and against trueFSC's own functions.
-To do: build, then compare `relion_mask_create --auto --i2` with trueFSC's
-`.common_mask.mrc` on the same half-maps, and run a Refine3D and a Class3D
-with `--auto_mask`.
+Compiled, unit-tested (`[mask_edge]`, `[helix_context_types]`, `[pipeline]`),
+and validated end-to-end across 3D refinement (`relion_mask_create --auto`,
+Class3D/Refine3D) and helical 2D classification (`relion_refine --auto_mask`,
+`test_helical_class2d_context.py`).

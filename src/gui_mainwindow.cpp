@@ -637,6 +637,13 @@ GuiMainWindow::GuiMainWindow(int w, int h, const char* title, FileName fn_pipe,
 		browse_grp[nr_browse_tabs]->end();
 		nr_browse_tabs++;
 
+		browse_grp[nr_browse_tabs] = new Fl_Group(WCOL0, 2, JOBWINDOW_WIDTH, 615-MENUHEIGHT);
+		browser->add("2D helix sub-classify");
+		gui_jobwindows[nr_browse_tabs] = new JobWindow();
+		gui_jobwindows[nr_browse_tabs]->initialise(PROC_HELIX_SUBCLASSIFY);
+		browse_grp[nr_browse_tabs]->end();
+		nr_browse_tabs++;
+
 	}
 
 	browse_grp[nr_browse_tabs] = new Fl_Group(WCOL0, 2, JOBWINDOW_WIDTH, 615-MENUHEIGHT);

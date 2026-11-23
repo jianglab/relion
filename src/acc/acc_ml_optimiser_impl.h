@@ -140,6 +140,7 @@ void getFourierTransformsAndCtfs(long int part_id,
         RFLOAT prior_tilt = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_TILT_PRIOR);
         RFLOAT prior_psi = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_PSI_PRIOR);
         RFLOAT prior_psi_flip_ratio = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_PSI_PRIOR_FLIP_RATIO);
+        RFLOAT prior_rot_flip_ratio = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_ROT_PRIOR_FLIP_RATIO);
 
         bool do_auto_refine_local_searches = (baseMLO->do_auto_refine) && (baseMLO->sampling.healpix_order >= baseMLO->autosampling_hporder_local_searches);
         bool do_classification_local_searches = (! baseMLO->do_auto_refine) && (baseMLO->mymodel.orientational_prior_mode == PRIOR_ROTTILT_PSI)
@@ -157,6 +158,8 @@ void getFourierTransformsAndCtfs(long int part_id,
             prior_psi = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_PSI);
         if (prior_psi_flip_ratio > 998.99 && prior_psi_flip_ratio < 999.01)
             prior_psi_flip_ratio = 0.5;
+        if (prior_rot_flip_ratio > 998.99 && prior_rot_flip_ratio < 999.01)
+            prior_rot_flip_ratio = 0.5;
 
         ////////// How does this work now: each particle has a different sampling object?!!!
         // Select only those orientations that have non-zero prior probability
@@ -166,14 +169,14 @@ void getFourierTransformsAndCtfs(long int part_id,
             baseMLO->sampling.selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalReconstruction(prior_rot, prior_tilt, prior_psi,
                                                                                                       sqrt(baseMLO->mymodel.sigma2_rot), sqrt(baseMLO->mymodel.sigma2_tilt), sqrt(baseMLO->mymodel.sigma2_psi),
                                                                                                       op.pointer_dir_nonzeroprior, op.directions_prior, op.pointer_psi_nonzeroprior, op.psi_prior,
-                                                                                                      do_local_angular_searches, prior_psi_flip_ratio);
+                                                                                                      do_local_angular_searches, prior_psi_flip_ratio, prior_rot_flip_ratio);
         }
         else
         {
             baseMLO->sampling.selectOrientationsWithNonZeroPriorProbability(prior_rot, prior_tilt, prior_psi,
                                                                             sqrt(baseMLO->mymodel.sigma2_rot), sqrt(baseMLO->mymodel.sigma2_tilt), sqrt(baseMLO->mymodel.sigma2_psi),
                                                                             op.pointer_dir_nonzeroprior, op.directions_prior, op.pointer_psi_nonzeroprior, op.psi_prior,
-                                                                            (baseMLO->do_fix_gpu_bimodal_psi && baseMLO->do_bimodal_psi && baseMLO->mymodel.sigma2_psi > 0.));
+                                                                            (baseMLO->gpuBimodalPsiEnabled() && baseMLO->do_bimodal_psi && baseMLO->mymodel.sigma2_psi > 0.));
         }
         if (baseMLO->do_helical_polarity && baseMLO->mymodel.ref_dim == 2)
             baseMLO->helicalPolarityAdjustPsiPrior(op.part_id, prior_psi, op.pointer_psi_nonzeroprior, op.psi_prior);
@@ -1159,8 +1162,17 @@ inline void storeFilamentScores(MlOptimiser *baseMLO, const OptimisationParamter
 		std::vector<AccProjectorPlan> &projectorPlans, AccPtr<XFLOAT> &allWeights, size_t allWeights_size, size_t translation_num,
 		AccProjectorPlan *batch = NULL)
 {
-	if (baseMLO->filctx_opt.mode == filctx::OFF || baseMLO->filctx_loglik.empty() || sp.nr_images != 1)
+	if (!baseMLO->useCoarseFilamentScores() || !baseMLO->needFilamentLoglik() || baseMLO->filctx_loglik.empty() || sp.nr_images != 1)
 		return;
+	if (baseMLO->isFilamentSeedIter())
+	{
+		const int K = baseMLO->mymodel.nr_classes;
+		float *row = &baseMLO->filctx_loglik[(size_t)op.part_id * K];
+		for (int k = 0; k < K; k++) row[k] = 0.f;
+		if (op.part_id >= 0 && op.part_id < (long int)baseMLO->filctx_visited.size())
+			baseMLO->filctx_visited[op.part_id] = 1;
+		return;
+	}
 	// allWeights may live on the device only: copy into a host buffer of our own
 	std::vector<XFLOAT> hw(allWeights_size);
 #if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED)
@@ -1197,6 +1209,8 @@ inline void storeFilamentScores(MlOptimiser *baseMLO, const OptimisationParamter
 		}
 		for (int k = 0; k < K; k++)
 			if (best[k] < std::numeric_limits<XFLOAT>::max()) row[k] = (float)(op.min_diff2 - best[k]);
+		if (op.part_id >= 0 && op.part_id < (long int)baseMLO->filctx_visited.size())
+			baseMLO->filctx_visited[op.part_id] = 1;
 		return;
 	}
 #endif
@@ -1210,6 +1224,8 @@ inline void storeFilamentScores(MlOptimiser *baseMLO, const OptimisationParamter
 		if (n > 0) row[iclass] = (float)(op.min_diff2 - best);
 		pos += n;
 	}
+	if (op.part_id >= 0 && op.part_id < (long int)baseMLO->filctx_visited.size())
+		baseMLO->filctx_visited[op.part_id] = 1;
 }
 
 // With `hold` (CUDA, one image, 2D references with class batching and on-the-fly plans, no CC) the pass is
@@ -2536,6 +2552,13 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
         my_sigma2_offset_x = my_sigma2_offset_y = my_sigma2_offset_z = (baseMLO->mymodel.nr_bodies > 1) ?
 			baseMLO->mymodel.sigma_offset_bodies[ibody]*baseMLO->mymodel.sigma_offset_bodies[ibody] : baseMLO->mymodel.sigma2_offset;
     }
+    if (baseMLO->do_helical_track_smooth && baseMLO->do_helical_refine && !baseMLO->ignore_helical_symmetry &&
+        baseMLO->mymodel.ref_dim == 2 &&
+        baseMLO->iter >= 3 && baseMLO->helical_track_sigma_A > 0.)
+    {
+        const RFLOAT eff_track_sigma = std::max((RFLOAT)baseMLO->helical_track_sigma_A, (RFLOAT)(0.75 * baseMLO->sampling.offset_step * baseMLO->mymodel.pixel_size));
+        my_sigma2_offset_y = std::min(my_sigma2_offset_y, eff_track_sigma * eff_track_sigma);
+    }
 
 #if defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
 	deviceStream_t devAcc = accMLO->getSyclDevice();
@@ -2583,6 +2606,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 				else
 					pdf = op.directions_prior[idir] * op.psi_prior[ipsi];
 				pdf *= baseMLO->helicalContextPrior(op.part_id, exp_iclass);
+				pdf *= baseMLO->helical2dClassFactor(op.part_id, exp_iclass);
 
 				pdfs[iorientclass] = pdf * baseMLO->filamentClassFactor(op.part_id, exp_iclass) *
 				                     baseMLO->sharedRefSeedFactor(op.part_id, exp_iclass);
@@ -2752,22 +2776,25 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     myprior_z = ZZ(op.prior);
             }
 
+            RFLOAT rot_myprior_x = myprior_x;
+            RFLOAT rot_myprior_y = myprior_y;
+            RFLOAT rot_myprior_z = myprior_z;
+            // If it is doing helical refinement AND Cartesian vector myprior has a length > 0, transform the vector to its helical coordinates
+            if ( (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry))
+            {
+                RFLOAT mypriors_len2 = rot_myprior_x * rot_myprior_x + rot_myprior_y * rot_myprior_y;
+                if (accMLO->shiftsIs3D)
+                    mypriors_len2 += rot_myprior_z * rot_myprior_z;
+
+                if (mypriors_len2 > 0.00001)
+                {
+                    prior_rotation.apply(rot_myprior_x, rot_myprior_y, rot_myprior_z, rot_myprior_x, rot_myprior_y, rot_myprior_z);
+                }
+            }
+
             for (unsigned long itrans = sp.itrans_min; itrans <= sp.itrans_max; itrans++)
             {
-
-                // If it is doing helical refinement AND Cartesian vector myprior has a length > 0, transform the vector to its helical coordinates
-                if ( (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry))
-                {
-                    RFLOAT mypriors_len2 = myprior_x * myprior_x + myprior_y * myprior_y;
-                    if (accMLO->shiftsIs3D)
-                        mypriors_len2 += myprior_z * myprior_z;
-
-                    if (mypriors_len2 > 0.00001)
-                    {
-                        prior_rotation.apply(myprior_x, myprior_y, myprior_z, myprior_x, myprior_y, myprior_z);
-                    }
-                }
-                // (For helical refinement) Now offset, old_offset, sampling.translations and myprior are all in helical coordinates
+                // (For helical refinement) Now offset, old_offset, sampling.translations and rot_myprior are all in helical coordinates
 
                 // To speed things up, only calculate pdf_offset at the coarse sampling.
                 // That should not matter much, and that way one does not need to calculate all the OversampledTranslations
@@ -2777,13 +2804,13 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 double tdiff2 = 0.;
 
                 if ( (! baseMLO->do_helical_refine) || (baseMLO->ignore_helical_symmetry) )
-                    tdiff2 += (offset_x - myprior_x) * (offset_x - myprior_x) / (-2. * my_sigma2_offset_x);
-                tdiff2 += (offset_y - myprior_y) * (offset_y - myprior_y) / (-2. * my_sigma2_offset_y);
+                    tdiff2 += (offset_x - rot_myprior_x) * (offset_x - rot_myprior_x) / (-2. * my_sigma2_offset_x);
+                tdiff2 += (offset_y - rot_myprior_y) * (offset_y - rot_myprior_y) / (-2. * my_sigma2_offset_y);
                 if (accMLO->shiftsIs3D)
                 {
                     RFLOAT offset_z = old_offset_z + baseMLO->sampling.translations_z[itrans];
                     if ( (! baseMLO->do_helical_refine) || (baseMLO->ignore_helical_symmetry) )
-                        tdiff2 += (offset_z - myprior_z) * (offset_z - myprior_z) / (-2. * my_sigma2_offset_z);
+                        tdiff2 += (offset_z - rot_myprior_z) * (offset_z - rot_myprior_z) / (-2. * my_sigma2_offset_z);
                 }
 
                 // As of version 3.1, sigma_offsets are in Angstroms!
@@ -2836,6 +2863,36 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     sp.nr_trans);
 
 
+            // Filament polarity: sums of the coarse weights over psi angles that are not / are
+            // flipped (layout class, direction, psi, translation). Must run for BOTH fused and
+            // unfused GPU significance paths while ipartMweight holds un-filtered exponentiated weights.
+            auto storeCoarsePolarity = [&]()
+            {
+                if (!baseMLO->do_helical_polarity || baseMLO->mymodel.ref_dim != 2 || baseMLO->do_skip_align || baseMLO->do_skip_rotate)
+                    return;
+                const size_t n = ipartMweight.getSize();
+                std::vector<XFLOAT> w(n);
+#if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED) || defined(_SYCL_ENABLED)
+                ipartMweight.cpToHost(&w[0], n);
+                ipartMweight.streamSync();
+#else
+                memcpy(&w[0], ~ipartMweight, n * sizeof(XFLOAT));
+#endif
+                double wsum[2] = {0., 0.};
+                const long int cls_span = (long int)sp.nr_trans * (long int)sp.nr_dir * (long int)sp.nr_psi;
+                for (size_t k = 0; k < n; k++)
+                    if (w[k] > 0.)
+                    {
+                        long int ipsi = (k / sp.nr_trans) % sp.nr_psi + sp.ipsi_min;
+                        long int icls = (cls_span > 0) ? (long int)(k / cls_span) + sp.iclass_min : sp.iclass_min;
+                        double w_pol = (!baseMLO->helical_context.pol_class_weight.empty() && icls >= 0 &&
+                                        icls < (long int)baseMLO->helical_context.pol_class_weight.size())
+                                       ? baseMLO->helical_context.pol_class_weight[icls] : 1.;
+                        wsum[baseMLO->helicalPolarityMode(op.part_id, op.pointer_psi_nonzeroprior[ipsi])] += w[k] * w_pol;
+                    }
+                baseMLO->helicalPolarityStore(op.part_id, wsum[0], wsum[1]);
+            };
+
 #ifdef _CUDA_ENABLED
             // The rest of the pass on the GPU in a few launches and one copy
             // (RELION_GPU_FUSED_WEIGHTS, see CudaKernels::fusedWeightPass)
@@ -2858,6 +2915,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 CudaKernels::fusedWeightPass<XFLOAT>(ipartMweight, baseMLO->adaptive_fraction,
                         (long) baseMLO->maximum_significants, ~fres, true);
                 fres.cpToHostWait();
+                storeCoarsePolarity();
                 SigRes r;
                 memcpy(&r, &fres[0], sizeof(SigRes));
                 memcpy(&op.Mcoarse_significant.data[foffset], &fres[sizeof(SigRes)], fused_n);
@@ -2896,27 +2954,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             */
             AccUtilities::kernel_exponentiate( ipartMweight, 50 - weights_max);
 
-            // Filament polarity: sums of the coarse weights over psi angles that are not / are
-            // flipped (layout class, direction, psi, translation)
-            if (baseMLO->do_helical_polarity && !(baseMLO->do_skip_align || baseMLO->do_skip_rotate))
-            {
-                size_t n = ipartMweight.getSize();
-                std::vector<XFLOAT> w(n);
-#if defined(_CUDA_ENABLED) || defined(_HIP_ENABLED) || defined(_SYCL_ENABLED)
-                ipartMweight.cpToHost(&w[0], n);
-                ipartMweight.streamSync();
-#else
-                memcpy(&w[0], ~ipartMweight, n * sizeof(XFLOAT));
-#endif
-                double wsum[2] = {0., 0.};
-                for (size_t k = 0; k < n; k++)
-                    if (w[k] > 0.)
-                    {
-                        long int ipsi = (k / sp.nr_trans) % sp.nr_psi + sp.ipsi_min;
-                        wsum[baseMLO->helicalPolarityMode(op.part_id, op.pointer_psi_nonzeroprior[ipsi])] += w[k];
-                    }
-                baseMLO->helicalPolarityStore(op.part_id, wsum[0], wsum[1]);
-            }
+            storeCoarsePolarity();
 
             CTIC(accMLO->timer,"sort");
 #ifdef _HIP_ENABLED
@@ -3693,7 +3731,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
         RFLOAT old_offset_x = XX(op.old_offset);
         RFLOAT old_offset_y = YY(op.old_offset);
 
-        if (baseMLO->mymodel.ref_dim == 2 && baseMLO->mymodel.nr_bodies == 1)
+        if (baseMLO->mymodel.ref_dim == 2 && baseMLO->mymodel.nr_bodies == 1 && !baseMLO->do_helical_refine)
         {
             myprior_x = XX(baseMLO->mymodel.prior_offset_class[exp_iclass]);
             myprior_y = YY(baseMLO->mymodel.prior_offset_class[exp_iclass]);
@@ -3721,6 +3759,17 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
         		helical_prior ? DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_PSI) : 0.,
         		(accMLO->shiftsIs3D) ? (3) : (2), CART_TO_HELICAL_COORDS);
 
+        RFLOAT rot_myprior_x = myprior_x;
+        RFLOAT rot_myprior_y = myprior_y;
+        RFLOAT rot_myprior_z = myprior_z;
+        {
+            RFLOAT mypriors_len2 = rot_myprior_x * rot_myprior_x + rot_myprior_y * rot_myprior_y;
+            if (accMLO->shiftsIs3D)
+                mypriors_len2 += rot_myprior_z * rot_myprior_z;
+            if ( (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry) && (mypriors_len2 > 0.00001) )
+                prior_rotation.apply(rot_myprior_x, rot_myprior_y, rot_myprior_z, rot_myprior_x, rot_myprior_y, rot_myprior_z);
+        }
+
         //Pregenerate oversampled translation objects for kernel-call
         for (long int itrans = 0, iitrans = 0; itrans < sp.nr_trans; itrans++)
         {
@@ -3741,24 +3790,13 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
                 if (accMLO->shiftsIs3D)
                     oo_otrans[otrans_z+fake_class*nr_transes+iitrans] = zshift;
 
-                // Calculate the vector length of myprior
-                RFLOAT mypriors_len2 = myprior_x * myprior_x + myprior_y * myprior_y;
-                if (accMLO->shiftsIs3D)
-                    mypriors_len2 += myprior_z * myprior_z;
-
-                // If it is doing helical refinement AND Cartesian vector myprior has a length > 0, transform the vector to its helical coordinates
-                if ( (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry) && (mypriors_len2 > 0.00001) )
-                {
-                    prior_rotation.apply(myprior_x, myprior_y, myprior_z, myprior_x, myprior_y, myprior_z);
-                }
-
                 RFLOAT diffx = 0.;
                 if ( (! baseMLO->do_helical_refine) || (baseMLO->ignore_helical_symmetry) )
-                    diffx = myprior_x - xshift;
-                RFLOAT diffy = myprior_y - yshift;
+                    diffx = rot_myprior_x - xshift;
+                RFLOAT diffy = rot_myprior_y - yshift;
                 RFLOAT diffz = 0;
                 if (accMLO->shiftsIs3D)
-                    diffz = myprior_z - zshift;
+                    diffz = rot_myprior_z - zshift;
 
                 oo_otrans[otrans_x2y2z2+fake_class*nr_transes+iitrans] = diffx*diffx + diffy*diffy + diffz*diffz;
 
@@ -4043,7 +4081,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     // The host copy of the fine weights and their orientation indices is also what the dense weight map
     // is made from below; with RELION_GPU_ASYNC_STORE that is done on the device, and the copy is left
     // out unless the consistency check needs it (or "check" compares the two ways of making the map).
-    const bool needHostFineWeights = (ibody == 0 && baseMLO->do_keep_full_filaments && baseMLO->mymodel.nr_classes > 1);
+    const bool needHostFineWeights = (ibody == 0 && baseMLO->needPerClassMetadata());
     bool deviceScatter = false;
 #ifdef _CUDA_ENABLED
     deviceScatter = asyncStoreMode != 0;
@@ -5308,6 +5346,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
             }
             if (baseMLO->do_helical_context)
                 baseMLO->helicalContextStore(op.part_id, thr_wsum_pdf_class);
+            if (baseMLO->needFilamentLoglik() && !baseMLO->useCoarseFilamentScores())
+                baseMLO->storeFilamentPosterior(op.part_id, thr_wsum_pdf_class, op.metadata_offset);
             for (int n = 0; n < baseMLO->mymodel.nr_classes; n++) {
                 baseMLO->wsum_model.pdf_class[n] += thr_wsum_pdf_class[n];
                 if (baseMLO->mymodel.ref_dim == 2) {
@@ -5826,7 +5866,7 @@ void accDoExpectationParticleGroup(MlClass *myInstance, const std::vector<unsign
 			AccPtr<char> recs = ptrFactory.make<char>(), xt_tables = ptrFactory.make<char>(), xt_work = ptrFactory.make<char>();
 			runDiff2KernelCoarseGroup(items, recs, xt_tables, xt_work);
 			finishCoarseDeferred(holds, ops, mws, ptrFactory);
-			if (baseMLO->filctx_opt.mode != filctx::OFF)
+			if (baseMLO->needFilamentLoglik() && baseMLO->useCoarseFilamentScores())
 				for (auto &w : sg)
 					if (w->hold->def.n_classes > 0)
 					{

@@ -498,6 +498,7 @@ class star_handler_parameters
             bool has_odd_zernike = false, has_not_odd_zernike = false;
             bool has_even_zernike = false, has_not_even_zernike = false;
             bool has_ctf_premultiplied = false, has_not_ctf_premultiplied = false;
+            bool has_ctf_premult_intact = false, has_not_ctf_premult_intact = false;
             for (int i = 0; i < fns_in.size(); i++)
             {
                 if (MDoptics[i].containsLabel(EMDL_IMAGE_BEAMTILT_X) ||
@@ -543,6 +544,14 @@ class star_handler_parameters
                 else
                 {
                     has_not_ctf_premultiplied = true;
+                }
+                if (MDoptics[i].containsLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK))
+                {
+                    has_ctf_premult_intact = true;
+                }
+                else
+                {
+                    has_not_ctf_premult_intact = true;
                 }
             }
 #ifdef DEBUG
@@ -617,6 +626,17 @@ class star_handler_parameters
                         FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDoptics[i])
                         {
                             MDoptics[i].setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED, false);
+                        }
+                    }
+                }
+
+                if (has_ctf_premult_intact && has_not_ctf_premult_intact)
+                {
+                    if (!MDoptics[i].containsLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK))
+                    {
+                        FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDoptics[i])
+                        {
+                            MDoptics[i].setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK, false);
                         }
                     }
                 }

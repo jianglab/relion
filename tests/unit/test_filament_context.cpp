@@ -10,6 +10,7 @@
 #include <catch2/catch.hpp>
 
 #include "src/filament_context.h"
+#include "src/healpix_sampling.h"
 #include "src/metadata_table.h"
 
 #include <cmath>
@@ -172,4 +173,154 @@ TEST_CASE("segments are grouped per filament and in track order", "[filament_con
 	CHECK(f[0] == std::vector<long int>({3, 0}));  // a.mrc tube 1
 	CHECK(f[1] == std::vector<long int>({1, 4}));  // a.mrc tube 2
 	CHECK(f[2] == std::vector<long int>({2}));
+}
+
+TEST_CASE("3D helical bimodal psi selection resets is_psi_flipped per psi sample",
+          "[filament_context][healpix]")
+{
+	HealpixSampling hs;
+	hs.healpix_order = 1;
+	hs.psi_step = 5.;
+	hs.offset_step = 1.;
+	hs.offset_range = 5.;
+	hs.limit_tilt = -91.;
+	hs.fn_sym = "C1";
+	hs.initialise(3, true, false, false, false, true, 4.75, -2.6);
+
+	std::vector<int> ptr_dir, ptr_psi;
+	std::vector<RFLOAT> dir_prior, psi_prior;
+	hs.selectOrientationsWithNonZeroPriorProbabilityFor3DHelicalReconstruction(
+		0., 90., 15., 5., 5., 5., ptr_dir, dir_prior, ptr_psi, psi_prior, false, 0.25, 0.5);
+
+	REQUIRE(ptr_psi.size() == psi_prior.size());
+	REQUIRE_FALSE(psi_prior.empty());
+	double sum_unflipped = 0., sum_flipped = 0., total = 0.;
+	for (size_t i = 0; i < ptr_psi.size(); i++)
+	{
+		RFLOAT psi = 0.;
+		hs.getPsiAngle(ptr_psi[i], psi);
+		const double w = psi_prior[i];
+		total += w;
+		if (std::fabs(std::remainder(psi - 15., 360.)) < 20.)
+			sum_unflipped += w;
+		else if (std::fabs(std::remainder(psi + 165., 360.)) < 20.)
+			sum_flipped += w;
+	}
+	CHECK(sum_unflipped > 0.);
+	CHECK(sum_flipped > 0.);
+	CHECK(total == Approx(1.0).margin(1e-6));
+	CHECK((sum_unflipped / sum_flipped) == Approx(3.0).margin(0.25));
+}
+
+TEST_CASE("Huber contrast clipping prevents single extreme outlier from corrupting leave-one-out prior",
+          "[filament_context]")
+{
+	const int K = 2;
+	std::vector<std::vector<long int> > f = {{0, 1, 2}};
+	std::vector<std::vector<double> > tracks = {{0., 15., 30.}};
+	std::vector<float> ll = {
+		0.5f, 0.f,
+		0.5f, 0.f,
+		0.f, 100.f
+	};
+
+	std::vector<double> pi = {0.5, 0.5};
+	filctx::Options opt;
+	opt.mode = filctx::CHAIN;
+	opt.stay = 0.99;
+	opt.bw_iters = 0;
+	opt.floor = 0.;
+	std::vector<double> T;
+	std::vector<float> lp;
+
+	opt.clip = -1.;
+	filctx::computePriors(f, tracks, 15., ll, K, pi, opt, 1.0, T, lp);
+	REQUIRE(std::exp(lp[0 * 2 + 0]) < 0.03);
+
+	opt.clip = 1.0;
+	filctx::computePriors(f, tracks, 15., ll, K, pi, opt, 1.0, T, lp);
+	REQUIRE(std::exp(lp[0 * 2 + 0]) > 0.30);
+
+	// Also check moderate Huber bound (clip = 6.0) caps an extreme segment relative to unclipped
+	opt.mode = filctx::FILAMENT;
+	opt.alpha = 0.;
+	f = {{0, 1}};
+	tracks = {{0., 15.}};
+	ll = {6.f, 0.f, 0.f, 20.f};
+	opt.clip = -1.;
+	filctx::computePriors(f, tracks, 15., ll, K, pi, opt, 1.0, T, lp);
+	const float p_unclipped = std::exp(lp[0 * 2 + 0]);
+	opt.clip = 6.0;
+	filctx::computePriors(f, tracks, 15., ll, K, pi, opt, 1.0, T, lp);
+	const float p_clipped = std::exp(lp[0 * 2 + 0]);
+	REQUIRE(p_clipped > p_unclipped * 1e5f);
+}
+
+TEST_CASE("Physical track exclusion leaves out nearby overlapping segments across irregular track spacing",
+          "[filament_context]")
+{
+	const int K = 2;
+	std::vector<std::vector<long int> > f = {{0, 1, 2, 3}};
+	std::vector<std::vector<double> > tracks = {{0., 10., 20., 200.}};
+	std::vector<float> ll = {
+		10.f, 0.f,
+		10.f, 0.f,
+		10.f, 0.f,
+		0.f, 10.f
+	};
+	std::vector<double> pi = {0.5, 0.5};
+	filctx::Options opt;
+	opt.mode = filctx::FILAMENT;
+	opt.gap = 1;
+	opt.exclude_angst = 50.;
+	opt.floor = 0.;
+	opt.alpha = 0.01;
+	std::vector<double> T;
+	std::vector<float> lp;
+
+	filctx::computePriors(f, tracks, 10., ll, K, pi, opt, 1.0, T, lp);
+	CHECK(std::exp(lp[1 * 2 + 1]) > 0.9);
+	CHECK(std::exp(lp[3 * 2 + 0]) > 0.9);
+}
+
+TEST_CASE("3D helical phase coherence bonus favors azimuthally consistent rot progression",
+          "[filament_context]")
+{
+	const long int N = 9;
+	const int K = 2;
+	std::vector<std::vector<long int> > f = {{0, 1, 2, 3, 4, 5, 6, 7, 8}};
+	std::vector<std::vector<double> > tracks = {{0., 19., 38., 57., 76., 95., 114., 133., 152.}};
+	std::vector<filctx::ClassHelixParams> hp(K);
+	for (int k = 0; k < K; k++)
+	{
+		hp[k].twist_deg = -2.61;
+		hp[k].rise_angst = 4.75;
+		hp[k].sym_order = 2;
+	}
+	const double scrambled[9] = {0., 45., 90., 135., 20., 110., 5., 80., 150.};
+	std::vector<double> rot((size_t)N * K, 0.), psi((size_t)N * K, 0.),
+	                    dx((size_t)N * K, 0.), dy((size_t)N * K, 0.), psi_prior(N, 0.);
+	std::vector<char> valid((size_t)N * K, 1);
+	for (long int p = 0; p < N; p++)
+	{
+		rot[(size_t)p * K + 0] = -2.61 * (tracks[0][p] / 4.75) + 30.;
+		rot[(size_t)p * K + 1] = scrambled[p];
+	}
+	std::vector<float> bonus;
+	filctx::computeHelicalPhaseBonus(f, tracks, N, K, rot, psi, dx, dy, valid, psi_prior,
+	                                 hp, 1, 20., 1.0, bonus);
+	REQUIRE(bonus.size() == (size_t)N * K);
+	CHECK(bonus[4 * 2 + 0] > bonus[4 * 2 + 1] + 0.5f);
+
+	std::vector<float> ll((size_t)N * K, 0.f);
+	std::vector<double> pi = {0.5, 0.5}, T;
+	std::vector<float> lp;
+	filctx::Options opt;
+	opt.mode = filctx::FILAMENT;
+	opt.gap = 1;
+	opt.exclude_angst = 20.;
+	opt.floor = 0.;
+	opt.alpha = 0.;
+	filctx::computePriors(f, tracks, 19., ll, K, pi, opt, 1.0, T, lp, &bonus);
+	CHECK(std::exp(lp[4 * 2 + 0]) > 0.60);
 }

@@ -38,7 +38,8 @@
 using namespace gravis;
 
 
-ObservationModel::ObservationModel()
+ObservationModel::ObservationModel() :
+	hasCtfPremultipliedIntactFirstPeakLabel(false)
 {
 }
 
@@ -51,7 +52,9 @@ ObservationModel::ObservationModel(const MetaDataTable &_opticsMdt, bool do_die_
 	boxSizesX(_opticsMdt.numberOfObjects(), 0),
 	boxSizesY(_opticsMdt.numberOfObjects(), 0),
     CtfPremultiplied(_opticsMdt.numberOfObjects(), false),
-    CtfCorrected(_opticsMdt.numberOfObjects(), false)
+    CtfPremultipliedIntactFirstPeak(_opticsMdt.numberOfObjects(), false),
+    CtfCorrected(_opticsMdt.numberOfObjects(), false),
+    hasCtfPremultipliedIntactFirstPeakLabel(false)
 {
 	if (!(opticsMdt.containsLabel(EMDL_IMAGE_PIXEL_SIZE) ||
 	      opticsMdt.containsLabel(EMDL_MICROGRAPH_PIXEL_SIZE) ||
@@ -145,6 +148,13 @@ ObservationModel::ObservationModel(const MetaDataTable &_opticsMdt, bool do_die_
 			bool val;
 			opticsMdt.getValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED, val, i);
 			CtfPremultiplied[i] = val;
+		}
+		if (opticsMdt.containsLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK))
+		{
+			bool val;
+			opticsMdt.getValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK, val, i);
+			CtfPremultipliedIntactFirstPeak[i] = val;
+			hasCtfPremultipliedIntactFirstPeakLabel = true;
 		}
         if (opticsMdt.containsLabel(EMDL_OPTIMISER_DATA_ARE_CTF_CORRECTED))
         {
@@ -901,6 +911,38 @@ int ObservationModel::getOpticsGroup(const MetaDataTable &particlesMdt, long int
 	opticsGroup--;
 
 	return opticsGroup;
+}
+
+bool ObservationModel::hasCtfPremultipliedIntactFirstPeak() const
+{
+	return hasCtfPremultipliedIntactFirstPeakLabel;
+}
+
+bool ObservationModel::getCtfPremultipliedIntactFirstPeak(int og) const
+{
+	if (og >= 0 && og < (int)CtfPremultipliedIntactFirstPeak.size())
+	{
+		return CtfPremultipliedIntactFirstPeak[og];
+	}
+	else
+	{
+		return false;
+	}
+}
+
+void ObservationModel::setCtfPremultipliedIntactFirstPeak(int og, bool val)
+{
+	if (og >= 0 && og < (int)CtfPremultipliedIntactFirstPeak.size())
+	{
+		CtfPremultipliedIntactFirstPeak[og] = val;
+		hasCtfPremultipliedIntactFirstPeakLabel = true;
+		if (og < opticsMdt.numberOfObjects())
+		{
+			if (!opticsMdt.containsLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK))
+				opticsMdt.addLabel(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK);
+			opticsMdt.setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED_INTACT_FIRST_PEAK, val, og);
+		}
+	}
 }
 
 bool ObservationModel::getCtfPremultiplied(int og) const
