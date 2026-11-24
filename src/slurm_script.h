@@ -37,6 +37,10 @@
  * command: the name of a file whose contents are copied, or the lines
  * themselves. RELION_MPIRUN names the MPI launcher (default mpirun).
  *
+ * The script's first command echoes the job id, the host and the job's nodes,
+ * so the output starts with where the job runs (after any #SBATCH lines that
+ * start the preamble).
+ *
  * The text has the same XXX...XXX placeholders as a template, so it is
  * completed the same way (RelionJob::saveJobSubmissionScript).
  */

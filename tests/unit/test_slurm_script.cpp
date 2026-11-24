@@ -154,6 +154,14 @@ TEST_CASE("Slurm script: text", "[slurm]")
 	CHECK(t.find("--gpus") == std::string::npos);
 	CHECK(t.find("#SBATCH --time=2:00:00\n") != std::string::npos);
 	CHECK(t.find("#SBATCH --account=abc --qos=high\n") != std::string::npos);
+	CHECK(t.find("module load openmpi\nmpirun --oversubscribe") != std::string::npos);
+	// the node is the first line of the output: after the preamble's own #SBATCH lines, before its commands
+	t = slurmscript::templateText(r, slurmscript::plan(r, nodes), "#SBATCH --account=xyz\nmodule load openmpi\n");
+	const size_t echo = t.find("echo \"Slurm job ${SLURM_JOB_ID} on $(hostname)");
+	REQUIRE(echo != std::string::npos);
+	CHECK(t.find("#SBATCH --account=xyz\n") < echo);
+	CHECK(echo < t.find("module load openmpi\n"));
+	t = slurmscript::templateText(r, slurmscript::plan(r, nodes), "module load openmpi");
 	CHECK(t.find("module load openmpi\nmpirun --oversubscribe --bind-to none -n XXXmpinodesXXX XXXcommandXXX\n") != std::string::npos);
 
 	// every process working: no oversubscription, and Slurm chooses the nodes

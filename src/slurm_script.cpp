@@ -290,9 +290,26 @@ std::string templateText(const Request &r, const Layout &l, const std::string &p
 	const std::string args = trim(r.args);
 	if (!args.empty())
 		t << "#SBATCH " << args << "\n";
-	if (!pre.empty())
+	// Leading comment lines of the preamble (#SBATCH directives of the site) stay
+	// above the first command, or Slurm would ignore them
+	size_t body = 0;
+	while (body < pre.size())
 	{
-		t << pre;
+		const size_t first = pre.find_first_not_of(" \t", body);
+		if (first == std::string::npos || pre[first] != '#') break;
+		const size_t eol = pre.find('\n', body);
+		body = (eol == std::string::npos) ? pre.size() : eol + 1;
+	}
+	if (body > 0)
+	{
+		t << pre.substr(0, body);
+		if (pre[body - 1] != '\n') t << "\n";
+	}
+	// First line of the job's output: where it runs
+	t << "echo \"Slurm job ${SLURM_JOB_ID} on $(hostname) (nodes: ${SLURM_JOB_NODELIST}), started $(date)\"\n";
+	if (body < pre.size())
+	{
+		t << pre.substr(body);
 		if (pre.back() != '\n') t << "\n";
 	}
 	for (const std::string &e : r.exports)
