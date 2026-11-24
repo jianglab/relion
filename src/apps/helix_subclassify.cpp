@@ -933,9 +933,12 @@ public:
 			{
 				const char *env_mpirun = getenv("RELION_MPIRUN");
 				const std::string mpirun_bin = (env_mpirun != NULL && env_mpirun[0] != '\0') ? std::string(env_mpirun) : std::string("mpirun");
+				// The Slurm script asks for one task fewer than the ranks (the leader only coordinates),
+				// so mpirun must be told to oversubscribe. The flag, unlike the Open MPI 4 environment
+				// variable, is also understood by Open MPI 5 (PRRTE).
 				cmd << "OMPI_MCA_rmaps_base_oversubscribe=1 " << mpirun_bin << " ";
 				if (mpirun_bin.find("srun") == std::string::npos)
-					cmd << "--bind-to none ";
+					cmd << "--oversubscribe --bind-to none ";
 				cmd << "-n " << nr_mpi << " ";
 			}
 			cmd << shellQuote(refine_bin)
