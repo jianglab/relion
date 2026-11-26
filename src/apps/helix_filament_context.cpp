@@ -22,6 +22,16 @@
 #include <omp.h>
 #endif
 
+static bool isEnvFlagOff(const char *name)
+{
+	const char *env = getenv(name);
+	if (env == NULL || env[0] == '\0')
+		return false;
+	std::string v(env);
+	for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+	return (v == "0" || v == "no" || v == "off" || v == "false");
+}
+
 class helix_filament_context_parameters
 {
 public:
@@ -47,12 +57,16 @@ public:
 		diameter = textToFloat(parser.getOption("--diameter", "Particle (mask) diameter in A (default: box size)", "-1"));
 		outer_diameter = textToFloat(parser.getOption("--outer_diameter", "Helical outer tube diameter in A (0: none)", "0"));
 		sort_classes_junk = textToFloat(parser.getOption("--sort_classes_junk", "Mark classes with resolution worse than this factor x median as junk", "1.5"));
-		ctx.nr_types = textToInteger(parser.getOption("--types", "Number of helical types (one more if there are junk filaments)", "4"));
-		types_max = textToInteger(parser.getOption("--types_max", "Choose the number of types between --types and this by held-out log-likelihood (cross-validation over filaments; <= 0: no)", "-1"));
+		ctx.nr_types = textToInteger(parser.getOption("--types", "Number of helical types (one more if there are junk filaments)", "2"));
+		types_max = textToInteger(parser.getOption("--types_max", "Choose the number of types between --types and this by held-out log-likelihood (cross-validation over filaments; <= --types: fixed)", "10"));
 		types_tol = textToFloat(parser.getOption("--types_tol", "With --types_max: use the fewest types whose held-out log-likelihood per segment is within this of the best", "0.01"));
 		types_agree = textToFloat(parser.getOption("--types_agree", "With --types_max: use the most types whose segment types, learnt from separate folds of the filaments, agree to at least this (adjusted Rand index); 0: by log-likelihood (--types_tol)", "0.75"));
 		nr_folds = textToInteger(parser.getOption("--folds", "Number of cross-validation folds for --types_max", "3"));
-		do_hierarchical = parser.checkOption("--hierarchical", "Enable recursive hierarchical tree splitting (selectNrTypes + splitTypesByTwistRate per node)");
+		const bool hier_on = parser.checkOption("--hierarchical", "Enable recursive hierarchical tree splitting (default on; RELION_HELICAL_HIERARCHICAL=0 or --dont_hierarchical disables)");
+		const bool hier_off = parser.checkOption("--dont_hierarchical", "Disable recursive hierarchical tree splitting and use flat mixture selection only");
+		if (hier_on && hier_off)
+			REPORT_ERROR("ERROR: specify at most one of --hierarchical and --dont_hierarchical.");
+		do_hierarchical = hier_on ? true : (hier_off ? false : !isEnvFlagOff("RELION_HELICAL_HIERARCHICAL"));
 		max_types_total = textToInteger(parser.getOption("--max_types_total", "With --hierarchical: maximum total leaf types across the tree", "24"));
 		min_type_filaments = textToInteger(parser.getOption("--min_type_filaments", "With --hierarchical: minimum filaments in a node to attempt further splitting", "20"));
 		fn_classes = parser.getOption("--classes", "Class averages (default: the _classes.mrcs next to the input _data.star)", "");
@@ -117,6 +131,13 @@ public:
 			diameter = box * angpix;
 			if (outer_diameter > 0.)
 				diameter = std::min(diameter, outer_diameter);
+		}
+
+		if (K >= 2)
+		{
+			ctx.nr_types = std::max(1, std::min(ctx.nr_types, K));
+			if (types_max > 0)
+				types_max = std::max(1, std::min(types_max, K));
 		}
 
 		ctx.nr_bw_iter = nr_iter;
@@ -288,7 +309,7 @@ public:
 				std::cout << " Filament context: surgical final filter updated " << nr_smoothed << " segments" << std::endl;
 		};
 
-		if (do_hierarchical)
+		if (do_hierarchical && types_max > ctx.nr_types && (int)ctx.filament_name.size() >= min_type_filaments)
 		{
 			const int tmax_node = (types_max > 1) ? types_max : std::min(12, std::max(2, max_types_total));
 			ctx.runHierarchicalTyping(psi, psip, ctx.nr_types, tmax_node, max_types_total, min_type_filaments,

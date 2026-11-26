@@ -33,6 +33,16 @@
 #include <unistd.h>
 #include <vector>
 
+static bool isEnvFlagOff(const char *name)
+{
+	const char *env = getenv(name);
+	if (env == NULL || env[0] == '\0')
+		return false;
+	std::string v(env);
+	for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+	return (v == "0" || v == "no" || v == "off" || v == "false");
+}
+
 namespace {
 
 std::string trimTrailingSlashes(std::string s)
@@ -363,7 +373,7 @@ public:
 	RFLOAT psi_step, sigma_psi, offset_range, offset_step, tau2_fudge, highres_limit, helical_context_weight;
 	RFLOAT auto_mask_start_res, auto_mask_soft, auto_mask_mass;
 	RFLOAT sort_classes_junk, types_tol, types_agree;
-	bool do_retype, do_hierarchical, do_premult, do_auto_premult, dont_premult, ctf_intact_first_peak;
+	bool do_retype, do_hierarchical, do_dont_hierarchical, do_premult, do_auto_premult, dont_premult, ctf_intact_first_peak;
 	bool do_invert_contrast, do_float16, do_auto_mask, do_dont_auto_mask;
 	bool do_keep_all_iter, do_dont_keep_all_iter, do_bimodal_psi, do_prepare_only;
 	std::string gpu_ids;
@@ -379,13 +389,17 @@ public:
 		fn_model = parser.getOption("--model", "Stage-1 _model.star (default: inferred from --i)", "");
 		fn_classes = parser.getOption("--classes", "Stage-1 _classes.mrcs (default: inferred from --i)", "");
 		types_min = textToInteger(parser.getOption("--types", "Minimum number of helical types when running typing", "2"));
-		types_max = textToInteger(parser.getOption("--types_max", "Maximum number of helical types for automatic HMM + twist selection (<= --types: fixed)", "6"));
+		types_max = textToInteger(parser.getOption("--types_max", "Maximum number of helical types for automatic HMM + twist selection (<= --types: fixed)", "10"));
 		types_tol = textToFloat(parser.getOption("--types_tol", "Cross-validation tolerance for --types_max", "0.01"));
 		types_agree = textToFloat(parser.getOption("--types_agree", "Minimum fold ARI agreement for --types_max", "0.75"));
 		nr_folds = textToInteger(parser.getOption("--folds", "Cross-validation folds for --types_max", "3"));
 		sort_classes_junk = textToFloat(parser.getOption("--sort_classes_junk", "Mark classes with resolution worse than this factor x median as junk", "1.5"));
 		do_retype = parser.checkOption("--retype", "Re-run HelicalContext HMM typing even if rlnHelicalType is already present");
-		do_hierarchical = parser.checkOption("--hierarchical", "Enable recursive hierarchical tree splitting when running Stage-1 typing");
+		const bool opt_hier = parser.checkOption("--hierarchical", "Enable recursive hierarchical tree splitting when running Stage-1 typing (default on; disable with --dont_hierarchical or RELION_HELICAL_HIERARCHICAL=0)");
+		do_dont_hierarchical = parser.checkOption("--dont_hierarchical", "Disable recursive hierarchical tree splitting in Stage-1 typing");
+		if (opt_hier && do_dont_hierarchical)
+			REPORT_ERROR("Specify at most one of --hierarchical and --dont_hierarchical.");
+		do_hierarchical = opt_hier ? true : (do_dont_hierarchical ? false : !isEnvFlagOff("RELION_HELICAL_HIERARCHICAL"));
 		max_types_total = textToInteger(parser.getOption("--max_types_total", "With --hierarchical: maximum total leaf types across the tree", "24"));
 		min_type_filaments = textToInteger(parser.getOption("--min_type_filaments", "With --hierarchical: minimum filaments in a node to attempt further splitting", "20"));
 		min_segs = textToInteger(parser.getOption("--min_segs", "Minimum non-junk segments in a type to run Stage 2", "20"));
@@ -414,9 +428,9 @@ public:
 		offset_step = textToFloat(parser.getOption("--offset_step", "Stage-2 translational search step before oversampling=1 (pixels)", "1"));
 		tau2_fudge = textToFloat(parser.getOption("--tau2_fudge", "Regularisation parameter T for Stage 2", "2"));
 		highres_limit = textToFloat(parser.getOption("--highres_limit", "High-resolution limit for Stage-2 alignment in A (-1: none)", "-1"));
-		do_auto_mask = parser.checkOption("--auto_mask", "Enable 2D contour reference auto-masking in Stage 2");
+		do_auto_mask = parser.checkOption("--auto_mask", "Enable 2D contour reference auto-masking in Stage 2 (default on; disable with --dont_auto_mask)");
 		do_dont_auto_mask = parser.checkOption("--dont_auto_mask", "Disable 2D contour reference auto-masking in Stage 2");
-		auto_mask_start_res = textToFloat(parser.getOption("--auto_mask_start_res", "Start resolution (A) for Stage-2 2D auto-masking", "12"));
+		auto_mask_start_res = textToFloat(parser.getOption("--auto_mask_start_res", "Start resolution (A) for Stage-2 2D auto-masking", "15"));
 		auto_mask_soft = textToFloat(parser.getOption("--auto_mask_soft", "Soft edge width (A) for Stage-2 auto-masking (-1: 3x resolution)", "-1"));
 		auto_mask_mass = textToFloat(parser.getOption("--auto_mask_mass", "Enclosed mass (kDa) for Stage-2 auto-masking (-1: Otsu threshold)", "-1"));
 		helical_context_weight = textToFloat(parser.getOption("--helical_context_weight", "Local helical context weight in Stage 2 (0: disable)", "0.5"));
@@ -437,6 +451,7 @@ public:
 			REPORT_ERROR("Specify at most one of --premultiply_ctf/--auto_premultiply_ctf and --dont_premultiply_ctf.");
 		if (do_auto_mask && do_dont_auto_mask)
 			REPORT_ERROR("Specify at most one of --auto_mask and --dont_auto_mask.");
+		do_auto_mask = !do_dont_auto_mask;
 		if (do_keep_all_iter && do_dont_keep_all_iter)
 			REPORT_ERROR("Specify at most one of --keep_all_iterations and --dont_keep_all_iterations.");
 		if (nr_pool < 1)
@@ -621,6 +636,12 @@ public:
 			stage1_K = std::max(1, stage1_K);
 			if (stage1_K > 1)
 			{
+				if (stage1_K >= 2)
+				{
+					types_min = std::max(1, std::min(types_min, stage1_K));
+					if (types_max > 0)
+						types_max = std::max(1, std::min(types_max, stage1_K));
+				}
 				HelicalContext ctx;
 				ctx.verb = verb;
 				ctx.nr_types = std::max(1, types_min);
@@ -706,7 +727,7 @@ public:
 					if (cls_cnt[k] < min_cls_segs) ctx.junk_class[k] = 1;
 				if (!refs.empty())
 					ctx.computeClassEquivalence(refs, stage1_angpix, outer_diameter);
-				if (do_hierarchical)
+				if (do_hierarchical && types_max > ctx.nr_types && (int)ctx.filament_name.size() >= min_type_filaments)
 				{
 					const int tmax_node = (types_max > 1) ? types_max : std::min(12, std::max(2, max_types_total));
 					ctx.runHierarchicalTyping(psi, psip, ctx.nr_types, tmax_node, max_types_total, min_type_filaments,

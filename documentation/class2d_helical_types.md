@@ -106,19 +106,30 @@ Class2D, Helix tab, **Filament context: Helical types** (EM only; with VDAM the
 job is refused). When **Helical types** is selected, the Helix tab switches the
 context parameter block to the helical-context controls:
 - **Helical types (min, max)** (`--helical_context_types`, `--helical_context_types_max`, default `2` to `10`, capped at `K`; set `min == max` to fix the type count)
+- **Hierarchical typing?** (`--helical_context_hierarchical` / `--dont_helical_context_hierarchical`, default Yes unless `RELION_HELICAL_HIERARCHICAL=0`: refines types on the final iteration by recursive hierarchical tree splitting + twist-rate refinement)
 - **Start iter, min fold ARI** (`--helical_context_start` default `4`, `--helical_context_types_agree` default `0.75`)
 - **Context power, exclude (A)** (`--helical_context_temper` default `-1`, `--helical_context_exclude` default `-1`)
-- **Smooth filament tracks?** (`--helical_track_smooth` / `--dont_helical_track_smooth`, default Yes unless `RELION_HELICAL_TRACK_SMOOTH=0`)
-- **Propagate filament polarity?** (`--helical_polarity` / `--dont_helical_polarity`, default Yes unless `RELION_HELICAL_POLARITY=0`; greyed out unless image alignment and bimodal psi searches are enabled)
+- **Smooth tracks, helical polarity** (`--helical_track_smooth` / `--dont_helical_track_smooth`, default Yes unless `RELION_HELICAL_TRACK_SMOOTH=0`; `--helical_polarity` / `--dont_helical_polarity`, default Yes unless `RELION_HELICAL_POLARITY=0`, greyed out unless image alignment and bimodal psi searches are enabled)
 
 Setting **Classify 2D helical segments?** to Yes selects the optimal combined
 default configuration: EM algorithm, **Helical types** (`--helical_context`),
 **Use cylindrical mask?** = Yes, **Measure tube diameter per class?** = Yes
-(default unless `RELION_HELICAL_AUTO_DIAMETER=0`), track smoothing, polarity
-propagation, and **Sort the classes?** = Yes (most abundant type first, junk last);
-setting it back to No restores VDAM, Off, and unsorted classes unless another
-context mode was chosen in between. Loading an existing job or reading an older
-`job.star` missing `helical_auto_diameter` keeps `No` for backwards compatibility.
+(default unless `RELION_HELICAL_AUTO_DIAMETER=0`), **Use automatic masks?** = Yes
+from `15` A (`--auto_mask --auto_mask_start_res 15`), hierarchical typing, track
+smoothing, polarity propagation, and **Sort the classes?** = Yes (most abundant
+type first, junk last); setting it back to No restores VDAM, Off, `No` auto-masks
+(reverting `15` -> `12` A), and unsorted classes unless another context mode was
+chosen in between. Loading an existing job or reading an older `job.star`
+missing `helical_auto_diameter` or `helctx_hierarchical` keeps `No` for
+backwards compatibility.
+
+In **3D classification**, **Filament context** defaults to **Per filament**
+(`--filament_context filament`) and picking **Do helical reconstruction?** = Yes
+enables **Use automatic masks?** = Yes from `15` A (`--auto_mask
+--auto_mask_start_res 15`, unless a manual `Reference mask` is set), while
+`"Two rounds?"` (`do_two_rounds`) remains off by default. In **HelixSubClassify**, Stage-1 defaults
+to `2..10` types with `--hierarchical` = Yes and Stage-2 enables `--auto_mask
+--auto_mask_start_res 15` by default.
 
 The **Class2D consensus** Optimisation tab defaults **Consensus helical types?**
 to Yes (unless `RELION_CONSENSUS_HELICAL_TYPES=0`; older `job.star` files missing
@@ -298,19 +309,22 @@ and polymorph type inference across iterations (`src/helix_context.{h,cpp}`,
 ### CLI options and environment switches
 
 - CLI (`parseInitial` and `parseContinue` in `src/ml_optimiser.cpp`):
+  - Fresh helical 2D EM runs automatically enable `--helical_context` (with track smoothing when multi-segment tracks are present), `--helical_context_types 2 --helical_context_types_max 10`, `--helical_context_hierarchical`, `--helical_auto_diameter`, `--sort_classes`, and (when flattening solvent) `--auto_mask --auto_mask_start_res 15`; fresh helical 3D Class3D runs automatically enable `--filament_context filament` (with track smoothing) and `--keep_full_filaments` when multi-segment tracks are present, plus `--auto_mask --auto_mask_start_res 15` when flattening solvent without `--solvent_mask`/per-class masks (override any with explicit `--dont_*` flags or `--filament_context off`).
+  - `--helical_context_hierarchical` / `--dont_helical_context_hierarchical` (default on; `RELION_HELICAL_HIERARCHICAL=0` disables)
   - `--helical_track_smooth` / `--dont_helical_track_smooth`
   - `--helical_track_sigma_A` (default `3.5`)
   - `--dont_helical_polarity`
   - `--helical_context_start` (default `4`), `--helical_context_temper` (default `-1`),
     `--helical_polarity_start` (default `3`)
 - Post-hoc tool (`relion_helix_filament_context` in `src/apps/helix_filament_context.cpp`):
-  - Defaults `--temper -1` (auto) and `--types_agree 0.75`; adds `--model`, `--outer_diameter`,
+  - Defaults `--types 2 --types_max 10`, `--hierarchical` (disable with `--dont_hierarchical` or `RELION_HELICAL_HIERARCHICAL=0`), `--temper -1` (auto) and `--types_agree 0.75`; adds `--model`, `--outer_diameter`,
     `--sort_classes_junk` (`1.5`), `--dont_smooth_flicker`, and `--j`; auto-detects
     `_classes.mrcs` / `_model.star` for `classContinuity`, `junkClasses`, `computeClassEquivalence`,
     and final surgical mismatch/flicker smoothing.
 - Environment switches (`=0` disables each component for ablation):
   - `RELION_GPU_BIMODAL_PSI=0`
   - `RELION_HELICAL_CLASS_PDF=0`
+  - `RELION_HELICAL_HIERARCHICAL=0`
   - `RELION_HELICAL_TRACK_SMOOTH=0`
   - `RELION_HELICAL_POLARITY=0`
   - `RELION_HELICAL_SECTION_SEED=0`

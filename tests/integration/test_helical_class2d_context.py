@@ -704,3 +704,109 @@ def test_helix_subclassify_multi_optics_and_join_star_intact_first_peak(
     assert len(joined_optics) == 3
     assert [row["rlnCtfDataAreCtfPremultipliedIntactFirstPeak"] for row in joined_optics] == ["1", "1", "0"]
 
+
+def test_helical_class2d_cli_auto_defaults(tmp_path, relion_bin, relion_runner):
+    import math
+    import struct
+
+    def write_test_mrcs(path, nx=16, ny=16, nz=4):
+        header = bytearray(1024)
+        struct.pack_into(
+            "<10i6f3i3f",
+            header,
+            0,
+            nx, ny, nz, 2,
+            0, 0, 0,
+            nx, ny, nz,
+            2.0 * nx, 2.0 * ny, 2.0 * nz,
+            90.0, 90.0, 90.0,
+            1, 2, 3,
+            -1.0, 1.0, 0.0,
+        )
+        header[52 * 4 : 52 * 4 + 4] = b"MAP "
+        header[53 * 4 : 53 * 4 + 4] = b"\x44\x44\x00\x00"
+        vals = []
+        for s in range(nz):
+            for y in range(ny):
+                dy = (y - (ny - 1) / 2.0) / 3.0
+                for x in range(nx):
+                    dx = (x - (nx - 1) / 2.0) / 4.0
+                    vals.append(math.exp(-0.5 * (dy * dy + 0.25 * dx * dx)) + 0.05 * math.sin((s + 1) * x * 0.5 + y * 0.3))
+        path.write_bytes(bytes(header) + struct.pack(f"<{len(vals)}f", *vals))
+
+    stk_path = tmp_path / "particles.mrcs"
+    write_test_mrcs(stk_path)
+
+    star_path = tmp_path / "particles.star"
+    star_path.write_text(
+        "\n".join(
+            [
+                "",
+                "# version 30001",
+                "",
+                "data_optics",
+                "",
+                "loop_",
+                "_rlnOpticsGroupName #1",
+                "_rlnOpticsGroup #2",
+                "_rlnVoltage #3",
+                "_rlnSphericalAberration #4",
+                "_rlnAmplitudeContrast #5",
+                "_rlnImagePixelSize #6",
+                "_rlnImageSize #7",
+                "_rlnImageDimensionality #8",
+                "opticsGroup1 1 300.0 2.7 0.1 2.0 16 2",
+                "",
+                "# version 30001",
+                "",
+                "data_particles",
+                "",
+                "loop_",
+                "_rlnImageName #1",
+                "_rlnMicrographName #2",
+                "_rlnHelicalTubeID #3",
+                "_rlnHelicalTrackLengthAngst #4",
+                "_rlnCoordinateX #5",
+                "_rlnCoordinateY #6",
+                "_rlnAngleTiltPrior #7",
+                "_rlnAnglePsiPrior #8",
+                "_rlnOpticsGroup #9",
+                f"000001@{stk_path} mic1.mrc 1 0.0 50.0 50.0 90.0 0.0 1",
+                f"000002@{stk_path} mic1.mrc 1 20.0 70.0 50.0 90.0 0.0 1",
+                f"000003@{stk_path} mic1.mrc 2 0.0 50.0 90.0 90.0 0.0 1",
+                f"000004@{stk_path} mic1.mrc 2 20.0 70.0 90.0 90.0 0.0 1",
+            ]
+        )
+        + "\n"
+    )
+
+    out_root = tmp_path / "run"
+    res = relion_runner(
+        [
+            str(relion_bin / "relion_refine"),
+            "--i", str(star_path),
+            "--o", str(out_root),
+            "--K", "4",
+            "--iter", "1",
+            "--helix",
+            "--helical_outer_diameter", "20",
+            "--particle_diameter", "28",
+            "--flatten_solvent",
+            "--psi_step", "15",
+            "--offset_range", "2",
+            "--offset_step", "1",
+            "--j", "1",
+            "--dont_combine_weights_via_disc",
+        ],
+        timeout=120,
+    )
+    assert res.returncode == 0, f"relion_refine helical auto-defaults failed:\n{res.stderr}\n{res.stdout}"
+    opt_tables = parse_star_tables(tmp_path / "run_it001_optimiser.star")
+    row = opt_tables["optimiser_general"][1][0]
+    assert row["rlnDoHelicalContext"] == "1"
+    assert row["rlnHelicalContextTypesMin"] == "2"
+    assert row["rlnHelicalContextTypesMax"] == "4"
+    assert row["rlnAutoMask"] == "1"
+    assert float(row["rlnAutoMaskStartResolution"]) == pytest.approx(15.0)
+
+

@@ -4785,7 +4785,11 @@ void MlOptimiserMpi::updateAutoMasks()
 		{
 			RFLOAT resolution, lowpass;
 			if (!autoMaskClassResolution(iclass, resolution, lowpass))
+			{
+				if (iclass < (int)auto_masks.size())
+					auto_masks[iclass].clear();
 				continue;
+			}
 			const int class_rank = iclass % (node->size - 1) + 1;
 			if (node->rank == class_rank)
 				calculateAutoMaskOfClass(iclass, resolution, lowpass, reports[iclass]);

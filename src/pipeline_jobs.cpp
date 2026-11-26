@@ -115,7 +115,7 @@ static bool containsCommandLineOption(const std::string &arguments, const std::s
 // Filament context fields shared by Class2D and Class3D; 'what' completes the sentence "... they share the polymorph, and <what>."
 static void addFilamentContextOptions(std::map<std::string, JobOption> &joboptions_, const char *what, bool class2d = false)
 {
-	joboptions_["filctx_mode"] = JobOption("Filament context:", class2d ? job_filament_context_options_2d : job_filament_context_options, 0, "The segments of one filament are not independent: they share the polymorph, and " + std::string(what) + ". \
+	joboptions_["filctx_mode"] = JobOption("Filament context:", class2d ? job_filament_context_options_2d : job_filament_context_options, class2d ? 0 : 2, "The segments of one filament are not independent: they share the polymorph, and " + std::string(what) + ". \
 If set to anything but Off, each segment gets a prior over the classes from the other segments of its filament, computed from their class likelihoods of the previous iteration (the segment's own data is never counted in its prior). \
 'Markov chain' (along the filament) learns, from the data, how likely the class of the next segment is given the class of this one (use it when the classes follow each other along the filament). \
 'Per filament' (one class distribution per filament) lets all segments of a filament share one class distribution (use it when every filament is of one kind). \
@@ -137,6 +137,7 @@ A negative value (the default) uses the distance between consecutive segments di
 		joboptions_["helctx_agree"] = JobOption("Min fold agreement:", std::string("0.75"), "Minimum 3-fold filament agreement (adjusted Rand index, 0 to 1) required when choosing the number of helical types (--helical_context_types_agree). Set to 0 to select purely by held-out log-likelihood.");
 		joboptions_["helctx_temper"] = JobOption("Context power:", std::string("-1"), "Factor on class log-likelihoods in the filament Markov chain (--helical_context_temper). -1 (the default) sets this automatically from segment step / box size with progressive annealing.");
 		joboptions_["helctx_exclude"] = JobOption("Exclude radius (A):", std::string("-1"), "Only segments at least this far away along the filament track (in Angstroms) contribute to a segment's context prior (--helical_context_exclude). -1 (the default) uses exact leave-one-out.");
+		joboptions_["helctx_hierarchical"] = JobOption("Hierarchical typing?", envFlagDefaultOn("RELION_HELICAL_HIERARCHICAL"), "Refine helical types on the final iteration using recursive hierarchical tree splitting + twist-rate refinement (--helical_context_hierarchical, default Yes; RELION_HELICAL_HIERARCHICAL=0 or --dont_helical_context_hierarchical uses flat selection only).");
 	}
 }
 
@@ -212,6 +213,7 @@ static bool addFilamentContextCommand(std::map<std::string, JobOption> &joboptio
 			         + " --helical_context_types_agree " + floatToString(agree)
 			         + " --helical_context_temper " + floatToString(htemper)
 			         + " --helical_context_exclude " + floatToString(hexcl);
+			command += joboptions_["helctx_hierarchical"].getBoolean() ? " --helical_context_hierarchical" : " --dont_helical_context_hierarchical";
 			command += joboptions_["helctx_track_smooth"].getBoolean() ? " --helical_track_smooth" : " --dont_helical_track_smooth";
 			RFLOAT range_psi = joboptions_["range_psi"].getNumber(error_message);
 			if (error_message != "") return false;
@@ -753,15 +755,25 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 
 			// Read in all the stored options
 			bool read_all = true;
+			std::set<std::string> missing_keys;
 			for (std::map<std::string,JobOption>::iterator it=joboptions.begin(); it!=joboptions.end(); ++it)
 			{
 				if (!(it->second).readValue(fh))
+				{
 					read_all = false;
+					missing_keys.insert(it->first);
+				}
 			}
 			if (joboptions.find("auto_parallel") != joboptions.end())
 				joboptions["auto_parallel"].value = "No"; // run.job files predate it
 			for (const char* k : {"do_virtual", "do_premultiply", "do_ctf_multiply", "helical_auto_diameter", "do_helical_types", "helctx_track_smooth", "helctx_polarity"})   // and these
 				if (joboptions.find(k) != joboptions.end()) joboptions[k].value = "No";
+			for (const char* k : {"helctx_hierarchical", "do_hierarchical"})
+				if (missing_keys.count(k) && joboptions.find(k) != joboptions.end()) joboptions[k].value = "No";
+			if (missing_keys.count("filctx_mode") && joboptions.find("filctx_mode") != joboptions.end() && type == PROC_3DCLASS)
+				joboptions["filctx_mode"].value = job_filament_context_options[0];
+			if (missing_keys.count("do_auto_mask") && joboptions.find("do_auto_mask") != joboptions.end() && type == PROC_HELIX_SUBCLASSIFY)
+				joboptions["do_auto_mask"].value = "No";
 			have_read = true;
 		}
 
@@ -806,7 +818,7 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		bool read_cylindrical_mask = false;
 		// Saved before these options existed or became Yes by default: the job keeps what it did then
 		std::set<std::string> read_new_yes;
-		const char* new_yes[] = {"do_virtual", "do_premultiply", "do_ctf_multiply", "helical_auto_diameter", "do_helical_types", "helctx_track_smooth", "helctx_polarity"};
+		const char* new_yes[] = {"do_virtual", "do_premultiply", "do_ctf_multiply", "helical_auto_diameter", "do_helical_types", "helctx_track_smooth", "helctx_polarity", "helctx_hierarchical", "do_hierarchical"};
 		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDvals)
 		{
 			MDvals.getValue(EMDL_JOBOPTION_VARIABLE, label);
@@ -832,6 +844,10 @@ bool RelionJob::read(std::string fn, bool &_is_continue, bool do_initialise)
 		for (const char* k : new_yes)
 			if (!read_new_yes.count(k) && joboptions.find(k) != joboptions.end())
 				joboptions[k].value = "No";
+		if (!read_new_yes.count("filctx_mode") && joboptions.find("filctx_mode") != joboptions.end() && type == PROC_3DCLASS)
+			joboptions["filctx_mode"].value = job_filament_context_options[0];
+		if (!read_new_yes.count("do_auto_mask") && joboptions.find("do_auto_mask") != joboptions.end() && type == PROC_HELIX_SUBCLASSIFY)
+			joboptions["do_auto_mask"].value = "No";
 		have_read = true;
 	}
 
@@ -4424,9 +4440,11 @@ void RelionJob::initialiseHelixSubclassifyJob()
 		"Stage-1 _data.star (or _optimiser.star) containing helical segments with rlnCoordinateX, rlnCoordinateY, rlnMicrographName (and optionally rlnHelicalType from a Helical types Class2D job).");
 	joboptions["do_retype"] = JobOption("Re-estimate helical types?", false,
 		"If set to Yes (--retype), re-run HelicalContext HMM typing + twist-rate splitting even if rlnHelicalType is already present in the input STAR file.");
+	joboptions["do_hierarchical"] = JobOption("Hierarchical typing?", envFlagDefaultOn("RELION_HELICAL_HIERARCHICAL"),
+		"If set to Yes (--hierarchical), run recursive hierarchical tree splitting + twist-rate refinement during Stage-1 typing (default Yes unless RELION_HELICAL_HIERARCHICAL=0 or --dont_hierarchical).");
 	joboptions["types_min"] = JobOption("Min helical types:", std::string("2"),
 		"Minimum number of helical types when running Stage-1 typing (--types).");
-	joboptions["types_max"] = JobOption("Max helical types:", std::string("6"),
+	joboptions["types_max"] = JobOption("Max helical types:", std::string("10"),
 		"Maximum number of helical types searched by cross-validation + twist-rate splitting (--types_max). Set equal to Min types for a fixed count.");
 	joboptions["types_agree"] = JobOption("Min fold agreement (ARI):", std::string("0.75"),
 		"Minimum 3-fold filament agreement (adjusted Rand index, 0 to 1) required when selecting the number of helical types (--types_agree).");
@@ -4480,9 +4498,9 @@ void RelionJob::initialiseHelixSubclassifyJob()
 		"Stage-2 translational search step in output pixels before oversampling=1 (--offset_step).");
 	joboptions["helical_context_weight"] = JobOption("Stage-2 context weight:", 0.5, 0., 2., 0.1,
 		"Local helical context prior weight in Stage-2 EM refinement (--helical_context_weight; 0 disables).");
-	joboptions["do_auto_mask"] = JobOption("Use automatic masks?", false,
-		"If set to Yes (--auto_mask), compute 2D contour masks from class averages once they reach the start resolution.");
-	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", std::string("12"),
+	joboptions["do_auto_mask"] = JobOption("Use automatic masks?", true,
+		"If set to Yes (--auto_mask, default), compute 2D contour masks from class averages once they reach the start resolution.");
+	joboptions["auto_mask_start_res"] = JobOption("Automatic masks from (A):", std::string("15"),
 		"Start resolution in Angstroms for Stage-2 2D contour auto-masking (--auto_mask_start_res).");
 	joboptions["auto_mask_soft"] = JobOption("Automatic mask soft edge (A):", std::string("-1"),
 		"Width of the raised-cosine soft edge in Angstroms (--auto_mask_soft; -1 chooses 3x resolution).");
@@ -4622,6 +4640,7 @@ bool RelionJob::getCommandsHelixSubclassifyJob(std::string &outputname, std::vec
 	std::string command = "`which relion_helix_subclassify` --i " + fn_img + " --o " + outputname;
 	if (joboptions["do_retype"].getBoolean())
 		command += " --retype";
+	command += joboptions["do_hierarchical"].getBoolean() ? " --hierarchical" : " --dont_hierarchical";
 	command += " --types " + integerToString((int)tmin_ll)
 	         + " --types_max " + integerToString((int)tmax_ll)
 	         + " --types_agree " + joboptions["types_agree"].getString()

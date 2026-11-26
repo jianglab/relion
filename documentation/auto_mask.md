@@ -72,21 +72,31 @@ extension of the binary mask is passed as set (set it to 0 for trueFSC's mask).
   (so the first iteration after a continuation, which has no mask yet, uses
   the unmasked FSC).
 - 3D classification: each class has its own mask, made on the MPI follower of
-  the class from its reference alone. The low-pass filter and the resolution
-  that sets the soft edge (3 times it) come from the class's spectral
-  signal-to-noise ratio (data_vs_prior, SSNR): the FSC between half-maps that
-  goes with it is SSNR / (2 + SSNR). A class gets a mask only once its own
-  resolution is better than `--auto_mask_start_res`.
-- 2D classification: `--auto_mask` (default off) extends the same per-class
-  SSNR contour mask to 2D references (`mymodel.ref_dim == 2`, `iter >= 2`),
-  activating once resolution is better than `max(auto_mask_start_res,
-  2.5 * pixel_size)` (handling coarsely binned pixel sizes whose Nyquist exceeds
-  12 A). Before calling `autoMaskFromMap()`, negative CTF side-lobes are
-  clamped at 0, `opt.nr_seeds` is scaled to the 2D box (`max(16, min(1000,
-  pixels / 256))`), and masks covering less than 1% of the box fall back to an
-  all-ones identity mask (`1.0`). When combined with helical `--helical_auto_diameter`,
-  the contour mask multiplies multiplicatively inside both the box/solvent mask
-  and the class's own tube.
+  the class from its reference alone (`autoMask3DClass`). The low-pass filter
+  (clamped to at least 30 A) and the resolution that sets the soft edge
+  (`max(3 px, 3 * res)`) come from the class's spectral signal-to-noise ratio
+  (data_vs_prior, SSNR): the FSC between half-maps that goes with it is
+  SSNR / (2 + SSNR). Classification runs (2D and 3D) share cautious late gating
+  (`iter >= 6` and `max(auto_mask_start_res, 2.5 * pixel_size)`), whereas 3D
+  auto-refinement remains ungated by iteration count. A class gets a mask only
+  once its own resolution is better than `eff_start`.
+- 2D and helical 3D classification: `--auto_mask` extends the same per-class
+  SSNR contour mask to 2D references (`mymodel.ref_dim == 2`, `iter >= 6`) and
+  hardened 3D class references (`autoMask3DClass`, `iter >= 6`), activating once
+  resolution is better than `max(auto_mask_start_res, 2.5 * pixel_size)`
+  (handling coarsely binned pixel sizes whose Nyquist exceeds 12 A). Fresh
+  helical Class2D EM, helical Class3D, and `relion_helix_subclassify` runs enable
+  `--auto_mask --auto_mask_start_res 15` automatically when flattening solvent
+  without an external/per-class mask (override with `--dont_auto_mask` /
+  `--auto_mask_start_res`); non-helical Class2D, non-helical Class3D, and
+  Refine3D keep `--auto_mask` off by default. Both `autoMask2DClass` and
+  `autoMask3DClass` apply the coarse shape-only low-pass BEFORE zero-clipping,
+  dilate an explicit envelope margin before adding the soft edge, preserve
+  helical multi-strand/protofilament components inside the tube across dark
+  grooves, reject tiny/flooded/off-axis/artifact masks back to an all-ones
+  identity mask (`1.0`), and apply asymmetric temporal hysteresis. When
+  combined with helical `--helical_auto_diameter` in 2D, the contour mask
+  multiplies inside both the box/solvent mask and the class's own tube.
 - `--auto_mask_soft` sets the soft edge (A) instead (no search);
   `--auto_mask_mass` binarises at the threshold that encloses this mass (kDa).
 - Every iteration writes the masks as `<out>_itNNN_automask.mrc`
@@ -100,8 +110,8 @@ extension of the binary mask is passed as set (set it to 0 for trueFSC's mask).
 - Not at the last iteration of auto-refinement (the references are not masked
   there for validation).
 
-GUI (2D classification, 3D classification and 3D auto-refine, I/O tab): "Use
-automatic masks?" (default No) and "Auto-mask from (A), soft (A), mass (kDa):"
+GUI (2D classification, 3D classification, 3D auto-refine, and HelixSubClassify): "Use
+automatic masks?" (default No for non-helical Class2D, non-helical Class3D, and 3D auto-refine; toggled to Yes with start resolution `15` A when enabling helical Class2D or helical Class3D without a reference mask, and default Yes at `15` A in HelixSubClassify) and "Auto-mask from (A), soft (A), mass (kDa):"
 (`--auto_mask_start_res`, `--auto_mask_soft`, `--auto_mask_mass`; negative soft
 edge / mass chooses automatically / uses Otsu's threshold). Unchecking "Use
 automatic masks?" emits `--dont_auto_mask`, and **Class2D consensus** forwards
@@ -112,23 +122,33 @@ Cost: the soft-edge search on the first follower takes two masked FSCs (four
 Fourier transforms of the box) per step, about 10 steps, and holds about ten
 copies of the box in memory there; `--auto_mask_soft` skips it.
 
-### 2D helical gating and unified `autoMask2DClass`
+### Cautious classification gating and unified `autoMask2DClass` / `autoMask3DClass`
 
-- **Late 2D gating (`ref_dim == 2`)**: `MlOptimiser::autoMaskThisIteration()`
-  waits until `iter >= 6` in 2D classification and compares `1 / current_resolution`
-  against `eff_start = std::max(auto_mask_start_res, 2.5 * pixel_size)` so
-  coarsely binned particles wait until genuine signal passes the Nyquist-safe
-  floor.
+- **Late gating (`iter >= 6` and Nyquist-safe floor)**: For both 2D and 3D
+  classification (`!do_split_random_halves`), `MlOptimiser::autoMaskThisIteration()`
+  waits until `iter >= 6` and compares `1 / current_resolution` against
+  `eff_start = std::max(auto_mask_start_res, 2.5 * pixel_size)` so coarsely
+  binned particles wait until genuine signal passes the Nyquist-safe floor.
+  3D auto-refinement (`do_split_random_halves`) continues to use half-map
+  auto-masking from any iteration once resolution passes `auto_mask_start_res`.
 - **Unified helical 2D mask geometry (`autoMask2DClass`)**: Per-class 2D masks
-  filter shape features at `min_lowpass = 35` A, extend mask support
-  `extend_angst = 18` A along the filament axis, blend smoothly with the
-  previous iteration's mask, and pair with `helixalign::classDiameter` when
-  `--helical_auto_diameter` (also late-gated at `iter >= 6`, override
-  `RELION_HELICAL_AUTO_DIAMETER_START`) is enabled.
+  filter shape features at `min_lowpass = 35` A before zero-clipping, extend
+  mask support `extend_angst = 18` A along the filament axis, blend with
+  asymmetric hysteresis against the previous iteration's mask, and pair with
+  `helixalign::classDiameter` when `--helical_auto_diameter` (also late-gated at
+  `iter >= 6`, override `RELION_HELICAL_AUTO_DIAMETER_START`) is enabled.
+- **Hardened 3D class mask geometry (`autoMask3DClass`)**: Per-class 3D masks
+  filter shape features at `min_lowpass = 30` A before zero-clipping, extend the
+  binary mask by `min(12 A, 0.10 * min_box_A)` with soft edge `max(3 px, 3 * res)`,
+  preserve multi-protofilament components along the Z helical axis inside
+  `classTubeDiameter`, fall back to an all-ones identity mask (`1.0`) when
+  degenerate/tiny/flooded/off-axis/Z-cap-hijacked, and apply asymmetric temporal
+  hysteresis (bypassed on the final iteration when `alignClasses()` shifts the
+  references).
 
 ## Status
 
 Compiled, unit-tested (`[mask_edge]`, `[helix_context_types]`, `[pipeline]`),
 and validated end-to-end across 3D refinement (`relion_mask_create --auto`,
-Class3D/Refine3D) and helical 2D classification (`relion_refine --auto_mask`,
-`test_helical_class2d_context.py`).
+Class3D/Refine3D) and helical classification (`relion_refine --auto_mask`,
+`test_helical_class2d_context.py`, `test_filament_context_class3d.py`).

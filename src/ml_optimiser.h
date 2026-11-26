@@ -753,6 +753,7 @@ public:
 	bool do_helical_context;
 	int helical_context_start_iter = 4;
 	bool helical_context_warm = false;
+	bool do_helical_context_hierarchical = true;
 	int helical_context_types_max;     // > nr_types: choose the number of types by cross-validation (once)
 	RFLOAT helical_context_types_tol;  // ... the fewest types within this (nats per segment) of the best
 	RFLOAT helical_context_types_agree; // > 0: instead the most types whose folds agree to this (adjusted Rand index)
@@ -762,6 +763,15 @@ public:
 	bool helical_context_types_selected;
 	RFLOAT helical_context_class_min_frac; // per-type class files: classes with at least this share of their segments in the type
 	long int helical_context_class_min_segs; // ... and at least this many segments of the type
+	// Track explicit CLI / environment overrides so fresh helical CLI jobs can default cleanly
+	bool continued_from_star = false;
+	bool explicit_helical_context_opt = false;
+	bool explicit_helical_auto_diameter_opt = false;
+	bool explicit_sort_classes_opt = false;
+	bool explicit_auto_mask_opt = false;
+	bool explicit_auto_mask_start_res_opt = false;
+	bool explicit_filament_context_opt = false;
+	bool explicit_keep_full_filaments_opt = false;
 	HelicalContext helical_context;
 	std::vector<long int> helical_context_rows; // MDimg row of each particle
 
@@ -1133,10 +1143,10 @@ public:
             auto_mask_soft_edge(-1.),
             auto_mask_mass(-1.),
             do_helical_context(0),
-            helical_context_types_max(-1),
+            helical_context_types_max(10),
             helical_context_types_tol(0.01),
             helical_context_types_agree(0.75),
-            helical_context_types_min(4),
+            helical_context_types_min(2),
             helical_context_types_every(5),
             helical_context_types_last_iter(-1),
             helical_context_types_selected(false),

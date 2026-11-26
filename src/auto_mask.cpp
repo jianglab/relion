@@ -822,6 +822,203 @@ void mergeHelicalInTubeComponents(const MultidimArray<RFLOAT> &lp, RFLOAT thresh
 	}
 }
 
+struct Mask3DStats
+{
+	long int nr_bin = 0;
+	long int nr_in_tube = 0;
+	double mean_dx = 0.;
+	double mean_dy = 0.;
+	double mean_dz = 0.;
+	double axial_cov = 1.;
+};
+
+double helicalCentralZHalf(long int nz, RFLOAT angpix, RFLOAT helix_length_angst)
+{
+	double central_z_half = 0.35 * (double)nz;
+	if (helix_length_angst > 0. && angpix > 0.)
+		central_z_half = std::min(central_z_half, 0.35 * (double)helix_length_angst / (double)angpix);
+	return central_z_half;
+}
+
+Mask3DStats measureMask3DStats(const MultidimArray<RFLOAT> &binary, RFLOAT angpix,
+		RFLOAT helix_tube_diam, RFLOAT helix_length_angst)
+{
+	const long int nx = XSIZE(binary), ny = YSIZE(binary), nz = ZSIZE(binary);
+	const double cx0 = (double)(nx / 2), cy0 = (double)(ny / 2), cz0 = (double)(nz / 2);
+	const bool check_tube = (helix_tube_diam > 0.);
+	const double tube_r_px = check_tube ? (0.5 * (double)helix_tube_diam / (double)angpix) : 0.;
+	const double tube_r2_px = tube_r_px * tube_r_px;
+	std::vector<unsigned char> slice_covered(nz, 0);
+	double sum_x = 0., sum_y = 0., sum_z = 0.;
+	Mask3DStats st;
+
+	for (long int k = 0; k < nz; k++)
+	{
+		const double dz = (double)k - cz0;
+		for (long int i = 0; i < ny; i++)
+		{
+			const double dy = (double)i - cy0;
+			for (long int j = 0; j < nx; j++)
+			{
+				if (DIRECT_A3D_ELEM(binary, k, i, j) <= 0.5)
+					continue;
+				const double dx = (double)j - cx0;
+				st.nr_bin++;
+				sum_x += dx;
+				sum_y += dy;
+				sum_z += dz;
+				if (check_tube && (dx * dx + dy * dy <= tube_r2_px))
+				{
+					st.nr_in_tube++;
+					slice_covered[k] = 1;
+				}
+			}
+		}
+	}
+
+	if (st.nr_bin > 0)
+	{
+		st.mean_dx = sum_x / (double)st.nr_bin;
+		st.mean_dy = sum_y / (double)st.nr_bin;
+		st.mean_dz = sum_z / (double)st.nr_bin;
+	}
+	if (check_tube)
+	{
+		const double central_z_half = helicalCentralZHalf(nz, angpix, helix_length_angst);
+		long int central_slices = 0, covered_slices = 0;
+		for (long int k = 0; k < nz; k++)
+		{
+			if (std::fabs((double)k - cz0) <= central_z_half)
+			{
+				central_slices++;
+				if (slice_covered[k] != 0)
+					covered_slices++;
+			}
+		}
+		st.axial_cov = (central_slices > 0) ? (double)covered_slices / (double)central_slices : 1.;
+	}
+	return st;
+}
+
+// Re-attach secondary helical protofilaments separated by a dark central groove when they lie
+// inside the helical tube along Z and span a substantial axial segment (missed when all brightest seeds
+// land on one protofilament).
+void mergeHelicalInTubeComponents3D(const MultidimArray<RFLOAT> &lp, RFLOAT threshold, RFLOAT angpix,
+		RFLOAT helix_tube_diam, RFLOAT helix_length_angst, MultidimArray<RFLOAT> &binary, long int primary_bin)
+{
+	const long int nx = XSIZE(lp), ny = YSIZE(lp), nz = ZSIZE(lp);
+	const long int plane = nx * ny, ntot = MULTIDIM_SIZE(lp);
+	const double cx0 = (double)(nx / 2), cy0 = (double)(ny / 2), cz0 = (double)(nz / 2);
+	const double tube_r_px = 0.5 * (double)helix_tube_diam / (double)angpix;
+	const double tube_r2_px = tube_r_px * tube_r_px;
+	const double central_z_half = helicalCentralZHalf(nz, angpix, helix_length_angst);
+	const long int min_comp_size = std::max(16L, (long int)std::round(0.05 * (double)primary_bin));
+	long int central_slices = 0;
+	for (long int k = 0; k < nz; k++)
+		if (std::fabs((double)k - cz0) <= central_z_half)
+			central_slices++;
+
+	std::vector<unsigned char> visited(ntot, 0);
+	std::vector<long int> stack, comp;
+	std::vector<unsigned char> comp_slices(nz, 0);
+
+	for (long int start = 0; start < ntot; start++)
+	{
+		if (visited[start] || DIRECT_MULTIDIM_ELEM(binary, start) > 0.5 || DIRECT_MULTIDIM_ELEM(lp, start) <= threshold)
+			continue;
+
+		comp.clear();
+		stack.clear();
+		visited[start] = 1;
+		stack.push_back(start);
+
+		long int in_tube = 0;
+		double sum_dx = 0., sum_dy = 0.;
+		std::fill(comp_slices.begin(), comp_slices.end(), 0);
+
+		while (!stack.empty())
+		{
+			const long int n = stack.back();
+			stack.pop_back();
+			comp.push_back(n);
+
+			const long int k = n / plane;
+			const long int rem = n % plane;
+			const long int i = rem / nx, j = rem % nx;
+			const double dx = (double)j - cx0;
+			const double dy = (double)i - cy0;
+			sum_dx += dx;
+			sum_dy += dy;
+			if (dx * dx + dy * dy <= tube_r2_px)
+				in_tube++;
+			comp_slices[k] = 1;
+
+			for (long int kk = std::max(0L, k - 1); kk <= std::min(nz - 1, k + 1); kk++)
+			for (long int ii = std::max(0L, i - 1); ii <= std::min(ny - 1, i + 1); ii++)
+			for (long int jj = std::max(0L, j - 1); jj <= std::min(nx - 1, j + 1); jj++)
+			{
+				const long int nn = (kk * ny + ii) * nx + jj;
+				if (!visited[nn] && DIRECT_MULTIDIM_ELEM(binary, nn) <= 0.5 && DIRECT_MULTIDIM_ELEM(lp, nn) > threshold)
+				{
+					visited[nn] = 1;
+					stack.push_back(nn);
+				}
+			}
+		}
+
+		const long int c_size = (long int)comp.size();
+		if (c_size < min_comp_size || 2L * in_tube < c_size)
+			continue;
+		const double c_mean_r_px = std::hypot(sum_dx / (double)c_size, sum_dy / (double)c_size);
+		if (c_mean_r_px * angpix > 0.45 * helix_tube_diam)
+			continue;
+
+		long int z_cov = 0;
+		for (long int k = 0; k < nz; k++)
+			if (comp_slices[k] != 0 && std::fabs((double)k - cz0) <= central_z_half)
+				z_cov++;
+		const double c_zspan = (central_slices > 0) ? (double)z_cov / (double)central_slices : 0.;
+		if (c_zspan < 0.25)
+			continue;
+
+		for (long int idx : comp)
+			DIRECT_MULTIDIM_ELEM(binary, idx) = 1.;
+	}
+}
+
+void applyAsymmetricHysteresis(const MultidimArray<RFLOAT> &candidate,
+		const MultidimArray<RFLOAT> *prev_mask, MultidimArray<RFLOAT> &mask)
+{
+	if (prev_mask != NULL && prev_mask->sameShape(candidate, true))
+	{
+		mask.resize(candidate);
+		mask.setXmippOrigin();
+		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(candidate)
+		{
+			const RFLOAT cand = DIRECT_MULTIDIM_ELEM(candidate, n);
+			const RFLOAT prev = DIRECT_MULTIDIM_ELEM(*prev_mask, n);
+			DIRECT_MULTIDIM_ELEM(mask, n) = (cand >= prev) ? cand : (RFLOAT)(0.5 * prev + 0.5 * cand);
+		}
+	}
+	else
+		mask = candidate;
+}
+
+bool fallbackAllOnesMask(const MultidimArray<RFLOAT> &ref, RFLOAT resolution,
+		MultidimArray<RFLOAT> &mask, AutoMaskReport *report)
+{
+	mask.resize(ref);
+	mask.setXmippOrigin();
+	mask.initConstant(1.);
+	if (report != NULL)
+	{
+		AutoMaskReport rep;
+		rep.resolution = resolution;
+		*report = rep;
+	}
+	return false;
+}
+
 } // namespace
 
 bool autoMask2DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT resolution,
@@ -833,22 +1030,8 @@ bool autoMask2DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT res
 		REPORT_ERROR("autoMask2DClass ERROR: input reference must be 2D (ZSIZE == 1)");
 
 	const long int nx = XSIZE(ref), ny = YSIZE(ref), ntot = MULTIDIM_SIZE(ref);
-	auto fallbackAllOnes = [&]() -> bool
-	{
-		mask.resize(ref);
-		mask.setXmippOrigin();
-		mask.initConstant(1.);
-		if (report != NULL)
-		{
-			AutoMaskReport rep;
-			rep.resolution = resolution;
-			*report = rep;
-		}
-		return false;
-	};
-
 	if (ntot <= 0 || !(angpix > 0.))
-		return fallbackAllOnes();
+		return fallbackAllOnesMask(ref, resolution, mask, report);
 
 	// 1. Coarse shape-only low-pass FIRST on the unclipped reference so random background noise and dark CTF
 	//    lobes cancel instead of being rectified upward before smoothing.
@@ -867,7 +1050,7 @@ bool autoMask2DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT res
 			DIRECT_MULTIDIM_ELEM(lp, n) = 0.;
 
 	if (!(lp.computeMax() > 1e-12))
-		return fallbackAllOnes();
+		return fallbackAllOnesMask(ref, resolution, mask, report);
 
 	// 2. Binary contour extraction without double-filtering
 	AutoMaskOptions base_opt;
@@ -911,7 +1094,7 @@ bool autoMask2DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT res
 			reject = true;
 	}
 	if (reject)
-		return fallbackAllOnes();
+		return fallbackAllOnesMask(ref, resolution, mask, report);
 
 	// 4. Envelope extension + raised-cosine soft edge
 	MultidimArray<RFLOAT> dist, candidate;
@@ -926,19 +1109,105 @@ bool autoMask2DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT res
 	candidate.setXmippOrigin();
 
 	// 5. Asymmetric hysteresis: widen immediately (cand >= prev), narrow gradually (0.5 * prev + 0.5 * cand)
-	if (prev_mask != NULL && prev_mask->sameShape(candidate, true))
+	applyAsymmetricHysteresis(candidate, prev_mask, mask);
+
+	if (report != NULL)
+		*report = rep;
+	return true;
+}
+
+bool autoMask3DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT resolution,
+		const AutoMask3DOptions &opt, MultidimArray<RFLOAT> &mask,
+		const MultidimArray<RFLOAT> *prev_mask,
+		AutoMaskReport *report, int n_threads)
+{
+	if (ZSIZE(ref) < 2 || YSIZE(ref) < 2 || XSIZE(ref) < 2)
+		REPORT_ERROR("autoMask3DClass ERROR: input reference must be 3D (ZSIZE >= 2)");
+
+	const long int nx = XSIZE(ref), ny = YSIZE(ref), nz = ZSIZE(ref), ntot = MULTIDIM_SIZE(ref);
+	if (ntot <= 0 || !(angpix > 0.))
+		return fallbackAllOnesMask(ref, resolution, mask, report);
+
+	// 1. Coarse shape-only low-pass FIRST on the unclipped volume so random solvent noise and negative CTF
+	//    halos cancel instead of being rectified upward before smoothing.
+	const long int min_box = std::min(nx, std::min(ny, nz));
+	const RFLOAT max_lp = (RFLOAT)(0.45 * (double)min_box * angpix);
+	const RFLOAT lp_floor = std::min(max_lp, std::max((RFLOAT)0., opt.min_lowpass));
+	const RFLOAT requested_lp = (opt.lowpass > 0.) ? opt.lowpass : (RFLOAT)0.;
+	const RFLOAT lp_A = std::min(max_lp, std::max(lp_floor, requested_lp));
+
+	MultidimArray<RFLOAT> lp = ref;
+	if (lp_A > 2. * angpix)
+		autoMaskGaussianLowPass(lp, lp_A, angpix);
+
+	// Zero-clip negative lobes strictly AFTER coarse shape filtering
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(lp)
+		if (DIRECT_MULTIDIM_ELEM(lp, n) < 0.)
+			DIRECT_MULTIDIM_ELEM(lp, n) = 0.;
+
+	if (!(lp.computeMax() > 1e-12))
+		return fallbackAllOnesMask(ref, resolution, mask, report);
+
+	// 2. Binary contour extraction without double-filtering
+	AutoMaskOptions base_opt;
+	base_opt.lowpass = -1.;
+	base_opt.mass = opt.mass;
+	base_opt.nr_seeds = std::max(16, (int)std::min(1000L, ntot / 1024L));
+	base_opt.verb = opt.verb;
+
+	AutoMaskReport rep;
+	MultidimArray<RFLOAT> binary;
+	autoMaskBinary(lp, angpix, -1., base_opt, binary, rep);
+	rep.lowpass = (lp_A > 2. * angpix) ? lp_A : -1.;
+	rep.resolution = resolution;
+
+	const bool check_tube = (opt.helix_tube_diam > 0.);
+	if (check_tube)
 	{
-		mask.resize(candidate);
-		mask.setXmippOrigin();
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(candidate)
-		{
-			const RFLOAT cand = DIRECT_MULTIDIM_ELEM(candidate, n);
-			const RFLOAT prev = DIRECT_MULTIDIM_ELEM(*prev_mask, n);
-			DIRECT_MULTIDIM_ELEM(mask, n) = (cand >= prev) ? cand : (RFLOAT)(0.5 * prev + 0.5 * cand);
-		}
+		// Only attach secondary helical protofilaments if the primary seeded component lies inside the tube
+		const Mask3DStats primary_st = measureMask3DStats(binary, angpix, opt.helix_tube_diam, opt.helix_length_angst);
+		if (primary_st.nr_bin > 0 && 2L * primary_st.nr_in_tube >= primary_st.nr_bin
+		    && std::hypot(primary_st.mean_dx, primary_st.mean_dy) * angpix <= 0.45 * opt.helix_tube_diam)
+			mergeHelicalInTubeComponents3D(lp, rep.threshold, angpix, opt.helix_tube_diam,
+					opt.helix_length_angst, binary, primary_st.nr_bin);
 	}
-	else
-		mask = candidate;
+
+	// 3. Reject degenerate, tiny, flooded, off-axis, or Z-cap artifact masks before dilation
+	const Mask3DStats st = measureMask3DStats(binary, angpix, opt.helix_tube_diam, opt.helix_length_angst);
+	rep.mass = (RFLOAT)((double)st.nr_bin * angpix * angpix * angpix * 0.81e-3);
+
+	const double vol_frac = (double)st.nr_bin / (double)ntot;
+	bool reject = (st.nr_bin == 0 || vol_frac < opt.min_vol_frac || vol_frac > opt.max_vol_frac);
+	if (!reject)
+	{
+		if (check_tube)
+		{
+			if (std::hypot(st.mean_dx, st.mean_dy) * angpix > 0.45 * opt.helix_tube_diam
+			    || 2L * st.nr_in_tube < st.nr_bin
+			    || (opt.min_axial_cov > 0. && st.axial_cov < opt.min_axial_cov))
+				reject = true;
+		}
+		else if (std::sqrt(st.mean_dx * st.mean_dx + st.mean_dy * st.mean_dy + st.mean_dz * st.mean_dz)
+		         > 0.35 * (double)min_box)
+			reject = true;
+	}
+	if (reject)
+		return fallbackAllOnesMask(ref, resolution, mask, report);
+
+	// 4. Envelope extension + raised-cosine soft edge
+	MultidimArray<RFLOAT> dist, candidate;
+	const RFLOAT extend_px = std::max((RFLOAT)0., opt.extend_angst / angpix);
+	distanceToExtendedMask(binary, extend_px, dist, n_threads);
+	RFLOAT width = opt.soft_edge;
+	if (width < 0.)
+		width = std::max((RFLOAT)3., (resolution > 0.) ? (RFLOAT)(3. * resolution / angpix) : (RFLOAT)3.);
+	width = XMIPP_MIN(XMIPP_MAX(width, 0.), (RFLOAT)min_box / 3.);
+	rep.soft_edge = width;
+	autoMaskSoftEdge(dist, width, candidate);
+	candidate.setXmippOrigin();
+
+	// 5. Asymmetric hysteresis: widen immediately (cand >= prev), narrow gradually (0.5 * prev + 0.5 * cand)
+	applyAsymmetricHysteresis(candidate, prev_mask, mask);
 
 	if (report != NULL)
 		*report = rep;

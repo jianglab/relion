@@ -1955,6 +1955,7 @@ void JobWindow::initialiseHelixSubclassifyWindow()
 	resetHeight();
 	place("fn_img", TOGGLE_DEACTIVATE);
 	place("do_retype");
+	place("do_hierarchical");
 	place2("types_min", "types_max", "Helical types (min, max):");
 	place("types_agree");
 	current_y += STEPY/2;
@@ -2198,10 +2199,10 @@ void JobWindow::initialiseClass2DWindow()
 	group_helctx = new Fl_Group(WCOL0, MENUHEIGHT, 550, 600-MENUHEIGHT, "");
 	group_helctx->begin();
 	place2("helctx_types_min", "helctx_types_max", "Helical types (min, max):");
+	place("helctx_hierarchical");
 	place2("helctx_start", "helctx_agree", "Start iter, min fold ARI:");
 	place2("helctx_temper", "helctx_exclude", "Context power, exclude (A):");
-	place("helctx_track_smooth");
-	place("helctx_polarity");
+	place2("helctx_track_smooth", "helctx_polarity", "Smooth tracks, helical polarity:");
 	group_helctx->end();
 
 	guientries["filctx_mode"].cb_menu_i(); // grey out the parameters while Off
@@ -2260,6 +2261,12 @@ void JobWindow::initialiseClass2DWindow()
 		const char *env_sort = getenv("RELION_SORT_CLASSES");
 		if (env_sort == NULL || env_sort[0] == '\0')
 			guientries["do_sort_classes"].setValue(helix ? "Yes" : "No");
+		guientries["do_auto_mask"].setValue(helix ? "Yes" : "No");
+		const std::string cur_res = guientries["auto_mask_start_res"].inp->value();
+		if (helix && (cur_res == "12" || cur_res.empty()))
+			guientries["auto_mask_start_res"].setValue("15");
+		else if (!helix && cur_res == "15")
+			guientries["auto_mask_start_res"].setValue("12");
 	};
 
 	tab5->end();
@@ -2769,6 +2776,22 @@ void JobWindow::initialiseClass3DWindow()
 			guientries["filctx_mode"].setValue(job_filament_context_options[2]);
 		else if (!helix && mode == job_filament_context_options[2])
 			guientries["filctx_mode"].setValue(job_filament_context_options[0]);
+		if (guientries["do_auto_mask"].inp->active_r())
+		{
+			const bool no_manual_mask = std::string(guientries["fn_mask"].inp->value()).empty();
+			const std::string cur_res = guientries["auto_mask_start_res"].inp->value();
+			if (helix && no_manual_mask)
+			{
+				guientries["do_auto_mask"].setValue("Yes");
+				if (cur_res == "12" || cur_res.empty())
+					guientries["auto_mask_start_res"].setValue("15");
+			}
+			else if (!helix && cur_res == "15")
+			{
+				guientries["do_auto_mask"].setValue("No");
+				guientries["auto_mask_start_res"].setValue("12");
+			}
+		}
 		update_class3d_helix_ui();
 	};
 	refresh = [ui, update_class3d_helix_ui](bool loaded)

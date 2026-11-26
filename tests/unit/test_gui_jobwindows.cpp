@@ -580,7 +580,7 @@ TEST_CASE("GUI: Class2D filament context parameters match the active context mod
 	REQUIRE(window.group_filctx != nullptr);
 	REQUIRE(window.group_helctx != nullptr);
 	for (const char *name : {"filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha",
-	                          "helctx_types_min", "helctx_types_max", "helctx_start", "helctx_agree",
+	                          "helctx_types_min", "helctx_types_max", "helctx_hierarchical", "helctx_start", "helctx_agree",
 	                          "helctx_temper", "helctx_exclude", "helctx_track_smooth", "helctx_polarity"})
 		REQUIRE(window.guientries.find(name) != window.guientries.end());
 
@@ -651,35 +651,43 @@ static void pickMenu(GuiEntry &entry, const char *item)
 	GuiEntry::cb_menu(entry.menu, &entry);
 }
 
-TEST_CASE("GUI: Class2D helical segments default to EM with helical types and class sorting", "[gui][filament_context]")
+TEST_CASE("GUI: Class2D helical segments default to EM with helical types, auto-mask, and class sorting", "[gui][filament_context]")
 {
 	unsetenv("RELION_SORT_CLASSES");
 	unsetenv("RELION_HELICAL_AUTO_DIAMETER");
+	unsetenv("RELION_HELICAL_HIERARCHICAL");
 	JobWindow window;
 	window.initialise(PROC_2DCLASS, false);
 	auto value = [&window](const char *key) { return std::string(window.guientries[key].inp->value()); };
 	REQUIRE(value("do_em") == "No");
 	REQUIRE(value("do_sort_classes") == "No");
+	REQUIRE(value("do_auto_mask") == "No");
+	REQUIRE(value("auto_mask_start_res") == "12");
 	REQUIRE(value("helical_cylindrical_mask") == "Yes");
 	REQUIRE(value("helical_auto_diameter") == "Yes");
+	REQUIRE(value("helctx_hierarchical") == "Yes");
 	REQUIRE(value("filctx_mode") == job_filament_context_options[0]);
 
 	pickMenu(window.guientries["do_helix"], "Yes");
 	CHECK(value("do_em") == "Yes");
 	CHECK(value("do_grad") == "No");
 	CHECK(value("do_sort_classes") == "Yes");
+	CHECK(value("do_auto_mask") == "Yes");
+	CHECK(value("auto_mask_start_res") == "15");
 	CHECK(value("helctx_track_smooth") == "Yes");
 	CHECK(value("helctx_polarity") == "Yes");
 	CHECK(value("filctx_mode") == job_filament_context_options_2d[3]);
 	CHECK(window.group_helctx->visible());
 	CHECK_FALSE(window.group_filctx->visible());
 
-	SECTION("back to No: VDAM, Off, and unsorted again")
+	SECTION("back to No: VDAM, Off, auto-mask No (12 A), and unsorted again")
 	{
 		pickMenu(window.guientries["do_helix"], "No");
 		CHECK(value("do_em") == "No");
 		CHECK(value("do_grad") == "Yes");
 		CHECK(value("do_sort_classes") == "No");
+		CHECK(value("do_auto_mask") == "No");
+		CHECK(value("auto_mask_start_res") == "12");
 		CHECK(value("filctx_mode") == job_filament_context_options[0]);
 	}
 	SECTION("back to No after the user chose another mode: the user's choices stay")
@@ -747,7 +755,10 @@ TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while
 		}
 	}
 
-	REQUIRE_FALSE(window.group_filctx->active());
+	REQUIRE_FALSE(window.group_filctx->active_r());
+	REQUIRE(std::string(window.guientries["filctx_mode"].inp->value()) == job_filament_context_options[2]);
+	REQUIRE(std::string(window.guientries["do_two_rounds"].inp->value()) == "No");
+	REQUIRE(std::string(window.guientries["do_auto_mask"].inp->value()) == "No");
 
 	SECTION("loading a job that uses a mode activates the parameters")
 	{
@@ -776,6 +787,7 @@ TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while
 
 	SECTION("the parameters stay active in a mode when helical is toggled off and on")
 	{
+		window.guientries["filctx_mode"].setValue(job_filament_context_options[0]);
 		window.guientries["do_helix"].setValue("Yes");
 		REQUIRE_FALSE(window.group_filctx->active());
 		window.guientries["filctx_mode"].setValue(job_filament_context_options[2]);
@@ -784,10 +796,14 @@ TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while
 		REQUIRE(window.group_filctx->active());
 	}
 
-	SECTION("picking do_helix selects Per filament and greys out polarity when alignment restricts psi")
+	SECTION("picking do_helix selects Per filament, enables 15 A auto-mask, and greys out polarity when alignment restricts psi")
 	{
 		pickMenu(window.guientries["do_helix"], "Yes");
 		CHECK(std::string(window.guientries["filctx_mode"].inp->value()) == job_filament_context_options[2]);
+		CHECK(std::string(window.guientries["do_auto_mask"].inp->value()) == "Yes");
+		CHECK(std::string(window.guientries["auto_mask_start_res"].inp->value()) == "15");
+		CHECK(window.guientries["auto_mask_start_res"].inp->active_r());
+		CHECK(std::string(window.guientries["do_two_rounds"].inp->value()) == "No");
 		CHECK(window.group_filctx->active());
 		CHECK(window.guientries["helctx_track_smooth"].inp->active_r());
 		CHECK(window.guientries["helctx_polarity"].inp->active_r());
@@ -809,6 +825,13 @@ TEST_CASE("GUI: Class3D filament context sits on the Helix tab, greyed out while
 
 		pickMenu(window.guientries["do_helix"], "No");
 		CHECK(std::string(window.guientries["filctx_mode"].inp->value()) == job_filament_context_options[0]);
+		CHECK(std::string(window.guientries["do_auto_mask"].inp->value()) == "No");
+		CHECK(std::string(window.guientries["auto_mask_start_res"].inp->value()) == "12");
+		CHECK_FALSE(window.guientries["auto_mask_start_res"].inp->active_r());
+
+		window.guientries["fn_mask"].setValue("mask.mrc");
+		pickMenu(window.guientries["do_helix"], "Yes");
+		CHECK(std::string(window.guientries["do_auto_mask"].inp->value()) == "No");
 	}
 }
 
@@ -929,11 +952,12 @@ TEST_CASE("GUI: Class2DConsensus exposes helical types controls with layout chec
 
 TEST_CASE("GUI: HelixSubClassify window exposes controls, greying, and clean layout", "[gui][layout][helix_subclassify]")
 {
+	unsetenv("RELION_HELICAL_HIERARCHICAL");
 	JobWindow window;
 	window.initialise(PROC_HELIX_SUBCLASSIFY, false);
 	REQUIRE(layoutProblemsOfWindow(window).empty());
 
-	for (const char *key : {"fn_img", "do_retype", "types_min", "types_max", "types_agree", "min_segs", "do_prepare_only",
+	for (const char *key : {"fn_img", "do_retype", "do_hierarchical", "types_min", "types_max", "types_agree", "min_segs", "do_prepare_only",
 	                        "extract_size", "scale_size", "angpix", "do_premultiply", "ctf_intact_first_peak",
 	                        "do_invert", "do_float16", "nr_classes", "nr_iter", "tau_fudge", "random_seed",
 	                        "particle_diameter", "helical_tube_outer_diameter", "helical_rise", "highres_limit",
@@ -967,13 +991,18 @@ TEST_CASE("GUI: HelixSubClassify window exposes controls, greying, and clean lay
 	pickMenu(window.guientries["do_premultiply"], "Yes");
 	CHECK(window.guientries["ctf_intact_first_peak"].inp->active_r());
 
-	CHECK_FALSE(window.guientries["auto_mask_start_res"].inp->active_r());
-	pickMenu(window.guientries["do_auto_mask"], "Yes");
+	CHECK(std::string(window.guientries["do_hierarchical"].inp->value()) == "Yes");
+	CHECK(std::string(window.guientries["types_max"].inp->value()) == "10");
+	CHECK(std::string(window.guientries["do_auto_mask"].inp->value()) == "Yes");
+	CHECK(std::string(window.guientries["auto_mask_start_res"].inp->value()) == "15");
 	for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
 		CHECK(window.guientries[key].inp->active_r());
 	pickMenu(window.guientries["do_auto_mask"], "No");
 	for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
 		CHECK_FALSE(window.guientries[key].inp->active_r());
+	pickMenu(window.guientries["do_auto_mask"], "Yes");
+	for (const char *key : {"auto_mask_start_res", "auto_mask_soft", "auto_mask_mass"})
+		CHECK(window.guientries[key].inp->active_r());
 
 	CHECK_FALSE(window.guientries["gpu_ids"].inp->active_r());
 	pickMenu(window.guientries["use_gpu"], "Yes");

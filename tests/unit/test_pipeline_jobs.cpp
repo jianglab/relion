@@ -727,9 +727,10 @@ TEST_CASE("Class2D: filament context options reach the command line",
 {
 	unsetenv("RELION_HELICAL_TRACK_SMOOTH");
 	unsetenv("RELION_HELICAL_POLARITY");
+	unsetenv("RELION_HELICAL_HIERARCHICAL");
 	RelionJob job = makeClass2DJob();
 	for (const char *name : {"filctx_mode", "filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha",
-	                          "helctx_types_min", "helctx_types_max", "helctx_start", "helctx_agree",
+	                          "helctx_types_min", "helctx_types_max", "helctx_hierarchical", "helctx_start", "helctx_agree",
 	                          "helctx_temper", "helctx_exclude", "helctx_track_smooth", "helctx_polarity"})
 		REQUIRE(job.joboptions.find(name) != job.joboptions.end());
 
@@ -760,12 +761,13 @@ TEST_CASE("Class2D: filament context options reach the command line",
 		REQUIRE(commands[0].find(" --filament_context off --helical_context --helical_context_types 2 --helical_context_types_max 10"
 		                         " --helical_context_start 4 --helical_context_types_agree 0.75"
 		                         " --helical_context_temper -1 --helical_context_exclude -1"
-		                         " --helical_track_smooth --helical_polarity") != std::string::npos);
+		                         " --helical_context_hierarchical --helical_track_smooth --helical_polarity") != std::string::npos);
 		REQUIRE(commands[0].find("--filament_temper") == std::string::npos);
 
 		// Custom settings and negative flags
 		job.joboptions["helctx_types_min"].setString("4");
 		job.joboptions["helctx_types_max"].setString("4");
+		job.joboptions["helctx_hierarchical"].setString("No");
 		job.joboptions["helctx_start"].setString("6");
 		job.joboptions["helctx_agree"].setString("0.8");
 		job.joboptions["helctx_temper"].setString("0.2");
@@ -776,7 +778,7 @@ TEST_CASE("Class2D: filament context options reach the command line",
 		CHECK(commands[0].find(" --helical_context --helical_context_types 4 --helical_context_types_max 4"
 		                       " --helical_context_start 6 --helical_context_types_agree 0.8"
 		                       " --helical_context_temper 0.2 --helical_context_exclude 150"
-		                       " --dont_helical_track_smooth --dont_helical_polarity") != std::string::npos);
+		                       " --dont_helical_context_hierarchical --dont_helical_track_smooth --dont_helical_polarity") != std::string::npos);
 
 		// Without bimodal_psi, polarity propagation is disabled cleanly
 		job.joboptions["helctx_polarity"].setString("Yes");
@@ -891,7 +893,9 @@ TEST_CASE("Class3D: filament context options reach the command line",
 	for (const char *name : {"filctx_mode", "filctx_temper", "filctx_gap", "filctx_floor", "filctx_alpha",
 	                         "helctx_track_smooth", "helctx_polarity"})
 		REQUIRE(job.joboptions.find(name) != job.joboptions.end());
-	REQUIRE(job.joboptions["filctx_mode"].getString() == job_filament_context_options[0]);
+	REQUIRE(job.joboptions["filctx_mode"].getString() == job_filament_context_options[2]);
+	CHECK_FALSE(job.joboptions["do_two_rounds"].getBoolean());
+	CHECK_FALSE(job.joboptions["do_auto_mask"].getBoolean());
 
 	std::vector<std::string> commands;
 	std::string final_command, error_message;
@@ -905,14 +909,18 @@ TEST_CASE("Class3D: filament context options reach the command line",
 	job.joboptions["do_helix"].setString("Yes");
 	job.joboptions["helical_tube_outer_diameter"].setString("200");
 
-	SECTION("helical, default: off is emitted explicitly")
+	SECTION("helical, default: Per filament is emitted explicitly")
 	{
 		REQUIRE(generateCommands(job, commands, final_command, error_message));
-		REQUIRE(commands[0].find(" --filament_context off") != std::string::npos);
-		REQUIRE(commands[0].find("--filament_temper") == std::string::npos);
+		REQUIRE(commands[0].find(" --filament_context filament") != std::string::npos);
 		REQUIRE(commands[0].find(" --keep_full_filaments") != std::string::npos);
 		REQUIRE(commands[0].find(" --helical_track_smooth") != std::string::npos);
 		REQUIRE(commands[0].find(" --helical_polarity") != std::string::npos);
+
+		job.joboptions["filctx_mode"].setString(job_filament_context_options[0]);
+		REQUIRE(generateCommands(job, commands, final_command, error_message));
+		REQUIRE(commands[0].find(" --filament_context off") != std::string::npos);
+		REQUIRE(commands[0].find("--filament_temper") == std::string::npos);
 	}
 
 	SECTION("helical context negative flags are emitted explicitly when turned off")
@@ -982,6 +990,7 @@ TEST_CASE("Class3D: filament context options reach the command line",
 		job.joboptions["fn_cont"].setString("Class3D/job007/run_it025_optimiser.star");
 		SECTION("off")
 		{
+			job.joboptions["filctx_mode"].setString(job_filament_context_options[0]);
 			REQUIRE(generateCommands(job, commands, final_command, error_message));
 			REQUIRE(commands[0].find(" --continue ") != std::string::npos);
 			REQUIRE(commands[0].find(" --filament_context off") != std::string::npos);
@@ -1457,18 +1466,28 @@ TEST_CASE("Class2D, Class3D and Class2DConsensus: new Yes defaults stay No for o
 	unsetenv("RELION_CONSENSUS_HELICAL_TYPES");
 	unsetenv("RELION_HELICAL_TRACK_SMOOTH");
 	unsetenv("RELION_HELICAL_POLARITY");
+	unsetenv("RELION_HELICAL_HIERARCHICAL");
 
 	RelionJob fresh2d = makeClass2DJob();
 	CHECK(fresh2d.joboptions["helical_auto_diameter"].getBoolean());
 	CHECK(fresh2d.joboptions["helctx_track_smooth"].getBoolean());
 	CHECK(fresh2d.joboptions["helctx_polarity"].getBoolean());
+	CHECK(fresh2d.joboptions["helctx_hierarchical"].getBoolean());
 	RelionJob fresh3d = makeClass3DJob();
+	CHECK(fresh3d.joboptions["filctx_mode"].getString() == job_filament_context_options[2]);
 	CHECK(fresh3d.joboptions["helctx_track_smooth"].getBoolean());
 	CHECK(fresh3d.joboptions["helctx_polarity"].getBoolean());
 	RelionJob freshcons;
 	freshcons.clear();
 	freshcons.initialise(PROC_CLASS2D_CONSENSUS);
 	CHECK(freshcons.joboptions["do_helical_types"].getBoolean());
+	RelionJob freshsub;
+	freshsub.clear();
+	freshsub.initialise(PROC_HELIX_SUBCLASSIFY);
+	freshsub.label = get_proc_label(PROC_HELIX_SUBCLASSIFY);
+	CHECK(freshsub.joboptions["do_hierarchical"].getBoolean());
+	CHECK(freshsub.joboptions["do_auto_mask"].getBoolean());
+	CHECK(freshsub.joboptions["auto_mask_start_res"].getString() == "15");
 
 	auto stripAndReload = [](RelionJob &job, const std::vector<std::string> &drop_keys, const std::string &fn)
 	{
@@ -1494,18 +1513,24 @@ TEST_CASE("Class2D, Class3D and Class2DConsensus: new Yes defaults stay No for o
 	};
 
 	const std::string tag = integerToString((int)std::clock());
-	RelionJob old2d = stripAndReload(fresh2d, {"helical_auto_diameter", "helctx_track_smooth", "helctx_polarity"}, "old2d_" + tag + ".star");
+	RelionJob old2d = stripAndReload(fresh2d, {"helical_auto_diameter", "helctx_track_smooth", "helctx_polarity", "helctx_hierarchical"}, "old2d_" + tag + ".star");
 	CHECK_FALSE(old2d.joboptions["helical_auto_diameter"].getBoolean());
 	CHECK_FALSE(old2d.joboptions["helctx_track_smooth"].getBoolean());
 	CHECK_FALSE(old2d.joboptions["helctx_polarity"].getBoolean());
+	CHECK_FALSE(old2d.joboptions["helctx_hierarchical"].getBoolean());
 
-	RelionJob old3d = stripAndReload(fresh3d, {"helctx_track_smooth", "helctx_polarity"}, "old3d_" + tag + ".star");
+	RelionJob old3d = stripAndReload(fresh3d, {"filctx_mode", "helctx_track_smooth", "helctx_polarity"}, "old3d_" + tag + ".star");
+	CHECK(old3d.joboptions["filctx_mode"].getString() == job_filament_context_options[0]);
 	CHECK_FALSE(old3d.joboptions["helctx_track_smooth"].getBoolean());
 	CHECK_FALSE(old3d.joboptions["helctx_polarity"].getBoolean());
 
 	freshcons.label = get_proc_label(PROC_CLASS2D_CONSENSUS);
 	RelionJob oldcons = stripAndReload(freshcons, {"do_helical_types"}, "oldcons_" + tag + ".star");
 	CHECK_FALSE(oldcons.joboptions["do_helical_types"].getBoolean());
+
+	RelionJob oldsub = stripAndReload(freshsub, {"do_hierarchical", "do_auto_mask"}, "oldsub_" + tag + ".star");
+	CHECK_FALSE(oldsub.joboptions["do_hierarchical"].getBoolean());
+	CHECK_FALSE(oldsub.joboptions["do_auto_mask"].getBoolean());
 }
 
 TEST_CASE("Class2DConsensus: rejects invalid refinement iteration counts", "[pipeline][consensus]")
@@ -2517,6 +2542,7 @@ TEST_CASE("Class2D and Class2DConsensus: automatic mask options emit explicit fl
 TEST_CASE("HelixSubClassify: job options, CLI flags, Slurm script, and validation", "[pipeline][helix_subclassify]")
 {
 	unsetenv("RELION_KEEP_ALL_ITERATIONS");
+	unsetenv("RELION_HELICAL_HIERARCHICAL");
 	RelionJob job;
 	job.clear();
 	job.initialise(PROC_HELIX_SUBCLASSIFY);
@@ -2527,12 +2553,13 @@ TEST_CASE("HelixSubClassify: job options, CLI flags, Slurm script, and validatio
 	std::vector<std::string> commands;
 	std::string final_command, error_message;
 
-	// Defaults: auto CTF premult, auto-mask off, keep_all_iter off, GPU none, output merged_particles.star
+	// Defaults: hierarchical 2..10, auto CTF premult, auto-mask on @ 15 A, keep_all_iter off, GPU none, output merged_particles.star
 	REQUIRE(generateCommands(job, commands, final_command, error_message));
 	REQUIRE(commands.size() == 1);
 	CHECK(commands[0].find("`which relion_helix_subclassify` --i Class2D/job001/run_it025_data.star --o ") != std::string::npos);
+	CHECK(commands[0].find(" --hierarchical --types 2 --types_max 10") != std::string::npos);
 	CHECK(commands[0].find(" --auto_premultiply_ctf") != std::string::npos);
-	CHECK(commands[0].find(" --dont_auto_mask") != std::string::npos);
+	CHECK(commands[0].find(" --auto_mask --auto_mask_start_res 15") != std::string::npos);
 	CHECK(commands[0].find(" --dont_keep_all_iterations") != std::string::npos);
 	CHECK(commands[0].find(" --pool 30") != std::string::npos);
 	CHECK(commands[0].find(" --gpu none") != std::string::npos);
@@ -2541,13 +2568,14 @@ TEST_CASE("HelixSubClassify: job options, CLI flags, Slurm script, and validatio
 
 	// Toggled options round-trip through job.star and emit matching CLI flags
 	job.joboptions["do_retype"].setString("Yes");
+	job.joboptions["do_hierarchical"].setString("No");
 	job.joboptions["types_min"].setString("1");
 	job.joboptions["types_max"].setString("5");
 	job.joboptions["extract_size"].setString("512");
 	job.joboptions["scale_size"].setString("256");
 	job.joboptions["do_premultiply"].setString("No");
-	job.joboptions["do_auto_mask"].setString("Yes");
-	job.joboptions["auto_mask_start_res"].setString("15");
+	job.joboptions["do_auto_mask"].setString("No");
+	job.joboptions["auto_mask_start_res"].setString("12");
 	job.joboptions["auto_mask_soft"].setString("6");
 	job.joboptions["auto_mask_mass"].setString("300");
 	job.joboptions["keep_all_iter"].setString("Yes");
@@ -2563,15 +2591,18 @@ TEST_CASE("HelixSubClassify: job options, CLI flags, Slurm script, and validatio
 	std::remove(rw_star.c_str());
 	CHECK(reloaded.type == PROC_HELIX_SUBCLASSIFY);
 	CHECK(reloaded.joboptions["do_retype"].getString() == "Yes");
+	CHECK(reloaded.joboptions["do_hierarchical"].getString() == "No");
+	CHECK(reloaded.joboptions["do_auto_mask"].getString() == "No");
 	CHECK(reloaded.joboptions["extract_size"].getString() == "512");
 	CHECK(reloaded.joboptions["scale_size"].getString() == "256");
 	CHECK(reloaded.joboptions["do_premultiply"].getString() == "No");
-	CHECK(reloaded.joboptions["auto_mask_start_res"].getString() == "15");
+	CHECK(reloaded.joboptions["auto_mask_start_res"].getString() == "12");
 
 	REQUIRE(generateCommands(reloaded, commands, final_command, error_message));
 	CHECK(commands[0].find(" --retype") != std::string::npos);
+	CHECK(commands[0].find(" --dont_hierarchical --types 1 --types_max 5") != std::string::npos);
 	CHECK(commands[0].find(" --dont_premultiply_ctf") != std::string::npos);
-	CHECK(commands[0].find(" --auto_mask --auto_mask_start_res 15 --auto_mask_soft 6 --auto_mask_mass 300") != std::string::npos);
+	CHECK(commands[0].find(" --dont_auto_mask") != std::string::npos);
 	CHECK(commands[0].find(" --keep_all_iterations") != std::string::npos);
 	CHECK(commands[0].find(" --gpu \"0:1\"") != std::string::npos);
 	CHECK(commands[0].find(" --prepare_only") != std::string::npos);

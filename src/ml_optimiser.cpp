@@ -151,6 +151,49 @@ MlOptimiser::~MlOptimiser()
 
 /** ========================== I/O operations  =========================== */
 
+static bool isEnvFlagOff(const char *name)
+{
+	const char *env = getenv(name);
+	if (!env || !env[0])
+		return false;
+	std::string v(env);
+	for (size_t i = 0; i < v.size(); i++)
+		v[i] = tolower(v[i]);
+	return v == "0" || v == "no" || v == "off" || v == "false";
+}
+
+static bool hasMultiSegmentHelicalTracks(const MetaDataTable &MD)
+{
+	if (!MD.containsLabel(EMDL_MICROGRAPH_NAME) ||
+	    !MD.containsLabel(EMDL_PARTICLE_HELICAL_TUBE_ID) ||
+	    !MD.containsLabel(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM))
+		return false;
+	std::map<std::string, std::pair<RFLOAT, RFLOAT> > span;
+	const long int n = MD.numberOfObjects();
+	for (long int i = 0; i < n; i++)
+	{
+		FileName mic;
+		int tube = 0;
+		RFLOAT track = 0.;
+		if (!MD.getValue(EMDL_MICROGRAPH_NAME, mic, i) ||
+		    !MD.getValue(EMDL_PARTICLE_HELICAL_TUBE_ID, tube, i) ||
+		    !MD.getValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, track, i))
+			continue;
+		const std::string key = mic + ":" + integerToString(tube);
+		auto it = span.find(key);
+		if (it == span.end())
+			span[key] = std::make_pair(track, track);
+		else
+		{
+			if (track < it->second.first) it->second.first = track;
+			if (track > it->second.second) it->second.second = track;
+			if (it->second.second - it->second.first > 0.)
+				return true;
+		}
+	}
+	return false;
+}
+
 void MlOptimiser::usage()
 {
     parser.writeUsage(std::cout);
@@ -221,6 +264,7 @@ static std::string getFinufftCacheBudgetDefault()
 
 void MlOptimiser::parseContinue(int argc, char **argv)
 {
+    continued_from_star = true;
     // A continued run never deletes it000: whatever exists belongs to the
     // original run, which already applied its own rule to it (MultiBody, which
     // continues a Refine3D, keeps the refinement's)
@@ -836,11 +880,19 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     fn_mask = parser.getOption("--solvent_mask", "User-provided mask for the references (default is to use spherical mask with particle_diameter)", "None");
     fn_mask2 = parser.getOption("--solvent_mask2", "User-provided secondary mask (with its own average density)", "None");
     do_write_unmasked_maps = parser.checkOption("--write_unmasked_maps", "3D classification and auto-refinement: at every iteration also write the maps before the solvent mask (rootname_itNNN[_halfN]_classNNN_unmasked.mrc), next to the masked ones");
-    do_auto_mask = parser.checkOption("--auto_mask", "Mask the 3D references at every iteration with masks made from them automatically, as trueFSC in helicon: low-pass filtered, thresholded (Otsu), the regions with the brightest voxels kept and a soft edge added (in auto-refinement made from the two half-maps, with the soft edge that best separates signal from noise). Needs --flatten_solvent; not with --solvent_mask");
-    explicit_dont_auto_mask = parser.checkOption("--dont_auto_mask", "Do not mask the 3D references with automatic masks (the default)");
+    do_auto_mask = parser.checkOption("--auto_mask", "Mask the 2D/3D references at every iteration with masks made from them automatically, as trueFSC in helicon: low-pass filtered, thresholded (Otsu), the regions with the brightest voxels kept and a soft edge added (in auto-refinement made from the two half-maps, with the soft edge that best separates signal from noise). Needs --flatten_solvent; not with --solvent_mask (default on for helical Class2D/Class3D with --flatten_solvent)");
+    explicit_dont_auto_mask = parser.checkOption("--dont_auto_mask", "Do not mask the references with automatic masks");
     if (explicit_dont_auto_mask)
         do_auto_mask = false;
-    auto_mask_start_res = textToFloat(parser.getOption("--auto_mask_start_res", "Make the automatic masks only once the resolution is better than this (in A); spherical masks until then", "12"));
+    explicit_auto_mask_opt = (do_auto_mask || explicit_dont_auto_mask);
+    const std::string s_am_res = parser.getOption("--auto_mask_start_res", "Make the automatic masks only once the resolution is better than this (in A; default 12, or 15 for helical Class2D/Class3D); spherical/tube masks until then", "AUTO");
+    if (s_am_res != "AUTO")
+    {
+        explicit_auto_mask_start_res_opt = true;
+        auto_mask_start_res = textToFloat(s_am_res);
+    }
+    else
+        auto_mask_start_res = 12.;
     auto_mask_soft_edge = textToFloat(parser.getOption("--auto_mask_soft", "Width of the soft edge of the automatic masks (in A). Default: optimised from the half-maps in auto-refinement, 3 times the resolution of the class in classification", "-1"));
     auto_mask_mass = textToFloat(parser.getOption("--auto_mask_mass", "Binarise the automatic masks at the threshold that encloses this mass (in kDa) instead of at Otsu's threshold", "-1"));
     fn_lowpass_mask = parser.getOption("--lowpass_mask", "User-provided mask for low-pass filtering", "None");
@@ -1024,16 +1076,17 @@ void MlOptimiser::parseInitial(int argc, char **argv)
     if (parser.checkOption("--dont_helical_cylindrical_mask", "Mask helical segments with the tube within a sphere of the mask diameter, as before"))
         helical_cylindrical_mask = false;
     {
-        // Opt-in until validated: RELION_HELICAL_AUTO_DIAMETER=1 makes it the default
+        // Default on for helical 2D EM; RELION_HELICAL_AUTO_DIAMETER=0 disables
         const char *env = getenv("RELION_HELICAL_AUTO_DIAMETER");
-        std::string v = (env == NULL) ? "" : env;
-        for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
-        helical_auto_diameter = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
+        helical_auto_diameter = (env != NULL && env[0] != '\0') && !isEnvFlagOff("RELION_HELICAL_AUTO_DIAMETER");
+        const bool aut_on = parser.checkOption("--helical_auto_diameter", "2D classes of helical segments: mask each class's reference with a tube as wide as its own average, measured every iteration; the tube of the job is then the mask diameter (default for helical 2D EM, RELION_HELICAL_AUTO_DIAMETER=0 disables)");
+        const bool aut_off = parser.checkOption("--dont_helical_auto_diameter", "Mask all classes with the tube of the job");
+        if (aut_on)
+            helical_auto_diameter = true;
+        if (aut_off)
+            helical_auto_diameter = false;
+        explicit_helical_auto_diameter_opt = (env != NULL && env[0] != '\0') || aut_on || aut_off;
     }
-    if (parser.checkOption("--helical_auto_diameter", "2D classes of helical segments: mask each class's reference with a tube as wide as its own average, measured every iteration; the tube of the job is then the mask diameter (RELION_HELICAL_AUTO_DIAMETER=1 makes this the default)"))
-        helical_auto_diameter = true;
-    if (parser.checkOption("--dont_helical_auto_diameter", "Mask all classes with the tube of the job (the default, unless RELION_HELICAL_AUTO_DIAMETER=1)"))
-        helical_auto_diameter = false;
     do_helical_symmetry_local_refinement = parser.checkOption("--helical_symmetry_search", "Perform local refinement of helical symmetry?");
     do_helical_symmetrise_refs = parser.checkOption("--helical_symmetrise_refs", "Before the first iteration, give each class's starting map its own helical twist and rise (from the --ref STAR file)");
     helical_sigma_distance_A = textToFloat(parser.getOption("--helical_sigma_distance_A", "Sigma of distance along the helical tracks (Angstroms; the persistence length of the filament, independent of box size and pixel size)", "-1."));
@@ -1514,11 +1567,7 @@ void MlOptimiser::read(FileName fn_in, int rank, bool do_prevent_preread)
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_POLARITY_START, helical_polarity_start_iter))
         helical_polarity_start_iter = 3;
     if (!MD.getValue(EMDL_OPTIMISER_DO_HELICAL_TRACK_SMOOTH, do_helical_track_smooth))
-    {
-        const char *env_ts = getenv("RELION_HELICAL_TRACK_SMOOTH");
-        const bool env_ts_off = (env_ts && env_ts[0] && (std::string(env_ts) == "0" || std::string(env_ts) == "off"));
-        do_helical_track_smooth = (do_helical_context && !env_ts_off);
-    }
+        do_helical_track_smooth = (do_helical_context && !isEnvFlagOff("RELION_HELICAL_TRACK_SMOOTH"));
     if (!MD.getValue(EMDL_OPTIMISER_HELICAL_TILT_WEIGHT_SIGMA, helical_tilt_weight_sigma))
         helical_tilt_weight_sigma = -1.;
     // New SGD (13Feb2018)
@@ -2896,6 +2945,65 @@ void MlOptimiser::initialiseGeneral(int rank)
     }
     else
         updateSharedReferenceGroups();
+    // Fresh CLI helical runs default to the validated helical typing parameter combinations
+    if (iter == 0 && !continued_from_star)
+    {
+        if (mymodel.ref_dim == 2 && !mydata.is_3D && !mydata.is_tomo &&
+            mymodel.nr_classes > 1 && !do_fix_classes && !gradient_refine &&
+            (do_helical_refine || helical_tube_outer_diameter > 0.))
+        {
+            if (!explicit_helical_context_opt && filctx_opt.mode == filctx::OFF && hasMultiSegmentHelicalTracks(mydata.MDimg))
+            {
+                do_helical_context = true;
+                if (!do_helical_track_smooth_off && !isEnvFlagOff("RELION_HELICAL_TRACK_SMOOTH"))
+                    do_helical_track_smooth = true;
+                if (verb > 0)
+                    std::cout << " Helical 2D classification: enabling --helical_context ("
+                              << helical_context_types_min << ".." << helical_context_types_max
+                              << " types) by default (--dont_helical_context to disable)" << std::endl;
+            }
+            if (!explicit_helical_auto_diameter_opt && helical_cylindrical_mask && fn_mask == "None")
+                helical_auto_diameter = true;
+            if (!explicit_sort_classes_opt && do_helical_context)
+                do_sort_classes = true;
+            if (!explicit_auto_mask_opt && do_solvent && fn_mask == "None")
+            {
+                do_auto_mask = true;
+                if (!explicit_auto_mask_start_res_opt)
+                    auto_mask_start_res = 15.;
+                if (verb > 0)
+                    std::cout << " Helical 2D classification: enabling --auto_mask --auto_mask_start_res "
+                              << auto_mask_start_res << " by default (--dont_auto_mask to disable)" << std::endl;
+            }
+        }
+        if (mymodel.ref_dim == 3 && !mydata.is_tomo && mymodel.nr_bodies == 1 &&
+            mymodel.nr_classes > 1 && !do_auto_refine && !do_fix_classes && !gradient_refine &&
+            do_helical_refine)
+        {
+            if (hasMultiSegmentHelicalTracks(mydata.MDimg))
+            {
+                if (!explicit_filament_context_opt)
+                {
+                    filctx_opt.mode = filctx::FILAMENT;
+                    if (!do_helical_track_smooth_off && !isEnvFlagOff("RELION_HELICAL_TRACK_SMOOTH"))
+                        do_helical_track_smooth = true;
+                    if (verb > 0)
+                        std::cout << " Helical 3D classification: enabling --filament_context filament by default (--filament_context off to disable)" << std::endl;
+                }
+                if (!explicit_keep_full_filaments_opt)
+                    do_keep_full_filaments = true;
+            }
+            if (!explicit_auto_mask_opt && do_solvent && fn_mask == "None" && mymodel.class_settings.mask.empty())
+            {
+                do_auto_mask = true;
+                if (!explicit_auto_mask_start_res_opt)
+                    auto_mask_start_res = 15.;
+                if (verb > 0)
+                    std::cout << " Helical 3D classification: enabling --auto_mask --auto_mask_start_res "
+                              << auto_mask_start_res << " by default (--dont_auto_mask to disable)" << std::endl;
+            }
+        }
+    }
     // Automatic class diameters: keep experimental particle images masked at --helical_outer_diameter,
     // while class references adapt up to max(helical_tube_outer_diameter, particle_diameter)
     if (helical_auto_diameter && helical_cylindrical_mask && fn_mask == "None" &&
@@ -4382,6 +4490,13 @@ void MlOptimiser::initialiseHelicalContext()
         helical_context_rows[part_id] = mydata.particles[part_id].id;
     helical_context.verb = verb;
     helical_context.pol_class_weight.assign(mymodel.nr_classes, 1.f);
+    if (mymodel.nr_classes >= 2)
+    {
+        helical_context_types_min = std::max(1, std::min(helical_context_types_min, mymodel.nr_classes));
+        if (helical_context_types_max > 0)
+            helical_context_types_max = std::max(1, std::min(helical_context_types_max, mymodel.nr_classes));
+        helical_context.nr_types = std::max(1, std::min(helical_context.nr_types, mymodel.nr_classes));
+    }
     RFLOAT diameter = (particle_diameter > 0.) ? particle_diameter : mymodel.ori_size * mymodel.pixel_size;
     if (helical_tube_outer_diameter > 0.)
         diameter = std::min(diameter, helical_tube_outer_diameter);
@@ -4823,12 +4938,22 @@ void MlOptimiser::updateHelicalContext()
 
     // Number of types: select as soon as the context prior starts (and re-select over full range while classes sharpen)
     const bool auto_select = (helical_context_types_max > helical_context_types_min);
+    int nr_good_classes = 0;
+    for (int k = 0; k < mymodel.nr_classes; k++)
+        if (helical_context.junk_class.empty() || !helical_context.junk_class[k])
+            nr_good_classes++;
+    const bool cont_wait_every = (continued_from_star && helical_context_types_selected &&
+                                  (helical_context_types_every <= 0 ||
+                                   iter - helical_context_types_last_iter < helical_context_types_every));
+    const bool use_hier_final = (iter == nr_iter && auto_select && do_helical_context_hierarchical &&
+                                 !cont_wait_every && nr_good_classes >= 2 &&
+                                 (int)helical_context.filament_name.size() >= 20);
     if (auto_select && iter + 1 < helical_context_start_iter && !helical_context_types_selected)
     {
         helical_context.nr_types = 1;
         helical_context.initialised_model = false;
     }
-    else if (auto_select && iter + 1 >= helical_context_start_iter)
+    else if (!use_hier_final && auto_select && iter + 1 >= helical_context_start_iter)
     {
         int tmin = helical_context_types_min, tmax = helical_context_types_max;
         const int every = (helical_context.nr_types <= 1 && iter <= 12 && helical_context_types_every > 0)
@@ -4856,7 +4981,8 @@ void MlOptimiser::updateHelicalContext()
         }
     }
 
-    helical_context.update();
+    if (!use_hier_final)
+        helical_context.update();
 
     // Split chimeric multi-polymorph crossover classes before late convergence iterations
     helical_split_happened = false;
@@ -4941,13 +5067,27 @@ void MlOptimiser::updateHelicalContext()
         if (verb > 0 && nr_smoothed > 0)
             std::cout << " Filament context: surgical final filter updated " << nr_smoothed << " segments" << std::endl;
     };
+    if (use_hier_final)
+    {
+        const int eff_max = std::min(helical_context_types_max, mymodel.nr_classes);
+        helical_context.runHierarchicalTyping(
+            psi, psi_prior,
+            helical_context_types_min,
+            std::max(2, std::min(eff_max, 10)),
+            eff_max, 20, 3,
+            helical_context_types_tol,
+            helical_context_types_agree,
+            helical_context.use_twist_rate_split);
+        helical_context_types_selected = true;
+    }
+
     if (allow_final_smooth && iter == nr_iter && (long int)helical_context.post.size() == nr_parts * (long int)mymodel.nr_classes)
         runFinalSmooth();
 
     helical_context.fitPeriods(psi, psi_prior);
     if (iter + 1 >= helical_context_start_iter + 2 && iter < nr_iter)
         helical_context.applyPhaseRingPriors(psi, psi_prior);
-    if (iter == nr_iter && helical_context_types_max > helical_context.nr_types)
+    if (!use_hier_final && iter == nr_iter && helical_context_types_max > helical_context.nr_types)
     {
         const int prev_nt = helical_context.nr_types;
         if (helical_context.splitTypesByTwistRate(helical_context_types_max) > prev_nt)
@@ -8793,11 +8933,12 @@ void MlOptimiser::updateHelicalClassDiameters(std::vector<MultidimArray<RFLOAT> 
 
 bool MlOptimiser::autoMaskThisIteration() const
 {
-    const RFLOAT eff_start = (mymodel.ref_dim == 2)
+    const bool is_class_mask = !do_split_random_halves;
+    const RFLOAT eff_start = is_class_mask
         ? std::max(auto_mask_start_res, (RFLOAT)(2.5 * mymodel.pixel_size))
         : auto_mask_start_res;
     return do_auto_mask && (mymodel.ref_dim == 2 || mymodel.ref_dim == 3) && mymodel.nr_bodies == 1 &&
-           (mymodel.ref_dim == 3 || iter >= 6) &&
+           (!is_class_mask || iter >= 6) &&
            mymodel.current_resolution > 0. && 1. / mymodel.current_resolution <= eff_start;
 }
 
@@ -8827,37 +8968,51 @@ bool MlOptimiser::autoMaskClassResolution(int iclass, RFLOAT &resolution, RFLOAT
     // With a mask column in --ref, only the classes marked "auto" get automatic masks
     const std::vector<std::string> &class_mask = mymodel.class_settings.mask;
     const bool wanted = class_mask.empty() || (iclass < (int)class_mask.size() && class_mask[iclass] == "auto");
-    const RFLOAT eff_start = (mymodel.ref_dim == 2)
-        ? std::max(auto_mask_start_res, (RFLOAT)(2.5 * mymodel.pixel_size))
-        : auto_mask_start_res;
+    const RFLOAT eff_start = std::max(auto_mask_start_res, (RFLOAT)(2.5 * mymodel.pixel_size));
     return wanted && mymodel.pdf_class[iclass] > 0. && resolution <= eff_start;
 }
 
 void MlOptimiser::calculateAutoMaskOfClass(int iclass, RFLOAT resolution, RFLOAT lowpass, AutoMaskReport &report)
 {
-    AutoMaskOptions opt;
-    opt.lowpass = lowpass;
-    opt.mass = auto_mask_mass;
-    opt.soft_edge = (auto_mask_soft_edge >= 0.) ? auto_mask_soft_edge / mymodel.pixel_size : -1.;
+    const RFLOAT soft_px = (auto_mask_soft_edge >= 0.) ? auto_mask_soft_edge / mymodel.pixel_size : -1.;
     if ((int)auto_masks.size() != mymodel.nr_classes)
         auto_masks.resize(mymodel.nr_classes);
+    // On the final iteration, alignClasses() rotates/shifts 3D classes just before masking,
+    // so bypass asymmetric hysteresis against the pre-alignment mask frame.
+    const bool was_aligned = (mymodel.ref_dim == 3 && do_align_classes && mymodel.nr_classes > 1 && iter == nr_iter);
+    const MultidimArray<RFLOAT> *prev_ptr =
+        (!was_aligned && auto_masks[iclass].sameShape(mymodel.Iref[iclass], true)) ? &auto_masks[iclass] : NULL;
+    MultidimArray<RFLOAT> next_mask;
     if (mymodel.ref_dim == 2)
     {
         AutoMask2DOptions opt2d;
         opt2d.lowpass = lowpass;
         opt2d.min_lowpass = 35.;
         opt2d.extend_angst = 18.;
-        opt2d.soft_edge = opt.soft_edge;
-        opt2d.mass = opt.mass;
+        opt2d.soft_edge = soft_px;
+        opt2d.mass = auto_mask_mass;
         opt2d.helix_tube_diam = (helical_tube_outer_diameter > 0.) ? helical_tube_outer_diameter : -1.;
-        const MultidimArray<RFLOAT> *prev_ptr =
-            auto_masks[iclass].sameShape(mymodel.Iref[iclass], true) ? &auto_masks[iclass] : NULL;
-        MultidimArray<RFLOAT> next_mask;
         autoMask2DClass(mymodel.Iref[iclass], mymodel.pixel_size, resolution, opt2d, next_mask, prev_ptr, &report, nr_threads);
-        auto_masks[iclass] = next_mask;
     }
     else
-        autoMaskFromMap(mymodel.Iref[iclass], mymodel.pixel_size, resolution, opt, auto_masks[iclass], &report, nr_threads);
+    {
+        AutoMask3DOptions opt3d;
+        opt3d.lowpass = lowpass;
+        opt3d.min_lowpass = 30.;
+        const long int min_box = std::min(XSIZE(mymodel.Iref[iclass]),
+                                          std::min(YSIZE(mymodel.Iref[iclass]), ZSIZE(mymodel.Iref[iclass])));
+        opt3d.extend_angst = std::min((RFLOAT)12., (RFLOAT)(0.10 * (double)min_box * mymodel.pixel_size));
+        opt3d.soft_edge = soft_px;
+        opt3d.mass = auto_mask_mass;
+        if (do_helical_refine)
+        {
+            const RFLOAT tube_d = classTubeDiameter(iclass, true);
+            opt3d.helix_tube_diam = (tube_d > 0.) ? tube_d : -1.;
+            opt3d.helix_length_angst = (particle_diameter > 0.) ? particle_diameter : -1.;
+        }
+        autoMask3DClass(mymodel.Iref[iclass], mymodel.pixel_size, resolution, opt3d, next_mask, prev_ptr, &report, nr_threads);
+    }
+    auto_masks[iclass] = next_mask;
 }
 
 void MlOptimiser::printAutoMaskReport(int iclass, const AutoMaskReport &report) const
@@ -8865,6 +9020,11 @@ void MlOptimiser::printAutoMaskReport(int iclass, const AutoMaskReport &report) 
     std::cout << " Auto mask";
     if (mymodel.nr_classes > 1)
         std::cout << " of class " << iclass + 1;
+    if (report.lowpass < 0. && report.mass == 0. && report.soft_edge == 0.)
+    {
+        std::cout << ": skipped (fallback to unmasked, resolution " << report.resolution << " A)" << std::endl;
+        return;
+    }
     std::cout << ": low-pass " << ((report.lowpass > 0.) ? floatToString(report.lowpass) + " A" : std::string("none"))
               << ", threshold " << report.threshold << ", " << ROUND(report.mass) << " kDa inside, soft edge "
               << report.soft_edge * mymodel.pixel_size << " A" << (report.soft_edge_optimised ? " (optimised)" : "")
@@ -14309,12 +14469,16 @@ void MlOptimiser::parseKeepFullFilaments(bool is_continue)
         const char *env = getenv("RELION_KEEP_FULL_FILAMENTS");
         std::string v = (env == NULL) ? "" : env;
         for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+        if (!v.empty())
+            explicit_keep_full_filaments_opt = true;
         do_keep_full_filaments = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
     }
     const bool keep_on = parser.checkOption("--keep_full_filaments", "Assign all segments from the same full filament to the same 3D class (helical Class3D)");
     const bool keep_off = parser.checkOption("--dont_keep_full_filaments", "Do not force all segments of a filament into the same 3D class");
     if (keep_on && keep_off)
         REPORT_ERROR("ERROR: cannot specify both --keep_full_filaments and --dont_keep_full_filaments");
+    if (keep_on || keep_off)
+        explicit_keep_full_filaments_opt = true;
     if (keep_on) do_keep_full_filaments = true;
     if (keep_off) do_keep_full_filaments = false;
 }
@@ -14324,6 +14488,7 @@ void MlOptimiser::parseHelicalContextOptions(bool is_continue)
     const bool ctx_on = parser.checkOption("--helical_context", "Use the other segments of each filament as a prior on the class of a segment (helical 2D classification)");
     const bool ctx_off = parser.checkOption("--dont_helical_context", "Disable the filament context prior in helical 2D classification");
     const bool context_just_enabled = (is_continue && !do_helical_context && ctx_on && !ctx_off);
+    explicit_helical_context_opt = (ctx_on || ctx_off);
     if (!is_continue)
         do_helical_context = ctx_on && !ctx_off;
     else
@@ -14344,7 +14509,7 @@ void MlOptimiser::parseHelicalContextOptions(bool is_continue)
     if (!is_continue || s_excl != "OLD")
         helical_context.exclude_angst = textToFloat(s_excl);
 
-    const std::string s_types = parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", is_continue ? "OLD" : "4");
+    const std::string s_types = parser.getOption("--helical_context_types", "Number of helical types in the filament context (one more if there are junk filaments)", is_continue ? "OLD" : "2");
     if (!is_continue)
     {
         helical_context.nr_types = textToInteger(s_types);
@@ -14361,7 +14526,7 @@ void MlOptimiser::parseHelicalContextOptions(bool is_continue)
         }
     }
 
-    const std::string s_tmax = parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", is_continue ? "OLD" : "-1");
+    const std::string s_tmax = parser.getOption("--helical_context_types_max", "Choose the number of types between --helical_context_types and this by held-out log-likelihood of filaments (once, in the iteration before the prior is first used)", is_continue ? "OLD" : "10");
     if (!is_continue)
     {
         helical_context_types_max = textToInteger(s_tmax);
@@ -14399,6 +14564,14 @@ void MlOptimiser::parseHelicalContextOptions(bool is_continue)
     else if (warm_off)
         helical_context_warm = false;
     helical_context.use_polarity_order = parser.checkOption("--helical_context_polarity_order", "With --helical_polarity: run the class chain of filaments with flipped polarity backwards");
+    const bool hier_on = parser.checkOption("--helical_context_hierarchical", "Use recursive hierarchical tree splitting + twist-rate refinement on the final iteration when selecting helical types");
+    const bool hier_off = parser.checkOption("--dont_helical_context_hierarchical", "Disable hierarchical tree splitting and use flat mixture selection only");
+    if (hier_on && hier_off)
+        REPORT_ERROR("ERROR: cannot specify both --helical_context_hierarchical and --dont_helical_context_hierarchical");
+    if (!is_continue)
+        do_helical_context_hierarchical = !isEnvFlagOff("RELION_HELICAL_HIERARCHICAL");
+    if (hier_on) do_helical_context_hierarchical = true;
+    if (hier_off) do_helical_context_hierarchical = false;
     helical_context_class_min_frac = textToFloat(parser.getOption("--helical_context_class_min_frac", "Files per helical type: include a class if at least this fraction of its segments is of the type", "0.1"));
     helical_context_class_min_segs = textToInteger(parser.getOption("--helical_context_class_min_segs", "Files per helical type: ... and at least this many of its segments", "20"));
     {
@@ -14407,8 +14580,7 @@ void MlOptimiser::parseHelicalContextOptions(bool is_continue)
         const std::string s_track_sigma = parser.getOption("--helical_track_sigma_A", "Transverse offset prior sigma (A) around smoothed filament centerline in 2D classification (from iteration 3; 3D track smoothing updates psi priors only)", is_continue ? "OLD" : "3.5");
         if (!is_continue || s_track_sigma != "OLD")
             helical_track_sigma_A = textToFloat(s_track_sigma);
-        const char *env_ts = getenv("RELION_HELICAL_TRACK_SMOOTH");
-        const bool env_ts_off = (env_ts && env_ts[0] && (std::string(env_ts) == "0" || std::string(env_ts) == "off"));
+        const bool env_ts_off = isEnvFlagOff("RELION_HELICAL_TRACK_SMOOTH");
         if (!is_continue)
         {
             const bool default_3d_on = (do_helical_refine && mymodel.nr_classes > 1 && filctx_opt.mode != filctx::OFF);
@@ -14439,9 +14611,15 @@ void MlOptimiser::parseHelicalContextOptions(bool is_continue)
 void MlOptimiser::parseFilamentContext()
 {
     filctx_opt = filctx::optionsFromEnvironment();
-    std::string mode = parser.getOption("--filament_context", "Use the other segments of a filament as a prior on a segment's class: off, chain (Markov chain along the filament) or filament (one class distribution per filament). Default: RELION_FILAMENT_CONTEXT, else off", "");
+    const char *env_fc = getenv("RELION_FILAMENT_CONTEXT");
+    std::string mode = parser.getOption("--filament_context", "Use the other segments of a filament as a prior on a segment's class: off, chain (Markov chain along the filament) or filament (one class distribution per filament). Default: RELION_FILAMENT_CONTEXT, else filament for fresh helical Class3D or off", "");
+    if (env_fc && env_fc[0])
+        explicit_filament_context_opt = true;
     if (!mode.empty())
+    {
         filctx_opt.mode = filctx::modeFromString(mode, "--filament_context");
+        explicit_filament_context_opt = true;
+    }
     std::string temper = parser.getOption("--filament_temper", "Filament context: power on the segment likelihoods (<= 0: segment step / box length). Default: RELION_FILAMENT_TEMPER", "");
     if (!temper.empty())
         filctx_opt.temper = textToFloat(temper);
@@ -14896,6 +15074,13 @@ void MlOptimiser::initialiseHelical3DContext()
         helical_context_rows[part_id] = mydata.particles[part_id].id;
     helical_context.verb = verb;
     helical_context.pol_class_weight.assign(mymodel.nr_classes, 1.f);
+    if (mymodel.nr_classes >= 2)
+    {
+        helical_context_types_min = std::max(1, std::min(helical_context_types_min, mymodel.nr_classes));
+        if (helical_context_types_max > 0)
+            helical_context_types_max = std::max(1, std::min(helical_context_types_max, mymodel.nr_classes));
+        helical_context.nr_types = std::max(1, std::min(helical_context.nr_types, mymodel.nr_classes));
+    }
     RFLOAT diameter = (particle_diameter > 0.) ? particle_diameter : mymodel.ori_size * mymodel.pixel_size;
     if (helical_tube_outer_diameter > 0.)
         diameter = std::min(diameter, helical_tube_outer_diameter);
@@ -15826,12 +16011,20 @@ void MlOptimiser::parseSortClassesAndRefLowpass(bool is_continue)
         const char *env = getenv("RELION_SORT_CLASSES");
         std::string v = (env == NULL) ? "" : env;
         for (size_t i = 0; i < v.size(); i++) v[i] = tolower(v[i]);
+        if (!v.empty())
+            explicit_sort_classes_opt = true;
         do_sort_classes = !(v.empty() || v == "0" || v == "no" || v == "off" || v == "false");
     }
-    if (parser.checkOption("--sort_classes", "Class2D: after the last iteration, renumber the classes by helical type (with --helical_context), then by size, junk last (RELION_SORT_CLASSES=1 makes this the default)"))
+    if (parser.checkOption("--sort_classes", "Class2D: after the last iteration, renumber the classes by helical type (with --helical_context), then by size, junk last (default on for fresh helical 2D EM or RELION_SORT_CLASSES=1)"))
+    {
         do_sort_classes = true;
-    if (parser.checkOption("--dont_sort_classes", "Keep the classes in their original order (the default, unless RELION_SORT_CLASSES=1)"))
+        explicit_sort_classes_opt = true;
+    }
+    if (parser.checkOption("--dont_sort_classes", "Keep the classes in their original order (the default for non-helical runs, unless RELION_SORT_CLASSES=1)"))
+    {
         do_sort_classes = false;
+        explicit_sort_classes_opt = true;
+    }
     const std::string s_junk = parser.getOption("--sort_classes_junk", "With --sort_classes: classes with a resolution worse than this times the median class are junk (sorted last)", is_continue ? "OLD" : "1.5");
     if (!is_continue || s_junk != "OLD")
         sort_classes_junk = textToFloat(s_junk);

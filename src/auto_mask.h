@@ -120,4 +120,29 @@ bool autoMask2DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT res
 		const MultidimArray<RFLOAT> *prev_mask = NULL,
 		AutoMaskReport *report = NULL, int n_threads = 1);
 
+struct AutoMask3DOptions
+{
+	RFLOAT lowpass = -1.;            // A (clamped to [min_lowpass, 0.45 * min_box_A])
+	RFLOAT min_lowpass = 30.;        // Coarse shape-only floor (A) applied before zero-clipping
+	RFLOAT extend_angst = 12.;       // Envelope margin (A) dilated onto binary mask before soft edge
+	RFLOAT soft_edge = -1.;          // Soft edge width (pixels; < 0: max(3 px, 3 * resolution / angpix))
+	RFLOAT mass = -1.;               // Binarisation mass (kDa; <= 0: Otsu)
+	double min_vol_frac = 0.002;     // Minimum allowed binary mask volume fraction
+	double max_vol_frac = 0.75;      // Maximum allowed binary mask volume fraction
+	RFLOAT helix_tube_diam = -1.;    // A (> 0: reject off-axis/out-of-tube/Z-cap artifacts & preserve in-tube protofilaments)
+	RFLOAT helix_length_angst = -1.; // A (> 0: active helical length along Z, e.g. particle_diameter; <= 0 uses full Z box)
+	double min_axial_cov = 0.60;     // With helix_tube_diam > 0: min covered fraction of central 70% Z slices inside tube (<= 0 disables)
+	bool verb = false;
+};
+
+// Hardened 3D class automatic mask: coarse shape-only low-pass on the unclipped volume,
+// zero-clipping only afterward, helical multi-protofilament preservation inside the tube
+// across dark grooves (helical axis along Z), explicit envelope dilation, rejection of
+// tiny/flooded/off-axis/Z-cap artifacts back to an all-ones baseline mask (returning false),
+// and asymmetric hysteresis (widen immediately, narrow gradually).
+bool autoMask3DClass(const MultidimArray<RFLOAT> &ref, RFLOAT angpix, RFLOAT resolution,
+		const AutoMask3DOptions &opt, MultidimArray<RFLOAT> &mask,
+		const MultidimArray<RFLOAT> *prev_mask = NULL,
+		AutoMaskReport *report = NULL, int n_threads = 1);
+
 #endif /* AUTO_MASK_H_ */

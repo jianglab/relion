@@ -1715,3 +1715,420 @@ TEST_CASE("ObservationModel: tracks rlnCtfDataAreCtfPremultipliedIntactFirstPeak
 
 	vcache::removeTree(tmpdir);
 }
+
+TEST_CASE("MlOptimiser: fresh helical 2D EM and 3D Class3D CLI auto-defaults and overrides", "[helix_context_types]")
+{
+	unsetenv("RELION_FILAMENT_CONTEXT");
+	unsetenv("RELION_KEEP_FULL_FILAMENTS");
+	unsetenv("RELION_SORT_CLASSES");
+	unsetenv("RELION_HELICAL_AUTO_DIAMETER");
+	unsetenv("RELION_HELICAL_TRACK_SMOOTH");
+	unsetenv("RELION_HELICAL_HIERARCHICAL");
+
+	const std::string tmpdir = "tmp_ml_helical_defaults_" + integerToString((int)std::clock());
+	vcache::removeTree(tmpdir);
+	vcache::makeDirs(tmpdir);
+
+	const FileName fn_stk = tmpdir + "/parts.mrcs";
+	{
+		Image<RFLOAT> stk(16, 16, 1, 4);
+		stk().initZeros();
+		FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY3D(stk())
+		{
+			const RFLOAT dx = i - 7.5, dy = j - 7.5;
+			DIRECT_A3D_ELEM(stk(), k, i, j) = std::exp(-(dx * dx + dy * dy) / 10.0) + 0.05 * std::sin((k + 1) * 0.4 * j + 0.3 * i);
+		}
+		stk.write(fn_stk);
+	}
+
+	const FileName fn_ref = tmpdir + "/ref.mrc";
+	{
+		Image<RFLOAT> ref(16, 16, 16);
+		ref().initZeros();
+		FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY3D(ref())
+		{
+			const RFLOAT dy = i - 7.5, dx = j - 7.5;
+			DIRECT_A3D_ELEM(ref(), k, i, j) = std::exp(-(dx * dx + dy * dy) / 8.0);
+		}
+		ref.setSamplingRateInHeader(2.0, 2.0, 2.0);
+		ref.write(fn_ref);
+	}
+
+	MetaDataTable MDopt, MDpart;
+	MDopt.setName("optics");
+	MDopt.addObject();
+	MDopt.setValue(EMDL_IMAGE_OPTICS_GROUP, 1, 0);
+	MDopt.setValue(EMDL_IMAGE_OPTICS_GROUP_NAME, std::string("opticsGroup1"), 0);
+	MDopt.setValue(EMDL_IMAGE_PIXEL_SIZE, (RFLOAT)2.0, 0);
+	MDopt.setValue(EMDL_IMAGE_SIZE, 16, 0);
+	MDopt.setValue(EMDL_IMAGE_DIMENSIONALITY, 2, 0);
+	MDopt.setValue(EMDL_CTF_VOLTAGE, (RFLOAT)300.0, 0);
+	MDopt.setValue(EMDL_CTF_CS, (RFLOAT)2.7, 0);
+	MDopt.setValue(EMDL_CTF_Q0, (RFLOAT)0.1, 0);
+	MDopt.setValue(EMDL_OPTIMISER_DATA_ARE_CTF_PREMULTIPLIED, false, 0);
+
+	MDpart.setName("particles");
+	for (int p = 0; p < 4; p++)
+	{
+		MDpart.addObject();
+		MDpart.setValue(EMDL_IMAGE_OPTICS_GROUP, 1, p);
+		MDpart.setValue(EMDL_IMAGE_NAME, integerToString(p + 1, 6, '0') + "@" + fn_stk, p);
+		MDpart.setValue(EMDL_MICROGRAPH_NAME, FileName("mic1.mrc"), p);
+		MDpart.setValue(EMDL_PARTICLE_HELICAL_TUBE_ID, (p / 2) + 1, p);
+		MDpart.setValue(EMDL_PARTICLE_HELICAL_TRACK_LENGTH_ANGSTROM, (RFLOAT)((p % 2) * 20.0), p);
+		MDpart.setValue(EMDL_IMAGE_COORD_X, (RFLOAT)(50.0 + (p % 2) * 20.0), p);
+		MDpart.setValue(EMDL_IMAGE_COORD_Y, (RFLOAT)(50.0 + (p / 2) * 40.0), p);
+		MDpart.setValue(EMDL_ORIENT_TILT_PRIOR, (RFLOAT)90.0, p);
+		MDpart.setValue(EMDL_ORIENT_PSI_PRIOR, (RFLOAT)0.0, p);
+	}
+	const FileName fn_star = tmpdir + "/particles.star";
+	ObservationModel obs(MDopt, false);
+	obs.save(MDpart, fn_star);
+
+	const std::string out2d = tmpdir + "/run2d";
+	{
+		const char *argv[] = {
+			"relion_refine",
+			"--i", fn_star.c_str(),
+			"--o", out2d.c_str(),
+			"--K", "4",
+			"--iter", "2",
+			"--helix",
+			"--helical_outer_diameter", "20",
+			"--particle_diameter", "28",
+			"--flatten_solvent",
+			"--psi_step", "15",
+			"--offset_range", "2",
+			"--offset_step", "1",
+			"--j", "1",
+			"--verb", "0"
+		};
+		MlOptimiser opt;
+		opt.read((int)(sizeof(argv) / sizeof(argv[0])), const_cast<char **>(argv), 0);
+		opt.initialiseGeneral(0);
+		CHECK(opt.do_helical_context);
+		CHECK(opt.helical_context_types_min == 2);
+		CHECK(opt.helical_context_types_max == 10);
+		CHECK(opt.do_helical_context_hierarchical);
+		CHECK(opt.do_helical_track_smooth);
+		CHECK(opt.helical_auto_diameter);
+		CHECK(opt.do_sort_classes);
+		CHECK(opt.do_auto_mask);
+		CHECK(opt.auto_mask_start_res == Approx(15.0));
+	}
+
+	{
+		const char *argv[] = {
+			"relion_refine",
+			"--i", fn_star.c_str(),
+			"--o", out2d.c_str(),
+			"--K", "4",
+			"--iter", "2",
+			"--helix",
+			"--helical_outer_diameter", "20",
+			"--particle_diameter", "28",
+			"--flatten_solvent",
+			"--psi_step", "15",
+			"--offset_range", "2",
+			"--offset_step", "1",
+			"--dont_helical_context",
+			"--dont_helical_auto_diameter",
+			"--dont_sort_classes",
+			"--dont_auto_mask",
+			"--dont_helical_context_hierarchical",
+			"--dont_helical_track_smooth",
+			"--j", "1",
+			"--verb", "0"
+		};
+		MlOptimiser opt;
+		opt.read((int)(sizeof(argv) / sizeof(argv[0])), const_cast<char **>(argv), 0);
+		opt.initialiseGeneral(0);
+		CHECK_FALSE(opt.do_helical_context);
+		CHECK_FALSE(opt.helical_auto_diameter);
+		CHECK_FALSE(opt.do_sort_classes);
+		CHECK_FALSE(opt.do_auto_mask);
+		CHECK_FALSE(opt.do_helical_context_hierarchical);
+		CHECK_FALSE(opt.do_helical_track_smooth);
+	}
+
+	const std::string out3d = tmpdir + "/run3d";
+	{
+		const char *argv[] = {
+			"relion_refine",
+			"--i", fn_star.c_str(),
+			"--o", out3d.c_str(),
+			"--ref", fn_ref.c_str(),
+			"--ini_high", "20",
+			"--K", "2",
+			"--iter", "2",
+			"--helix",
+			"--helical_outer_diameter", "20",
+			"--helical_rise_initial", "4.75",
+			"--helical_twist_initial", "-1.5",
+			"--helical_nr_asu", "1",
+			"--particle_diameter", "28",
+			"--flatten_solvent",
+			"--healpix_order", "1",
+			"--j", "1",
+			"--verb", "0"
+		};
+		MlOptimiser opt;
+		opt.read((int)(sizeof(argv) / sizeof(argv[0])), const_cast<char **>(argv), 0);
+		opt.initialiseGeneral(0);
+		CHECK(opt.filctx_opt.mode == filctx::FILAMENT);
+		CHECK(opt.do_keep_full_filaments);
+		CHECK(opt.do_helical_track_smooth);
+		CHECK(opt.do_auto_mask);
+		CHECK(opt.auto_mask_start_res == Approx(15.0));
+	}
+
+	{
+		const char *argv[] = {
+			"relion_refine",
+			"--i", fn_star.c_str(),
+			"--o", out3d.c_str(),
+			"--ref", fn_ref.c_str(),
+			"--ini_high", "20",
+			"--K", "2",
+			"--iter", "2",
+			"--helix",
+			"--helical_outer_diameter", "20",
+			"--helical_rise_initial", "4.75",
+			"--helical_twist_initial", "-1.5",
+			"--helical_nr_asu", "1",
+			"--particle_diameter", "28",
+			"--flatten_solvent",
+			"--healpix_order", "1",
+			"--filament_context", "off",
+			"--dont_keep_full_filaments",
+			"--dont_helical_track_smooth",
+			"--dont_auto_mask",
+			"--j", "1",
+			"--verb", "0"
+		};
+		MlOptimiser opt;
+		opt.read((int)(sizeof(argv) / sizeof(argv[0])), const_cast<char **>(argv), 0);
+		opt.initialiseGeneral(0);
+		CHECK(opt.filctx_opt.mode == filctx::OFF);
+		CHECK_FALSE(opt.do_keep_full_filaments);
+		CHECK_FALSE(opt.do_helical_track_smooth);
+		CHECK_FALSE(opt.do_auto_mask);
+	}
+
+	vcache::removeTree(tmpdir);
+}
+
+TEST_CASE("autoMask3DClass: coarse shape low-pass first, rim artifact fallback, and hysteresis", "[helix_context_types][auto_mask]")
+{
+	std::mt19937 rng(2026);
+	std::normal_distribution<double> gaus(0.0, 0.3);
+
+	// 1. Unclipped 3D helical cylinder along Z with dark CTF halo + Gaussian background noise
+	MultidimArray<RFLOAT> ref(64, 64, 64);
+	ref.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(ref)
+	{
+		const RFLOAT r_xy = std::hypot((RFLOAT)i, (RFLOAT)j);
+		const RFLOAT az = std::fabs((RFLOAT)k);
+		double val = gaus(rng);
+		if (r_xy <= 3.0 && az <= 24.0)
+			val += 8.0;
+		else if (r_xy <= 6.0 && az <= 24.0)
+			val -= 3.0;
+		A3D_ELEM(ref, k, i, j) = val;
+	}
+
+	AutoMask3DOptions opt;
+	opt.lowpass = 10.0;          // fine lowpass should be raised to min_lowpass = 30 A
+	opt.min_lowpass = 30.0;
+	opt.extend_angst = 12.0;     // 3.0 px envelope extension @ 4 A/px
+	opt.soft_edge = 3.0;
+	opt.helix_tube_diam = 100.0;
+	opt.helix_length_angst = 200.0;
+	MultidimArray<RFLOAT> mask1;
+	AutoMaskReport rep;
+	REQUIRE(autoMask3DClass(ref, 4.0, 10.0, opt, mask1, NULL, &rep, 1));
+	CHECK(rep.lowpass >= 30.0 - 1e-4);
+	CHECK(A3D_ELEM(mask1, 0, 0, 0) > 0.99);
+	CHECK(A3D_ELEM(mask1, 0, 5, 0) > 0.50);    // 12 A dilation extends well beyond r = 3 px core
+	CHECK(A3D_ELEM(mask1, -28, -28, -28) < 0.05);
+
+	// 2. Small off-axis corner rim artifact patch inside helical mode is rejected back to all-ones
+	MultidimArray<RFLOAT> rim(64, 64, 64);
+	rim.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(rim)
+	{
+		const bool corner = (k <= -23 && k >= -27 && i <= -23 && i >= -27 && j <= -23 && j >= -27);
+		A3D_ELEM(rim, k, i, j) = corner ? 10.0 : 0.0;
+	}
+	MultidimArray<RFLOAT> mask_rim;
+	CHECK_FALSE(autoMask3DClass(rim, 4.0, 10.0, opt, mask_rim, NULL, NULL, 1));
+	CHECK(mask_rim.computeMin() == Approx(1.0).margin(1e-6));
+	CHECK(mask_rim.computeMax() == Approx(1.0).margin(1e-6));
+
+	// 3. Asymmetric hysteresis: narrow gradually, widen immediately
+	MultidimArray<RFLOAT> wide(64, 64, 64), narrow(64, 64, 64);
+	wide.setXmippOrigin();
+	narrow.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(wide)
+	{
+		const RFLOAT r_xy = std::hypot((RFLOAT)i, (RFLOAT)j);
+		const RFLOAT az = std::fabs((RFLOAT)k);
+		A3D_ELEM(wide, k, i, j) = (r_xy <= 8.0 && az <= 24.0) ? 10.0 : 0.0;
+		A3D_ELEM(narrow, k, i, j) = (r_xy <= 2.0 && az <= 24.0) ? 10.0 : 0.0;
+	}
+	AutoMask3DOptions opt_hyst = opt;
+	opt_hyst.helix_tube_diam = 120.0;
+	opt_hyst.extend_angst = 8.0;
+	opt_hyst.soft_edge = 2.0;
+	MultidimArray<RFLOAT> m_wide, m_narrow_raw, m_narrow_hyst, m_widen_back;
+	REQUIRE(autoMask3DClass(wide, 4.0, 10.0, opt_hyst, m_wide, NULL, NULL, 1));
+	REQUIRE(autoMask3DClass(narrow, 4.0, 10.0, opt_hyst, m_narrow_raw, NULL, NULL, 1));
+	REQUIRE(autoMask3DClass(narrow, 4.0, 10.0, opt_hyst, m_narrow_hyst, &m_wide, NULL, 1));
+	CHECK(A3D_ELEM(m_wide, 0, 8, 0) > 0.9);
+	CHECK(A3D_ELEM(m_narrow_raw, 0, 8, 0) < 0.2);
+	CHECK(A3D_ELEM(m_narrow_hyst, 0, 8, 0) >= 0.5 * A3D_ELEM(m_wide, 0, 8, 0) - 1e-6);
+	REQUIRE(autoMask3DClass(wide, 4.0, 10.0, opt_hyst, m_widen_back, &m_narrow_raw, NULL, 1));
+	CHECK(A3D_ELEM(m_widen_back, 0, 8, 0) == Approx(A3D_ELEM(m_wide, 0, 8, 0)).margin(1e-6));
+}
+
+TEST_CASE("autoMask3DClass: twin-protofilament preservation, out-of-tube isolation, Z-cap fallback, hollow tube, and non-helical mode", "[helix_context_types][auto_mask]")
+{
+	AutoMask3DOptions opt;
+	opt.lowpass = 30.0;
+	opt.min_lowpass = 30.0;
+	opt.extend_angst = 12.0;
+	opt.soft_edge = 3.0;
+	opt.helix_tube_diam = 200.0;    // +/-100 A => +/-15.38 px at 6.5 A/px
+	opt.helix_length_angst = 360.0;
+
+	// 1. Twin protofilaments along Z with a dimmer opposing protofilament separated by a deep dark groove
+	MultidimArray<RFLOAT> twin(64, 64, 64);
+	twin.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(twin)
+	{
+		const RFLOAT az = std::fabs((RFLOAT)k);
+		const RFLOAT ax = std::fabs((RFLOAT)j);
+		double val = 0.0;
+		if (az <= 26.0)
+		{
+			if (ax <= 2.0 && i >= 5 && i <= 8) val = 10.0;        // upper protofilament holds top seeds
+			else if (ax <= 2.0 && i <= -5 && i >= -8) val = 8.5; // dimmer opposing protofilament inside tube
+			else if (ax <= 4.0 && std::fabs((RFLOAT)i) <= 2.0) val = -5.0; // deep dark central groove
+		}
+		A3D_ELEM(twin, k, i, j) = val;
+	}
+	MultidimArray<RFLOAT> m_twin;
+	AutoMaskReport rep_twin;
+	REQUIRE(autoMask3DClass(twin, 6.5, 14.0, opt, m_twin, NULL, &rep_twin, 1));
+	CHECK(A3D_ELEM(m_twin, 0, 6, 0) > 0.95);
+	CHECK(A3D_ELEM(m_twin, 0, -6, 0) > 0.95);
+	CHECK(A3D_ELEM(m_twin, 0, 26, 26) < 0.05);
+	CHECK(rep_twin.mass > 0.0);
+
+	// 2. Parallel neighbor outside the 200 A tube (r_xy = 22 px = 143 A > 100 A) is NOT merged
+	MultidimArray<RFLOAT> nbr(64, 64, 64);
+	nbr.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(nbr)
+	{
+		const RFLOAT az = std::fabs((RFLOAT)k);
+		const RFLOAT ax = std::fabs((RFLOAT)j);
+		double val = 0.0;
+		if (az <= 26.0)
+		{
+			if (std::hypot((RFLOAT)i, (RFLOAT)j) <= 3.0) val = 10.0;
+			else if (ax <= 2.0 && i >= 20 && i <= 24) val = 8.5; // outside 200 A tube
+		}
+		A3D_ELEM(nbr, k, i, j) = val;
+	}
+	MultidimArray<RFLOAT> m_nbr;
+	REQUIRE(autoMask3DClass(nbr, 6.5, 14.0, opt, m_nbr, NULL, NULL, 1));
+	CHECK(A3D_ELEM(m_nbr, 0, 0, 0) > 0.95);
+	CHECK(A3D_ELEM(m_nbr, 0, 22, 0) < 0.05);
+
+	// 3. Z-end-cap hijack falls back to all-ones instead of erasing the central helical shaft
+	MultidimArray<RFLOAT> zcap(64, 64, 64);
+	zcap.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(zcap)
+	{
+		const RFLOAT r_xy = std::hypot((RFLOAT)i, (RFLOAT)j);
+		double val = (r_xy <= 3.0 && std::fabs((RFLOAT)k) <= 26.0) ? 1.5 : 0.0;
+		if (r_xy <= 8.0 && k >= 21 && k <= 27)
+			val = 12.0;
+		A3D_ELEM(zcap, k, i, j) = val;
+	}
+	MultidimArray<RFLOAT> m_zcap;
+	CHECK_FALSE(autoMask3DClass(zcap, 6.5, 14.0, opt, m_zcap, NULL, NULL, 1));
+	CHECK(m_zcap.computeMin() == Approx(1.0).margin(1e-6));
+	CHECK(m_zcap.computeMax() == Approx(1.0).margin(1e-6));
+
+	// 4. Hollow helical tube along Z preserves the tube wall and excludes outer solvent
+	MultidimArray<RFLOAT> hollow(64, 64, 64);
+	hollow.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(hollow)
+	{
+		const RFLOAT r_xy = std::hypot((RFLOAT)i, (RFLOAT)j);
+		A3D_ELEM(hollow, k, i, j) = (r_xy >= 4.0 && r_xy <= 7.0 && std::fabs((RFLOAT)k) <= 26.0) ? 10.0 : 0.0;
+	}
+	AutoMask3DOptions opt_hollow = opt;
+	opt_hollow.helix_tube_diam = 160.0;
+	MultidimArray<RFLOAT> m_hollow;
+	REQUIRE(autoMask3DClass(hollow, 6.5, 14.0, opt_hollow, m_hollow, NULL, NULL, 1));
+	CHECK(A3D_ELEM(m_hollow, 0, 5, 0) > 0.95);
+	CHECK(A3D_ELEM(m_hollow, 0, 28, 28) < 0.05);
+
+	// 5. Non-helical mode (helix_tube_diam <= 0) masks compact globular 3D density cleanly
+	MultidimArray<RFLOAT> glob(64, 64, 64);
+	glob.setXmippOrigin();
+	FOR_ALL_ELEMENTS_IN_ARRAY3D(glob)
+		A3D_ELEM(glob, k, i, j) = (k * k + i * i + j * j <= 144) ? 10.0 : 0.0;
+	AutoMask3DOptions opt_nonhelix = opt;
+	opt_nonhelix.helix_tube_diam = -1.0;
+	opt_nonhelix.helix_length_angst = -1.0;
+	opt_nonhelix.extend_angst = 8.0;
+	opt_nonhelix.soft_edge = 2.0;
+	MultidimArray<RFLOAT> m_glob;
+	REQUIRE(autoMask3DClass(glob, 4.0, 10.0, opt_nonhelix, m_glob, NULL, NULL, 1));
+	CHECK(A3D_ELEM(m_glob, 0, 0, 0) > 0.95);
+	CHECK(A3D_ELEM(m_glob, 28, 28, 28) < 0.05);
+}
+
+TEST_CASE("MlOptimiser: autoMaskThisIteration delays Class3D until iter 6 but not Refine3D", "[helix_context_types][auto_mask]")
+{
+	MlOptimiser opt;
+	opt.do_auto_mask = true;
+	opt.auto_mask_start_res = 15.;
+	opt.mymodel.ref_dim = 3;
+	opt.mymodel.nr_bodies = 1;
+	opt.mymodel.pixel_size = 2.0;
+	opt.mymodel.current_resolution = 1. / 10.; // 10 A
+
+	// Class3D: gated until iter >= 6 and Nyquist-safe floor max(start_res, 2.5 * pixel_size)
+	opt.do_split_random_halves = false;
+	for (int it = 1; it <= 5; it++)
+	{
+		opt.iter = it;
+		CHECK_FALSE(opt.autoMaskThisIteration());
+	}
+	opt.iter = 6;
+	CHECK(opt.autoMaskThisIteration());
+
+	opt.mymodel.pixel_size = 8.0; // eff_start = max(15, 20) = 20 A
+	opt.mymodel.current_resolution = 1. / 18.;
+	CHECK(opt.autoMaskThisIteration());
+	opt.mymodel.current_resolution = 1. / 22.;
+	CHECK_FALSE(opt.autoMaskThisIteration());
+
+	// Refine3D: uses half-map FSC without iteration delay or 2.5 * pixel_size floor
+	opt.do_split_random_halves = true;
+	opt.mymodel.pixel_size = 2.0;
+	opt.iter = 1;
+	opt.mymodel.current_resolution = 1. / 10.;
+	CHECK(opt.autoMaskThisIteration());
+	opt.mymodel.current_resolution = 1. / 18.;
+	CHECK_FALSE(opt.autoMaskThisIteration());
+	opt.mymodel.pixel_size = 8.0;
+	opt.iter = 6;
+	opt.mymodel.current_resolution = 1. / 18.;
+	CHECK_FALSE(opt.autoMaskThisIteration());
+}
