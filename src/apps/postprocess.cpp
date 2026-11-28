@@ -27,6 +27,7 @@ int main(int argc, char *argv[])
 	try
 	{
 		prm.read(argc, argv);
+		relionFftwInitThreads();
 
 		if (prm.do_locres)
 			prm.run_locres();
@@ -37,9 +38,11 @@ int main(int argc, char *argv[])
 	{
 		//prm.usage();
 		std::cerr << XE;
+		relionFftwCleanupThreads();
 
 		return RELION_EXIT_FAILURE;
 	}
 
+	relionFftwCleanupThreads();
 	return RELION_EXIT_SUCCESS;
 }

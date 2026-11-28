@@ -57,10 +57,7 @@ std::vector<double> LBFGS::optimize(
 	param.epsilon = epsilon;
 	param.xtol = xtol;
 
-	#pragma omp critical(LBGFS)
-	{
-		ret = lbfgs(N, m_x, &fx, evaluate, progress, &adapter, &param);
-	}
+	ret = lbfgs(N, m_x, &fx, evaluate, progress, &adapter, &param);
 	if (status_out) *status_out = ret;
 	if (fx_out) *fx_out = fx;
 
@@ -215,9 +212,16 @@ lbfgsfloatval_t LBFGS::LibLbfgsAdapter::evaluate(
 		x_vec[i] = x[i];
 	}
 
-	double fx = opt.f(x_vec, tempStorage);
-
-	opt.grad(x_vec, grad_vec, tempStorage);
+	double fx;
+	if (opt.supportsGradAndValue())
+	{
+		fx = opt.gradAndValue(x_vec, grad_vec, tempStorage);
+	}
+	else
+	{
+		fx = opt.f(x_vec, tempStorage);
+		opt.grad(x_vec, grad_vec, tempStorage);
+	}
 
 	for (int i = 0; i < n; i++)
 	{

@@ -52,6 +52,22 @@ __device__ inline void cuda_atomic_add(float* address, float value)
 }
 #endif
 
+__device__ inline void cuda_atomic_add_double(double* address, double val)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 600
+	atomicAdd(address, val);
+#else
+	unsigned long long int* address_as_ull = (unsigned long long int*)address;
+	unsigned long long int old = *address_as_ull, assumed;
+	do
+	{
+		assumed = old;
+		old = atomicCAS(address_as_ull, assumed, __double_as_longlong(val + __longlong_as_double(assumed)));
+	}
+	while (assumed != old);
+#endif
+}
+
 
 /*
  * For the following functions always use fast, low-precision intrinsics

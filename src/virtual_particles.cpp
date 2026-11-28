@@ -903,6 +903,48 @@ struct Sums {
 bool readSum(const VStack& v, Sums& sums);
 void storeSum(const VStack& v, Sums& sums, int threads);
 
+/// Cached damage weights (avoid recomputing and re-allocating across micrographs/particles)
+static std::shared_ptr<const std::vector<Image<RFLOAT> > > cachedDamageWeights(
+		const std::vector<gravis::d2Vector>& bk, int kc)
+{
+	struct Key
+	{
+		int kc;
+		std::vector<double> bx, by;
+		bool operator<(const Key& o) const
+		{
+			if (kc != o.kc) return kc < o.kc;
+			if (bx != o.bx) return bx < o.bx;
+			return by < o.by;
+		}
+	};
+	Key key;
+	key.kc = kc;
+	key.bx.reserve(bk.size());
+	key.by.reserve(bk.size());
+	for (const auto& b : bk)
+	{
+		key.bx.push_back(b.x);
+		key.by.push_back(b.y);
+	}
+
+	static std::mutex& wmutex = *new std::mutex;
+	static std::map<Key, std::shared_ptr<const std::vector<Image<RFLOAT> > > >& wcache =
+		*new std::map<Key, std::shared_ptr<const std::vector<Image<RFLOAT> > > >;
+	{
+		std::lock_guard<std::mutex> lock(wmutex);
+		auto it = wcache.find(key);
+		if (it != wcache.end()) return it->second;
+	}
+	std::shared_ptr<const std::vector<Image<RFLOAT> > > w(
+		new std::vector<Image<RFLOAT> >(DamageHelper::computeWeights(bk, kc)));
+	{
+		std::lock_guard<std::mutex> lock(wmutex);
+		if (wcache.size() >= 64) wcache.clear();
+		return wcache.emplace(std::move(key), w).first->second;
+	}
+}
+
 /// The frame sums of `v` from its movie, read by `mh`: one pass over the particles of each window size
 void makeSums(const VStack& v, MicrographHandler& mh, Sums& sums, int threads)
 {
@@ -923,8 +965,8 @@ void makeSums(const VStack& v, MicrographHandler& mh, Sums& sums, int threads)
 		// The dose weights fall off over the same resolution in every window: sigma is in pixels of box r.s
 		std::vector<gravis::d2Vector> bk = r.bk;
 		if (s != r.s) for (gravis::d2Vector& b : bk) b.x = b.x * s / r.s;
-		const std::vector<Image<RFLOAT> > weights = DamageHelper::computeWeights(bk, s / 2 + 1);
-		sums.stack[g] = FrameRecombiner::sumMicrograph(mdt, mh, tracks, s, r.angpix, r.data_angpix, weights, threads);
+		std::shared_ptr<const std::vector<Image<RFLOAT> > > weights = cachedDamageWeights(bk, s / 2 + 1);
+		sums.stack[g] = FrameRecombiner::sumMicrograph(mdt, mh, tracks, s, r.angpix, r.data_angpix, *weights, threads);
 	}
 }
 
@@ -933,67 +975,88 @@ void computePolished(const VStack& v, std::vector<float>& pixels)
 {
 	const PolishRecipe& r = *v.polish;
 
-	// A MicrographHandler is not thread-safe: one micrograph at a time, all cores on it
+	// A MicrographHandler is not thread-safe: hold its lock only when reading/decoding a movie on a cache miss
 	// (never destroyed: background cache builders may still read particles while the process exits)
 	static std::mutex& mutex = *new std::mutex;
 	static std::map<std::string, std::unique_ptr<MicrographHandler> >& handlers = *new std::map<std::string, std::unique_ptr<MicrographHandler> >;
-	std::lock_guard<std::mutex> guard(mutex);
 
 	const int threads = localCores();
 	// From version 5 the sums are rounded to 16 bits, read from the cache or made now: the same particles either way
 	const bool rounded = v.version >= DESCRIPTOR_VERSION_POLISH_SUM16;
 	Sums sums(v);
-	if (!(rounded && readSum(v, sums)))
+	const bool have_sum = rounded && readSum(v, sums);
+	if (!have_sum)
 	{
-		std::ostringstream key;
-		key.precision(17);
-		key << r.corr_mic << " " << r.first_frame << " " << r.last_frame << " " << r.eer_upsampling << " " << r.eer_grouping
-		    << " " << r.movie_angpix << " " << r.coords_angpix << " " << r.hot_cutoff;
-		std::unique_ptr<MicrographHandler>& mh = handlers[key.str()];
-		if (!mh)
 		{
-			MetaDataTable mdt;
-			mdt.addObject();
-			mdt.setValue(EMDL_MICROGRAPH_NAME, v.mic);
-			MicrographHandler* h = new MicrographHandler();
-			h->corrMicFn = r.corr_mic;
-			h->firstFrame = r.first_frame;
-			h->lastFrame = r.last_frame;
-			h->eer_upsampling = r.eer_upsampling;
-			h->eer_grouping = r.eer_grouping;
-			h->movie_angpix = r.movie_angpix;
-			h->coords_angpix = r.coords_angpix;
-			h->hotCutoff = r.hot_cutoff;
-			int fc;
-			double dose;
-			std::string metaFn;
-			h->init(std::vector<MetaDataTable>(1, mdt), false, threads, fc, dose, metaFn);
-			mh.reset(h);
-		}
+			std::lock_guard<std::mutex> guard(mutex);
+			std::ostringstream key;
+			key.precision(17);
+			key << r.corr_mic << " " << r.first_frame << " " << r.last_frame << " " << r.eer_upsampling << " " << r.eer_grouping
+			    << " " << r.movie_angpix << " " << r.coords_angpix << " " << r.hot_cutoff;
+			std::unique_ptr<MicrographHandler>& mh = handlers[key.str()];
+			if (!mh)
+			{
+				MetaDataTable mdt;
+				mdt.addObject();
+				mdt.setValue(EMDL_MICROGRAPH_NAME, v.mic);
+				MicrographHandler* h = new MicrographHandler();
+				h->corrMicFn = r.corr_mic;
+				h->firstFrame = r.first_frame;
+				h->lastFrame = r.last_frame;
+				h->eer_upsampling = r.eer_upsampling;
+				h->eer_grouping = r.eer_grouping;
+				h->movie_angpix = r.movie_angpix;
+				h->coords_angpix = r.coords_angpix;
+				h->hotCutoff = r.hot_cutoff;
+				int fc;
+				double dose;
+				std::string metaFn;
+				h->init(std::vector<MetaDataTable>(1, mdt), false, threads, fc, dose, metaFn);
+				mh.reset(h);
+			}
 
-		// Several window sizes: the movie is decoded once and kept for the passes after the first, if it fits
-		mh->keepForCombination = sums.stack.size() > 1;
-		makeSums(v, *mh, sums, threads);
-		mh->releaseKept();
+			// Several window sizes: the movie is decoded once and kept for the passes after the first, if it fits
+			mh->keepForCombination = sums.stack.size() > 1;
+			makeSums(v, *mh, sums, threads);
+			mh->releaseKept();
+		}
 		if (rounded) storeSum(v, sums, threads);
 	}
-	Image<RFLOAT> stack(r.out_size, r.out_size, 1, v.cx.size());
-	RawImage<RFLOAT> out(stack);
-	#pragma omp parallel for num_threads(threads)
-	for (long p = 0; p < (long)v.cx.size(); p++)
-	{
-		BufferedImage<Complex> sum = sums.stack[sums.at[p].first].getSliceRef(sums.at[p].second);
-		MultidimArray<RFLOAT> ctf;
-		const bool has_ctf = v.recipe.premultiplied();
-		if (has_ctf) ctfImage(v.ctf[p], v.win[p], r.angpix, ctf);
-		FrameRecombiner::finishParticle(sum, has_ctf ? &ctf : NULL, out.getSliceRef(p));
-	}
+	const size_t pc = v.cx.size();
+	const size_t slice_sz = (size_t)r.out_size * (size_t)r.out_size;
+	pixels.resize(pc * slice_sz);
+	const bool has_ctf = v.recipe.premultiplied();
 
-	pixels.resize(MULTIDIM_SIZE(stack()));
-	for (size_t n = 0; n < pixels.size(); n++)
+	// Group particles by window size so each thread stays on one cached FFTW plan slot
+	std::vector<int> order;
+	order.reserve(pc);
+	for (const auto& grp : sums.members)
+		order.insert(order.end(), grp.begin(), grp.end());
+
+	#pragma omp parallel num_threads(threads)
 	{
-		const RFLOAT x = DIRECT_MULTIDIM_ELEM(stack(), n);
-		pixels[n] = r.float16 ? half2float(float2half((float)x)) : (float)x;
+		FrameRecombiner::FinishWorkspace ws;
+		Image<RFLOAT> slice(r.out_size, r.out_size);
+		RawImage<RFLOAT> out(slice);
+		#pragma omp for schedule(static)
+		for (long idx = 0; idx < (long)pc; idx++)
+		{
+			const int p = order[idx];
+			BufferedImage<Complex> sum = sums.stack[sums.at[p].first].getSliceRef(sums.at[p].second);
+			if (has_ctf) ctfImage(v.ctf[p], v.win[p], r.angpix, ws.ctfImg);
+			FrameRecombiner::finishParticle(sum, has_ctf ? &ws.ctfImg : NULL, out, ws);
+			float* dst = &pixels[(size_t)p * slice_sz];
+			if (r.float16)
+			{
+				for (size_t n = 0; n < slice_sz; n++)
+					dst[n] = half2float(float2half((float)DIRECT_MULTIDIM_ELEM(slice(), n)));
+			}
+			else
+			{
+				for (size_t n = 0; n < slice_sz; n++)
+					dst[n] = (float)DIRECT_MULTIDIM_ELEM(slice(), n);
+			}
+		}
 	}
 }
 
@@ -1393,12 +1456,15 @@ bool readSum(const VStack& v, Sums& sums)
 	for (size_t p = 0; p < pc; p++) start[p + 1] = start[p] + (size_t)(v.win[p] / 2 + 1) * v.win[p] * 2;
 	std::shared_ptr<std::vector<float16> > ahead;
 	const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+	std::shared_future<std::shared_ptr<std::vector<float16> > > fut;
+	bool have_fut = false;
 	{
 		std::lock_guard<std::mutex> guard(g_sum_ahead_mutex);
 		std::map<std::string, std::shared_future<std::shared_ptr<std::vector<float16> > > >::iterator
 			it = g_sum_ahead.find(v.sum_key);
-		if (it != g_sum_ahead.end()) { ahead = it->second.get(); g_sum_ahead.erase(it); }
+		if (it != g_sum_ahead.end()) { fut = it->second; g_sum_ahead.erase(it); have_fut = true; }
 	}
+	if (have_fut) ahead = fut.get();
 	std::vector<float16> own;
 	if (!ahead && !loadSumFile(v, own)) return false;
 	const long long waited = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();

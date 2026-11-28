@@ -185,17 +185,20 @@ public:
 
 	// Execute CTFFIND4.1+ for a single micrograph
 	void executeCtffind4(long int imic);
+	void executeCtffind4ForMic(long int imic, RFLOAT my_cs, RFLOAT my_voltage, RFLOAT my_q0, RFLOAT my_angpix);
 
 	// Get micrograph metadata
 	bool getCtffindResults(FileName fn_mic, RFLOAT &defU, RFLOAT &defV, RFLOAT &defAng, RFLOAT &CC,
 			RFLOAT &HT, RFLOAT &CS, RFLOAT &AmpCnst, RFLOAT &XMAG, RFLOAT &DStep,
-			RFLOAT &maxres, RFLOAT &valscore, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis, bool do_warn = true);
+			RFLOAT &maxres, RFLOAT &valscore, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis,
+			bool do_warn = true, RFLOAT my_angpix = -1.);
 	bool getCtffind3Results(FileName fn_mic, RFLOAT &defU, RFLOAT &defV, RFLOAT &defAng, RFLOAT &CC,
 			RFLOAT &HT, RFLOAT &CS, RFLOAT &AmpCnst, RFLOAT &XMAG, RFLOAT &DStep,
 			RFLOAT &maxres, RFLOAT &phaseshift, RFLOAT &valscore, bool do_warn = true);
 	bool getCtffind4Results(FileName fn_mic, RFLOAT &defU, RFLOAT &defV, RFLOAT &defAng, RFLOAT &CC,
 			RFLOAT &HT, RFLOAT &CS, RFLOAT &AmpCnst, RFLOAT &XMAG, RFLOAT &DStep,
-			RFLOAT &maxres, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis, bool do_warn = true);
+			RFLOAT &maxres, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis,
+			bool do_warn = true, RFLOAT my_angpix = -1.);
 };
 
 

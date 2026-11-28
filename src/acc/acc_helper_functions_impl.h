@@ -659,6 +659,33 @@ void runWavgKernel(
 #endif
 }
 
+#ifdef _CUDA_ENABLED
+void buildSeparableShiftTables(
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		AccPtr<float2> &shx,
+		AccPtr<float2> &shy,
+		unsigned long translation_num,
+		int imgX,
+		int imgY,
+		int maxR)
+{
+#ifndef ACC_DOUBLE_PRECISION
+	if (translation_num == 0 || imgX <= 0 || imgY <= 0)
+		return;
+	deviceStream_t stream = shx.getStream();
+	shy.setStream(stream);
+	shx.setSize((size_t) translation_num * imgX);
+	shx.deviceAlloc();
+	shy.setSize((size_t) translation_num * imgY);
+	shy.deviceAlloc();
+	cuda_kernel_shift_table_sep<<<dim3((imgX + imgY + 127) / 128, translation_num), 128, 0, stream>>>(
+			trans_x, trans_y, ~shx, ~shy, imgX, imgY, maxR);
+	LAUNCH_HANDLE_ERROR(cudaGetLastError());
+#endif
+}
+#endif
+
 void runBackProjectKernel(
 		AccBackprojector &BP,
 		AccProjectorKernel &projector,
@@ -1656,10 +1683,18 @@ static size_t gpuBlocksPerSM()
 	static std::map<int, size_t> chosen;
 	int dev = 0;
 	DEBUG_HANDLE_ERROR(cudaGetDevice(&dev));
+	static thread_local int tl_dev = -1;
+	static thread_local size_t tl_bpsm = 0;
+	if (dev == tl_dev)
+		return tl_bpsm;
 	std::lock_guard<std::mutex> lock(mutex);
 	auto it = chosen.find(dev);
 	if (it != chosen.end())
-		return it->second;
+	{
+		tl_dev = dev;
+		tl_bpsm = it->second;
+		return tl_bpsm;
+	}
 	size_t b = 3;
 	std::string why;
 	const char *e = getenv("RELION_GPU_BLOCKS_PER_SM");
@@ -1686,6 +1721,8 @@ static size_t gpuBlocksPerSM()
 			why = "device " + std::to_string(dev) + " has " + std::to_string(total_b >> 20) + " MiB in total, safe default";
 	}
 	chosen[dev] = b;
+	tl_dev = dev;
+	tl_bpsm = b;
 	std::cout << " GPU pixel chunks: " << b << " blocks per multiprocessor (" << why << "; RELION_GPU_BLOCKS_PER_SM=N overrides)." << std::endl;
 	return b;
 }
@@ -1782,7 +1819,9 @@ void runWavgKernelBatched(
 		XFLOAT part_scale,
 		bool refs_are_ctf_corrected,
 		bool data_is_3D,
-		AccPtr<char> &table)
+		AccPtr<char> &table,
+		const void *pre_shx_v,
+		const void *pre_shy_v)
 {
 	if (jobs.empty())
 		return;
@@ -1809,14 +1848,26 @@ void runWavgKernelBatched(
 		AccPtr<float2> shifts = table.make<float2>();
 		AccPtr<float2> shx = table.make<float2>();
 		AccPtr<float2> shy = table.make<float2>();
+		const float2 *shx_ptr = NULL;
+		const float2 *shy_ptr = NULL;
 		if (wavg_sep)
 		{
-			shx.setSize(translation_num * projector.imgX);
-			shx.deviceAlloc();
-			shy.setSize(translation_num * projector.imgY);
-			shy.deviceAlloc();
-			cuda_kernel_shift_table_sep<<<dim3((projector.imgX + projector.imgY + 127) / 128, translation_num), 128, 0, stream>>>(
-					trans_x, trans_y, ~shx, ~shy, projector.imgX, projector.imgY, projector.maxR);
+			if (pre_shx_v != NULL && pre_shy_v != NULL)
+			{
+				shx_ptr = (const float2 *) pre_shx_v;
+				shy_ptr = (const float2 *) pre_shy_v;
+			}
+			else
+			{
+				shx.setSize(translation_num * projector.imgX);
+				shx.deviceAlloc();
+				shy.setSize(translation_num * projector.imgY);
+				shy.deviceAlloc();
+				cuda_kernel_shift_table_sep<<<dim3((projector.imgX + projector.imgY + 127) / 128, translation_num), 128, 0, stream>>>(
+						trans_x, trans_y, ~shx, ~shy, projector.imgX, projector.imgY, projector.maxR);
+				shx_ptr = ~shx;
+				shy_ptr = ~shy;
+			}
 		}
 		else
 		{
@@ -1830,7 +1881,7 @@ void runWavgKernelBatched(
 #define WAVG_SUM(RC, R3) cuda_kernel_wavg_sum<RC, R3, WAVG_BLOCK_SIZE><<<dim3(n, wavg_chunks), WAVG_BLOCK_SIZE, smem, stream>>>( \
 		image_size, Fimg_real, Fimg_imag, ctfs, wdiff2s_parts, translation_num, (XFLOAT) op.sum_weight, \
 		(XFLOAT) op.significant_weight, part_scale, wavg_sep ? (float2 *) NULL : ~shifts, d_jobs, d_start, nc, wavg_chunks, \
-		wavg_sep ? ~shx : (float2 *) NULL, wavg_sep ? ~shy : (float2 *) NULL)
+		shx_ptr, shy_ptr)
 		if (refs_are_ctf_corrected) { if (projector.mdlZ != 0) WAVG_SUM(true, true);  else WAVG_SUM(true, false); }
 		else                        { if (projector.mdlZ != 0) WAVG_SUM(false, true); else WAVG_SUM(false, false); }
 #undef WAVG_SUM
@@ -1919,10 +1970,28 @@ void runDiff2KernelFineBatched(
 		fine_partial.setSize((size_t) fine_chunks * n * fine_ch);
 		fine_partial.deviceAlloc();
 	}
+	const float2 *fine_shx = NULL;
+	const float2 *fine_shy = NULL;
+#ifndef ACC_DOUBLE_PRECISION
+	AccPtr<float2> sep_buf = table.make<float2>();
+	if (!data_is_3D && gpuFineSeparable() && n >= 8 && translation_num >= 8 &&
+		(size_t) translation_num * (projector.imgX + projector.imgY) * sizeof(float2) <= ((size_t) 64 << 20))
+	{
+		sep_buf.setSize((size_t) translation_num * (projector.imgX + projector.imgY));
+		sep_buf.deviceAlloc();
+		float2 *shx_p = ~sep_buf;
+		float2 *shy_p = shx_p + (size_t) translation_num * projector.imgX;
+		cuda_kernel_shift_table_sep<<<dim3((projector.imgX + projector.imgY + 127) / 128, translation_num), 128, 0, stream>>>(
+				trans_x, trans_y, shx_p, shy_p, projector.imgX, projector.imgY, projector.maxR);
+		LAUNCH_HANDLE_ERROR(cudaGetLastError());
+		fine_shx = shx_p;
+		fine_shy = shy_p;
+	}
+#endif
 #define D2F_BATCH(R3, D3, BS, CH) cuda_kernel_diff2_fine<R3, D3, BS, CH><<<dim3(n, D3 ? 1 : fine_chunks), BS, 0, stream>>>( \
 		NULL, Fimgs_real, Fimgs_imag, trans_x, trans_y, trans_z, projector, corr_img, NULL, \
 		image_size, sum_init, 0, translation_num, 0, NULL, NULL, NULL, NULL, d_jobs, d_start, nc, D3 ? 1 : fine_chunks, \
-		fine_chunks > 1 ? ~fine_partial : (XFLOAT *) NULL)
+		fine_chunks > 1 ? ~fine_partial : (XFLOAT *) NULL, fine_shx, fine_shy)
 	if (data_is_3D)  D2F_BATCH(true, true, D2F_BLOCK_SIZE_DATA3D, D2F_CHUNK_DATA3D);
 	else if (ref3d)  D2F_BATCH(true, false, D2F_BLOCK_SIZE_REF3D, D2F_CHUNK_REF3D);
 	else             D2F_BATCH(false, false, D2F_BLOCK_SIZE_2D, D2F_CHUNK_2D);
@@ -2055,7 +2124,9 @@ void runBackProjectKernelBatched(
 		bool ctf_premultiplied,
 		AccPtr<char> &table,
 		const std::vector<unsigned> *slots,
-		const BPAccumView *accum)
+		const BPAccumView *accum,
+		const void *pre_shx_v,
+		const void *pre_shy_v)
 {
 	if (jobs.empty())
 		return;
@@ -2146,13 +2217,19 @@ void runBackProjectKernelBatched(
 			if (!(reported.fetch_or(bit) & bit))
 				fprintf(stderr, "RELION_GPU_BP_PACK: %s\n", notes[pack_state]);
 		}
-		// RELION_GPU_BP_SHIFT=1: 2D data, up to 1024 translations, table up to 64 MB. The table numbers the rows beyond maxR
-		// differently from this kernel (see cuda_kernel_shift_table), but those pixels lie outside the sphere of maxR2 = maxR^2
-		// and add nothing, so any even-sized image with maxR <= imgY / 2 can use it
+		// RELION_GPU_BP_SHIFT=1: 2D data, up to 1024 translations, table up to 64 MB. Separable shifts
+		// (RELION_GPU_BP_SEPARABLE, default-on) reuse (pre_shx, pre_shy) when matching BP.maxR == imgX - 1
+		// or build a compact 1D table ((imgX + imgY) * translation_num entries).
 		AccPtr<float2> bp_shifts = table.make<float2>();
+		AccPtr<float2> bp_shx = table.make<float2>();
+		AccPtr<float2> bp_shy = table.make<float2>();
 		bool use_shift = false;
+		bool use_sep_shift = false;
+		const float2 *bp_shx_ptr = NULL;
+		const float2 *bp_shy_ptr = NULL;
 #ifndef ACC_DOUBLE_PRECISION
-		if (gpuBpShift() && !data_is_3D && (imgY % 2) == 0 && BP.maxR <= imgY / 2 && (int) BP.maxR2 == BP.maxR * BP.maxR && translation_num > 0 &&
+		const bool bp_shift_ok = !data_is_3D && (imgY % 2) == 0 && BP.maxR <= imgY / 2 && (int) BP.maxR2 == BP.maxR * BP.maxR && translation_num > 0;
+		if (gpuBpShift() && bp_shift_ok &&
 			translation_num <= 1024 && (size_t) imgX * imgY * translation_num * sizeof(float2) <= ((size_t) 64 << 20))
 		{
 			bp_shifts.setSize(translation_num * imgX * imgY);
@@ -2162,43 +2239,81 @@ void runBackProjectKernelBatched(
 			LAUNCH_HANDLE_ERROR(cudaGetLastError());
 			use_shift = true;
 		}
+		else if (gpuBpSeparable() && bp_shift_ok &&
+			(size_t) translation_num * (imgX + imgY) * sizeof(float2) <= ((size_t) 64 << 20))
+		{
+			if (pre_shx_v != NULL && pre_shy_v != NULL && BP.maxR == imgX - 1)
+			{
+				bp_shx_ptr = (const float2 *) pre_shx_v;
+				bp_shy_ptr = (const float2 *) pre_shy_v;
+			}
+			else
+			{
+				bp_shx.setSize(translation_num * imgX);
+				bp_shx.deviceAlloc();
+				bp_shy.setSize(translation_num * imgY);
+				bp_shy.deviceAlloc();
+				cuda_kernel_shift_table_sep<<<dim3((imgX + imgY + 127) / 128, translation_num), 128, 0, stream>>>(
+						trans_x, trans_y, ~bp_shx, ~bp_shy, imgX, imgY, BP.maxR);
+				LAUNCH_HANDLE_ERROR(cudaGetLastError());
+				bp_shx_ptr = ~bp_shx;
+				bp_shy_ptr = ~bp_shy;
+			}
+			use_sep_shift = true;
+		}
 #endif
-		// RELION_GPU_BP_DIVHOIST=1: with the compacted translation list, weight / weight_norm is made once per translation
-		// when the list is built (the same value as the division in the pixel loop); 2D data
-		static const bool bp_divhoist = [] { const char *e = getenv("RELION_GPU_BP_DIVHOIST"); return e && atoi(e) != 0; }();
-		const bool hoist_div = bp_divhoist && compact3 && !data_is_3D;
+		// RELION_GPU_BP_DIVHOIST: with the compacted translation list, weight / weight_norm is made once per translation
+		// when the list is built (the same value as the division in the pixel loop); 2D data (on by default)
+		const bool hoist_div = gpuBpDivHoist() && compact3 && !data_is_3D;
 		auto launch_bp = [&](int tl) {
-#define BP3D_BATCH(D3, CP, BS) BP3D_BATCH_S(D3, CP, false, BS)
-#define BP3D_BATCH_S(D3, CP, SH, BS) BP3D_BATCH_H(D3, CP, SH, false, BS)
-#define BP3D_BATCH_H(D3, CP, SH, HD, BS) cuda_kernel_backproject3D<D3, CP, SH, HD><<<dim3(n, bp_chunks), BS, (!D3 && tl == 2) ? pk_off + pk_bytes : (compact3 ? smem3 : 0), stream>>>( \
+#define BP3D_CALL(D3, CP, SH, HD, SEP, BS) cuda_kernel_backproject3D<D3, CP, SH, HD, SEP><<<dim3(n, bp_chunks), BS, (!D3 && tl == 2) ? pk_off + pk_bytes : (compact3 ? smem3 : 0), stream>>>( \
 			d_img_real, d_img_imag, trans_x, trans_y, trans_z, NULL, d_Minvsigma2s, d_ctfs, \
 			translation_num, significant_weight, (XFLOAT) 0, NULL, NULL, NULL, NULL, \
 			BP.maxR, BP.maxR2, BP.padding_factor, imgX, imgY, imgZ, imgX*imgY*imgZ, \
 			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ, d_jobs, d_start, nc, bp_chunks, compact3, bp_scatter, acc, d_slots, \
-			data_is_3D ? 0 : tl, ~bp_shifts, bp_pack_runs)
-		if (use_shift)
+			D3 ? 0 : tl, ~bp_shifts, tl == 2 ? bp_pack_runs : BP_PACK_RUNS, bp_shx_ptr, bp_shy_ptr)
+		if (data_is_3D)
 		{
-			if (ctf_premultiplied) BP3D_BATCH_S(false, true, true, BP_REF3D_BLOCK_SIZE);
-			else                   BP3D_BATCH_S(false, false, true, BP_REF3D_BLOCK_SIZE);
+			if (ctf_premultiplied) BP3D_CALL(true, true, false, false, false, BP_DATA3D_BLOCK_SIZE);
+			else                   BP3D_CALL(true, false, false, false, false, BP_DATA3D_BLOCK_SIZE);
+		}
+		else if (use_sep_shift)
+		{
+			if (hoist_div)
+			{
+				if (ctf_premultiplied) BP3D_CALL(false, true, false, true, true, BP_REF3D_BLOCK_SIZE);
+				else                   BP3D_CALL(false, false, false, true, true, BP_REF3D_BLOCK_SIZE);
+			}
+			else
+			{
+				if (ctf_premultiplied) BP3D_CALL(false, true, false, false, true, BP_REF3D_BLOCK_SIZE);
+				else                   BP3D_CALL(false, false, false, false, true, BP_REF3D_BLOCK_SIZE);
+			}
+		}
+		else if (use_shift)
+		{
+			if (hoist_div)
+			{
+				if (ctf_premultiplied) BP3D_CALL(false, true, true, true, false, BP_REF3D_BLOCK_SIZE);
+				else                   BP3D_CALL(false, false, true, true, false, BP_REF3D_BLOCK_SIZE);
+			}
+			else
+			{
+				if (ctf_premultiplied) BP3D_CALL(false, true, true, false, false, BP_REF3D_BLOCK_SIZE);
+				else                   BP3D_CALL(false, false, true, false, false, BP_REF3D_BLOCK_SIZE);
+			}
 		}
 		else if (hoist_div)
 		{
-			if (ctf_premultiplied) BP3D_BATCH_H(false, true, false, true, BP_REF3D_BLOCK_SIZE);
-			else                   BP3D_BATCH_H(false, false, false, true, BP_REF3D_BLOCK_SIZE);
-		}
-		else if (data_is_3D)
-		{
-			if (ctf_premultiplied) BP3D_BATCH(true, true, BP_DATA3D_BLOCK_SIZE);
-			else                   BP3D_BATCH(true, false, BP_DATA3D_BLOCK_SIZE);
+			if (ctf_premultiplied) BP3D_CALL(false, true, false, true, false, BP_REF3D_BLOCK_SIZE);
+			else                   BP3D_CALL(false, false, false, true, false, BP_REF3D_BLOCK_SIZE);
 		}
 		else
 		{
-			if (ctf_premultiplied) BP3D_BATCH(false, true, BP_REF3D_BLOCK_SIZE);
-			else                   BP3D_BATCH(false, false, BP_REF3D_BLOCK_SIZE);
+			if (ctf_premultiplied) BP3D_CALL(false, true, false, false, false, BP_REF3D_BLOCK_SIZE);
+			else                   BP3D_CALL(false, false, false, false, false, BP_REF3D_BLOCK_SIZE);
 		}
-#undef BP3D_BATCH
-#undef BP3D_BATCH_S
-#undef BP3D_BATCH_H
+#undef BP3D_CALL
 		};
 #ifndef ACC_DOUBLE_PRECISION  // the check compares float models
 		static int tile_checks_left = [] { const char *e = getenv("RELION_GPU_BP_TILE_CHECKS"); return e ? atoi(e) : 2; }();
@@ -2257,7 +2372,10 @@ void runBackProjectAccumFlush(
 		unsigned img_y,
 		int used)
 {
-	cuda_kernel_backproject3D_flush<<<used, 128>>>(
+	const size_t fl_smem = BP.interleaved
+		? (size_t) (128 / 32) * (32 * 6 * 2 * sizeof(XFLOAT) + 32 * 2 * sizeof(size_t))
+		: 0;
+	cuda_kernel_backproject3D_flush<<<used, 128, fl_smem>>>(
 			acc, d_models, slots_per_class, img_x, img_y, BP.maxR2, BP.padding_factor,
 			BP.mdlX, BP.mdlY, BP.mdlInitY, BP.mdlInitZ);
 	LAUNCH_HANDLE_ERROR(cudaGetLastError());
@@ -2772,10 +2890,14 @@ bool runDiff2KernelCoarseBatched(
 		// RELION_GPU_XT_PIPE (default 3): 0 the plain pass loop, 1 reference and correlation values of the next pass fetched ahead,
 		// 2 also the A values (up to 2 tiles per block), 3 also the A values of any tile count. Same sums in the same order.
 		static const int xt_pipe = getenv("RELION_GPU_XT_PIPE") ? atoi(getenv("RELION_GPU_XT_PIPE")) : 3;
-#define XT_LAUNCH_P(NT, PP) cuda_kernel_diff2_coarse_xt<NT, PP><<<dim3(even[nc], n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
+		const bool xt_pixfast = (xt_ablate & 8) != 0;
+#define XT_LAUNCH_P(NT, PP) cuda_kernel_diff2_coarse_xt<NT, PP, false><<<dim3(even[nc], n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
 				d_classes, d_even, (int) nc, ~xt_a, ~xt_x2, corr_img, (int) translation_num, (int) xt_tpad, \
 				(int) image_size, ~partial, n_chunks, chunk_stride, xt_ablate)
-#define XT_LAUNCH(NT) do { if (xt_pipe >= 3) XT_LAUNCH_P(NT, 3); else if (xt_pipe == 2) XT_LAUNCH_P(NT, 2); else if (xt_pipe == 1) XT_LAUNCH_P(NT, 1); else XT_LAUNCH_P(NT, 0); } while (0)
+#define XT_LAUNCH(NT) do { if (xt_pixfast) cuda_kernel_diff2_coarse_xt<NT, 3, true><<<dim3(even[nc], n_chunks, (ntt + NT - 1) / NT), XT_BLOCK, 0, stream>>>( \
+				d_classes, d_even, (int) nc, ~xt_a, ~xt_x2, corr_img, (int) translation_num, (int) xt_tpad, \
+				(int) image_size, ~partial, n_chunks, chunk_stride, xt_ablate); \
+			else if (xt_pipe >= 3) XT_LAUNCH_P(NT, 3); else if (xt_pipe == 2) XT_LAUNCH_P(NT, 2); else if (xt_pipe == 1) XT_LAUNCH_P(NT, 1); else XT_LAUNCH_P(NT, 0); } while (0)
 		auto launch = [&](int t)
 		{
 			if (t >= 8) XT_LAUNCH(8); else if (t >= 6) XT_LAUNCH(6); else if (t >= 4) XT_LAUNCH(4); else if (t == 3) XT_LAUNCH(3); else if (t == 2) XT_LAUNCH(2); else XT_LAUNCH(1);

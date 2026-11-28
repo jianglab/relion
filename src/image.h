@@ -51,6 +51,9 @@
 
 #include <cstdint>
 #include <typeinfo>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -67,6 +70,7 @@
 #include "src/virtual_particles.h"
 #include "src/virtual_movie_averages.h"
 #include "src/lazy_cache.h"
+#include "src/mem_tiff.h"
 
 /// @defgroup Images Images
 //@{
@@ -117,7 +121,7 @@ extern "C" {
 #ifdef TIFF_DEBUG
 		std::cout << "TiffInMemoryReadProc: read_size = " << read_size << " cur_pos = " << tiff_handle->pos << " buf_size = " << tiff_handle->size << std::endl;
 #endif
-		if (tiff_handle->pos + read_size >= tiff_handle->size)
+		if (tiff_handle->pos + read_size > tiff_handle->size)
 			REPORT_ERROR("TiffInMemoryReadProc: seeking beyond the end of the buffer.");
 
 		memcpy(buf, tiff_handle->buf + tiff_handle->pos, read_size);
@@ -141,23 +145,27 @@ extern "C" {
 #ifdef TIFF_DEBUG
 		std::cout << "TiffInMemorySeekProc: offset = " << offset << " cur_pos = " << tiff_handle->pos << " buf_size = " << tiff_handle->size << std::endl;
 #endif
+		toff_t target = tiff_handle->pos;
 		switch (whence)
 		{
 			case SEEK_SET:
-				tiff_handle->pos = 0;
+				target = offset;
 				break;
 			case SEEK_CUR:
-				tiff_handle->pos += offset;
+				target = tiff_handle->pos + offset;
 				break;
 			case SEEK_END:
-				REPORT_ERROR("TIFFInMemorySeekProc: SEEK_END is not supported.");
-				// break; // intentional to suppress compiler warnings.
+				target = (toff_t)tiff_handle->size + offset;
+				break;
+			default:
+				return (toff_t)-1;
 		}
 
-		if (tiff_handle->pos >= tiff_handle->size)
-			REPORT_ERROR("TIFFInMemorySeekProc: seeking beyond the end of the buffer.");
+		if (target > (toff_t)tiff_handle->size)
+			return (toff_t)-1;
 
-		return 0;
+		tiff_handle->pos = target;
+		return target;
 	}
 
 	static int TiffInMemoryCloseProc(thandle_t handle)
@@ -568,7 +576,8 @@ public:
 		int err = 0;
 		err = _read(name, hFile, true, select_img, false, is_2D);
 		// Reposition file pointer for a next read
-		rewind(fimg);
+		if (fimg != NULL)
+			rewind(fimg);
 		return err;
 	}
 
@@ -731,9 +740,10 @@ public:
 			}
 		case Float16:
 			{
+				const float *lut = half2floatLut();
 				float16 *ptr = (float16 *)page;
 				for(size_t i = 0; i < pageSize; i++)
-					ptrDest[i] = (T)half2float(ptr[i]);
+					ptrDest[i] = (T)lut[(unsigned short)ptr[i]];
 				break;
 			}
 		case UHalf:
@@ -1069,11 +1079,6 @@ public:
 			printf("DEBUG: myoffset = %d select_img= %d \n", myoffset, select_img);
 #endif
 
-			if (pagesize > pagemax)
-				page = (char *) askMemory(pagemax*sizeof(char));
-			else
-				page = (char *) askMemory(pagesize*sizeof(char));
-
 			// Because we requested XYSIZE to be even for UHalf, this is always safe.
 			int error_fseek;
 			if (!dont_seek)
@@ -1082,6 +1087,84 @@ public:
 				if (error_fseek != 0)
 					return -1;
 			}
+
+			if (!swap && pad == 0 && datatype != UHalf)
+			{
+				const size_t total_elems = NSIZE(data) * ZYXSIZE(data);
+				const size_t total_src_bytes = NSIZE(data) * pagesize;
+				const bool exact_direct =
+					(datatype == Float  && typeid(T) == typeid(float)) ||
+					(datatype == SShort && typeid(T) == typeid(short)) ||
+					(datatype == UShort && typeid(T) == typeid(unsigned short));
+				if (exact_direct)
+				{
+					if (total_src_bytes > 0 && fread(MULTIDIM_ARRAY(data), total_src_bytes, 1, fimg) != 1)
+						return -2;
+					return 0;
+				}
+				const bool tail_cast_direct =
+					(datatype == Float || datatype == Float16 || datatype == SShort || datatype == UShort) &&
+					datatypesize < sizeof(T);
+				if (tail_cast_direct)
+				{
+					T* dst = MULTIDIM_ARRAY(data);
+					char* raw = reinterpret_cast<char*>(dst) + total_elems * sizeof(T) - total_src_bytes;
+					if (total_src_bytes > 0 && fread(raw, total_src_bytes, 1, fimg) != 1)
+						return -2;
+					static const size_t BLK = 1024;
+					if (datatype == Float)
+					{
+						float blk[BLK];
+						for (size_t i = 0; i < total_elems; i += BLK)
+						{
+							const size_t cnt = (total_elems - i < BLK) ? (total_elems - i) : BLK;
+							memcpy(blk, raw + i * sizeof(float), cnt * sizeof(float));
+							for (size_t k = 0; k < cnt; ++k)
+								dst[i + k] = (T)blk[k];
+						}
+					}
+					else if (datatype == Float16)
+					{
+						const float *lut = half2floatLut();
+						float16 blk[BLK];
+						for (size_t i = 0; i < total_elems; i += BLK)
+						{
+							const size_t cnt = (total_elems - i < BLK) ? (total_elems - i) : BLK;
+							memcpy(blk, raw + i * sizeof(float16), cnt * sizeof(float16));
+							for (size_t k = 0; k < cnt; ++k)
+								dst[i + k] = (T)lut[(unsigned short)blk[k]];
+						}
+					}
+					else if (datatype == SShort)
+					{
+						short blk[BLK];
+						for (size_t i = 0; i < total_elems; i += BLK)
+						{
+							const size_t cnt = (total_elems - i < BLK) ? (total_elems - i) : BLK;
+							memcpy(blk, raw + i * sizeof(short), cnt * sizeof(short));
+							for (size_t k = 0; k < cnt; ++k)
+								dst[i + k] = (T)blk[k];
+						}
+					}
+					else if (datatype == UShort)
+					{
+						unsigned short blk[BLK];
+						for (size_t i = 0; i < total_elems; i += BLK)
+						{
+							const size_t cnt = (total_elems - i < BLK) ? (total_elems - i) : BLK;
+							memcpy(blk, raw + i * sizeof(unsigned short), cnt * sizeof(unsigned short));
+							for (size_t k = 0; k < cnt; ++k)
+								dst[i + k] = (T)blk[k];
+						}
+					}
+					return 0;
+				}
+			}
+
+			if (pagesize > pagemax)
+				page = (char *) askMemory(pagemax*sizeof(char));
+			else
+				page = (char *) askMemory(pagesize*sizeof(char));
 
 			for (size_t myn=0; myn<NSIZE(data); myn++)
 			{

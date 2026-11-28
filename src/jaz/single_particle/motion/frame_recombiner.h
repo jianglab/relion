@@ -25,6 +25,8 @@
 #include <src/virtual_particles.h>
 #include <src/jaz/image/buffered_image.h>
 #include <functional>
+#include <map>
+#include <utility>
 #include <vector>
 #include <string>
 
@@ -74,6 +76,29 @@ class FrameRecombiner
 				const std::vector<std::vector<gravis::d2Vector>>& priorShift,
 				int s, double angpix, double data_angpix,
 				const std::vector<Image<RFLOAT>>& weights, int threads);
+		// Reusable per-thread FFTW c2r plan & scratch workspace for finishParticle (keyed by window size)
+		struct FinishWorkspace
+		{
+			struct PlanSlot
+			{
+				BufferedImage<Complex> scratch;
+				BufferedImage<RFLOAT> real;
+				void* plan = 0;
+			};
+
+			int s = 0;
+			std::map<int, PlanSlot> plans;
+			PlanSlot* active = 0;
+			MultidimArray<RFLOAT> ctfImg;
+
+			FinishWorkspace() {}
+			~FinishWorkspace();
+			FinishWorkspace(const FinishWorkspace&) = delete;
+			FinishWorkspace& operator=(const FinishWorkspace&) = delete;
+
+			void prepare(int new_s);
+		};
+
 		static void finishParticles(
 				BufferedImage<Complex>& sumStack, int threads,
 				const std::function<bool(int p, MultidimArray<RFLOAT>& ctf)>& ctf,
@@ -81,6 +106,9 @@ class FrameRecombiner
 		// One particle from its sum (changed in place), multiplied with `ctf` if given, into `out` (cut to its size)
 		static void finishParticle(
 				BufferedImage<Complex>& sum, MultidimArray<RFLOAT>* ctf, RawImage<RFLOAT> out);
+		static void finishParticle(
+				BufferedImage<Complex>& sum, MultidimArray<RFLOAT>* ctf, RawImage<RFLOAT> out,
+				FinishWorkspace& ws);
 
 		bool writesVirtual() const { return write_virtual; }
 		// Virtual particles are only described, but their frame sums are cached if a cache is in use
@@ -131,6 +159,8 @@ class FrameRecombiner
 		std::vector<std::vector<Image<RFLOAT>>> freqWeights;
 		// and the per-frame (sigma, k) they were computed from, per optics group (for virtual particles)
 		std::vector<std::vector<gravis::d2Vector>> bkFactors;
+		// cached per-(ogmg, window_s) damage weights for per-particle premultiplied windows
+		std::map<std::pair<int, int>, std::vector<Image<RFLOAT>>> windowWeightsCache_;
 
 		std::vector<Image<RFLOAT>> weightsFromFCC(const std::vector<MetaDataTable>& allMdts,
 		                                          int s, double angpix, std::string og_name);

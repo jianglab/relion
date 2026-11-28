@@ -456,12 +456,8 @@ void applyGeometry(const MultidimArray<T>& V1,
     else
     {
         // 3D transformation
-
-        int m1, n1, o1, m2, n2, o2;
-        RFLOAT x, y, z, xp, yp, zp;
-        RFLOAT minxp, minyp, maxxp, maxyp, minzp, maxzp;
         int cen_x, cen_y, cen_z, cen_xp, cen_yp, cen_zp;
-        RFLOAT wx, wy, wz;
+        RFLOAT minxp, minyp, maxxp, maxyp, minzp, maxzp;
 
         // Find center of MultidimArray
         cen_z = (int)(V2.zdim / 2);
@@ -496,7 +492,14 @@ void applyGeometry(const MultidimArray<T>& V1,
         // this value at the output voxel
 
         // V2 is not initialised to 0 because all its pixels are rewritten
+        int relionBulkThreads(size_t n);
+        const int nt = relionBulkThreads((size_t)V2.zdim * (size_t)V2.ydim * (size_t)V2.xdim);
+        #pragma omp parallel for schedule(static) num_threads(nt) if(nt > 1)
         for (int k = 0; k < V2.zdim; k++)
+        {
+            int m1, n1, o1, m2, n2, o2;
+            RFLOAT x, y, z, xp, yp, zp;
+            RFLOAT wx, wy, wz;
             for (int i = 0; i < V2.ydim; i++)
             {
                 // Calculate position of the beginning of the row in the output
@@ -668,6 +671,7 @@ void applyGeometry(const MultidimArray<T>& V1,
                     zp += Aref(2, 0);
                 }
             }
+        }
     }
 }
 

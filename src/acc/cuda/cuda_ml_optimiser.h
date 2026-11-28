@@ -100,6 +100,22 @@ public:
 	// The reference projections of the coarse pass, made on the first use in an iteration (RELION_GPU_COARSE_CACHE)
 	CoarseProjectionCache coarse_cache;
 
+	// Persistent per-iteration device lookup tables for on-GPU wdiff2s reduction
+	struct Wdiff2Tables
+	{
+		std::mutex mtx;
+		bool ready = false;
+		bool valid = false;
+		void *d_blob = NULL;
+		std::vector<const int*> d_Mresol_fine;
+		std::vector<size_t> Mresol_size;
+		const unsigned char *d_scale_mask = NULL;
+		int scale_stride = 0;
+		int nr_classes = 0;
+	} wdiff2_tables;
+	const Wdiff2Tables &getWdiff2Tables();
+	void releaseWdiff2Tables();
+
 	// Make this device current on the calling thread (worker threads start on device 0)
 	void bindThreadToDevice()
 	{
@@ -110,6 +126,7 @@ public:
 	~MlDeviceBundle()
 	{
 		gpuMemTrace("iteration end, before the bundle is released");
+		releaseWdiff2Tables();
 		coarse_cache.release();
 		groupTablePoolTrim(device_id);
 		finishLeanIteration();
@@ -147,6 +164,14 @@ public:
 			for (long c = first; c <= last; c++)
 				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(classStreams[c]));
 		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+	}
+	// GPU-to-GPU ordering barrier across classStreams[first..last] and cudaStreamPerThread.
+	// When classStreamsShared is true, every class stream IS cudaStreamPerThread, so CUDA
+	// FIFO stream semantics already guarantee ordering with zero host stall.
+	void orderClassStreams(long first, long last)
+	{
+		if (!classStreamsShared)
+			syncClassStreams(first, last);
 	}
 	cudaError_t errorStatus;
 

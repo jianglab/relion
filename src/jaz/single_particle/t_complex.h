@@ -95,6 +95,14 @@ class tComplex
             return *this;
         }
 
+        tComplex& operator *= (T s)
+        {
+            real *= s;
+            imag *= s;
+
+            return *this;
+        }
+
         tComplex& operator /= (const tComplex& arg)
         {
             T cd = arg.real*arg.real + arg.imag*arg.imag;
@@ -104,6 +112,14 @@ class tComplex
 
             real = re/cd;
             imag = im/cd;
+
+            return *this;
+        }
+
+        tComplex& operator /= (T s)
+        {
+            real /= s;
+            imag /= s;
 
             return *this;
         }

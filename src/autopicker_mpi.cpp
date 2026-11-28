@@ -19,6 +19,8 @@
  ***************************************************************************/
 
 #include "src/autopicker_mpi.h"
+#include "src/virtual_movie_averages.h"
+#include "src/async_file_writer.h"
 
 void AutoPickerMpi::read(int argc, char **argv)
 {
@@ -87,12 +89,28 @@ void AutoPickerMpi::run()
 		barstep = XMIPP_MAX(1, my_nr_micrographs / 60);
 	}
 
+	if (!do_topaz_extract)
+	{
+		relionFftwInitThreads();
+		relionFftwPlanThreads(std::min(nr_cpu_threads, 8));
+	}
+
 	FileName fn_olddir="";
+	vmovies::ReadAhead read_ahead(do_topaz_extract ? 0 : -1);
+	read_ahead.expectMicrographs((long) my_nr_micrographs);
 	for (long int imic = my_first_micrograph; imic <= my_last_micrograph; imic++)
 	{
 		// Abort through the pipeline_control system
 		if (pipeline_control_check_abort_job())
 			MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
+
+		if (read_ahead.enabled())
+		{
+			std::vector<std::string> next;
+			for (long int k = imic + 1; k <= my_last_micrograph && (int) next.size() < vmovies::ReadAhead::WINDOW; k++)
+				next.push_back(fn_micrographs[k]);
+			read_ahead.upcoming(next);
+		}
 
 		if (verb > 0 && imic % barstep == 0)
 			progress_bar(imic);
@@ -114,6 +132,8 @@ void AutoPickerMpi::run()
 		else
 			autoPickOneMicrograph(fn_micrographs[imic], imic);
 	}
+
+	AsyncFileWriter::instance().waitOrThrow();
 
 	if (verb > 0)
 		progress_bar(my_nr_micrographs);

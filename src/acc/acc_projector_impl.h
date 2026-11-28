@@ -1,5 +1,8 @@
 #include "src/acc/acc_projector.h"
 #include "src/gpu_switch.h"
+#ifdef _CUDA_ENABLED
+#include "src/acc/cuda/cuda_mem_utils.h"
+#endif
 #include <signal.h>
 
 
@@ -348,6 +351,38 @@ void AccProjector::initMdl(Complex *data)
 		free(padImag);
 		return;
 	}
+#endif
+#ifdef _CUDA_ENABLED
+#ifndef PROJECTOR_NO_TEXTURES
+	if (mdlZ != 0 && cplx2)
+	{
+		int relionBulkThreads(size_t n);
+		const size_t bytes = mdlXYZ * sizeof(float2);
+		float2 *tmp = NULL;
+		size_t cap = 0;
+		const bool use_pool = pinnedBigCopyOn() && bytes >= ((size_t)1 << 20);
+		if (use_pool)
+			tmp = (float2 *) pinnedHostPool().acquire(bytes, cap);
+		if (!tmp)
+		{
+			tmp = (float2 *) malloc(bytes);
+			if (!tmp) CRITICAL(RAMERR);
+		}
+		const int nt = relionBulkThreads(mdlXYZ);
+		#pragma omp parallel for schedule(static) num_threads(nt) if(nt > 1)
+		for (size_t i = 0; i < mdlXYZ; i++)
+			tmp[i] = make_float2((float) data[i].real, (float) data[i].imag);
+		cudaMemcpy3DParms copyParams = {0};
+		copyParams.extent = make_cudaExtent(mdlX, mdlY, mdlZ);
+		copyParams.kind   = cudaMemcpyHostToDevice;
+		copyParams.dstArray = *texArrayReal;
+		copyParams.srcPtr   = make_cudaPitchedPtr(tmp, mdlX * sizeof(float2), mdlX, mdlY);
+		DEBUG_HANDLE_ERROR(cudaMemcpy3D(&copyParams));
+		if (cap > 0) pinnedHostPool().release(tmp, cap);
+		else free(tmp);
+		return;
+	}
+#endif
 #endif
 	XFLOAT *tmpReal;
 	XFLOAT *tmpImag;

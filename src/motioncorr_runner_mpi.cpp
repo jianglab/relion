@@ -98,7 +98,8 @@ void MotioncorrRunnerMpi::run()
 
 		if (result) {
 			saveModel(mic);
-			plotShifts(fn_micrographs[imic], mic);
+			if (!do_skip_logfile)
+				plotShiftsAsync(fn_micrographs[imic], mic);
 		}
 	}
 	{

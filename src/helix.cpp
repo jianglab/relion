@@ -1021,11 +1021,8 @@ void imposeHelicalSymmetryInRealSpace(
 	if (z_min < (((RFLOAT)(STARTINGZ(v))) + 1.))
 		z_min = (((RFLOAT)(STARTINGZ(v))) + 1.);
 
-	// Init volumes
+	// Init volume origin and check parameters
 	v.setXmippOrigin();
-	vout.clear();
-	vout.resize(v);
-	vout.setXmippOrigin();
 	const BoxEllipse ellipsoid(v, sphere_radius_pix, cosine_width_pix);
 
 	// Calculate tabulated sine and cosine values
@@ -1077,6 +1074,10 @@ void imposeHelicalSymmetryInRealSpace(
 			std::cout << " Imposing helical symmetry in real space on the CPU: " << reason << "." << std::endl;
 		}
 	}
+
+	vout.clear();
+	vout.resize(v);
+	vout.setXmippOrigin();
 
 	// The voxels are independent, so the volume is split over threads. The original loop set the
 	// voxels outside the mask to zero in v itself as it went, so a voxel near the edge saw zeros for

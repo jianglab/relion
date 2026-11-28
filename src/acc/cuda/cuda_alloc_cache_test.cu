@@ -123,6 +123,41 @@ bool run(Outcome &o)
 		(void) b;
 		o.hitsCacheOff = pool.cachedHits();
 	}
+	// free-list integrity under fragmentation, prev/next/both coalescing, split, exact reuse, and multi-chunk growth
+	{
+		CudaCustomAllocator::setCacheMode(true);
+		CudaCustomAllocator pool(0, 512);
+		pool.configureLean((size_t) 64 << 20, (size_t) 16 << 20);
+		pool.setCacheCapMB(1); // small cap forces evictions + _free coalescing
+		CudaCustomAllocator::allowCache(false); // bypass ThreadCache so every alloc/free hits freeHead
+		Block *b1 = pool.alloc(512 * 1024);
+		Block *b2 = pool.alloc(512 * 1024);
+		Block *b3 = pool.alloc(512 * 1024);
+		Block *b4 = pool.alloc(512 * 1024);
+		Block *b5 = pool.alloc(512 * 1024);
+		pool.free(b1); // head free
+		pool.free(b3); // middle free (isolated)
+		pool.free(b5); // merges with tail free
+		pool.free(b4); // merges with prev (b3) AND next (b5) -> both-neighbor coalesce
+		pool.free(b2); // merges with prev (b1) AND next (merged b3..tail) -> single free block
+		bool ok = (b1 && b2 && b3 && b4 && b5 && pool.checkFreeListInvariant());
+		// exact match vs split + multi-chunk _addChunk
+		Block *e1 = pool.alloc((size_t) 16 << 20);
+		ok = ok && (e1 != NULL) && pool.checkFreeListInvariant();
+		Block *g1 = pool.alloc((size_t) 8 << 20); // triggers _addChunk
+		Block *g2 = pool.alloc((size_t) 4 << 20);
+		ok = ok && (g1 != NULL && g2 != NULL) && pool.checkFreeListInvariant();
+		pool.free(g1);
+		pool.free(e1);
+		pool.free(g2);
+		// cross-chunk boundary must NOT coalesce (b in chunk1 vs chunk0), exact reuse of 4 MB block
+		Block *r1 = pool.alloc((size_t) 4 << 20);
+		ok = ok && (r1 != NULL) && pool.checkFreeListInvariant();
+		pool.free(r1);
+		ok = ok && pool.checkFreeListInvariant() && (pool.getTotalUsedSpace() == 0);
+		CudaCustomAllocator::allowCache(true);
+		o.freeListOk = ok;
+	}
 	cudaStreamDestroy(s1);
 	cudaStreamDestroy(s2);
 	return true;

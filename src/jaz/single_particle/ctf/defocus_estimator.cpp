@@ -33,8 +33,75 @@
 #include <src/jaz/gravis/t2Vector.h>
 #include <src/jaz/single_particle/ctf/modular_ctf_optimisation.h>
 #include <src/jaz/optimization/lbfgs.h>
+#include <src/async_file_writer.h>
+#include <memory>
 
 using namespace gravis;
+
+static void writeDefocusPlot(const MetaDataTable& mdt, const std::string& outPath)
+{
+	std::string outRoot = CtfRefiner::getOutputFilenameRoot(mdt, outPath);
+
+	FileName fn_eps = outRoot + "_ctf-refine_fit.eps";
+
+	CPlot2D plot2D(fn_eps);
+	plot2D.SetXAxisSize(600);
+	plot2D.SetYAxisSize(600);
+	plot2D.SetDrawLegend(false);
+	plot2D.SetFlipY(true);
+
+	RFLOAT min_defocus = 99.e10;
+	RFLOAT max_defocus = -99.e10;
+
+	const int pc = mdt.numberOfObjects();
+
+	for (int p = 0; p < pc; p++)
+	{
+		RFLOAT defU, defV;
+		mdt.getValue(EMDL_CTF_DEFOCUSU, defU, p);
+		mdt.getValue(EMDL_CTF_DEFOCUSV, defV, p);
+		defU = (defU + defV) / 2.;
+
+		min_defocus = XMIPP_MIN(min_defocus, defU);
+		max_defocus = XMIPP_MAX(max_defocus, defU);
+	}
+
+	for (int p = 0; p < pc; p++)
+	{
+		RFLOAT defU, defV;
+		RFLOAT xcoor, ycoor;
+
+		mdt.getValue(EMDL_IMAGE_COORD_X, xcoor, p);
+		mdt.getValue(EMDL_IMAGE_COORD_Y, ycoor, p);
+		mdt.getValue(EMDL_CTF_DEFOCUSU, defU, p);
+		mdt.getValue(EMDL_CTF_DEFOCUSV, defV, p);
+
+		defU = (defU + defV) / 2.;
+
+		RFLOAT val  = (defU - min_defocus) / (max_defocus - min_defocus);
+		const RFLOAT eps = 1e-10;
+		if (max_defocus - min_defocus < eps) val = 0.5; // to avoid NaN in color
+
+		CDataSet dataSet;
+
+		dataSet.SetDrawMarker(true);
+		dataSet.SetDrawLine(false);
+		dataSet.SetMarkerSize(10);
+		dataSet.SetDatasetColor(val, 0.8 * val, 1.0 - val);
+
+		CDataPoint point(xcoor, ycoor);
+
+		dataSet.AddDataPoint(point);
+
+		plot2D.AddDataSet(dataSet);
+	}
+
+	char title[256];
+	snprintf(title, 255, "Defocus range from blue to orange: %.0f A", max_defocus - min_defocus);
+	plot2D.SetXAxisTitle(title);
+
+	plot2D.OutputPostScriptPlot(fn_eps);
+}
 
 DefocusEstimator::DefocusEstimator()
 :	ready(false)
@@ -149,12 +216,14 @@ void DefocusEstimator::processMicrograph(
 		}
 	}
 
-	// Output a diagnostic Postscript file
-	writeEPS(mdt);
-
-	// Now write out STAR file with optimised values for this micrograph
+	// Output diagnostic Postscript and optimised STAR files asynchronously
+	std::shared_ptr<MetaDataTable> mdtCopy(new MetaDataTable(mdt));
 	std::string outRoot = CtfRefiner::getOutputFilenameRoot(mdt, outPath);
-	mdt.write(outRoot + "_defocus_fit.star");
+	std::string path = outPath;
+	AsyncFileWriter::instance().submit([mdtCopy, outRoot, path]() {
+		writeDefocusPlot(*mdtCopy, path);
+		mdtCopy->write(outRoot + "_defocus_fit.star");
+	});
 }
 
 void DefocusEstimator::writeEPS(const MetaDataTable& mdt)
@@ -164,67 +233,7 @@ void DefocusEstimator::writeEPS(const MetaDataTable& mdt)
 		REPORT_ERROR("ERROR: DefocusEstimator::writeEPS: DefocusEstimator not initialized.");
 	}
 
-	std::string outRoot = CtfRefiner::getOutputFilenameRoot(mdt, outPath);
-
-	FileName fn_eps = outRoot + "_ctf-refine_fit.eps";
-
-	CPlot2D plot2D(fn_eps);
-	plot2D.SetXAxisSize(600);
-	plot2D.SetYAxisSize(600);
-	plot2D.SetDrawLegend(false);
-	plot2D.SetFlipY(true);
-
-	RFLOAT min_defocus = 99.e10;
-	RFLOAT max_defocus = -99.e10;
-
-	const int pc = mdt.numberOfObjects();
-
-	for (int p = 0; p < pc; p++)
-	{
-		RFLOAT defU, defV;
-		mdt.getValue(EMDL_CTF_DEFOCUSU, defU, p);
-		mdt.getValue(EMDL_CTF_DEFOCUSV, defV, p);
-		defU = (defU + defV) / 2.;
-
-		min_defocus = XMIPP_MIN(min_defocus, defU);
-		max_defocus = XMIPP_MAX(max_defocus, defU);
-	}
-
-	for (int p = 0; p < pc; p++)
-	{
-		RFLOAT defU, defV;
-		RFLOAT xcoor, ycoor;
-
-		mdt.getValue(EMDL_IMAGE_COORD_X, xcoor, p);
-		mdt.getValue(EMDL_IMAGE_COORD_Y, ycoor, p);
-		mdt.getValue(EMDL_CTF_DEFOCUSU, defU, p);
-		mdt.getValue(EMDL_CTF_DEFOCUSV, defV, p);
-
-		defU = (defU + defV) / 2.;
-
-		RFLOAT val  = (defU - min_defocus) / (max_defocus - min_defocus);
-		const RFLOAT eps = 1e-10;
-		if (max_defocus - min_defocus < eps) val = 0.5; // to avoid NaN in color
-
-		CDataSet dataSet;
-
-		dataSet.SetDrawMarker(true);
-		dataSet.SetDrawLine(false);
-		dataSet.SetMarkerSize(10);
-		dataSet.SetDatasetColor(val, 0.8 * val, 1.0 - val);
-
-		CDataPoint point(xcoor, ycoor);
-
-		dataSet.AddDataPoint(point);
-
-		plot2D.AddDataSet(dataSet);
-	}
-
-	char title[256];
-	snprintf(title, 255, "Defocus range from blue to orange: %.0f A", max_defocus - min_defocus);
-	plot2D.SetXAxisTitle(title);
-
-	plot2D.OutputPostScriptPlot(fn_eps);
+	writeDefocusPlot(mdt, outPath);
 }
 
 bool DefocusEstimator::isFinished(const MetaDataTable &mdt)

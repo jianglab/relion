@@ -917,6 +917,26 @@ void MetaDataTable::append(const MetaDataTable& mdt)
 			REPORT_ERROR("ERROR in appending metadata tables with not the same columns!");
 	}
 
+	// Fast path when both tables have the exact same schema and column layout
+	if (doubleLabels == mdt.doubleLabels &&
+	    intLabels == mdt.intLabels &&
+	    boolLabels == mdt.boolLabels &&
+	    stringLabels == mdt.stringLabels &&
+	    intVectorLabels == mdt.intVectorLabels &&
+	    doubleVectorLabels == mdt.doubleVectorLabels &&
+	    unknownLabels == mdt.unknownLabels &&
+	    activeLabels == mdt.activeLabels &&
+	    unknownLabelNames == mdt.unknownLabelNames &&
+	    unknownLabelPosition2Offset == mdt.unknownLabelPosition2Offset &&
+	    label2offset == mdt.label2offset)
+	{
+		objects.reserve(objects.size() + mdt.numberOfObjects());
+		for (long i = 0; i < mdt.objects.size(); i++)
+			objects.push_back(new MetaDataContainer(this, mdt.objects[i]));
+		firstObject();
+		return;
+	}
+
 	// Now append
 	objects.reserve(objects.size() + mdt.numberOfObjects());
 	for (long i = 0; i < mdt.objects.size(); i++)
@@ -1216,6 +1236,42 @@ long int MetaDataTable::readStarLoopRows(std::ifstream& in, const std::string &f
 	const size_t base = objects.size();
 	objects.resize(base + nr_rows, nullptr);
 
+	enum FastColKind : unsigned char { FC_DOUBLE, FC_INT, FC_BOOL, FC_STRING, FC_UNKNOWN, FC_OTHER };
+	struct FastCol {
+		FastColKind kind;
+		EMDLabel label;
+		long offset;
+	};
+	std::vector<FastCol> cols(num_labels);
+	for (int j = 0; j < num_labels; j++)
+	{
+		EMDLabel l = activeLabels[j];
+		FastCol fc;
+		fc.label = l;
+		fc.offset = -1;
+		if (l == EMDL_UNKNOWN_LABEL)
+		{
+			fc.kind = FC_UNKNOWN;
+			fc.offset = unknownLabelPosition2Offset[j];
+			if (fc.offset < 0)
+				fc.kind = FC_OTHER;
+		}
+		else if (l >= 0 && l < EMDL_LAST_LABEL && label2offset[l] >= 0)
+		{
+			fc.offset = label2offset[l];
+			if (EMDL::isDouble(l))      fc.kind = FC_DOUBLE;
+			else if (EMDL::isInt(l))    fc.kind = FC_INT;
+			else if (EMDL::isBool(l))   fc.kind = FC_BOOL;
+			else if (EMDL::isString(l)) fc.kind = FC_STRING;
+			else                        fc.kind = FC_OTHER;
+		}
+		else
+		{
+			fc.kind = FC_OTHER;
+		}
+		cols[j] = fc;
+	}
+
 	const int nthreads = starParseThreads(nr_rows);
 	std::atomic<size_t> first_bad(nr_rows);
 	auto work = [&](size_t r0, size_t r1)
@@ -1230,22 +1286,118 @@ long int MetaDataTable::readStarLoopRows(std::ifstream& in, const std::string &f
 					this, doubleLabels, intLabels, boolLabels, stringLabels,
 					intVectorLabels, doubleVectorLabels, unknownLabels);
 				objects[base + r] = obj;
-				simplifyInto(buf.data() + line_start[r], line_end[r] - line_start[r], line);
-				int pos = 0, labelPosition = 0;
-				while (nextTokenInSTAR(line, pos, value))
+				const char *raw = buf.data() + line_start[r];
+				size_t rlen = line_end[r] - line_start[r];
+				if (rlen > 0 && raw[rlen - 1] == '\r')
+					rlen--;
+				bool simple = true;
+				for (size_t k = 0; k < rlen; k++)
 				{
-					if (labelPosition >= num_labels)
-						throw 1;
-					if (activeLabels[labelPosition] == EMDL_UNKNOWN_LABEL)
+					const unsigned char c = (unsigned char)raw[k];
+					if (c == '\'' || c == '"' || c == '#' || (c < 0x20 && c != '\t'))
 					{
-						const long offset = unknownLabelPosition2Offset[labelPosition];
-						if (offset < 0)
-							throw 1;
-						obj->unknowns[offset] = value;
+						simple = false;
+						break;
 					}
-					else
-						setValueFromString(activeLabels[labelPosition], value, base + r);
-					labelPosition++;
+				}
+				int labelPosition = 0;
+				if (simple)
+				{
+					size_t p = 0;
+					while (p < rlen)
+					{
+						while (p < rlen && (raw[p] == ' ' || raw[p] == '\t')) p++;
+						if (p >= rlen) break;
+						size_t q = p + 1;
+						while (q < rlen && raw[q] != ' ' && raw[q] != '\t') q++;
+						if (labelPosition >= num_labels)
+							throw 1;
+						const FastCol &fc = cols[labelPosition];
+						const char *tok = raw + p;
+						const size_t tlen = q - p;
+						const char c0 = tok[0];
+						bool handled = false;
+						if (fc.kind == FC_DOUBLE)
+						{
+							if ((c0 >= '0' && c0 <= '9') || c0 == '-' || c0 == '.')
+							{
+								double v;
+								auto res = std::from_chars(tok, tok + tlen, v);
+								if (res.ec == std::errc() && res.ptr == tok + tlen &&
+								    std::isfinite(v) && (v == 0. || std::fabs(v) > 1e-300))
+								{
+									obj->doubles[fc.offset] = v;
+									handled = true;
+								}
+							}
+						}
+						else if (fc.kind == FC_INT)
+						{
+							if ((c0 >= '0' && c0 <= '9') || c0 == '-')
+							{
+								long v;
+								auto res = std::from_chars(tok, tok + tlen, v);
+								if (res.ec == std::errc() && res.ptr == tok + tlen)
+								{
+									obj->ints[fc.offset] = v;
+									handled = true;
+								}
+							}
+						}
+						else if (fc.kind == FC_BOOL)
+						{
+							if (tlen == 1 && (c0 == '0' || c0 == '1'))
+							{
+								obj->bools[fc.offset] = (c0 == '1');
+								handled = true;
+							}
+						}
+						else if (fc.kind == FC_STRING)
+						{
+							obj->strings[fc.offset].assign(tok, tlen);
+							handled = true;
+						}
+						else if (fc.kind == FC_UNKNOWN)
+						{
+							obj->unknowns[fc.offset].assign(tok, tlen);
+							handled = true;
+						}
+						if (!handled)
+						{
+							value.assign(tok, tlen);
+							if (fc.label == EMDL_UNKNOWN_LABEL)
+							{
+								if (fc.offset < 0) throw 1;
+								obj->unknowns[fc.offset] = value;
+							}
+							else
+							{
+								setValueFromString(fc.label, value, base + r);
+							}
+						}
+						labelPosition++;
+						p = q;
+					}
+				}
+				else
+				{
+					simplifyInto(buf.data() + line_start[r], line_end[r] - line_start[r], line);
+					int pos = 0;
+					while (nextTokenInSTAR(line, pos, value))
+					{
+						if (labelPosition >= num_labels)
+							throw 1;
+						if (activeLabels[labelPosition] == EMDL_UNKNOWN_LABEL)
+						{
+							const long offset = unknownLabelPosition2Offset[labelPosition];
+							if (offset < 0)
+								throw 1;
+							obj->unknowns[offset] = value;
+						}
+						else
+							setValueFromString(activeLabels[labelPosition], value, base + r);
+						labelPosition++;
+					}
 				}
 				if (labelPosition < num_labels && num_labels > 2)
 					throw 1;
@@ -1679,46 +1831,198 @@ void MetaDataTable::write(std::ostream& out) const
 		// Write actual data block. Large blocks are written in one go (SHWS 31jul2024: writing big
 		// STAR files on a network file system one value at a time was very slow). The rows are
 		// formatted into text by several threads, a batch of blocks at a time, and written in order.
+		enum WColKind : unsigned char { WC_DOUBLE, WC_INT, WC_BOOL, WC_STRING, WC_UNKNOWN, WC_OTHER, WC_SKIP, WC_COMMENT };
+		struct WCol {
+			WColKind kind;
+			EMDLabel label;
+			long offset;
+		};
+		std::vector<WCol> wcols(activeLabels.size());
+		for (size_t i = 0; i < activeLabels.size(); i++)
+		{
+			EMDLabel l = activeLabels[i];
+			WCol wc;
+			wc.label = l;
+			wc.offset = -1;
+			if (l == EMDL_UNKNOWN_LABEL)
+			{
+				wc.kind = WC_UNKNOWN;
+				wc.offset = unknownLabelPosition2Offset[i];
+			}
+			else if (l == EMDL_SORTED_IDX)
+			{
+				wc.kind = WC_SKIP;
+			}
+			else if (l == EMDL_COMMENT)
+			{
+				wc.kind = WC_COMMENT;
+				wc.offset = (l >= 0 && l < EMDL_LAST_LABEL) ? label2offset[l] : -1;
+			}
+			else if (l >= 0 && l < EMDL_LAST_LABEL && label2offset[l] >= 0)
+			{
+				wc.offset = label2offset[l];
+				if (EMDL::isDouble(l))      wc.kind = WC_DOUBLE;
+				else if (EMDL::isInt(l))    wc.kind = WC_INT;
+				else if (EMDL::isBool(l))   wc.kind = WC_BOOL;
+				else if (EMDL::isString(l)) wc.kind = WC_STRING;
+				else                        wc.kind = WC_OTHER;
+			}
+			else
+			{
+				wc.kind = WC_OTHER;
+			}
+			wcols[i] = wc;
+		}
+
 		auto formatRows = [&](long int r0, long int r1, std::string &dst)
 		{
 			dst.clear();
-			std::string val, entryComment;
-			auto put = [&dst](const std::string &v)
+			dst.reserve((size_t)(r1 - r0) * (wcols.size() * 14 + 32));
+			std::string val;
+			const char spaces[] = "            ";
+			auto put = [&dst, &spaces](const std::string &v)
 			{
-				if (v.size() < 10) dst.append(10 - v.size(), ' ');
+				if (v.size() < 10) dst.append(spaces, 10 - v.size());
 				dst += v;
 				dst += ' ';
 			};
 			for (long int idx = r0; idx < r1; idx++)
 			{
-				entryComment.clear();
-				for (long i = 0; i < activeLabels.size(); i++)
+				const MetaDataContainer *obj = objects[idx];
+				const std::string *comment_ptr = nullptr;
+				for (size_t i = 0; i < wcols.size(); i++)
 				{
-					EMDLabel l = activeLabels[i];
-
-					if (l == EMDL_UNKNOWN_LABEL)
+					const WCol &wc = wcols[i];
+					switch (wc.kind)
 					{
-						val = objects[idx]->unknowns[unknownLabelPosition2Offset[i]];
-						escapeStringForSTAR(val);
-						put(val);
-					}
-					else if (l != EMDL_COMMENT && l != EMDL_SORTED_IDX)
-					{
-						val.clear();
-						getValueToString(l, val, idx, true); // escape=true
-						put(val);
-					}
-					if (l == EMDL_COMMENT)
-					{
-						getValue(EMDL_COMMENT, entryComment, idx);
+						case WC_SKIP:
+							break;
+						case WC_COMMENT:
+						{
+							if (wc.offset >= 0)
+							{
+								const std::string &cs = obj->strings[wc.offset];
+								if (!cs.empty() && cs != "\"\"")
+									comment_ptr = &cs;
+								else
+									comment_ptr = nullptr;
+							}
+							break;
+						}
+						case WC_DOUBLE:
+						{
+							const double v = obj->doubles[wc.offset];
+							if (exact_doubles)
+							{
+								char exact[32];
+								int n = snprintf(exact, sizeof(exact), "%12.17g", v);
+								int len = (n < 0) ? (int)strlen(exact) : std::min(n, (int)sizeof(exact) - 1);
+								if (len < 10) dst.append(spaces, 10 - len);
+								dst.append(exact, len);
+								dst.push_back(' ');
+							}
+							else
+							{
+								char buffer[14];
+								const char *fmt = ((ABS(v) > 0. && ABS(v) < 0.001) || ABS(v) > 100000.)
+									? (v < 0. ? "%12.5e" : "%12.6e")
+									: (v < 0. ? "%12.5f" : "%12.6f");
+								int n = snprintf(buffer, 13, fmt, v);
+								int len = (n < 0) ? (int)strlen(buffer) : std::min(n, 12);
+								if (len < 10) dst.append(spaces, 10 - len);
+								dst.append(buffer, len);
+								dst.push_back(' ');
+							}
+							break;
+						}
+						case WC_INT:
+						{
+							const long v = obj->ints[wc.offset];
+							if (v >= -99999999999L && v <= 999999999999L)
+							{
+								char buf[13];
+								unsigned long u = (v < 0) ? (0UL - (unsigned long)v) : (unsigned long)v;
+								int pos = 12;
+								do {
+									buf[--pos] = char('0' + (u % 10));
+									u /= 10;
+								} while (u);
+								if (v < 0) buf[--pos] = '-';
+								while (pos > 0) buf[--pos] = ' ';
+								buf[12] = ' ';
+								dst.append(buf, 13);
+							}
+							else
+							{
+								char buffer[14];
+								int n = snprintf(buffer, 13, "%12ld", v);
+								int len = (n < 0) ? (int)strlen(buffer) : std::min(n, 12);
+								if (len < 10) dst.append(spaces, 10 - len);
+								dst.append(buffer, len);
+								dst.push_back(' ');
+							}
+							break;
+						}
+						case WC_BOOL:
+							dst.append(obj->bools[wc.offset] ? "           1 " : "           0 ", 13);
+							break;
+						case WC_STRING:
+						{
+							const std::string &s = obj->strings[wc.offset];
+							if (s.empty() || s == "\"\"")
+							{
+								dst.append("        \"\" ", 11);
+							}
+							else if (s[0] != '"' && s[0] != '\'' && s.find_first_of(" \t") == std::string::npos)
+							{
+								if (s.size() < 10) dst.append(spaces, 10 - s.size());
+								dst.append(s);
+								dst.push_back(' ');
+							}
+							else
+							{
+								val = s;
+								escapeStringForSTAR(val);
+								put(val);
+							}
+							break;
+						}
+						case WC_UNKNOWN:
+						{
+							const std::string &s = obj->unknowns[wc.offset];
+							if (s.empty())
+							{
+								dst.append("        \"\" ", 11);
+							}
+							else if (s[0] != '"' && s[0] != '\'' && s.find_first_of(" \t") == std::string::npos)
+							{
+								if (s.size() < 10) dst.append(spaces, 10 - s.size());
+								dst.append(s);
+								dst.push_back(' ');
+							}
+							else
+							{
+								val = s;
+								escapeStringForSTAR(val);
+								put(val);
+							}
+							break;
+						}
+						case WC_OTHER:
+						{
+							val.clear();
+							getValueToString(wc.label, val, idx, true);
+							put(val);
+							break;
+						}
 					}
 				}
-				if (!entryComment.empty())
+				if (comment_ptr)
 				{
-					dst += "# ";
-					dst += entryComment;
+					dst.append("# ", 2);
+					dst.append(*comment_ptr);
 				}
-				dst += '\n';
+				dst.push_back('\n');
 			}
 		};
 

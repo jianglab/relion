@@ -367,6 +367,11 @@ public:
 	std::vector<MultidimArray<RFLOAT> > auto_masks;
 	// Each class's own reference mask from the --ref STAR file (empty: none)
 	std::vector<MultidimArray<RFLOAT> > class_masks;
+	// Cached static user-provided solvent mask (fn_mask) validated across iterations
+	FileName cached_solvent_mask_fn_;
+	time_t cached_solvent_mask_mtime_ = 0;
+	off_t cached_solvent_mask_size_ = -1;
+	MultidimArray<RFLOAT> cached_solvent_mask_;
 
 	// Filename for a user-provided second solvent mask
 	// This solvent mask will have its own average density and may be useful for example to fill the interior of an icosahedral virus
@@ -915,6 +920,8 @@ public:
 	// Array with pointers to the resolution of each point in a Fourier-space FFTW-like array (one for each optics_group)
 	std::vector<MultidimArray<int> > Mresol_fine, Mresol_coarse;
 	MultidimArray<int> Npix_per_shell;
+	// Cached (remap_image_sizes, per-image logsigma2) per optics_group for storeWeightedSums
+	std::vector<std::pair<RFLOAT, RFLOAT> > exp_logsigma2_cache_;
 
 	// Verbosity flag
 	int verb;

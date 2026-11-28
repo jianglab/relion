@@ -82,6 +82,7 @@ public:
 		std::thread::id readyThread;
 		cudaStream_t allocStream;   // RELION_GPU_ALLOC_CACHE: the stream the block was asked for on
 		bool allocStreamValid;
+		Alloc *freePrev, *freeNext;
 
 
 #ifdef CUSTOM_ALLOCATOR_MEMGUARD
@@ -102,13 +103,17 @@ public:
 			readyMarked(false),
 			readyStream(0),
 			allocStream(0),
-			allocStreamValid(false)
+			allocStreamValid(false),
+			freePrev(NULL),
+			freeNext(NULL)
 		{}
 
 		~Alloc()
 		{
 			prev = NULL;
 			next = NULL;
+			freePrev = NULL;
+			freeNext = NULL;
 			ptr = NULL;
 
 			if (readyEvent != 0)
@@ -161,6 +166,7 @@ public:
 private:
 
 	Alloc *first;
+	Alloc *freeHead;
 	size_t totalSize;
 	size_t alignmentSize;
 
@@ -304,13 +310,35 @@ private:
 		DEBUG_HANDLE_ERROR(cudaDeviceSynchronize());
 	}
 
+	// Caller holds `mutex`; `cache == true`
+	void _freeListInsert(Alloc *a)
+	{
+		a->freePrev = NULL;
+		a->freeNext = freeHead;
+		if (freeHead != NULL)
+			freeHead->freePrev = a;
+		freeHead = a;
+	}
+
+	void _freeListRemove(Alloc *a)
+	{
+		if (a->freePrev != NULL)
+			a->freePrev->freeNext = a->freeNext;
+		else if (freeHead == a)
+			freeHead = a->freeNext;
+		if (a->freeNext != NULL)
+			a->freeNext->freePrev = a->freePrev;
+		a->freePrev = NULL;
+		a->freeNext = NULL;
+	}
+
 	//Look for the first suited space
 	Alloc *_getFirstSuitedFree(size_t size)
 	{
-		Alloc *a = first;
+		Alloc *a = cache ? freeHead : first;
 		//If not the last and too small or not free go to next allocation region
 		while (a != NULL && ( a->size < size || ! a->free ) )
-			a = a->next;
+			a = cache ? a->freeNext : a->next;
 
 		return a;
 	}
@@ -541,12 +569,15 @@ private:
 			//Previous neighbor is free, concatenate
 			if ( a->prev != NULL && a->prev->free && a->prev->chunk == a->chunk)
 			{
+				Alloc *prevBlk = a->prev;
+				_freeListRemove(prevBlk);
+
 				//Resize and set pointer
-				a->size += a->prev->size;
-				a->ptr = a->prev->ptr;
+				a->size += prevBlk->size;
+				a->ptr = prevBlk->ptr;
 
 				//Fetch secondary neighbor
-				Alloc *ppL = a->prev->prev;
+				Alloc *ppL = prevBlk->prev;
 
 				//Remove primary neighbor
 				if (ppL == NULL) //If the previous is first in chain
@@ -554,7 +585,7 @@ private:
 				else
 					ppL->next = a;
 
-				delete a->prev;
+				delete prevBlk;
 
 				//Attach secondary neighbor
 				a->prev = ppL;
@@ -563,20 +594,25 @@ private:
 			//Next neighbor is free, concatenate
 			if ( a->next != NULL && a->next->free && a->next->chunk == a->chunk)
 			{
+				Alloc *nextBlk = a->next;
+				_freeListRemove(nextBlk);
+
 				//Resize and set pointer
-				a->size += a->next->size;
+				a->size += nextBlk->size;
 
 				//Fetch secondary neighbor
-				Alloc *nnL = a->next->next;
+				Alloc *nnL = nextBlk->next;
 
 				//Remove primary neighbor
 				if (nnL != NULL)
 					nnL->prev = a;
-				delete a->next;
+				delete nextBlk;
 
 				//Attach secondary neighbor
 				a->next = nnL;
 			}
+
+			_freeListInsert(a);
 		}
 		else
 		{
@@ -597,6 +633,7 @@ private:
 
 	void _setup()
 	{
+		freeHead = NULL;
 		first = new Alloc();
 		first->prev = NULL;
 		first->next = NULL;
@@ -630,6 +667,7 @@ private:
 			chunks.push_back(Chunk{first->ptr, totalSize, first->chunk});
 			heldBytes = totalSize;
 			peakHeld = std::max(peakHeld, heldBytes);
+			_freeListInsert(first);
 		}
 		else
 			cache = false;
@@ -638,6 +676,7 @@ private:
 	// An empty list: one free block of no size, as a pool without memory has
 	void _makeEmptyList()
 	{
+		freeHead = NULL;
 		first = new Alloc();
 		first->prev = NULL;
 		first->next = NULL;
@@ -680,6 +719,7 @@ private:
 			t->next = a;
 			a->prev = t;
 		}
+		_freeListInsert(a);
 		return true;
 	}
 
@@ -702,6 +742,7 @@ private:
 
 	void _clear()
 	{
+		freeHead = NULL;
 		if (chunks.empty() && first->ptr != NULL)
 			DEBUG_HANDLE_ERROR(cudaFree( first->ptr ));
 		for (const Chunk &c : chunks)
@@ -747,11 +788,11 @@ private:
 	std::atomic<bool> cacheTight;
 	static std::atomic<unsigned long> &stampSource() { static std::atomic<unsigned long> s(1); return s; }
 
-	// RELION_GPU_ALLOC_CACHE_MB: most MB cached per thread (expert override; default 8)
+	// RELION_GPU_ALLOC_CACHE_MB: most MB cached per thread (expert override; default 16)
 	static int cacheCapFromEnv()
 	{
 		const char *e = getenv("RELION_GPU_ALLOC_CACHE_MB");
-		return (e && *e && atoi(e) > 0) ? atoi(e) : 8;
+		return (e && *e && atoi(e) > 0) ? atoi(e) : 16;
 	}
 	static std::atomic<int> &cacheModeVar()
 	{
@@ -781,7 +822,7 @@ private:
 	size_t cacheCapBytes()
 	{
 		size_t c = (size_t) cacheCapMB.load() * 1000 * 1000;
-		return std::min(c, std::max((size_t) 4000000, heldBytes / 64));
+		return std::min(c, std::max((size_t) 8000000, heldBytes / 16));
 	}
 	// Size classes: aligned, and above 4 kB in steps of 1/32 of the power of two below, so that buffers whose
 	// sizes vary a little from particle to particle find each other
@@ -837,12 +878,22 @@ public:
 				return false;
 			tc->blocks[std::make_pair(a->allocStream, a->size)].push_back(a);
 			tc->bytes += a->size;
-			// over the cap: the blocks of the other sizes first, oldest key first
-			for (auto it = tc->blocks.begin(); tc->bytes > cap && it != tc->blocks.end(); )
+			// over the cap: evict the largest other size classes first so one big buffer does not flush all hot small blocks
+			while (tc->bytes > cap)
 			{
-				if (it->first.second == a->size && it->first.first == a->allocStream) { ++it; continue; }
-				for (Alloc *b : it->second) { tc->bytes -= b->size; evict.push_back(b); }
-				it = tc->blocks.erase(it);
+				bool erased = false;
+				for (auto it = tc->blocks.end(); it != tc->blocks.begin(); )
+				{
+					--it;
+					if (it->first.second == a->size && it->first.first == a->allocStream)
+						continue;
+					for (Alloc *b : it->second) { tc->bytes -= b->size; evict.push_back(b); }
+					tc->blocks.erase(it);
+					erased = true;
+					break;
+				}
+				if (!erased)
+					break;
 			}
 			// still over: the oldest blocks of the key just freed (the cap holds for one size class too)
 			auto own = tc->blocks.find(std::make_pair(a->allocStream, a->size));
@@ -875,7 +926,7 @@ private:
 public:
 
 	CudaCustomAllocator(size_t size, size_t alignmentSize):
-		totalSize(size), alignmentSize(alignmentSize), first(0), cache(true),
+		totalSize(size), alignmentSize(alignmentSize), first(0), freeHead(NULL), cache(true),
 		nextChunkId(0), lean(false), capBytes(size), heldBytes(0), usedBytes(0), peakUsed(0), peakHeld(0), chunksAdded(0),
 		cacheStamp(stampSource().fetch_add(1) + 1), cacheHits(0), cacheMisses(0), cacheCapMB(cacheCapFromEnv()), cacheTight(false)
 	{
@@ -1018,6 +1069,7 @@ public:
 
 			if (curAlloc->size == size)
 			{
+				_freeListRemove(curAlloc);
 				curAlloc->free = false;
 				newAlloc = curAlloc;
 			}
@@ -1280,6 +1332,34 @@ public:
 	{
 		Lock ml(&mutex);
 		_printState();
+	}
+
+	bool checkFreeListInvariant()
+	{
+		Lock ml(&mutex);
+		if (!cache)
+			return freeHead == NULL;
+		size_t nodes = 0, freeInChain = 0;
+		for (Alloc *a = first; a != NULL; a = a->next)
+		{
+			nodes++;
+			if (a->free && a->size > 0)
+				freeInChain++;
+			if (a->next && a->next->prev != a)
+				return false;
+			if (a->prev && a->prev->next != a)
+				return false;
+		}
+		size_t freeInList = 0;
+		Alloc *prev = NULL;
+		for (Alloc *a = freeHead; a != NULL; a = a->freeNext)
+		{
+			if (!a->free || a->size == 0 || a->freePrev != prev || freeInList > nodes)
+				return false;
+			prev = a;
+			freeInList++;
+		}
+		return freeInList == freeInChain;
 	}
 };
 //

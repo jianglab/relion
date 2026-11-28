@@ -1,7 +1,8 @@
 #include "Gaussian_process.h"
 
 #include <src/Eigen/Dense>
-#include <src/Eigen/SVD>
+#include <src/Eigen/Eigenvalues>
+#include <cmath>
 
 using namespace Eigen;
 
@@ -25,11 +26,11 @@ Matrix2D<double> GaussianProcess::computeCovariance(
 	return A;
 }
 
-GaussianProcess::Basis GaussianProcess::getBasis(
-		const Matrix2D<double> &C, int maxDims, double eps)
+static GaussianProcess::Basis computeSymmetricBasis(
+		const Matrix2D<double> &C, int maxDims, double eps, bool scaleSqrt)
 {
 	const int N = C.Xdim();
-	
+
 	int dc = (maxDims < 0 || maxDims > N)? N : maxDims;
 
 	MatrixXd A0(N,N);
@@ -40,13 +41,12 @@ GaussianProcess::Basis GaussianProcess::getBasis(
 		A0(r,c) = C(r,c);
 	}
 
-	BDCSVD<MatrixXd> svd(A0, ComputeFullV);
+	SelfAdjointEigenSolver<MatrixXd> es(A0);
 
-	// remove eigendeformations with too small eigenvalues
-
+	// Eigenvalues from SelfAdjointEigenSolver are in ascending order
 	for (int d = 0; d < dc; d++)
 	{
-		if (svd.singularValues()[d] < eps)
+		if (es.eigenvalues()[N - 1 - d] < eps)
 		{
 			dc = d;
 			break;
@@ -55,24 +55,48 @@ GaussianProcess::Basis GaussianProcess::getBasis(
 
 	GaussianProcess::Basis out;
 	out.eigenvalues.resize(dc);
-	out.eigenvectors.resize(N*dc);
+	out.eigenvectors.resize((size_t)N * dc);
 
 	for (int d = 0; d < dc; d++)
 	{
-		const double l = sqrt(svd.singularValues()[d]);
+		const int col = N - 1 - d;
+		const double ev = es.eigenvalues()[col];
+
+		// Canonicalize eigenvector sign for deterministic reproducibility
+		int p_max = 0;
+		double v_max = 0.0;
+		for (int p = 0; p < N; p++)
+		{
+			const double av = std::abs(es.eigenvectors()(p, col));
+			if (av > v_max)
+			{
+				v_max = av;
+				p_max = p;
+			}
+		}
+		const double sign = (es.eigenvectors()(p_max, col) < 0.0) ? -1.0 : 1.0;
+		const double scale = sign * (scaleSqrt ? sqrt(ev) : 1.0);
 
 		for (int p = 0; p < N; p++)
 		{
-			out.eigenvectors[dc*p + d] = l * svd.matrixV()(p,d);
+			out.eigenvectors[(size_t)dc * p + d] = scale * es.eigenvectors()(p, col);
 		}
+		out.eigenvalues[d] = ev;
 	}
 
-	for (int d = 0; d < dc; d++)
-	{
-		out.eigenvalues[d] = svd.singularValues()[d];
-	}
-	
 	return out;
+}
+
+GaussianProcess::Basis GaussianProcess::getBasis(
+		const Matrix2D<double> &C, int maxDims, double eps)
+{
+	return computeSymmetricBasis(C, maxDims, eps, true);
+}
+
+GaussianProcess::Basis GaussianProcess::getUnitBasis(
+		const Matrix2D<double> &K_unit, int maxDims, double eps)
+{
+	return computeSymmetricBasis(K_unit, maxDims, eps, false);
 }
 
 SquareExponentialKernel::SquareExponentialKernel(double sig_vel, double sig_div)

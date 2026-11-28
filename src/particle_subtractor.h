@@ -59,6 +59,9 @@ public:
 	// Write in half-precision 16 bit floating point numbers (MRC mode 12)
 	bool write_float16;
 
+	// Number of OpenMP/FFTW/FINUFFT threads per process (-1 = automatic)
+	int nr_threads = -1;
+
 	// Running sums of power of signal and noise for SSNR calculation (keep public for MPI access)
 	MultidimArray<RFLOAT> sum_count, sum_S2, sum_N2;
 

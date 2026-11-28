@@ -30,6 +30,13 @@
 
 namespace CudaKernels
 {
+inline void freeSyncedScratch(CudaCustomAllocator *allocator, CudaCustomAllocator::Alloc *alloc, cudaStream_t stream)
+{
+	alloc->markReadyEvent(stream);
+	if (!allocator->tryCache(alloc))
+		allocator->free(alloc);
+}
+
 template <typename T>
 static std::pair<int, T> getArgMaxOnDevice(AccPtr<T> &ptr)
 {
@@ -50,13 +57,13 @@ if (ptr.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size, ptr.getStream());
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMax( alloc->getPtr(), temp_storage_size, ~ptr, ~max_pair, ptr.getSize(), ptr.getStream()));
 
 	max_pair.cpToHostWait();
 
-	ptr.getAllocator()->free(alloc);
+	freeSyncedScratch(ptr.getAllocator(), alloc, ptr.getStream());
 
 	std::pair<int, T> pair;
 	pair.first = max_pair[0].key;
@@ -85,13 +92,13 @@ if (ptr.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size, ptr.getStream());
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMin( alloc->getPtr(), temp_storage_size, ~ptr, ~min_pair, ptr.getSize(), ptr.getStream()));
 
 	min_pair.cpToHostWait();
 
-	ptr.getAllocator()->free(alloc);
+	freeSyncedScratch(ptr.getAllocator(), alloc, ptr.getStream());
 
 	std::pair<int, T> pair;
 	pair.first = min_pair[0].key;
@@ -120,13 +127,13 @@ if (ptr.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size, ptr.getStream());
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Max( alloc->getPtr(), temp_storage_size, ~ptr, ~max_val, ptr.getSize(), ptr.getStream()));
 
 	max_val.cpToHostWait();
 
-	ptr.getAllocator()->free(alloc);
+	freeSyncedScratch(ptr.getAllocator(), alloc, ptr.getStream());
 
 	return max_val[0];
 }
@@ -151,13 +158,13 @@ if (ptr.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size, ptr.getStream());
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Min( alloc->getPtr(), temp_storage_size, ~ptr, ~min_val, ptr.getSize(), ptr.getStream()));
 
 	min_val.cpToHostWait();
 
-	ptr.getAllocator()->free(alloc);
+	freeSyncedScratch(ptr.getAllocator(), alloc, ptr.getStream());
 
 	return min_val[0];
 }
@@ -171,7 +178,7 @@ static void minToDevice(AccPtr<T> &ptr, T *d_out)
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Min( NULL, temp_storage_size, ~ptr, d_out, ptr.getSize()));
 	if(temp_storage_size==0)
 		temp_storage_size=1;
-	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size, ptr.getStream());
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Min( alloc->getPtr(), temp_storage_size, ~ptr, d_out, ptr.getSize(), ptr.getStream()));
 	// the scratch goes back to the allocator only when the reduction has finished (other threads share it)
 	alloc->markReadyEvent(ptr.getStream());
@@ -198,13 +205,13 @@ if (ptr.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = ptr.getAllocator()->alloc(temp_storage_size, ptr.getStream());
 
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::Sum( alloc->getPtr(), temp_storage_size, ~ptr, ~val, ptr.getSize(), ptr.getStream()));
 
 	val.cpToHostWait();
 
-	ptr.getAllocator()->free(alloc);
+	freeSyncedScratch(ptr.getAllocator(), alloc, ptr.getStream());
 
 	return val[0];
 }
@@ -229,7 +236,7 @@ if (in.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = in.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = in.getAllocator()->alloc(temp_storage_size, stream);
 
 	DEBUG_HANDLE_ERROR(cub::DeviceRadixSort::SortKeys( alloc->getPtr(), temp_storage_size, ~in, ~out, in.getSize(), 0, sizeof(T) * 8, stream));
 
@@ -257,7 +264,7 @@ if (in.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = in.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = in.getAllocator()->alloc(temp_storage_size, stream);
 
 	DEBUG_HANDLE_ERROR(cub::DeviceRadixSort::SortKeysDescending( alloc->getPtr(), temp_storage_size, ~in, ~out, in.getSize(), 0, sizeof(T) * 8, stream));
 
@@ -331,14 +338,14 @@ if (in.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = in.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = in.getAllocator()->alloc(temp_storage_size, stream);
 
 	DEBUG_HANDLE_ERROR(cub::DeviceSelect::If(alloc->getPtr(), temp_storage_size, ~in, ~out, ~num_selected_out, in.getSize(), select_op, stream));
 
 	num_selected_out.cpToHost();
 	DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
 
-	in.getAllocator()->free(alloc);
+	freeSyncedScratch(in.getAllocator(), alloc, stream);
 	return num_selected_out[0];
 }
 
@@ -362,7 +369,7 @@ if (in.getAllocator() == NULL)
 	if(temp_storage_size==0)
 		temp_storage_size=1;
 
-	CudaCustomAllocator::Alloc* alloc = in.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc* alloc = in.getAllocator()->alloc(temp_storage_size, stream);
 
 	DEBUG_HANDLE_ERROR(cub::DeviceScan::InclusiveSum( alloc->getPtr(), temp_storage_size, ~in, ~out, in.getSize(), stream));
 
@@ -484,7 +491,7 @@ static void significanceOnDevice(AccPtr<T> &sorted, AccPtr<T> &cumulative, AccPt
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMax(NULL, temp_storage_size, ~weights, &d_r->max, weights.getSize()));
 	if (temp_storage_size == 0)
 		temp_storage_size = 1;
-	CudaCustomAllocator::Alloc *alloc = weights.getAllocator()->alloc(temp_storage_size);
+	CudaCustomAllocator::Alloc *alloc = weights.getAllocator()->alloc(temp_storage_size, stream);
 	DEBUG_HANDLE_ERROR(cub::DeviceReduce::ArgMax(alloc->getPtr(), temp_storage_size, ~weights, &d_r->max, weights.getSize(), stream));
 	alloc->markReadyEvent(stream);
 	alloc->doFreeWhenReady();
@@ -1214,7 +1221,7 @@ static void fusedWeightPass(AccPtr<T> &weights, double adaptive_fraction, long m
 	{
 		// no sort: the maximum, the exponentiation, and the radix selection of the threshold weight
 		const size_t part_bytes = up(128 * sizeof(MaxIdx<T>));
-		CudaCustomAllocator::Alloc *ralloc = weights.getAllocator()->alloc(part_bytes + radixSelectScratchBytes());
+		CudaCustomAllocator::Alloc *ralloc = weights.getAllocator()->alloc(part_bytes + radixSelectScratchBytes(), stream);
 		char *rbase = (char *) ralloc->getPtr();
 		MaxIdx<T> *rpartial = (MaxIdx<T> *) rbase;
 		SignificanceResult<T> *rr = (SignificanceResult<T> *) d_res;
@@ -1238,7 +1245,7 @@ static void fusedWeightPass(AccPtr<T> &weights, double adaptive_fraction, long m
 	const size_t tmp_bytes = std::max(sort_tmp, scan_tmp) + 1;
 	const size_t total = fusedWeightScratchBytes<T>(n);
 
-	CudaCustomAllocator::Alloc *alloc = weights.getAllocator()->alloc(total);
+	CudaCustomAllocator::Alloc *alloc = weights.getAllocator()->alloc(total, stream);
 	char *base = (char *) alloc->getPtr();
 	T *sorted = (T *) base;
 	T *cumulative = (T *) (base + up(n * sizeof(T)));
@@ -1304,7 +1311,7 @@ static bool skipAlignWeightPass(AccPtr<T> &weights, double adaptive_fraction, ch
 		return false;
 	const size_t al = 256;
 	auto up = [&](size_t b) { return (b + al - 1) / al * al; };
-	CudaCustomAllocator::Alloc *alloc = weights.getAllocator()->alloc(up(n * sizeof(T)) * 2 + up(128 * sizeof(MaxIdx<T>)));
+	CudaCustomAllocator::Alloc *alloc = weights.getAllocator()->alloc(up(n * sizeof(T)) * 2 + up(128 * sizeof(MaxIdx<T>)), stream);
 	char *base = (char *) alloc->getPtr();
 	T *sorted = (T *) base;
 	T *cumulative = (T *) (base + up(n * sizeof(T)));

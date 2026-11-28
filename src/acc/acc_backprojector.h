@@ -93,6 +93,7 @@ public:
 			deviceStream_t optStream);
 
 	void getMdlData(XFLOAT *real, XFLOAT *imag, XFLOAT * weights);
+	void addMdlDataToHost(Complex *data, RFLOAT *weights, int nr_threads = 1);
 	void getMdlDataPtrs(XFLOAT *& real, XFLOAT *& imag, XFLOAT *& weights);
 
 	void setStream(deviceStream_t s) { stream = s; }

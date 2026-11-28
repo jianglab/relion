@@ -1582,7 +1582,8 @@ void kernel_weights_exponent_coarse(
 		AccPtr<T> &g_Mweight,
 		T g_min_diff2,
 		unsigned long nr_coarse_orient,
-		unsigned long  nr_coarse_trans)
+		unsigned long  nr_coarse_trans,
+		const T *d_min_diff2 = NULL)
 {
 	long int block_num = ceilf( ((double)nr_coarse_orient*nr_coarse_trans*num_classes) / (double)SUMW_BLOCK_SIZE );
 
@@ -1597,7 +1598,8 @@ void kernel_weights_exponent_coarse(
 			g_min_diff2,
 			nr_coarse_orient,
 			nr_coarse_trans,
-			nr_coarse_orient*nr_coarse_trans*num_classes);
+			nr_coarse_orient*nr_coarse_trans*num_classes,
+			d_min_diff2);
 #elif _HIP_ENABLED
 	hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_kernel_weights_exponent_coarse<T>), dim3(block_num), dim3(SUMW_BLOCK_SIZE), 0, g_Mweight.getStream(),
 			~g_pdf_orientation,

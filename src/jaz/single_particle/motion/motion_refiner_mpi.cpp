@@ -19,6 +19,62 @@
  ***************************************************************************/
 
 #include "motion_refiner_mpi.h"
+#include <algorithm>
+
+namespace
+{
+
+// Partition [0, weights.size()) into contiguous non-overlapping ranges balancing total weight
+void divideWeighted(
+		const std::vector<double>& weights,
+		int nr_ranks, int my_rank,
+		long int& first, long int& last)
+{
+	const long int n = (long int)weights.size();
+	if (n <= 0 || my_rank < 0 || my_rank >= nr_ranks)
+	{
+		first = 1;
+		last = 0;
+		return;
+	}
+	if (nr_ranks == 1)
+	{
+		first = 0;
+		last = n - 1;
+		return;
+	}
+	if (n <= nr_ranks)
+	{
+		if (my_rank < n) { first = my_rank; last = my_rank; }
+		else { first = 1; last = 0; }
+		return;
+	}
+
+	std::vector<double> pref(n + 1, 0.0);
+	for (long int i = 0; i < n; i++)
+		pref[i + 1] = pref[i] + std::max(1.0, weights[i]);
+
+	const double total = pref[n];
+	std::vector<long int> cut(nr_ranks + 1, 0);
+	cut[nr_ranks] = n;
+
+	for (int r = 1; r < nr_ranks; r++)
+	{
+		const double target = total * ((double)r / (double)nr_ranks);
+		const long int lo = cut[r - 1] + 1;
+		const long int hi = n - (nr_ranks - r);
+		auto it = std::lower_bound(pref.begin() + lo, pref.begin() + hi + 1, target);
+		long int idx = (long int)(it - pref.begin());
+		if (idx > lo && std::abs(pref[idx - 1] - target) < std::abs(pref[idx] - target))
+			idx--;
+		cut[r] = std::max(lo, std::min(hi, idx));
+	}
+
+	first = cut[my_rank];
+	last = cut[my_rank + 1] - 1;
+}
+
+} // namespace
 
 void MotionRefinerMpi::read(int argc, char **argv)
 {
@@ -69,11 +125,16 @@ void MotionRefinerMpi::runWithFccUpdate()
 	
 	if (estimateMotion)
 	{
-		// Each node does part of the work
+		// Each node does part of the work (balanced by particle^2 workload)
 		long int my_first_motion_micrograph_FCC, my_last_motion_micrograph_FCC;
-		
-		divide_equally(
-			lastMotionMgForFCC+1, node->size, node->rank,
+		const long int n_fcc = lastMotionMgForFCC + 1;
+		std::vector<double> weights_fcc(std::max<long int>(0, n_fcc));
+		for (long int i = 0; i < n_fcc; i++)
+		{
+			const double pc = (double)motionMdts[i].numberOfObjects();
+			weights_fcc[i] = std::max(1.0, pc * pc);
+		}
+		divideWeighted(weights_fcc, node->size, node->rank,
 			my_first_motion_micrograph_FCC, my_last_motion_micrograph_FCC);
 
 		if (debug)
@@ -123,16 +184,20 @@ void MotionRefinerMpi::runWithRecombination()
 
 
 		long int my_first_recomb_micrograph_FCC, my_last_recomb_micrograph_FCC;
-
-		divide_equally(
-			lastRecombMgForFCC+1, node->size, node->rank,
+		const long int n_rec = lastRecombMgForFCC + 1;
+		std::vector<double> weights_rec(std::max<long int>(0, n_rec));
+		for (long int i = 0; i < n_rec; i++)
+			weights_rec[i] = std::max(1.0, (double)recombMdts[i].numberOfObjects());
+		divideWeighted(weights_rec, node->size, node->rank,
 			my_first_recomb_micrograph_FCC, my_last_recomb_micrograph_FCC);
 
 
 		long int my_first_total_micrograph_no_FCC, my_last_total_micrograph_no_FCC;
-
-		divide_equally(
-			total_nr_micrographs - firstTotalMgWithoutFCC, node->size, node->rank,
+		const long int n_no_fcc = total_nr_micrographs - firstTotalMgWithoutFCC;
+		std::vector<double> weights_no_fcc(std::max<long int>(0, n_no_fcc));
+		for (long int i = 0; i < n_no_fcc; i++)
+			weights_no_fcc[i] = std::max(1.0, (double)chosenMdts[firstTotalMgWithoutFCC + i].numberOfObjects());
+		divideWeighted(weights_no_fcc, node->size, node->rank,
 			my_first_total_micrograph_no_FCC, my_last_total_micrograph_no_FCC);
 
 		my_first_total_micrograph_no_FCC += firstTotalMgWithoutFCC;
@@ -215,9 +280,14 @@ void MotionRefinerMpi::runWithRecombination()
 	else
 	{
 		long int my_first_motion_micrograph_no_FCC, my_last_motion_micrograph_no_FCC;
-
-		divide_equally(
-			motion_nr_micrographs - firstMotionMgWithoutFCC, node->size, node->rank,
+		const long int n_mot_no_fcc = motion_nr_micrographs - firstMotionMgWithoutFCC;
+		std::vector<double> weights_mot_no_fcc(std::max<long int>(0, n_mot_no_fcc));
+		for (long int i = 0; i < n_mot_no_fcc; i++)
+		{
+			const double pc = (double)motionMdts[firstMotionMgWithoutFCC + i].numberOfObjects();
+			weights_mot_no_fcc[i] = std::max(1.0, pc * pc);
+		}
+		divideWeighted(weights_mot_no_fcc, node->size, node->rank,
 			my_first_motion_micrograph_no_FCC, my_last_motion_micrograph_no_FCC);
 
 		my_first_motion_micrograph_no_FCC += firstMotionMgWithoutFCC;

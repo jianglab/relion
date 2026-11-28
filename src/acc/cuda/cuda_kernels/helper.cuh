@@ -22,8 +22,11 @@ __global__ void cuda_kernel_weights_exponent_coarse(
 		T g_min_diff2,
 		int nr_coarse_orient,
 		int nr_coarse_trans,
-		int max_idx)
+		int max_idx,
+		const T *d_min_diff2 = NULL)
 {
+	if (d_min_diff2 != NULL)
+		g_min_diff2 = *d_min_diff2;
 	int bid = blockIdx.x;
 	int tid = threadIdx.x;
 
@@ -299,9 +302,127 @@ __global__ void cuda_kernel_cosineFilter(	XFLOAT *vol,
 
 __global__ void cuda_kernel_initOrientations(RFLOAT *pdfs, XFLOAT *pdf_orientation, bool *pdf_orientation_zeros, size_t sz);
 
+__global__ void cuda_kernel_initOrientationsSeparable(
+		const RFLOAT *class_factor,
+		const RFLOAT *dir_prior,
+		const RFLOAT *psi_prior,
+		int mode,
+		unsigned long nr_classes,
+		unsigned long nr_dir,
+		unsigned long nr_psi,
+		XFLOAT *pdf_orientation,
+		bool *pdf_orientation_zeros);
+
+struct Wdiff2UsedClasses64
+{
+	int n;
+	int cls[64];
+};
+
+__global__ void cuda_kernel_reduce_wdiff2s(
+		const XFLOAT *d_sum,
+		const XFLOAT *d_AA,
+		const XFLOAT *d_XA,
+		const int *d_Mresol,
+		const unsigned char *d_scale_mask,
+		Wdiff2UsedClasses64 u64,
+		const int *d_used_cls_ext,
+		int nr_used,
+		int sigma_shells,
+		int scale_stride,
+		unsigned long image_size,
+		bool do_scale,
+		double *d_out);
+
+struct PerClassBestJob
+{
+	long int firstPos;
+	long int weightNum;
+};
+
+struct PerClassBestOut
+{
+	long int best_s;
+	XFLOAT best_w;
+	long int last_zero_s;
+	int zero_parity;
+};
+
+__global__ void cuda_kernel_per_class_best(
+		const XFLOAT *d_weights,
+		const PerClassBestJob *jobs,
+		int n_jobs,
+		PerClassBestOut *out);
+
 //----------------------------------------------------------------------------
 namespace CudaKernels
 {
+
+template <typename T>
+__global__ void cuda_kernel_translateNorm2D(
+		const T * __restrict__ g_image_in,
+		T * __restrict__ g_image_out,
+		int image_size,
+		int xdim,
+		int ydim,
+		int dx,
+		int dy,
+		T normcorr,
+		bool do_norm)
+{
+	int pixel = threadIdx.x + blockIdx.x * BLOCK_SIZE;
+	if (pixel < image_size)
+	{
+		int x = pixel % xdim;
+		int y = pixel / xdim;
+		int sx = x - dx;
+		int sy = y - dy;
+		T val = (T) 0;
+		if (sx >= 0 && sx < xdim && sy >= 0 && sy < ydim)
+		{
+			val = g_image_in[sy * xdim + sx];
+			if (do_norm)
+				val *= normcorr;
+		}
+		g_image_out[pixel] = val;
+	}
+}
+
+template <typename T>
+__global__ void cuda_kernel_translateNorm3D(
+		const T * __restrict__ g_image_in,
+		T * __restrict__ g_image_out,
+		int image_size,
+		int xdim,
+		int ydim,
+		int zdim,
+		int dx,
+		int dy,
+		int dz,
+		T normcorr,
+		bool do_norm)
+{
+	int voxel = threadIdx.x + blockIdx.x * BLOCK_SIZE;
+	if (voxel < image_size)
+	{
+		int xydim = xdim * ydim;
+		int z = voxel / xydim;
+		int xy = voxel % xydim;
+		int y = xy / xdim;
+		int x = xy % xdim;
+		int sx = x - dx;
+		int sy = y - dy;
+		int sz = z - dz;
+		T val = (T) 0;
+		if (sx >= 0 && sx < xdim && sy >= 0 && sy < ydim && sz >= 0 && sz < zdim)
+		{
+			val = g_image_in[sz * xydim + sy * xdim + sx];
+			if (do_norm)
+				val *= normcorr;
+		}
+		g_image_out[voxel] = val;
+	}
+}
 
 template <typename T>
 __global__ void cuda_kernel_translate2D(	T * g_image_in,
@@ -441,6 +562,64 @@ __global__ void cuda_kernel_rotateAndCtf( ACCCOMPLEX *d_Faux,
 						  	  	  	  	  XFLOAT psi,
 						  	  			  AccProjectorKernel projector,
 						  	  			  int startPsi = 0);
+
+template <bool DO_CTF>
+__global__ void cuda_kernel_rotateAndConvol(
+		ACCCOMPLEX *d_Faux,
+		const XFLOAT * __restrict__ d_ctf,
+		const ACCCOMPLEX * __restrict__ d_Fmic,
+		XFLOAT psi,
+		AccProjectorKernel projector,
+		int startPsi);
+
+__global__ void cuda_kernel_probRatio_centered(
+		XFLOAT * __restrict__ d_Mccf,
+		XFLOAT * __restrict__ d_Mpsi,
+		const XFLOAT * __restrict__ d_Maux,
+		const XFLOAT * __restrict__ d_Mmean,
+		const XFLOAT * __restrict__ d_Mstddev,
+		int W,
+		XFLOAT normfft,
+		XFLOAT sum_ref_under_circ_mask,
+		XFLOAT sum_ref2_under_circ_mask,
+		XFLOAT expected_Pratio,
+		int NpsiThisBatch,
+		int startPsi,
+		int totalPsis,
+		bool isFirstBatch);
+
+__global__ void cuda_kernel_centerScaleAndNegSq(
+		const XFLOAT * __restrict__ d_reals,
+		XFLOAT * __restrict__ d_Mmean,
+		XFLOAT * __restrict__ d_Mstddev_tmp,
+		int W,
+		XFLOAT normfft);
+
+__global__ void cuda_kernel_finalizeMstddev_centered(
+		const XFLOAT * __restrict__ d_Mstddev_tmp,
+		const XFLOAT * __restrict__ d_aux,
+		XFLOAT * __restrict__ d_Mstddev,
+		XFLOAT * __restrict__ d_Mstddev_inv,
+		int W,
+		XFLOAT normfft);
+
+__global__ void cuda_kernel_extractPrepPatch(
+		const XFLOAT * __restrict__ d_full,
+		XFLOAT * __restrict__ d_patch,
+		int N,
+		int P,
+		int p_first,
+		bool is_uncentered_even);
+
+__global__ void cuda_kernel_combineHelicalBest(
+		const XFLOAT * __restrict__ d_Mccf_best,
+		const XFLOAT * __restrict__ d_Mpsi_best,
+		XFLOAT * __restrict__ d_Mccf_combined,
+		XFLOAT * __restrict__ d_Mpsi_combined,
+		int * __restrict__ d_Mclass_combined,
+		size_t image_size,
+		int iref,
+		bool do_amyloid);
 
 /*
  * Multiplies complex array A (in-place) by B, pixel-by-pixel, after conjugating A

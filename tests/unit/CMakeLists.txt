@@ -87,6 +87,7 @@ set(RELION_UNIT_TEST_SOURCES
     test_vmovie_read_ahead.cpp
     test_motioncorr_nufft.cpp
     test_exact_map3d.cpp
+    test_mem_tiff.cpp
 )
 
 if (CUDA_FOUND)
@@ -125,7 +126,7 @@ add_test(
 )
 
 # Also register per-tag test groups so individual suites can be filtered
-foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch pinned_pool gpu_signif_select pair_list lazy_cache rank_launcher gp_motion_fit)
+foreach(tag ctf s2grid s2hybrid fftw nufft metadata mda matrix2d zernike anisomag aberrations ewald backprojector smode ewald_ctf_weight relion_finufft finufft_projector cryosparc unon s2smode alignmap pipeline select2d consensus filament prefetch ml_optimiser cleanup vparticles rectangular fused cache parhint slurm particle_order fftw_plans bulk_threads helix_symmetry helix_coords gpu_reconstruct gpu_switch pinned_pool gpu_signif_select pair_list lazy_cache rank_launcher gp_motion_fit mem_tiff)
     add_test(
         NAME unit_${tag}
         COMMAND relion_unit_tests [${tag}]

@@ -2112,26 +2112,20 @@ void MlOptimiserMpi::expectation()
 					for (int j = 0; j < b->projectors.size(); j++)
 						b->projectors[j].clear();
 
-					for (int j = 0; j < b->backprojectors.size(); j++)
+					const int nbp = b->backprojectors.size();
+					size_t total_vox = 0;
+					for (int j = 0; j < nbp; j++)
+						total_vox += b->backprojectors[j].mdlXYZ;
+					const int nt_post = (nbp > 1 && total_vox >= 262144) ? std::max(1, std::min(nr_threads, nbp)) : 1;
+					const int nt_inner = (nt_post == 1) ? std::max(1, nr_threads) : 1;
+					#pragma omp parallel for schedule(dynamic, 1) num_threads(nt_post) if(nt_post > 1)
+					for (int j = 0; j < nbp; j++)
 					{
-						unsigned long s = wsum_model.BPref[j].data.nzyxdim;
-						XFLOAT *reals = new XFLOAT[s];
-						XFLOAT *imags = new XFLOAT[s];
-						XFLOAT *weights = new XFLOAT[s];
-
-						b->backprojectors[j].getMdlData(reals, imags, weights);
-
-						for (unsigned long n = 0; n < s; n++)
-						{
-							wsum_model.BPref[j].data.data[n].real += (RFLOAT) reals[n];
-							wsum_model.BPref[j].data.data[n].imag += (RFLOAT) imags[n];
-							wsum_model.BPref[j].weight.data[n] += (RFLOAT) weights[n];
-						}
-
-						delete [] reals;
-						delete [] imags;
-						delete [] weights;
-
+						if (nt_post > 1) b->bindThreadToDevice();
+						b->backprojectors[j].addMdlDataToHost(
+								wsum_model.BPref[j].data.data,
+								wsum_model.BPref[j].weight.data,
+								nt_inner);
 						b->backprojectors[j].clear();
 					}
 
@@ -2509,6 +2503,7 @@ void MlOptimiserMpi::combineAllWeightedSums()
 			wsum_model.unpack(Msum);
 		}
 #else
+		const bool use_allreduce = gpuswitch::on("RELION_MPI_ALLREDUCE");
 		// Loop over possibly multiple instances of Mpack of maximum size
 		int piece = 0;
 		int nr_pieces = 1;
@@ -2516,6 +2511,20 @@ void MlOptimiserMpi::combineAllWeightedSums()
 		{
 			// All nodes except those who will reset nr_pieces piece will pass while loop in next pass
 			nr_pieces = 0;
+
+			if (use_allreduce)
+			{
+				if (!node->isLeader())
+				{
+					wsum_model.pack(Mpack, piece, nr_pieces);
+					node->relion_MPI_Allreduce_inplace(
+							MULTIDIM_ARRAY(Mpack), MULTIDIM_SIZE(Mpack), MY_MPI_DOUBLE, MPI_SUM,
+							do_split_random_halves ? node->splitC : node->followerC);
+					wsum_model.unpack(Mpack, piece - 1);
+					Mpack.clear();
+				}
+				continue;
+			}
 
 			// First all followers pack up their wsum_model
 			if (!node->isLeader())
@@ -2789,6 +2798,7 @@ void MlOptimiserMpi::combineWeightedSumsTwoRandomHalves()
 		std::cerr << " Join: the summed back-projection arrays are not sent back to rank 2 (RELION_JOIN_SKIP_BPREF)" << std::endl;
 
 	// Bcast to everyone
+	const bool use_coll_bcast = gpuswitch::on("RELION_MPI_ALLREDUCE");
 	piece = 0;
 	nr_pieces = 1;
 	while (piece < nr_pieces)
@@ -2807,7 +2817,11 @@ void MlOptimiserMpi::combineWeightedSumsTwoRandomHalves()
 			jt_pack += t1 - t0;
 
 			// rank one sends Mpack to everyone else
-			if (node->rank == 1)
+			if (use_coll_bcast && node->size > 3)
+			{
+				node->relion_MPI_Bcast(MULTIDIM_ARRAY(Mpack), MULTIDIM_SIZE(Mpack), MY_MPI_DOUBLE, 0, node->followerC);
+			}
+			else if (node->rank == 1)
 			{
 				for (int other_follower = 2; other_follower < node->size; other_follower++)
 					node->relion_MPI_Send(MULTIDIM_ARRAY(Mpack), MULTIDIM_SIZE(Mpack), MY_MPI_DOUBLE, other_follower, MPITAG_PACK, MPI_COMM_WORLD);
@@ -2892,6 +2906,7 @@ void MlOptimiserMpi::maximization()
     bool do_correct_tau2_by_avgctf2 = setAverageCTF2(avgctf2);
 
 	// First reconstruct all classes in parallel
+	gpurec::ScopedReconstructCache gpu_rec_cache(gpurec::requested() && gpurec::gpuRequested() && mymodel.ref_dim == 3);
 	for (int ibody = 0; ibody < mymodel.nr_bodies; ibody++)
 	{
 
@@ -3778,6 +3793,8 @@ void MlOptimiserMpi::alignClassesMpi()
 
 	const RFLOAT maxres = mymodel.current_resolution;
 	const int nr_followers = node->size - 1;
+	gpurec::ScopedDownsampleCache gpu_ds_cache(gpurec::requested() && gpurec::gpuRequested() && !node->isLeader());
+	AlignMapReference prepared_ref;
 
 	// Class i is searched by the follower that reconstructed it; all ranks then get the
 	// parameters and apply them to their own copy of the map, so the maps stay identical.
@@ -3795,10 +3812,12 @@ void MlOptimiserMpi::alignClassesMpi()
 		RFLOAT params[6] = {0., 0., 0., 0., 0., 0.};
 		if (node->rank == owner)
 		{
+			if (!prepared_ref.valid())
+				prepared_ref = prepareAlignReference(mymodel.Iref[iclass_ref], mymodel.pixel_size, maxres, nr_threads, false);
 			alignCuboidMapToMap(mymodel.Iref[iclass], mymodel.Iref[iclass_ref], nr_freedom,
 					mymodel.pixel_size, maxres, 3, 1., 1.,
 					params[0], params[1], params[2], params[3], params[4], params[5],
-					nr_threads, false);
+					nr_threads, false, false, &prepared_ref);
 		}
 		node->relion_MPI_Bcast(params, 6, MY_MPI_DOUBLE, owner, MPI_COMM_WORLD);
 

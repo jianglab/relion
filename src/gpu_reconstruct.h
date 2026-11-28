@@ -57,12 +57,54 @@ struct SkipGriddingInput
 	// Precision on the GPU: by default that of RELION's GPU code (single unless built with
 	// DoublePrec_ACC); RELION_GPU_RECONSTRUCT=double forces double
 	bool double_precision = false;
+
+	// Post-processing fused onto the GPU volume before D2H transfer (defaults off for unit-test compatibility)
+	bool do_soft_mask = false;
+	int gridding_mode = 0;     // 0: none/FINUFFT, 1: sinc, 2: sinc^2
+	RFLOAT gridding_rrval = 0.; // (RFLOAT)(ori_size * padding_factor)
 };
 
-/// Reconstruct; vol_out receives ori_size^3 values (z, y, x order), before softMaskOutsideMap() and
-/// griddingCorrect(). Returns false, with the reason, when the CPU has to do it.
+/// Reconstruct; vol_out receives ori_size^3 values (z, y, x order). Returns false, with the reason,
+/// when the CPU has to do it.
 bool reconstructSkipGridding(const SkipGriddingInput &in, RFLOAT *vol_out, std::string &reason,
                              bool &warned_zero_weight);
+
+/// RAII scope caching cuFFT plans and scratch GPU buffers across multiple reconstructSkipGridding calls.
+struct ScopedReconstructCache
+{
+	explicit ScopedReconstructCache(bool enable = true);
+	~ScopedReconstructCache();
+	ScopedReconstructCache(const ScopedReconstructCache &) = delete;
+	ScopedReconstructCache &operator=(const ScopedReconstructCache &) = delete;
+private:
+	bool active_;
+};
+
+/// RAII scope caching GPU buffers across consecutive helicalSymmetryRealSpace calls.
+struct ScopedHelixRealSpaceCache
+{
+	explicit ScopedHelixRealSpaceCache(bool enable = true);
+	~ScopedHelixRealSpaceCache();
+	ScopedHelixRealSpaceCache(const ScopedHelixRealSpaceCache &) = delete;
+	ScopedHelixRealSpaceCache &operator=(const ScopedHelixRealSpaceCache &) = delete;
+private:
+	bool active_;
+};
+
+/// RAII scope caching cuFFT plans and GPU buffers across consecutive downsampleVolume3D calls.
+struct ScopedDownsampleCache
+{
+	explicit ScopedDownsampleCache(bool enable = true);
+	~ScopedDownsampleCache();
+	ScopedDownsampleCache(const ScopedDownsampleCache &) = delete;
+	ScopedDownsampleCache &operator=(const ScopedDownsampleCache &) = delete;
+private:
+	bool active_;
+};
+
+/// Downsample a cubic 3D volume from orig_size^3 to new_size^3 via RFLOAT-precision Fourier windowing on GPU.
+/// Returns false when CUDA is unavailable, inputs are invalid, or GPU memory is insufficient.
+bool downsampleVolume3D(const RFLOAT *in, int orig_size, RFLOAT *out, int new_size);
 
 /// Whether the GPU memory kept for the next expectation step stays in the card during the reconstruction
 /// (default; RELION_GPU_KEEP_POOL=0 frees it first). False in a build without CUDA.
@@ -76,6 +118,9 @@ bool doublePrecision();
 /// Set by relion_refine: whether the job asked for a GPU (--gpu), also when --skip_align then turns
 /// the GPU off for the expectation step
 void setGpuRequested(bool r);
+
+/// Select a CUDA device for reconstruction (returns >= 0 device ID or -1 if unavailable).
+int selectDevice(const std::string &gpu_ids, int rank, int verb);
 bool gpuRequested();
 
 /// Whether a CUDA device is visible

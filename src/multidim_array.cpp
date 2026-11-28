@@ -45,7 +45,9 @@
 #include "src/multidim_array.h"
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <sstream>
 
@@ -61,25 +63,37 @@ namespace
 	{
 		std::ifstream in("/proc/buddyinfo");
 		std::string line;
-		long n = 0;
+		std::map<long, long> by_node;
 
 		while (std::getline(in, line))
 		{
+			const size_t node_pos = line.find("Node ");
 			const size_t z = line.find("zone");
-			if (z == std::string::npos) continue;
+			if (node_pos == std::string::npos || z == std::string::npos) continue;
+
+			const long node_id = std::strtol(line.c_str() + node_pos + 5, NULL, 10);
 
 			std::istringstream counts(line.substr(z + 4));
 			std::string zone;
 			counts >> zone;
+			if (zone != "Normal" && zone != "Movable") continue;
 
 			long c;
+			long n = 0;
 			for (int order = 0; counts >> c; order++)
 			{
 				if (order >= 9) n += c << (order - 9);
 			}
+			by_node[node_id] += n;
 		}
 
-		return n;
+		if (by_node.empty()) return 0;
+		long min_n = by_node.begin()->second;
+		for (std::map<long, long>::const_iterator it = by_node.begin(); it != by_node.end(); ++it)
+		{
+			if (it->second < min_n) min_n = it->second;
+		}
+		return min_n;
 	}
 }
 

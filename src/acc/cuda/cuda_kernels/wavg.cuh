@@ -187,13 +187,13 @@ __global__ void cuda_kernel_wavg(
 
 					s_wdiff2s_parts[tid] += weight * (diff_real*diff_real + diff_imag*diff_imag);
 
-					s_sumXA[tid] +=  weight * ( ref_real * trans_real + ref_imag * trans_imag);
-					s_sumA2[tid] +=  weight * ( ref_real*ref_real  +  ref_imag*ref_imag );
+					if (g_wdiff2s_XA != NULL) s_sumXA[tid] +=  weight * ( ref_real * trans_real + ref_imag * trans_imag);
+					if (g_wdiff2s_AA != NULL) s_sumA2[tid] +=  weight * ( ref_real*ref_real  +  ref_imag*ref_imag );
 				}
 			}
 
-			cuda_atomic_add(&g_wdiff2s_XA[pixel], s_sumXA[tid]);
-			cuda_atomic_add(&g_wdiff2s_AA[pixel], s_sumA2[tid]);
+			if (g_wdiff2s_XA != NULL) cuda_atomic_add(&g_wdiff2s_XA[pixel], s_sumXA[tid]);
+			if (g_wdiff2s_AA != NULL) cuda_atomic_add(&g_wdiff2s_AA[pixel], s_sumA2[tid]);
 			cuda_atomic_add(&g_wdiff2s_parts[pixel], s_wdiff2s_parts[tid]);
 		}
 	}
@@ -332,8 +332,8 @@ __global__ void cuda_kernel_wavg_sum(
 		}
 		const XFLOAT ref2 = ref_real * ref_real + ref_imag * ref_imag;
 		const XFLOAT XA = ref_real * Yr + ref_imag * Yi;
-		cuda_atomic_add(&c.wdiff2s_XA[pixel], XA);
-		cuda_atomic_add(&c.wdiff2s_AA[pixel], W * ref2);
+		if (c.wdiff2s_XA != NULL) cuda_atomic_add(&c.wdiff2s_XA[pixel], XA);
+		if (c.wdiff2s_AA != NULL) cuda_atomic_add(&c.wdiff2s_AA[pixel], W * ref2);
 		cuda_atomic_add(&g_wdiff2s_parts[pixel], W * ref2 - (XFLOAT) 2. * XA + W * (xr * xr + xi * xi));
 	}
 }

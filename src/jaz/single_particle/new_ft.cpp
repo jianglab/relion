@@ -32,6 +32,7 @@
 #include <string>
 #include <math.h>
 
+const unsigned int NewFFT::MEASURED;
 
 void NewFFT::FourierTransform(
 		MultidimArray<double>& src,
@@ -181,7 +182,7 @@ void NewFFT::FourierTransform(
 		resizeComplexToMatch(src, dest);
 	}
 			
-	DoublePlan p(src, dest);
+	DoublePlan p(src, dest, FFTW_ESTIMATE, 1);
 	_FourierTransform(src, dest, p, normalization);
 }
 
@@ -199,12 +200,12 @@ void NewFFT::inverseFourierTransform(
 	if (preserveInput)
 	{
 		MultidimArray<dComplex> src2 = src;
-		DoublePlan p(dest, src2);
+		DoublePlan p(dest, src2, FFTW_ESTIMATE, -1);
 		_inverseFourierTransform(src2, dest, p, normalization);
 	}
 	else
 	{
-		DoublePlan p(dest, src);
+		DoublePlan p(dest, src, FFTW_ESTIMATE, -1);
 		_inverseFourierTransform(src, dest, p, normalization);
 	}
 }
@@ -220,7 +221,7 @@ void NewFFT::FourierTransform(
 		resizeComplexToMatch(src, dest);
 	}
 			
-	FloatPlan p(src, dest, plan_flags);
+	FloatPlan p(src, dest, plan_flags, 1);
 	_FourierTransform(src, dest, p, normalization);
 }
 
@@ -239,12 +240,12 @@ void NewFFT::inverseFourierTransform(
 	if (preserveInput)
 	{
 		MultidimArray<fComplex> src2 = src;
-		FloatPlan p(dest, src2, plan_flags);
+		FloatPlan p(dest, src2, plan_flags, -1);
 		_inverseFourierTransform(src2, dest, p, normalization);
 	}
 	else
 	{
-		FloatPlan p(dest, src, plan_flags);
+		FloatPlan p(dest, src, plan_flags, -1);
 		_inverseFourierTransform(src, dest, p, normalization);
 	}
 }
@@ -367,40 +368,76 @@ void NewFFT::_inverseFourierTransform(
 }
 
 
-NewFFT::DoublePlan::DoublePlan(int w, int h, int d, unsigned int flags)
+NewFFT::DoublePlan::DoublePlan(int w, int h, int d, unsigned int flags, int dir)
 :   
 	reusable(true), 
 	w(w), h(h), d(d),
 	realPtr(0), 
 	complexPtr(0)
 {
-	MultidimArray<double> realDummy(d,h,w);
-	MultidimArray<dComplex> complexDummy(d,h,w/2+1);
-	
 	std::vector<int> N(0);
 	if (d > 1) N.push_back(d);
 	if (h > 1) N.push_back(h);
 	           N.push_back(w);
 	
 	const int ndim = N.size();
+	const bool need_fwd = (dir >= 0);
+	const bool need_bwd = (dir <= 0);
+	const bool is_estimate = (flags & FFTW_ESTIMATE) != 0;
 
-	fftw_plan planForward, planBackward;	
+	double* real_buf = NULL;
+	fftw_complex* cplx_buf = NULL;
+	MultidimArray<double> realDummy;
+	MultidimArray<dComplex> complexDummy;
+	if (is_estimate)
+	{
+		if (need_fwd || need_bwd)
+		{
+			const size_t n_real = (size_t)d * h * w;
+			const size_t n_cplx = (size_t)d * h * (w / 2 + 1);
+			real_buf = (double*)malloc((n_real > 0 ? n_real : 1) * sizeof(double));
+			cplx_buf = (fftw_complex*)malloc((n_cplx > 0 ? n_cplx : 1) * sizeof(fftw_complex));
+			if (real_buf == NULL || cplx_buf == NULL)
+			{
+				free(real_buf);
+				free(cplx_buf);
+				REPORT_ERROR("FFTW plan scratch allocation failed");
+			}
+		}
+	}
+	else
+	{
+		realDummy.reshape(d, h, w);
+		complexDummy.reshape(d, h, w / 2 + 1);
+		real_buf = MULTIDIM_ARRAY(realDummy);
+		cplx_buf = (fftw_complex*)MULTIDIM_ARRAY(complexDummy);
+	}
+
+	fftw_plan planForward = NULL, planBackward = NULL;	
 	#pragma omp critical(FourierTransformer_fftw_plan)
 	{
-		planForward = fftw_plan_dft_r2c(
-				ndim, &N[0],
-				MULTIDIM_ARRAY(realDummy),
-				(fftw_complex*) MULTIDIM_ARRAY(complexDummy),
-				FFTW_UNALIGNED | flags);
+		if (need_fwd)
+			planForward = fftw_plan_dft_r2c(
+					ndim, &N[0],
+					real_buf,
+					cplx_buf,
+					FFTW_UNALIGNED | flags);
 		
-		planBackward = fftw_plan_dft_c2r(
-				ndim, &N[0],
-				(fftw_complex*) MULTIDIM_ARRAY(complexDummy),
-				MULTIDIM_ARRAY(realDummy),
-				FFTW_UNALIGNED | flags);
+		if (need_bwd)
+			planBackward = fftw_plan_dft_c2r(
+					ndim, &N[0],
+					cplx_buf,
+					real_buf,
+					FFTW_UNALIGNED | flags);
 	}	
+
+	if (is_estimate)
+	{
+		free(real_buf);
+		free(cplx_buf);
+	}
 	
-	if (planForward == NULL || planBackward == NULL)
+	if ((need_fwd && planForward == NULL) || (need_bwd && planBackward == NULL))
 	{
 		REPORT_ERROR("FFTW plans cannot be created");
 	}
@@ -411,7 +448,7 @@ NewFFT::DoublePlan::DoublePlan(int w, int h, int d, unsigned int flags)
 NewFFT::DoublePlan::DoublePlan(
 		MultidimArray<double>& real,
 		MultidimArray<dComplex>& complex,
-		unsigned int flags)
+		unsigned int flags, int dir)
 :   
 	reusable(flags & FFTW_UNALIGNED), 
 	w(real.xdim), h(real.ydim), d(real.zdim),
@@ -424,24 +461,28 @@ NewFFT::DoublePlan::DoublePlan(
 	           N.push_back(w);
 	
 	const int ndim = N.size();
+	const bool need_fwd = (dir >= 0);
+	const bool need_bwd = (dir <= 0);
 	
-	fftw_plan planForward, planBackward;	
+	fftw_plan planForward = NULL, planBackward = NULL;	
 	#pragma omp critical(FourierTransformer_fftw_plan)
 	{
-		planForward = fftw_plan_dft_r2c(
-				ndim, &N[0],
-				MULTIDIM_ARRAY(real),
-				(fftw_complex*) MULTIDIM_ARRAY(complex),
-				flags);
+		if (need_fwd)
+			planForward = fftw_plan_dft_r2c(
+					ndim, &N[0],
+					MULTIDIM_ARRAY(real),
+					(fftw_complex*) MULTIDIM_ARRAY(complex),
+					flags);
 		
-		planBackward = fftw_plan_dft_c2r(
-				ndim, &N[0],
-				(fftw_complex*) MULTIDIM_ARRAY(complex),
-				MULTIDIM_ARRAY(real),
-				flags);
+		if (need_bwd)
+			planBackward = fftw_plan_dft_c2r(
+					ndim, &N[0],
+					(fftw_complex*) MULTIDIM_ARRAY(complex),
+					MULTIDIM_ARRAY(real),
+					flags);
 	}	
 	
-	if (planForward == NULL || planBackward == NULL)
+	if ((need_fwd && planForward == NULL) || (need_bwd && planBackward == NULL))
 	{
 		REPORT_ERROR("FFTW plans cannot be created");
 	}
@@ -449,40 +490,75 @@ NewFFT::DoublePlan::DoublePlan(
 	plan = std::shared_ptr<Plan>(new Plan(planForward, planBackward));
 }
 
-NewFFT::FloatPlan::FloatPlan(int w, int h, int d, unsigned int flags)
+NewFFT::FloatPlan::FloatPlan(int w, int h, int d, unsigned int flags, int dir)
 :	reusable(true), 
 	w(w), h(h), d(d),
 	realPtr(0), 
 	complexPtr(0)
 {
-	MultidimArray<float> realDummy(d,h,w);
-	MultidimArray<fComplex> complexDummy(d,h,w/2+1);
-	
 	std::vector<int> N(0);
 	if (d > 1) N.push_back(d);
 	if (h > 1) N.push_back(h);
 	           N.push_back(w);
 	
 	const int ndim = N.size();
+	const bool need_fwd = (dir >= 0);
+	const bool need_bwd = (dir <= 0);
+	const bool is_estimate = (flags & FFTW_ESTIMATE) != 0;
+
+	float* real_buf = NULL;
+	fftwf_complex* cplx_buf = NULL;
+	MultidimArray<float> realDummy;
+	MultidimArray<fComplex> complexDummy;
+	if (is_estimate)
+	{
+		if (need_fwd || need_bwd)
+		{
+			const size_t n_real = (size_t)d * h * w;
+			const size_t n_cplx = (size_t)d * h * (w / 2 + 1);
+			real_buf = (float*)malloc((n_real > 0 ? n_real : 1) * sizeof(float));
+			cplx_buf = (fftwf_complex*)malloc((n_cplx > 0 ? n_cplx : 1) * sizeof(fftwf_complex));
+			if (real_buf == NULL || cplx_buf == NULL)
+			{
+				free(real_buf);
+				free(cplx_buf);
+				REPORT_ERROR("FFTW plan scratch allocation failed");
+			}
+		}
+	}
+	else
+	{
+		realDummy.reshape(d, h, w);
+		complexDummy.reshape(d, h, w / 2 + 1);
+		real_buf = MULTIDIM_ARRAY(realDummy);
+		cplx_buf = (fftwf_complex*)MULTIDIM_ARRAY(complexDummy);
+	}
 	
-	
-	fftwf_plan planForward, planBackward;	
+	fftwf_plan planForward = NULL, planBackward = NULL;	
 	#pragma omp critical(FourierTransformer_fftw_plan)
 	{
-		planForward = fftwf_plan_dft_r2c(
-				ndim, &N[0],
-				MULTIDIM_ARRAY(realDummy),
-				(fftwf_complex*) MULTIDIM_ARRAY(complexDummy),
-				FFTW_UNALIGNED | flags);
+		if (need_fwd)
+			planForward = fftwf_plan_dft_r2c(
+					ndim, &N[0],
+					real_buf,
+					cplx_buf,
+					FFTW_UNALIGNED | flags);
 		
-		planBackward = fftwf_plan_dft_c2r(
-				ndim, &N[0],
-				(fftwf_complex*) MULTIDIM_ARRAY(complexDummy),
-				MULTIDIM_ARRAY(realDummy),
-				FFTW_UNALIGNED | flags);
+		if (need_bwd)
+			planBackward = fftwf_plan_dft_c2r(
+					ndim, &N[0],
+					cplx_buf,
+					real_buf,
+					FFTW_UNALIGNED | flags);
 	}
 
-	if (planForward == NULL || planBackward == NULL)
+	if (is_estimate)
+	{
+		free(real_buf);
+		free(cplx_buf);
+	}
+
+	if ((need_fwd && planForward == NULL) || (need_bwd && planBackward == NULL))
 	{
 		REPORT_ERROR("FFTW plans cannot be created");
 	}
@@ -529,7 +605,7 @@ std::string newFftWisdomFile()
 }
 
 // Inside the planner's critical section
-void measuredFloatPlans(int ndim, const int *N, float *real, fftwf_complex *complex, unsigned int flags,
+void measuredFloatPlans(int ndim, const int *N, float *real, fftwf_complex *complex, unsigned int flags, int dir,
                         fftwf_plan &forward, fftwf_plan &backward)
 {
 	static bool loaded = false;
@@ -540,10 +616,12 @@ void measuredFloatPlans(int ndim, const int *N, float *real, fftwf_complex *comp
 		if (!file.empty()) fftwf_import_wisdom_from_filename(file.c_str());   // a missing file is fine
 	}
 
+	const bool need_fwd = (dir >= 0);
+	const bool need_bwd = (dir <= 0);
 	const unsigned int wo = FFTW_MEASURE | FFTW_WISDOM_ONLY | flags;
-	forward = fftwf_plan_dft_r2c(ndim, N, real, complex, wo);
-	backward = fftwf_plan_dft_c2r(ndim, N, complex, real, wo);
-	if (forward != NULL && backward != NULL) return;
+	forward = need_fwd ? fftwf_plan_dft_r2c(ndim, N, real, complex, wo) : NULL;
+	backward = need_bwd ? fftwf_plan_dft_c2r(ndim, N, complex, real, wo) : NULL;
+	if ((!need_fwd || forward != NULL) && (!need_bwd || backward != NULL)) return;
 	if (forward != NULL) fftwf_destroy_plan(forward);
 	if (backward != NULL) fftwf_destroy_plan(backward);
 
@@ -557,11 +635,11 @@ void measuredFloatPlans(int ndim, const int *N, float *real, fftwf_complex *comp
 	{
 		float *sr = (float*)(rb + (64 - (uintptr_t)rb % 64) % 64 + (uintptr_t)real % 64);
 		fftwf_complex *sc = (fftwf_complex*)(cb + (64 - (uintptr_t)cb % 64) % 64 + (uintptr_t)complex % 64);
-		fftwf_plan f = fftwf_plan_dft_r2c(ndim, N, sr, sc, FFTW_MEASURE | flags);
-		fftwf_plan b = fftwf_plan_dft_c2r(ndim, N, sc, sr, FFTW_MEASURE | flags);
+		fftwf_plan f = need_fwd ? fftwf_plan_dft_r2c(ndim, N, sr, sc, FFTW_MEASURE | flags) : NULL;
+		fftwf_plan b = need_bwd ? fftwf_plan_dft_c2r(ndim, N, sc, sr, FFTW_MEASURE | flags) : NULL;
 		if (f != NULL) fftwf_destroy_plan(f);
 		if (b != NULL) fftwf_destroy_plan(b);
-		if (f != NULL && b != NULL && !file.empty())
+		if ((!need_fwd || f != NULL) && (!need_bwd || b != NULL) && !file.empty())
 		{
 			// merge with what other processes saved meanwhile, then replace the file in one step
 			const std::string dir = file.substr(0, file.rfind('/'));
@@ -577,14 +655,14 @@ void measuredFloatPlans(int ndim, const int *N, float *real, fftwf_complex *comp
 	free(cb);
 
 	// the wisdom now holds the plan; the plans for the real arrays use it (an estimate if it still fails)
-	forward = fftwf_plan_dft_r2c(ndim, N, real, complex, FFTW_MEASURE | FFTW_WISDOM_ONLY | flags);
-	backward = fftwf_plan_dft_c2r(ndim, N, complex, real, FFTW_MEASURE | FFTW_WISDOM_ONLY | flags);
-	if (forward == NULL || backward == NULL)
+	forward = need_fwd ? fftwf_plan_dft_r2c(ndim, N, real, complex, FFTW_MEASURE | FFTW_WISDOM_ONLY | flags) : NULL;
+	backward = need_bwd ? fftwf_plan_dft_c2r(ndim, N, complex, real, FFTW_MEASURE | FFTW_WISDOM_ONLY | flags) : NULL;
+	if ((need_fwd && forward == NULL) || (need_bwd && backward == NULL))
 	{
 		if (forward != NULL) fftwf_destroy_plan(forward);
 		if (backward != NULL) fftwf_destroy_plan(backward);
-		forward = fftwf_plan_dft_r2c(ndim, N, real, complex, FFTW_ESTIMATE | flags);
-		backward = fftwf_plan_dft_c2r(ndim, N, complex, real, FFTW_ESTIMATE | flags);
+		forward = need_fwd ? fftwf_plan_dft_r2c(ndim, N, real, complex, FFTW_ESTIMATE | flags) : NULL;
+		backward = need_bwd ? fftwf_plan_dft_c2r(ndim, N, complex, real, FFTW_ESTIMATE | flags) : NULL;
 	}
 }
 
@@ -593,7 +671,7 @@ void measuredFloatPlans(int ndim, const int *N, float *real, fftwf_complex *comp
 NewFFT::FloatPlan::FloatPlan(
 		MultidimArray<float>& real,
 		MultidimArray<fComplex>& complex,
-		unsigned int flags)
+		unsigned int flags, int dir)
 :
 	reusable(flags & FFTW_UNALIGNED), 
 	w(real.xdim), h(real.ydim), d(real.zdim),
@@ -606,9 +684,10 @@ NewFFT::FloatPlan::FloatPlan(
 	           N.push_back(w);
 	
 	const int ndim = N.size();
+	const bool need_fwd = (dir >= 0);
+	const bool need_bwd = (dir <= 0);
 	
-	
-	fftwf_plan planForward, planBackward;	
+	fftwf_plan planForward = NULL, planBackward = NULL;	
 	const bool measured = (flags & NewFFT::MEASURED) != 0 && measuredPlansWanted();
 	if (flags & NewFFT::MEASURED)
 	{
@@ -620,25 +699,27 @@ NewFFT::FloatPlan::FloatPlan(
 		if (measured)
 		{
 			measuredFloatPlans(ndim, &N[0], MULTIDIM_ARRAY(real), (fftwf_complex*) MULTIDIM_ARRAY(complex),
-			                   flags, planForward, planBackward);
+			                   flags, dir, planForward, planBackward);
 		}
 		else
 		{
-			planForward = fftwf_plan_dft_r2c(
-					ndim, &N[0],
-					MULTIDIM_ARRAY(real),
-					(fftwf_complex*) MULTIDIM_ARRAY(complex),
-					flags);
+			if (need_fwd)
+				planForward = fftwf_plan_dft_r2c(
+						ndim, &N[0],
+						MULTIDIM_ARRAY(real),
+						(fftwf_complex*) MULTIDIM_ARRAY(complex),
+						flags);
 
-			planBackward = fftwf_plan_dft_c2r(
-					ndim, &N[0],
-					(fftwf_complex*) MULTIDIM_ARRAY(complex),
-					MULTIDIM_ARRAY(real),
-					flags);
+			if (need_bwd)
+				planBackward = fftwf_plan_dft_c2r(
+						ndim, &N[0],
+						(fftwf_complex*) MULTIDIM_ARRAY(complex),
+						MULTIDIM_ARRAY(real),
+						flags);
 		}
 	}
 	
-	if (planForward == NULL || planBackward == NULL)
+	if ((need_fwd && planForward == NULL) || (need_bwd && planBackward == NULL))
 	{
 		REPORT_ERROR("FFTW plans cannot be created");
 	}

@@ -237,7 +237,7 @@ __device__ __forceinline__ size_t bpModelStride(const XFLOAT *g_model_real, cons
 	return (g_model_imag - g_model_real == 1) ? 3 : 1;
 }
 
-template < bool DATA3D, bool CTF_PREMULTIPLIED, bool USE_SHIFT = false, bool HOIST_DIV = false >
+template < bool DATA3D, bool CTF_PREMULTIPLIED, bool USE_SHIFT = false, bool HOIST_DIV = false, bool USE_SEP_SHIFT = false >
 __global__ void cuda_kernel_backproject3D(
 		XFLOAT *g_img_real,
 		XFLOAT *g_img_imag,
@@ -281,8 +281,9 @@ __global__ void cuda_kernel_backproject3D(
 		const float2 *g_shift = NULL, // USE_SHIFT: (cos, sin) of every translation's phase at every pixel of
 		               // 2D data, table[translation * img_xyz + pixel] (cuda_kernel_shift_table), read instead of
 		               // a sincosf per pixel and translation; float noise
-		int PR = BP_PACK_RUNS) // tile == 2: runs (of 4) staged in shared memory at a time, 1, 2 or 4; fewer runs
-		               // use less shared memory (more blocks per SM), the same terms are added in the same loop order within a run
+		int PR = BP_PACK_RUNS, // tile == 2: runs (of 4) staged in shared memory at a time, 1, 2 or 4
+		const float2 *g_shx = NULL, // USE_SEP_SHIFT: separable phase factors (cuda_kernel_shift_table_sep)
+		const float2 *g_shy = NULL)
 {
 	unsigned tid = threadIdx.x;
 	unsigned img = blockIdx.x;
@@ -422,6 +423,7 @@ __global__ void cuda_kernel_backproject3D(
 			{
 				int x = pixel % img_x;
 				int y = floorfracf(pixel, img_x);
+				const int row = y;
 				if (y > img_y_half)
 					y = y - img_y;
 				minvsigma2 = __ldg(&g_Minvsigma2s[pixel]);
@@ -449,7 +451,16 @@ __global__ void cuda_kernel_backproject3D(
 							weight = (HOIST_DIV ? weight : weight / weight_norm) * ctf * minvsigma2;
 							Fweight += weight * ctf;
 						}
-						if (USE_SHIFT)
+						if (USE_SEP_SHIFT)
+						{
+							const float2 a = __ldg(&g_shx[(size_t) itrans * img_x + x]);
+							const float2 b = __ldg(&g_shy[(size_t) itrans * img_y + row]);
+							const XFLOAT cx = a.x * b.x - a.y * b.y;
+							const XFLOAT cy = a.y * b.x + a.x * b.y;
+							temp_real = cx * img_real - cy * img_imag;
+							temp_imag = cx * img_imag + cy * img_real;
+						}
+						else if (USE_SHIFT)
 						{
 							const float2 cs = __ldg(&g_shift[itrans * img_xyz + pixel]);
 							temp_real = cs.x * img_real - cs.y * img_imag;
@@ -495,6 +506,7 @@ __global__ void cuda_kernel_backproject3D(
 				pos = __popc(ballot & ((1u << lane) - 1u));
 			}
 			// the four runs (y, z neighbours) go through the staging buffer PR at a time
+			if (n_act > 0)
 			for (int rb = 0; rb < 4; rb += PR)
 			{
 				__syncwarp();
@@ -503,14 +515,13 @@ __global__ void cuda_kernel_backproject3D(
 					const XFLOAT mfx = (XFLOAT) 1.0 - fx, mfy = (XFLOAT) 1.0 - fy, mfz = (XFLOAT) 1.0 - fz;
 					XFLOAT *v = pk_val + pos * (6 * PR);
 					size_t *b = pk_base + pos * PR;
-#pragma unroll
 					for (int r = 0; r < PR; r++)
 					{
 						const int run = rb + r;
 						const int zz = z0 + (run >> 1), yy = y0 + (run & 1);
 						const XFLOAT wz = (run >> 1) ? fz : mfz, wy = (run & 1) ? fy : mfy;
 						const XFLOAT d0 = wz * wy * mfx, d1 = wz * wy * fx;
-						b[r] = (size_t) (zz * mdl_x * mdl_y + yy * mdl_x + x0) * 3;
+						b[r] = ((size_t) zz * mdl_x * mdl_y + (size_t) yy * mdl_x + x0) * 3;
 						v[r * 6 + 0] = d0 * real;
 						v[r * 6 + 1] = d0 * imag;
 						v[r * 6 + 2] = d0 * Fweight;
@@ -523,8 +534,8 @@ __global__ void cuda_kernel_backproject3D(
 				const unsigned total = n_act * (6 * PR);
 				for (unsigned k = lane; k < total; k += 32)
 				{
-					const unsigned p = k / (6 * PR), f = k - p * (6 * PR), r = f / 6, e = f - r * 6;
-					cuda_atomic_add(&g_model_real[pk_base[p * PR + r] + e], pk_val[k]);
+					const unsigned q = k / 6, e = k - q * 6;
+					cuda_atomic_add(&g_model_real[pk_base[q] + e], pk_val[k]);
 				}
 			}
 			__syncwarp();
@@ -569,7 +580,7 @@ __global__ void cuda_kernel_backproject3D(
 		if (pixel >= img_xyz)
 			continue;
 
-		int x,y,z,xy;
+		int x,y,z,xy,row=0;
 
 		if(DATA3D)
 		{
@@ -590,6 +601,7 @@ __global__ void cuda_kernel_backproject3D(
 		{
 			x =             pixel % img_x;
 			y = floorfracf( pixel , img_x);
+			row = y;
 		}
 		if (y > img_y_half)
 		{
@@ -628,6 +640,15 @@ __global__ void cuda_kernel_backproject3D(
 				
 				if(DATA3D)
 					translatePixel(x, y, z, g_trans_x[itrans], g_trans_y[itrans], g_trans_z[itrans], img_real, img_imag, temp_real, temp_imag);
+				else if (USE_SEP_SHIFT)
+				{
+					const float2 a = __ldg(&g_shx[(size_t) itrans * img_x + x]);
+					const float2 b = __ldg(&g_shy[(size_t) itrans * img_y + row]);
+					const XFLOAT cx = a.x * b.x - a.y * b.y;
+					const XFLOAT cy = a.y * b.x + a.x * b.y;
+					temp_real = cx * img_real - cy * img_imag;
+					temp_imag = cx * img_imag + cy * img_real;
+				}
 				else if (USE_SHIFT)
 				{
 					const float2 cs = __ldg(&g_shift[itrans * img_xyz + pixel]);
@@ -806,6 +827,107 @@ __global__ void cuda_kernel_backproject3D_flush(
 
 	const int img_y_half = img_y / 2;
 	const int max_r2_vol = max_r2 * padding_factor * padding_factor;
+
+	if (S == 3)
+	{
+		extern __shared__ unsigned char fl_smem[];
+		const unsigned lane = tid & 31, wid = tid >> 5;
+		constexpr int FL_PR = 2;
+		XFLOAT *pk_val = (XFLOAT *) fl_smem + (size_t) wid * (32 * 6 * FL_PR);
+		size_t *pk_base = (size_t *) (fl_smem + (size_t) (blockDim.x / 32) * (32 * 6 * FL_PR) * sizeof(XFLOAT)) + (size_t) wid * (32 * FL_PR);
+		for (unsigned base = 0; base < acc.pixels; base += blockDim.x)
+		{
+			const unsigned pixel = base + tid;
+			bool go = false;
+			XFLOAT real = 0, imag = 0, Fweight = 0;
+			XFLOAT xp = 0, yp = 0, zp = 0;
+			if (pixel < acc.pixels)
+			{
+				real = a_buf[pixel];
+				imag = a_buf[acc.pixels + pixel];
+				Fweight = a_buf[2 * (size_t) acc.pixels + pixel];
+				if (real != (XFLOAT) 0.0 || imag != (XFLOAT) 0.0 || Fweight != (XFLOAT) 0.0)
+				{
+					a_buf[pixel] = (XFLOAT) 0.0;
+					a_buf[acc.pixels + pixel] = (XFLOAT) 0.0;
+					a_buf[2 * (size_t) acc.pixels + pixel] = (XFLOAT) 0.0;
+				}
+				if (Fweight > (XFLOAT) 0.0)
+				{
+					int x = pixel % img_x;
+					int y = floorfracf(pixel, img_x);
+					if (y > img_y_half)
+						y = y - img_y;
+					xp = (s_eulers[0] * x + s_eulers[1] * y) * padding_factor;
+					yp = (s_eulers[3] * x + s_eulers[4] * y) * padding_factor;
+					zp = (s_eulers[6] * x + s_eulers[7] * y) * padding_factor;
+					go = !((xp * xp + yp * yp + zp * zp) > max_r2_vol);
+				}
+			}
+			const unsigned ballot = __ballot_sync(0xffffffffu, go);
+			const unsigned n_act = __popc(ballot);
+			__syncwarp();
+			XFLOAT fx = 0, fy = 0, fz = 0;
+			int x0 = 0, y0 = 0, z0 = 0;
+			unsigned pos = 0;
+			if (go)
+			{
+				if (xp < (XFLOAT) 0.0)
+				{
+					xp = -xp;
+					yp = -yp;
+					zp = -zp;
+					imag = -imag;
+				}
+				x0 = floorf(xp);
+				fx = xp - x0;
+				y0 = floorf(yp);
+				fy = yp - y0;
+				y0 -= mdl_inity;
+				z0 = floorf(zp);
+				fz = zp - z0;
+				z0 -= mdl_initz;
+				pos = __popc(ballot & ((1u << lane) - 1u));
+			}
+			if (n_act > 0)
+			for (int rb = 0; rb < 4; rb += FL_PR)
+			{
+				__syncwarp();
+				if (go)
+				{
+					const XFLOAT mfx = (XFLOAT) 1.0 - fx, mfy = (XFLOAT) 1.0 - fy, mfz = (XFLOAT) 1.0 - fz;
+					XFLOAT *v = pk_val + pos * (6 * FL_PR);
+					size_t *b = pk_base + pos * FL_PR;
+					#pragma unroll
+					for (int r = 0; r < FL_PR; r++)
+					{
+						const int run = rb + r;
+						const int zz = z0 + (run >> 1), yy = y0 + (run & 1);
+						const XFLOAT wz = (run >> 1) ? fz : mfz, wy = (run & 1) ? fy : mfy;
+						const XFLOAT d0 = wz * wy * mfx, d1 = wz * wy * fx;
+						b[r] = ((size_t) zz * mdl_x * mdl_y + (size_t) yy * mdl_x + x0) * 3;
+						v[r * 6 + 0] = d0 * real;
+						v[r * 6 + 1] = d0 * imag;
+						v[r * 6 + 2] = d0 * Fweight;
+						v[r * 6 + 3] = d1 * real;
+						v[r * 6 + 4] = d1 * imag;
+						v[r * 6 + 5] = d1 * Fweight;
+					}
+				}
+				__syncwarp();
+				const unsigned total = n_act * (6 * FL_PR);
+				for (unsigned k = lane; k < total; k += 32)
+				{
+					const unsigned q = k / 6, e = k - q * 6;
+					cuda_atomic_add(&g_model_real[pk_base[q] + e], pk_val[k]);
+				}
+			}
+			__syncwarp();
+		}
+		if (tid == 0)
+			acc.slot_idx[slot] = -1;
+		return;
+	}
 
 	for (unsigned pixel = tid; pixel < acc.pixels; pixel += blockDim.x)
 	{

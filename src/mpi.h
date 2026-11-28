@@ -81,10 +81,9 @@ public:
 	MPI_Group worldG, followerG; // groups of ranks (in practice only used to create communicators)
 	MPI_Comm worldC, followerC; // communicators
 	int followerRank; // index of follower within the follower-group (and communicator)
-#ifdef USE_MPI_COLLECTIVE
 	MPI_Comm splitC;	// communicator when doing split random halves
 	int splitRank;		// index of ranks within the split random halves group
-
+#ifdef USE_MPI_COLLECTIVE
 	MPI_Group root_evenG, root_oddG;    // MPI group for root+[even or odd] ranks
 	MPI_Comm root_evenC, root_oddC;	// communicators for root+[even or odd] ranks
 
@@ -118,6 +117,8 @@ public:
 
 	/* Better error handling of MPI error messages */
 	void report_MPI_ERROR(int error_code);
+
+	int relion_MPI_Allreduce_inplace(void *buf, std::ptrdiff_t count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm);
 
 #ifdef USE_MPI_COLLECTIVE
 	int relion_MPI_Allreduce(void *sendB, void *recvB, std::ptrdiff_t count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm);

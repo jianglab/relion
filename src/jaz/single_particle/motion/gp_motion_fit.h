@@ -23,6 +23,7 @@
 
 #include <src/image.h>
 #include <src/jaz/optimization/optimization.h>
+#include <src/jaz/math/Gaussian_process.h>
 #include <src/jaz/gravis/t2Vector.h>
 #include <vector>
 
@@ -33,17 +34,31 @@ class GpMotionFit : public DifferentiableOptimization
         GpMotionFit(
                 const std::vector<std::vector<Image<double>>>& correlation,
                 double cc_pad,
-				double sig_vel_px, double sig_div_px, double sig_acc_px,
+                double sig_vel_px, double sig_div_px, double sig_acc_px,
                 int maxDims,
                 const std::vector<gravis::d2Vector>& positions,
                 const std::vector<gravis::d2Vector>& perFrameOffsets,
-                int threads, bool expKer);
+                int threads, bool expKer,
+                const GaussianProcess::Basis* unitBasis = 0);
+
+        GpMotionFit(
+                const std::vector<std::vector<Image<float>>>& correlation,
+                double cc_pad,
+                double sig_vel_px, double sig_div_px, double sig_acc_px,
+                int maxDims,
+                const std::vector<gravis::d2Vector>& positions,
+                const std::vector<gravis::d2Vector>& perFrameOffsets,
+                int threads, bool expKer,
+                const GaussianProcess::Basis* unitBasis = 0);
 
         double f(const std::vector<double>& x) const;
         double f(const std::vector<double>& x, void* tempStorage) const;
 
         void grad(const std::vector<double>& x, std::vector<double>& gradDest) const;
         void grad(const std::vector<double>& x, std::vector<double>& gradDest, void* tempStorage) const;
+
+        bool supportsGradAndValue() const { return true; }
+        double gradAndValue(const std::vector<double>& x, std::vector<double>& gradDest, void* tempStorage = 0) const;
 
         // The correlation maps are windows around these centres (see MotionHelper::movieCC);
         // leftWindow() says whether any evaluation since then needed a pixel outside them
@@ -63,10 +78,10 @@ class GpMotionFit : public DifferentiableOptimization
         {
             public:
 
-                int pad;
+                int pad = 0;
 
-                std::vector<std::vector<gravis::d2Vector>> pos, ccg_pf;
-                std::vector<double> e_p;
+                std::vector<gravis::d2Vector> pos_flat;
+                std::vector<double> ccgx_fp, ccgy_fp, e_p;
         };
 
     private:
@@ -75,26 +90,34 @@ class GpMotionFit : public DifferentiableOptimization
         int window = 0;
         mutable std::vector<char> outside;  // per particle, so that threads never write the same element
 
+        void initBasis(int maxDims, const GaussianProcess::Basis* unitBasis);
+
         // whether the cubic interpolation at (x, y) reads only pixels inside the window of particle p, frame f
         bool inWindow(int p, int f, double x, double y) const;
 
         double energy(const std::vector<double>& x,
-                      std::vector<std::vector<gravis::d2Vector>>& pos,
+                      std::vector<gravis::d2Vector>& pos_flat,
                       std::vector<double>& e_p) const;
 
         void gradient(const std::vector<double>& x,
-                      std::vector<std::vector<gravis::d2Vector>>& pos,
-                      std::vector<std::vector<gravis::d2Vector>>& ccg_pf,
+                      std::vector<double>& ccgx_fp,
+                      std::vector<double>& ccgy_fp,
                       std::vector<double>& gradDest) const;
+
+        double gradAndValueImpl(const std::vector<double>& x,
+                                std::vector<double>& gradDest,
+                                std::vector<double>& e_p,
+                                std::vector<double>& ccgx_fp,
+                                std::vector<double>& ccgy_fp) const;
 
         bool expKer;
         int pc, fc, dc, threads;
         double cc_pad, sig_vel_px, sig_div_px, sig_acc_px;
 
-        Matrix2D<RFLOAT> basis;
-        std::vector<double> eigenVals;
+        std::vector<double> basisRow, basisT, eigenVals;
 
-        const std::vector<std::vector<Image<double>>>& correlation;
+        const std::vector<std::vector<Image<double>>>* corrD;
+        const std::vector<std::vector<Image<float>>>* corrF;
         const std::vector<gravis::d2Vector>& positions;
         const std::vector<gravis::d2Vector>& perFrameOffsets;
 };

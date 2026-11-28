@@ -236,12 +236,12 @@ class NewFFT
                        (cf. http://www.fftw.org/fftw3_doc/Planner-Flags.html)
                 */
                 DoublePlan(int w, int h = 1, int d = 1,
-                           unsigned int flags = FFTW_ESTIMATE);
+                           unsigned int flags = FFTW_ESTIMATE, int dir = 0);
 
                 // constructor for array-specific plans
                 DoublePlan( MultidimArray<double>& real,
                             MultidimArray<dComplex>& complex,
-                            unsigned int flags = FFTW_ESTIMATE);
+                            unsigned int flags = FFTW_ESTIMATE, int dir = 0);
 
                 fftw_plan getForward() const
                 {
@@ -284,8 +284,8 @@ class NewFFT
                         {
                             #pragma omp critical(FourierTransformer_fftw_plan) 
                             {
-                                fftw_destroy_plan(forward);
-                                fftw_destroy_plan(backward);
+                                if (forward != NULL) fftw_destroy_plan(forward);
+                                if (backward != NULL) fftw_destroy_plan(backward);
                             }
                         }
 
@@ -303,11 +303,11 @@ class NewFFT
             public:
 
                 FloatPlan(int w, int h = 1, int d = 1,
-                          unsigned int flags = FFTW_ESTIMATE);
+                          unsigned int flags = FFTW_ESTIMATE, int dir = 0);
 
                 FloatPlan(MultidimArray<float>& real,
                           MultidimArray<fComplex>& complex,
-                          unsigned int flags = FFTW_ESTIMATE);
+                          unsigned int flags = FFTW_ESTIMATE, int dir = 0);
 
                 fftwf_plan getForward() const
                 {
@@ -350,8 +350,8 @@ class NewFFT
                         {
                             #pragma omp critical(FourierTransformer_fftw_plan)
                             {
-                                fftwf_destroy_plan(forward);
-                                fftwf_destroy_plan(backward);
+                                if (forward != NULL) fftwf_destroy_plan(forward);
+                                if (backward != NULL) fftwf_destroy_plan(backward);
                             }
                         }
 

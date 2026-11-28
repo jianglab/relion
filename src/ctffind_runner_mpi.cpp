@@ -18,6 +18,8 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/ctffind_runner_mpi.h"
+#include <atomic>
+#include <omp.h>
 
 void CtffindRunnerMpi::read(int argc, char **argv)
 {
@@ -54,32 +56,75 @@ void CtffindRunnerMpi::run()
 		}
 
 		std::vector<std::string> allmicnames;
-		for (long int imic = my_first_micrograph; imic <= my_last_micrograph; imic++)
+		const EMDLabel mylabel = (is_tomo) ? EMDL_TOMO_TILT_SERIES_PIXEL_SIZE : EMDL_MICROGRAPH_PIXEL_SIZE;
+		struct MicCtfParams { RFLOAT cs, voltage, q0, angpix; };
+		std::vector<MicCtfParams> micParams(my_nr_micrographs);
+		for (long int idx = 0; idx < my_nr_micrographs; idx++)
 		{
+			const long int imic = my_first_micrograph + idx;
+			const int og = optics_group_micrographs[imic] - 1;
+			obsModel.opticsMdt.getValue(EMDL_CTF_CS, micParams[idx].cs, og);
+			obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, micParams[idx].voltage, og);
+			obsModel.opticsMdt.getValue(EMDL_CTF_Q0, micParams[idx].q0, og);
+			obsModel.opticsMdt.getValue(mylabel, micParams[idx].angpix, og);
+		}
 
-			// Abort through the pipeline_control system
-			if (pipeline_control_check_abort_job())
-				MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
+		if (is_ctffind4 && nr_threads > 1 && my_nr_micrographs > 1)
+		{
+			std::atomic<long int> nr_done(0);
+			std::atomic<bool> aborted(false);
 
-			// Get angpix and voltage from the optics groups:
-			obsModel.opticsMdt.getValue(EMDL_CTF_CS, Cs, optics_group_micrographs[imic]-1);
-			obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, Voltage, optics_group_micrographs[imic]-1);
-			obsModel.opticsMdt.getValue(EMDL_CTF_Q0, AmplitudeConstrast, optics_group_micrographs[imic]-1);
-            EMDLabel mylabel = (is_tomo) ? EMDL_TOMO_TILT_SERIES_PIXEL_SIZE : EMDL_MICROGRAPH_PIXEL_SIZE;
-			obsModel.opticsMdt.getValue(mylabel, angpix, optics_group_micrographs[imic]-1);
-
-			if (is_ctffind4)
+			#pragma omp parallel for schedule(dynamic, 1) num_threads(nr_threads)
+			for (long int idx = 0; idx < my_nr_micrographs; idx++)
 			{
-				executeCtffind4(imic);
+				if (aborted.load(std::memory_order_relaxed)) continue;
+				if (pipeline_control_check_abort_job())
+				{
+					aborted.store(true, std::memory_order_relaxed);
+					continue;
+				}
+
+				const long int imic = my_first_micrograph + idx;
+				const MicCtfParams& mp = micParams[idx];
+				executeCtffind4ForMic(imic, mp.cs, mp.voltage, mp.q0, mp.angpix);
+
+				const long int done = ++nr_done;
+				if (verb > 0 && done % barstep == 0)
+				{
+					#pragma omp critical(ctffind_mpi_progress)
+					progress_bar(done);
+				}
 			}
-			else
+
+			if (aborted.load()) MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
+		}
+		else
+		{
+			for (long int idx = 0; idx < my_nr_micrographs; idx++)
 			{
-				executeCtffind3(imic);
+				const long int imic = my_first_micrograph + idx;
+
+				// Abort through the pipeline_control system
+				if (pipeline_control_check_abort_job())
+					MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
+
+				Cs = micParams[idx].cs;
+				Voltage = micParams[idx].voltage;
+				AmplitudeConstrast = micParams[idx].q0;
+				angpix = micParams[idx].angpix;
+
+				if (is_ctffind4)
+				{
+					executeCtffind4ForMic(imic, Cs, Voltage, AmplitudeConstrast, angpix);
+				}
+				else
+				{
+					executeCtffind3(imic);
+				}
+
+				if (verb > 0 && idx % barstep == 0)
+					progress_bar(idx);
 			}
-
-			if (verb > 0 && imic % barstep == 0)
-				progress_bar(imic);
-
 		}
 
 		if (verb > 0)

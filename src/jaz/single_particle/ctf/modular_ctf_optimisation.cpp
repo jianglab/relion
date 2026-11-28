@@ -139,18 +139,16 @@ ModularCtfOptimisation::ModularCtfOptimisation(
 				yu = yy;
 			}
 
-			Pixel q;
-			q.index = yi * (long)sh + xi;
-			q.xu = xu;
-			q.yu = yu;
-			q.u2 = xu * xu + yu * yu;
-			q.u4 = q.u2 * q.u2;
-			q.a1 = xu * xu - yu * yu;
-			q.bf = -q.u2/4.0;
-			q.wght = freqWgh * wght;
-			q.gammaOffset = obsModel->hasEvenZernike? aberrationByGroup[og](xi,yi) : 0.0;
-
-			pixelsByGroup[og].push_back(q);
+			GroupPixels& gp = pixelsByGroup[og];
+			const double u2 = xu * xu + yu * yu;
+			gp.index.push_back(yi * (long)sh + xi);
+			gp.u2.push_back(u2);
+			gp.u4.push_back(u2 * u2);
+			gp.a1.push_back(xu * xu - yu * yu);
+			gp.a2.push_back(2.0 * xu * yu);
+			gp.bf.push_back(-u2 / 4.0);
+			gp.wght.push_back(freqWgh * wght);
+			gp.gammaOffset.push_back(obsModel->hasEvenZernike? aberrationByGroup[og](xi,yi) : 0.0);
 		}
 	}
 
@@ -162,6 +160,44 @@ ModularCtfOptimisation::ModularCtfOptimisation(
 		{
 			REPORT_ERROR_STR("ModularCtfOptimisation: particle " << p << " is not " << s << " pixels in size.");
 		}
+	}
+
+	particleOg.resize(particle_count);
+	partA.resize(particle_count);
+	partB.resize(particle_count);
+	partC0.resize(particle_count);
+
+	#pragma omp parallel for num_threads(num_treads)
+	for (int p = 0; p < particle_count; p++)
+	{
+		const int og = obsModel->getOpticsGroup(mdt, p);
+		particleOg[p] = og;
+
+		const GroupPixels& gp = pixelsByGroup[og];
+		const size_t n = gp.index.size();
+		partA[p].resize(n);
+		partB[p].resize(n);
+
+		const long* __restrict idx = gp.index.data();
+		const double* __restrict w = gp.wght.data();
+		double* __restrict ap = partA[p].data();
+		double* __restrict bp = partB[p].data();
+		const Complex* __restrict zo = obs[p].data.data;
+		const Complex* __restrict zp = pred[p].data.data;
+
+		double c0 = 0.0;
+		for (size_t i = 0; i < n; i++)
+		{
+			const long k = idx[i];
+			const Complex z_obs = zo[k];
+			const Complex z_pred = zp[k];
+			const double wt = w[i];
+
+			ap[i] = wt * (z_pred.real * z_pred.real + z_pred.imag * z_pred.imag);
+			bp[i] = wt * (z_pred.real * z_obs.real + z_pred.imag * z_obs.imag);
+			c0 += wt * (z_obs.real * z_obs.real + z_obs.imag * z_obs.imag);
+		}
+		partC0[p] = c0;
 	}
 }
 
@@ -180,6 +216,15 @@ double ModularCtfOptimisation::gradAndValue(
 		fit[i] = modes[i] != Fixed;
 	}
 
+	const bool fitPh = fit[Phase];
+	const bool fitDz = fit[Defocus];
+	const bool fitA1 = fit[Astigmatism1];
+	const bool fitA2 = fit[Astigmatism2];
+	const bool fitCs = fit[SphericalAberration];
+	const bool fitBf = fit[BFactor];
+	const bool fitKf = fit[ScaleFactor];
+	const bool onlyDefocusAstig = !fitPh && !fitCs && !fitBf && !fitKf;
+
 	#pragma omp parallel for num_threads(num_treads)
 	for (int p = 0; p < particle_count; p++)
 	{
@@ -191,44 +236,96 @@ double ModularCtfOptimisation::gradAndValue(
 		const double bf = readParam(BFactor, x, p);
 		const double kf = readParam(ScaleFactor, x, p);
 
-		const std::vector<Pixel>& pixels = pixelsByGroup[obsModel->getOpticsGroup(mdt, p)];
-		const Complex* zo = obs[p].data.data;
-		const Complex* zp = pred[p].data.data;
+		const int og = particleOg[p];
+		const GroupPixels& gp = pixelsByGroup[og];
+		const size_t n = gp.index.size();
+		const double* __restrict u2v = gp.u2.data();
+		const double* __restrict u4v = gp.u4.data();
+		const double* __restrict a1v = gp.a1.data();
+		const double* __restrict a2v = gp.a2.data();
+		const double* __restrict bfv = gp.bf.data();
+		const double* __restrict gov = gp.gammaOffset.data();
+		const double* __restrict Ap = partA[p].data();
+		const double* __restrict Bp = partB[p].data();
 
-		double cost = 0.0, sum[CtfParamCount] = {};
+		double cost = partC0[p], sum[CtfParamCount] = {};
 
-		for (int i = 0; i < pixels.size(); i++)
+		if (onlyDefocusAstig && bf == 0.0)
 		{
-			const Pixel& q = pixels[i];
-			const double xu = q.xu, yu = q.yu, u2 = q.u2;
+			double sDz = 0.0, sA1 = 0.0, sA2 = 0.0;
+			if (fitDz && fitA1 && fitA2)
+			{
+				for (size_t i = 0; i < n; i++)
+				{
+					const double u2 = u2v[i];
+					const double a1q = a1v[i];
+					const double a2q = a2v[i];
+					const double gamma = ph + dz * u2 + a1 * a1q + a2 * a2q + cs * u4v[i] + gov[i];
+					double sg, cg;
+					SINCOS(gamma, &sg, &cg);
+					const double ctfVal = -kf * sg;
+					const double err = ctfVal * Ap[i] - Bp[i];
+					cost += ctfVal * (err - Bp[i]);
+					const double dE_dGamma = -2.0 * err * kf * cg;
+					sDz += dE_dGamma * u2;
+					sA1 += dE_dGamma * a1q;
+					sA2 += dE_dGamma * a2q;
+				}
+			}
+			else
+			{
+				for (size_t i = 0; i < n; i++)
+				{
+					const double u2 = u2v[i];
+					const double a1q = a1v[i];
+					const double a2q = a2v[i];
+					const double gamma = ph + dz * u2 + a1 * a1q + a2 * a2q + cs * u4v[i] + gov[i];
+					double sg, cg;
+					SINCOS(gamma, &sg, &cg);
+					const double ctfVal = -kf * sg;
+					const double err = ctfVal * Ap[i] - Bp[i];
+					cost += ctfVal * (err - Bp[i]);
+					const double dE_dGamma = -2.0 * err * kf * cg;
+					if (fitDz) sDz += dE_dGamma * u2;
+					if (fitA1) sA1 += dE_dGamma * a1q;
+					if (fitA2) sA2 += dE_dGamma * a2q;
+				}
+			}
+			sum[Defocus] = sDz;
+			sum[Astigmatism1] = sA1;
+			sum[Astigmatism2] = sA2;
+		}
+		else
+		{
+			const bool hasBf = (bf != 0.0);
+			for (size_t i = 0; i < n; i++)
+			{
+				const double u2 = u2v[i];
+				const double u4 = u4v[i];
+				const double a1q = a1v[i];
+				const double a2q = a2v[i];
+				const double bfq = bfv[i];
+				const double gamma = ph + dz * u2 + a1 * a1q + a2 * a2q + cs * u4 + gov[i];
 
-			const double gamma = ph
-					+ (dz + a1) * xu * xu + 2.0 * a2 * xu * yu + (dz - a1) * yu * yu
-					+ cs * q.u4 + q.gammaOffset;
+				const double env = hasBf ? exp(bf * bfq) : 1.0;
+				double sg, cg;
+				SINCOS(gamma, &sg, &cg);
+				const double ew = env * (-sg);
+				const double ctfVal = kf * ew;
+				const double err = ctfVal * Ap[i] - Bp[i];
+				cost += ctfVal * (err - Bp[i]);
 
-			// exp(-0.0) == 1
-			const double env = bf == 0.0? 1.0 : exp(-bf * u2 / 4.0);
-			const double wave = -sin(gamma);
-			const double ctfVal = kf * env * wave;
+				const double dE_dCtfVal = 2.0 * err;
+				const double dE_dGamma = dE_dCtfVal * kf * env * (-cg);
 
-			const Complex z_obs = zo[q.index];
-			const Complex z_pred = zp[q.index];
-			const Complex z_err = ctfVal * z_pred - z_obs;
-
-			cost += q.wght * z_err.norm();
-
-			const double dE_dCtfVal = 2.0 * q.wght * (
-						z_err.real * z_pred.real + z_err.imag * z_pred.imag);
-
-			const double dE_dGamma = dE_dCtfVal * kf * env * (-cos(gamma));
-
-			if (fit[Phase])               sum[Phase] += dE_dGamma;
-			if (fit[Defocus])             sum[Defocus] += dE_dGamma * u2;
-			if (fit[Astigmatism1])        sum[Astigmatism1] += dE_dGamma * q.a1;
-			if (fit[Astigmatism2])        sum[Astigmatism2] += dE_dGamma * 2.0 * xu * yu;
-			if (fit[SphericalAberration]) sum[SphericalAberration] += dE_dGamma * q.u4;
-			if (fit[BFactor])             sum[BFactor] += dE_dCtfVal * kf * wave * env * q.bf;
-			if (fit[ScaleFactor])         sum[ScaleFactor] += dE_dCtfVal * env * wave;
+				if (fitPh) sum[Phase] += dE_dGamma;
+				if (fitDz) sum[Defocus] += dE_dGamma * u2;
+				if (fitA1) sum[Astigmatism1] += dE_dGamma * a1q;
+				if (fitA2) sum[Astigmatism2] += dE_dGamma * a2q;
+				if (fitCs) sum[SphericalAberration] += dE_dGamma * u4;
+				if (fitBf) sum[BFactor] += dE_dCtfVal * ctfVal * bfq;
+				if (fitKf) sum[ScaleFactor] += dE_dCtfVal * ew;
+			}
 		}
 
 		costByParticle[p] = cost;

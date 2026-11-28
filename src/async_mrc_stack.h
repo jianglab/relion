@@ -159,12 +159,21 @@ private:
                 if (!f) REPORT_ERROR("cannot open " + st->tmp);
                 bool ok = fseek(f, 0, SEEK_END) == 0;
                 const size_t n = (size_t) st->x * st->y, page = n * gettypesize(dt);
-                std::vector<char> buf(page);
-                for (size_t i = 0; ok && i < chunk->size(); i++)
+                const size_t batch_target = 4u << 20;
+                const size_t batch_imgs = page > 0
+                    ? std::max<size_t>(1, std::min<size_t>(chunk->size(), batch_target / page))
+                    : chunk->size();
+                std::vector<char> buf(batch_imgs * std::max<size_t>(1, page));
+                for (size_t i = 0; ok && i < chunk->size(); i += batch_imgs)
                 {
-                    Image<RFLOAT> &im = *(*chunk)[i];
-                    im.castPage2Datatype(MULTIDIM_ARRAY(im.data), buf.data(), dt, n);
-                    ok = fwrite(buf.data(), page, 1, f) == 1;
+                    const size_t count = std::min(batch_imgs, chunk->size() - i);
+                    for (size_t j = 0; j < count; j++)
+                    {
+                        Image<RFLOAT> &im = *(*chunk)[i + j];
+                        im.castPage2Datatype(MULTIDIM_ARRAY(im.data), buf.data() + j * page, dt, n);
+                    }
+                    if (page > 0)
+                        ok = fwrite(buf.data(), count * page, 1, f) == 1;
                 }
                 if (fclose(f) != 0) ok = false;
                 if (!ok) REPORT_ERROR("error writing to " + st->tmp + " (disk full?)");

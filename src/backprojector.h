@@ -414,6 +414,7 @@ public:
 	 * Note the convolution is done on the complex array inside the transformer object!!
 	 */
 	void convoluteBlobRealSpace(FourierTransformer &transformer, bool do_mask = false);
+	void convoluteBlobRealSpace(FourierTransformer &transformer, bool do_mask, MultidimArray<RFLOAT> &Mconv);
 
 	/* Calculate the inverse FFT of Fin and windows the result to ori_size
 	 * Also pass the transformer, to prevent making and clearing a new one before clearing the one in reconstruct()

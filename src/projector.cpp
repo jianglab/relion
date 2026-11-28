@@ -34,15 +34,109 @@
 	#include <cufft.h>
 	#include "src/acc/cuda/gpu_mem_trace.h"
 	#include "src/acc/gpu_pool_plan.h"
-#elif _HIP_ENABLED
-	#include <hipfft/hipfft.h>
-#endif
-#if defined _CUDA_ENABLED || defined _HIP_ENABLED
 	#include <sys/types.h>
 	#include <sys/ipc.h>
 	#include <sys/sem.h>
+#elif _HIP_ENABLED
+	#include <hipfft/hipfft.h>
+	#include <sys/types.h>
+	#include <sys/ipc.h>
+	#include <sys/sem.h>
+#endif
+#if defined _CUDA_ENABLED || defined _HIP_ENABLED
 	#define SEMKEY 826976737978L /* key value for semget() */
 	#define PERMS 0666
+#endif
+
+#ifdef _CUDA_ENABLED
+namespace
+{
+struct GpuTransformCacheState
+{
+	int semid = -1;
+	bool sem_locked = false;
+	int devid = -1;
+	CudaCustomAllocator *allocator = nullptr;
+	size_t alloc_bytes = 0;
+
+	bool has_plan = false;
+	int ref_dim = 0;
+	int padoridim = 0;
+	cufftType cufft_type = CUFFT_D2Z;
+	bool have_lean_plan = false;
+	bool inplace_ft = false;
+	bool slab_ft = false;
+	int slab_dchunks = 1;
+	size_t ws_sz = 0;
+	cufftHandle lean_plan = 0;
+	cufftHandle slab_plan2d = 0;
+	cufftHandle slab_plan1d = 0;
+
+	void destroyPlans()
+	{
+		if (lean_plan) { cufftDestroy(lean_plan); lean_plan = 0; }
+		if (slab_plan2d) { cufftDestroy(slab_plan2d); slab_plan2d = 0; }
+		if (slab_plan1d) { cufftDestroy(slab_plan1d); slab_plan1d = 0; }
+		has_plan = have_lean_plan = inplace_ft = slab_ft = false;
+		slab_dchunks = 1;
+		ws_sz = 0;
+	}
+
+	void releaseAllocator()
+	{
+		if (allocator != nullptr)
+		{
+			delete allocator;
+			allocator = nullptr;
+			gpuMemTrace("reference transform cache: block given back");
+		}
+		alloc_bytes = 0;
+	}
+
+	void unlockSemaphore()
+	{
+		if (sem_locked && semid >= 0)
+		{
+			struct sembuf op_unlock[1] = { { 0, -1, (IPC_NOWAIT | SEM_UNDO) } };
+			semop(semid, &op_unlock[0], 1);
+			sem_locked = false;
+		}
+	}
+
+	void releaseAll()
+	{
+		destroyPlans();
+		releaseAllocator();
+		unlockSemaphore();
+	}
+
+	~GpuTransformCacheState() { releaseAll(); }
+};
+
+thread_local GpuTransformCacheState *tl_cft_cache = nullptr;
+} // anonymous namespace
+
+Projector::ScopedGpuTransformCache::ScopedGpuTransformCache(bool enable) : active_(false)
+{
+	if (enable && tl_cft_cache == nullptr)
+	{
+		tl_cft_cache = new GpuTransformCacheState();
+		active_ = true;
+	}
+}
+
+Projector::ScopedGpuTransformCache::~ScopedGpuTransformCache()
+{
+	if (active_ && tl_cft_cache != nullptr)
+	{
+		GpuTransformCacheState *c = tl_cft_cache;
+		tl_cft_cache = nullptr;
+		delete c;
+	}
+}
+#else
+Projector::ScopedGpuTransformCache::ScopedGpuTransformCache(bool) : active_(false) {}
+Projector::ScopedGpuTransformCache::~ScopedGpuTransformCache() {}
 #endif
 //#define DEBUG
 
@@ -235,6 +329,7 @@ void Projector::computeFourierTransformMap(
 		computeFourierTransformMapRect(vol_in, power_spectrum, current_size, do_gridding, do_heavy, min_ires, fourier_mask);
 		return;
 	}
+	const long int orig_vol_xinit = vol_in.xinit, orig_vol_yinit = vol_in.yinit, orig_vol_zinit = vol_in.zinit;
 
 	static const bool cft_tm = getenv("RELION_ITER_TIMING") != NULL;
 	std::vector<std::pair<const char*, double> > cft_laps;
@@ -331,7 +426,48 @@ void Projector::computeFourierTransformMap(
 	bool slab_ft = false;
 	int slab_dchunks = 1; // slab mode: the data array is read out of the device in this many planes-at-a-time chunks
 	cufftHandle slab_plan2d = 0, slab_plan1d = 0;
-	if(do_heavy && do_gpu && gpupool::leanMemoryMode() > 0)
+
+	GpuTransformCacheState *cache = tl_cft_cache;
+	const bool using_cache = (cache != nullptr && do_heavy && do_gpu);
+	bool reused_plan = false;
+	const char *slab_env = getenv("RELION_GPU_SLAB_FT"); // 1: always, 0: never
+	const char *chunk_env = getenv("RELION_GPU_DATA_CHUNK_MB"); // for tests
+	const int rmax_d = std::min(current_size < 0 ? ori_size / 2 : current_size / 2, ori_size / 2);
+	const size_t pad_d = 2 * (ROUND(padding_factor * rmax_d) + 1) + 1;
+	const size_t plane_bytes = (size_t)sizeof(Complex) * pad_d * (pad_d / 2 + 1);
+	const size_t chunk_bytes = ((chunk_env && atoi(chunk_env) > 0) ? (size_t)atoi(chunk_env) : (size_t)512) << 20;
+	const int dchunks = (int)std::max((size_t)1, ((size_t)plane_bytes * pad_d + chunk_bytes - 1) / chunk_bytes);
+	const size_t dplanes = (pad_d + dchunks - 1) / dchunks;
+	const size_t slab_read_out = plane_bytes * (dchunks > 1 ? dplanes : pad_d) +
+			(do_fourier_mask ? (size_t)sizeof(RFLOAT) * MULTIDIM_SIZE(*fourier_mask) : (size_t)0) + (size_t)sizeof(RFLOAT) * (ori_size + 2) * 2 + 65536;
+	auto computeSlabReq = [&](size_t s_ws) -> size_t {
+		const size_t N = (size_t)padoridim, Nh = (size_t)(padoridim / 2 + 1);
+		size_t sr = (size_t)sizeof(RFLOAT) * N * N * (2 * Nh) +
+				(size_t)sizeof(RFLOAT) * MULTIDIM_SIZE(vol_in) + std::max(s_ws, slab_read_out) + 4096;
+		return gpupool::transformPoolBytes(sr);
+	};
+
+	if (using_cache && cache->has_plan && cache->ref_dim == ref_dim && cache->padoridim == padoridim && cache->cufft_type == cufft_type)
+	{
+		int cur_dev = 0;
+		HANDLE_ERROR(cudaGetDevice(&cur_dev));
+		if (cache->devid != cur_dev)
+			cache->releaseAll();
+		else
+		{
+			reused_plan = true;
+			have_lean_plan = cache->have_lean_plan;
+			lean_plan = cache->lean_plan;
+			inplace_ft = cache->inplace_ft;
+			slab_ft = cache->slab_ft;
+			slab_dchunks = cache->slab_ft ? dchunks : 1;
+			slab_plan2d = cache->slab_plan2d;
+			slab_plan1d = cache->slab_plan1d;
+			ws_sz = cache->ws_sz;
+		}
+	}
+
+	if (!reused_plan && do_heavy && do_gpu && gpupool::leanMemoryMode() > 0)
 	{
 		if (cufftCreate(&lean_plan) == CUFFT_SUCCESS)
 		{
@@ -345,24 +481,34 @@ void Projector::computeFourierTransformMap(
 	}
 	if(do_heavy && do_gpu)
 	{
-		if (!have_lean_plan)
-			cufftEstimateMany(ref_dim, n, NULL, 0, 0, NULL, 0, 0, cufft_type, 1, &ws_sz);
-
-		// In-place transform (lean mode, 3D): the padded map is written with rows of 2*(N/2+1) numbers and
-		// the transform replaces it by its N*N*(N/2+1) complex numbers in the same memory, so the output
-		// array (as big as the input) is not needed. cuFFT gives the same numbers in place.
-		const char *inpl_env = getenv("RELION_GPU_LEAN_INPLACE_TRANSFORM");
-		inplace_ft = have_lean_plan && ref_dim == 3 && !(inpl_env && atoi(inpl_env) == 0);
-		const size_t Mpad_sz = inplace_ft ? (size_t)padoridim*(size_t)padoridim*(size_t)(2*(padoridim/2+1))
-		                                  : (size_t)MULTIDIM_SIZE(Mpad);
-		mem_req = (size_t)sizeof(RFLOAT)*MULTIDIM_SIZE(vol_in) +                   // dvol
-				  (inplace_ft ? (size_t)0 : (size_t)sizeof(Complex)*Faux_sz) +     // dFaux
-				  (size_t)sizeof(RFLOAT)*Mpad_sz +                                 // dMpad
-				  ws_sz + 4096;                                                    // workspace for cuFFT + extra space for alingment
-		if (have_lean_plan)
-			mem_req = gpupool::transformPoolBytes(mem_req);
+		if (slab_ft)
+		{
+			mem_req = computeSlabReq(ws_sz);
+		}
 		else
-			mem_req = mem_req * 1.5;
+		{
+			if (!reused_plan && !have_lean_plan)
+				cufftEstimateMany(ref_dim, n, NULL, 0, 0, NULL, 0, 0, cufft_type, 1, &ws_sz);
+
+			// In-place transform (lean mode, 3D): the padded map is written with rows of 2*(N/2+1) numbers and
+			// the transform replaces it by its N*N*(N/2+1) complex numbers in the same memory, so the output
+			// array (as big as the input) is not needed. cuFFT gives the same numbers in place.
+			if (!reused_plan)
+			{
+				const char *inpl_env = getenv("RELION_GPU_LEAN_INPLACE_TRANSFORM");
+				inplace_ft = have_lean_plan && ref_dim == 3 && !(inpl_env && atoi(inpl_env) == 0);
+			}
+			const size_t Mpad_sz = inplace_ft ? (size_t)padoridim*(size_t)padoridim*(size_t)(2*(padoridim/2+1))
+			                                  : (size_t)MULTIDIM_SIZE(Mpad);
+			mem_req = (size_t)sizeof(RFLOAT)*MULTIDIM_SIZE(vol_in) +                   // dvol
+					  (inplace_ft ? (size_t)0 : (size_t)sizeof(Complex)*Faux_sz) +     // dFaux
+					  (size_t)sizeof(RFLOAT)*Mpad_sz +                                 // dMpad
+					  ws_sz + 4096;                                                    // workspace for cuFFT + extra space for alingment
+			if (have_lean_plan)
+				mem_req = gpupool::transformPoolBytes(mem_req);
+			else
+				mem_req = mem_req * 1.5;
+		}
 	}
 
 	CudaCustomAllocator *allocator = NULL;
@@ -371,89 +517,153 @@ void Projector::computeFourierTransformMap(
 		int devid;
 		size_t mem_free, mem_tot;
 		cudaDeviceProp devProp;
-		if (semid <0)
+		if (using_cache)
 		{
 			HANDLE_ERROR(cudaGetDevice(&devid));
-			if ( ( semid=semget(SEMKEY+devid, 1, IPC_CREAT | PERMS )) < 0 )
-				REPORT_ERROR("semget error");
-		}
-		if (semop(semid, &op_lock[0], 2) < 0)
-			REPORT_ERROR("semop lock error");
-
-		HANDLE_ERROR(cudaMemGetInfo(&mem_free, &mem_tot));
-		gpuMemTrace("reference transform: before its buffers", (double) mem_req);
-		const char *slab_env = getenv("RELION_GPU_SLAB_FT"); // 1: always, 0: never
-		if(inplace_ft && !(slab_env && atoi(slab_env) == 0) && (mem_free <= mem_req || slab_env != NULL))
-		{
-			const int N = padoridim, Nh = padoridim/2 + 1;
-			int n2[2] = {N, N};
-			int inembed[2] = {N, 2*Nh}, onembed[2] = {N, Nh};
-			int n1[1] = {N};
-			cufftType t2 = (sizeof(RFLOAT) == sizeof(double)) ? CUFFT_D2Z : CUFFT_R2C;
-			cufftType t1 = (sizeof(RFLOAT) == sizeof(double)) ? CUFFT_Z2Z : CUFFT_C2C;
-			size_t ws2 = 0, ws1 = 0;
-			bool ok = cufftCreate(&slab_plan2d) == CUFFT_SUCCESS && cufftCreate(&slab_plan1d) == CUFFT_SUCCESS;
-			if (ok)
-			{
-				cufftSetAutoAllocation(slab_plan2d, 0);
-				cufftSetAutoAllocation(slab_plan1d, 0);
-				ok = cufftMakePlanMany(slab_plan2d, 2, n2, inembed, 1, N*2*Nh, onembed, 1, N*Nh, t2, 1, &ws2) == CUFFT_SUCCESS &&
-				     cufftMakePlanMany(slab_plan1d, 1, n1, n1, N*Nh, 1, n1, N*Nh, 1, t1, Nh, &ws1) == CUFFT_SUCCESS;
-			}
-			cudaGetLastError();
-			// The padded map stays while the transform is read out into the data array (and the Fourier mask is
-			// there): with the 3D plan the work area gives its room to those, here it does not, so count them
-			const int rmax_d = std::min(current_size < 0 ? ori_size / 2 : current_size / 2, ori_size / 2);
-			const size_t pad_d = 2 * (ROUND(padding_factor * rmax_d) + 1) + 1;
-			// The data array leaves the device in chunks of at most about 512 MB (planes of z), so a reference at
-			// the Nyquist limit (3.7 GB of data array at box 384, pad 2) does not need its whole size on the device
-			const size_t plane_bytes = (size_t)sizeof(Complex)*pad_d*(pad_d/2 + 1);
-			const char *chunk_env = getenv("RELION_GPU_DATA_CHUNK_MB"); // for tests
-			const size_t chunk_bytes = ((chunk_env && atoi(chunk_env) > 0) ? (size_t)atoi(chunk_env) : (size_t)512) << 20;
-			const int dchunks = (int) std::max((size_t)1, ((size_t)plane_bytes*pad_d + chunk_bytes - 1) / chunk_bytes);
-			const size_t dplanes = (pad_d + dchunks - 1) / dchunks;
-			const size_t read_out = plane_bytes*(dchunks > 1 ? dplanes : pad_d) +
-					  (do_fourier_mask ? (size_t)sizeof(RFLOAT)*MULTIDIM_SIZE(*fourier_mask) : (size_t)0) + (size_t)sizeof(RFLOAT)*(ori_size + 2)*2 + 65536;
-			size_t slab_req = (size_t)sizeof(RFLOAT)*(size_t)N*(size_t)N*(size_t)(2*Nh) +
-					  (size_t)sizeof(RFLOAT)*MULTIDIM_SIZE(vol_in) + std::max(std::max(ws1, ws2), read_out) + 4096; // dvol's room is a hole once it is freed
-			slab_req = gpupool::transformPoolBytes(slab_req);
-			if (ok && mem_free > slab_req && (slab_req < mem_req || slab_env != NULL))
-			{
-				slab_ft = true;
-				slab_dchunks = dchunks;
-				mem_req = slab_req;
-				ws_sz = std::max(ws1, ws2);
-				cufftDestroy(lean_plan);
-				have_lean_plan = false;
-			}
+			if (cache->semid >= 0 && cache->devid == devid)
+				semid = cache->semid;
 			else
 			{
-				if (slab_plan2d) cufftDestroy(slab_plan2d);
-				if (slab_plan1d) cufftDestroy(slab_plan1d);
-				slab_plan2d = slab_plan1d = 0;
+				cache->unlockSemaphore();
+				if (semid < 0 || cache->devid != devid)
+				{
+					if ( ( semid=semget(SEMKEY+devid, 1, IPC_CREAT | PERMS )) < 0 )
+						REPORT_ERROR("semget error");
+				}
+				cache->semid = semid;
+				cache->devid = devid;
 			}
-		}
-		if(mem_free > mem_req)
-		{
-			allocator = new CudaCustomAllocator(mem_req, (size_t)16);
-			gpuMemTrace("reference transform: block taken", (double) mem_req);
+			if (!cache->sem_locked)
+			{
+				if (semop(semid, &op_lock[0], 2) < 0)
+					REPORT_ERROR("semop lock error");
+				cache->sem_locked = true;
+			}
+			if (cache->allocator != nullptr && cache->devid == devid && cache->alloc_bytes >= mem_req && cache->allocator->getNumberOfAllocs() == 0)
+			{
+				allocator = cache->allocator;
+			}
+			else if (cache->allocator != nullptr)
+			{
+				cache->releaseAllocator();
+			}
 		}
 		else
 		{
-			if (have_lean_plan)
-				cufftDestroy(lean_plan);
-			// Say so once: the transform then runs on the CPU, much slower for large boxes
-			static bool reported = false;
-			if (!reported)
+			if (semid <0)
 			{
-				reported = true;
-				std::cout << " Reference Fourier transforms run on the CPU: the GPU has "
-				          << mem_free / (1024 * 1024) << " MB free and they need "
-				          << mem_req / (1024 * 1024) << " MB." << std::endl;
+				HANDLE_ERROR(cudaGetDevice(&devid));
+				if ( ( semid=semget(SEMKEY+devid, 1, IPC_CREAT | PERMS )) < 0 )
+					REPORT_ERROR("semget error");
 			}
-			do_gpu = false; // change local copy of do_gpu variable
-			if (semop(semid, &op_unlock[0], 1) < 0)
-				REPORT_ERROR("semop unlock error");
+			if (semop(semid, &op_lock[0], 2) < 0)
+				REPORT_ERROR("semop lock error");
+		}
+
+		if (allocator == NULL)
+		{
+			HANDLE_ERROR(cudaMemGetInfo(&mem_free, &mem_tot));
+			gpuMemTrace("reference transform: before its buffers", (double) mem_req);
+			if(!slab_ft && inplace_ft && !(slab_env && atoi(slab_env) == 0) && (mem_free <= mem_req || slab_env != NULL))
+			{
+				const int N = padoridim, Nh = padoridim/2 + 1;
+				int n2[2] = {N, N};
+				int inembed[2] = {N, 2*Nh}, onembed[2] = {N, Nh};
+				int n1[1] = {N};
+				cufftType t2 = (sizeof(RFLOAT) == sizeof(double)) ? CUFFT_D2Z : CUFFT_R2C;
+				cufftType t1 = (sizeof(RFLOAT) == sizeof(double)) ? CUFFT_Z2Z : CUFFT_C2C;
+				size_t ws2 = 0, ws1 = 0;
+				bool ok = cufftCreate(&slab_plan2d) == CUFFT_SUCCESS && cufftCreate(&slab_plan1d) == CUFFT_SUCCESS;
+				if (ok)
+				{
+					cufftSetAutoAllocation(slab_plan2d, 0);
+					cufftSetAutoAllocation(slab_plan1d, 0);
+					ok = cufftMakePlanMany(slab_plan2d, 2, n2, inembed, 1, N*2*Nh, onembed, 1, N*Nh, t2, 1, &ws2) == CUFFT_SUCCESS &&
+					     cufftMakePlanMany(slab_plan1d, 1, n1, n1, N*Nh, 1, n1, N*Nh, 1, t1, Nh, &ws1) == CUFFT_SUCCESS;
+				}
+				cudaGetLastError();
+				size_t slab_req = computeSlabReq(std::max(ws1, ws2));
+				if (ok && mem_free > slab_req && (slab_req < mem_req || slab_env != NULL))
+				{
+					slab_ft = true;
+					slab_dchunks = dchunks;
+					mem_req = slab_req;
+					ws_sz = std::max(ws1, ws2);
+					if (reused_plan && using_cache)
+						cache->destroyPlans();
+					else if (lean_plan)
+						cufftDestroy(lean_plan);
+					lean_plan = 0;
+					have_lean_plan = false;
+					reused_plan = false;
+				}
+				else
+				{
+					if (slab_plan2d) cufftDestroy(slab_plan2d);
+					if (slab_plan1d) cufftDestroy(slab_plan1d);
+					slab_plan2d = slab_plan1d = 0;
+				}
+			}
+			if(mem_free > mem_req)
+			{
+				allocator = new CudaCustomAllocator(mem_req, (size_t)16);
+				gpuMemTrace("reference transform: block taken", (double) mem_req);
+				if (using_cache)
+				{
+					cache->allocator = allocator;
+					cache->alloc_bytes = mem_req;
+					cache->devid = devid;
+				}
+			}
+			else
+			{
+				if (reused_plan && using_cache)
+					cache->destroyPlans();
+				else if (have_lean_plan && lean_plan)
+					cufftDestroy(lean_plan);
+				// Say so once: the transform then runs on the CPU, much slower for large boxes
+				static bool reported = false;
+				if (!reported)
+				{
+					reported = true;
+					std::cout << " Reference Fourier transforms run on the CPU: the GPU has "
+					          << mem_free / (1024 * 1024) << " MB free and they need "
+					          << mem_req / (1024 * 1024) << " MB." << std::endl;
+				}
+				do_gpu = false; // change local copy of do_gpu variable
+				if (using_cache)
+					cache->unlockSemaphore();
+				else if (semop(semid, &op_unlock[0], 1) < 0)
+					REPORT_ERROR("semop unlock error");
+			}
+		}
+		if (using_cache && do_gpu && slab_ft && !reused_plan)
+		{
+			cache->has_plan = true;
+			cache->devid = devid;
+			cache->ref_dim = ref_dim;
+			cache->padoridim = padoridim;
+			cache->cufft_type = cufft_type;
+			cache->have_lean_plan = false;
+			cache->inplace_ft = inplace_ft;
+			cache->slab_ft = true;
+			cache->slab_dchunks = slab_dchunks;
+			cache->ws_sz = ws_sz;
+			cache->slab_plan2d = slab_plan2d;
+			cache->slab_plan1d = slab_plan1d;
+		}
+		else if (using_cache && do_gpu && have_lean_plan && !reused_plan)
+		{
+			cache->has_plan = true;
+			cache->devid = devid;
+			cache->ref_dim = ref_dim;
+			cache->padoridim = padoridim;
+			cache->cufft_type = cufft_type;
+			cache->have_lean_plan = true;
+			cache->inplace_ft = inplace_ft;
+			cache->slab_ft = false;
+			cache->ws_sz = ws_sz;
+			cache->lean_plan = lean_plan;
 		}
 	}
 	AccPtrFactory ptrFactory(allocator);
@@ -464,7 +674,7 @@ void Projector::computeFourierTransformMap(
 	{
 		dvol.setHostPtr(MULTIDIM_ARRAY(vol_in));
 		dvol.accAlloc();
-		dvol.cpToDevice();
+		HANDLE_ERROR(pinnedBigUpload(~dvol, MULTIDIM_ARRAY(vol_in), dvol.getSize() * sizeof(RFLOAT)));
 	}
 #elif _HIP_ENABLED
 	static int semid = -1;
@@ -526,7 +736,7 @@ void Projector::computeFourierTransformMap(
 	{
 		dvol.setHostPtr(MULTIDIM_ARRAY(vol_in));
 		dvol.accAlloc();
-		dvol.cpToDevice();
+		HANDLE_ERROR(pinnedBigUpload(~dvol, MULTIDIM_ARRAY(vol_in), dvol.getSize() * sizeof(RFLOAT)));
 	}
 #endif
 	TIMING_TOC(TIMING_INIT1);
@@ -541,6 +751,8 @@ void Projector::computeFourierTransformMap(
 	// convolves the map with nothing and there is no interpolator transfer function
 	// to divide out.  Applying the trilinear sinc^2 pre-correction here would be an
 	// unmatched sharpening of the reference.
+	MultidimArray<RFLOAT> vol_gridded;
+	const MultidimArray<RFLOAT> *vol_src = &vol_in;
 	if (do_gridding && interpolator != FINUFFT)// && data_dim != 3)
 	{
 		if(do_heavy)
@@ -553,7 +765,11 @@ void Projector::computeFourierTransformMap(
 			}
 			else
 #endif
-			griddingCorrect(vol_in);
+			{
+				vol_gridded = vol_in;
+				griddingCorrect(vol_gridded);
+				vol_src = &vol_gridded;
+			}
 		else
 			vol_in.setXmippOrigin();
 	}
@@ -603,10 +819,10 @@ void Projector::computeFourierTransformMap(
 					memset(&DIRECT_A3D_ELEM(Mpad, k, 0, 0), 0, nyx * sizeof(RFLOAT));
 			}
 			#pragma omp parallel for num_threads(nt) if(nt > 1)
-			for (long int k = STARTINGZ(vol_in); k <= FINISHINGZ(vol_in); k++)
-			for (long int i = STARTINGY(vol_in); i <= FINISHINGY(vol_in); i++)
-			for (long int j = STARTINGX(vol_in); j <= FINISHINGX(vol_in); j++)
-				A3D_ELEM(Mpad, k, i, j) = A3D_ELEM(vol_in, k, i, j);
+			for (long int k = STARTINGZ(*vol_src); k <= FINISHINGZ(*vol_src); k++)
+			for (long int i = STARTINGY(*vol_src); i <= FINISHINGY(*vol_src); i++)
+			for (long int j = STARTINGX(*vol_src); j <= FINISHINGX(*vol_src); j++)
+				A3D_ELEM(Mpad, k, i, j) = A3D_ELEM(*vol_src, k, i, j);
 		}
 	}
 	TIMING_TOC(TIMING_PAD);
@@ -655,8 +871,11 @@ void Projector::computeFourierTransformMap(
 				if(err != CUFFT_SUCCESS)
 					REPORT_ERROR("failed to exec slab fft");
 				HANDLE_ERROR(cudaDeviceSynchronize());
-				cufftDestroy(slab_plan2d);
-				cufftDestroy(slab_plan1d);
+				if (!(using_cache && cache->slab_plan2d == slab_plan2d))
+				{
+					cufftDestroy(slab_plan2d);
+					cufftDestroy(slab_plan1d);
+				}
 				slab_ws.freeIfSet();
 			}
 			else
@@ -692,8 +911,23 @@ void Projector::computeFourierTransformMap(
 				err = cufftExecR2C(plan,(cufftReal*)~dMpad, (cufftComplex*)~dFaux);
 			if(err != CUFFT_SUCCESS)
 				REPORT_ERROR("failed to exec fft");
-			// deallocate plan, free mem
-			cufftDestroy(plan);
+			// deallocate plan, free mem (or retain in cache across classes)
+			if (using_cache && !have_lean_plan && !cache->has_plan)
+			{
+				cache->has_plan = true;
+				cache->ref_dim = ref_dim;
+				cache->padoridim = padoridim;
+				cache->cufft_type = cufft_type;
+				cache->have_lean_plan = true;
+				cache->inplace_ft = inplace_ft;
+				cache->slab_ft = false;
+				cache->ws_sz = std::max(ws_sz, fft_ws.getSize());
+				cache->lean_plan = plan;
+			}
+			else if (!(using_cache && cache->lean_plan == plan))
+			{
+				cufftDestroy(plan);
+			}
 			fft_ws.freeIfSet();
 			}
 
@@ -849,7 +1083,8 @@ void Projector::computeFourierTransformMap(
 					run_calcPowerSpectrum(~dFaux, padoridim, ~ddata, YSIZE(data), ~dpower_spectrum, ~dcounter,
 										  max_r2, min_r2, normfft, padding_factor, weight,
 										  ~dfourier_mask, fmXsz, fmYsz, fmZsz, do_fourier_mask, ref_dim == 3, (int) z0, (int) z1);
-					HANDLE_ERROR(cudaMemcpy(MULTIDIM_ARRAY(data) + z0 * data_plane_n, ~ddata, (z1 - z0) * data_plane_n * sizeof(Complex), cudaMemcpyDeviceToHost));
+					HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+					HANDLE_ERROR(pinnedBigDownload(MULTIDIM_ARRAY(data) + z0 * data_plane_n, ~ddata, (z1 - z0) * data_plane_n * sizeof(Complex)));
 				}
 #endif
 			}
@@ -858,8 +1093,13 @@ void Projector::computeFourierTransformMap(
 			run_calcPowerSpectrum(~dFaux, padoridim, ~ddata, YSIZE(data), ~dpower_spectrum, ~dcounter,
 								  max_r2, min_r2, normfft, padding_factor, weight,
 								  ~dfourier_mask, fmXsz, fmYsz, fmZsz, do_fourier_mask, ref_dim == 3);
+#ifdef _CUDA_ENABLED
+			HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+			HANDLE_ERROR(pinnedBigDownload(MULTIDIM_ARRAY(data), ~ddata, ddata.getSize() * sizeof(Complex)));
+#else
 			ddata.setHostPtr(MULTIDIM_ARRAY(data));
 			ddata.cpToHost();
+#endif
 			}
 			dfourier_mask.freeIfSet();
 		}
@@ -971,12 +1211,22 @@ void Projector::computeFourierTransformMap(
 
 	if(allocator != NULL)
 	{
-		delete allocator;
 #ifdef _CUDA_ENABLED
-		gpuMemTrace("reference transform: block given back");
+		if (using_cache && cache->allocator == allocator)
+		{
+			HANDLE_ERROR(cudaStreamSynchronize(0));
+			allocator->syncReadyEvents();
+		}
+		else
 #endif
-		if (semop(semid, &op_unlock[0], 1) < 0)
-			REPORT_ERROR("semop unlock error");
+		{
+			delete allocator;
+#ifdef _CUDA_ENABLED
+			gpuMemTrace("reference transform: block given back");
+#endif
+			if (semop(semid, &op_unlock[0], 1) < 0)
+				REPORT_ERROR("semop unlock error");
+		}
 	}
 #endif
 	cft_lap("free_unlock");
@@ -997,6 +1247,10 @@ void Projector::computeFourierTransformMap(
 		else
 			prepareFinufft();
 	}
+
+	vol_in.xinit = orig_vol_xinit;
+	vol_in.yinit = orig_vol_yinit;
+	vol_in.zinit = orig_vol_zinit;
 
 #ifdef PROJ_TIMING
 	proj_timer.printTimes(false);
@@ -1611,6 +1865,14 @@ void Projector::projectGradient(Volume<t2Vector<Complex>>& img_out, Matrix2D<RFL
 	// Go from the 2D slice coordinates to the 3D coordinates
 	Ainv *= (RFLOAT)padding_factor;  // take scaling into account directly
 
+	const RFLOAT a00 = Ainv(0,0), a01 = Ainv(0,1);
+	const RFLOAT a10 = Ainv(1,0), a11 = Ainv(1,1);
+	const RFLOAT a20 = Ainv(2,0), a21 = Ainv(2,1);
+	const long int sy = STARTINGY(data), sz = STARTINGZ(data);
+	const long int dx = data.xdim, dy = data.ydim, dz = data.zdim;
+	const long int yxdim = YXSIZE(data);
+	const Complex* __restrict dptr = MULTIDIM_ARRAY(data);
+
 	for (int yy = 0; yy < s; yy++)
 	{
 		const double y = yy < sh? yy : yy - s;
@@ -1623,9 +1885,9 @@ void Projector::projectGradient(Volume<t2Vector<Complex>>& img_out, Matrix2D<RFL
 			if (x*x + y2 > sh*sh) continue;
 
 			// Get logical coordinates in the 3D map
-			double xp = Ainv(0,0) * x + Ainv(0,1) * y;
-			double yp = Ainv(1,0) * x + Ainv(1,1) * y;
-			double zp = Ainv(2,0) * x + Ainv(2,1) * y;
+			double xp = a00 * x + a01 * y;
+			double yp = a10 * x + a11 * y;
+			double zp = a20 * x + a21 * y;
 
 			bool is_neg_x;
 
@@ -1645,38 +1907,35 @@ void Projector::projectGradient(Volume<t2Vector<Complex>>& img_out, Matrix2D<RFL
 
 			// Trilinear interpolation (with physical coords)
 			// Subtract STARTINGY and STARTINGZ to accelerate access to data (STARTINGX=0)
-			// In that way use DIRECT_A3D_ELEM, rather than A3D_ELEM
 
 			int x0 = FLOOR(xp);
 			double fx = xp - x0;
-			int x1 = x0 + 1;
 
 			int y0 = FLOOR(yp);
 			double fy = yp - y0;
-			y0 -=  STARTINGY(data);
-			int y1 = y0 + 1;
+			y0 -= sy;
 
 			int z0 = FLOOR(zp);
 			double fz = zp - z0;
-			z0 -= STARTINGZ(data);
-			int z1 = z0 + 1;
+			z0 -= sz;
 
-			if (x0 < 0 || x0+1 >= data.xdim
-			 || y0 < 0 || y0+1 >= data.ydim
-			 || z0 < 0 || z0+1 >= data.zdim)
+			if (x0 < 0 || x0+1 >= dx
+			 || y0 < 0 || y0+1 >= dy
+			 || z0 < 0 || z0+1 >= dz)
 			{
 				img_out(xx, yy, 0) = t2Vector<Complex>(Complex(0.0, 0.0), Complex(0.0, 0.0));
 				continue;
 			}
 
-			Complex v000 = DIRECT_A3D_ELEM(data, z0, y0, x0);
-			Complex v001 = DIRECT_A3D_ELEM(data, z0, y0, x1);
-			Complex v010 = DIRECT_A3D_ELEM(data, z0, y1, x0);
-			Complex v011 = DIRECT_A3D_ELEM(data, z0, y1, x1);
-			Complex v100 = DIRECT_A3D_ELEM(data, z1, y0, x0);
-			Complex v101 = DIRECT_A3D_ELEM(data, z1, y0, x1);
-			Complex v110 = DIRECT_A3D_ELEM(data, z1, y1, x0);
-			Complex v111 = DIRECT_A3D_ELEM(data, z1, y1, x1);
+			const long int base = z0 * yxdim + y0 * dx + x0;
+			const Complex v000 = dptr[base];
+			const Complex v001 = dptr[base + 1];
+			const Complex v010 = dptr[base + dx];
+			const Complex v011 = dptr[base + dx + 1];
+			const Complex v100 = dptr[base + yxdim];
+			const Complex v101 = dptr[base + yxdim + 1];
+			const Complex v110 = dptr[base + yxdim + dx];
+			const Complex v111 = dptr[base + yxdim + dx + 1];
 
 			Complex v00 = LIN_INTERP(fx, v000, v001);
 			Complex v10 = LIN_INTERP(fx, v100, v101);
@@ -1712,8 +1971,8 @@ void Projector::projectGradient(Volume<t2Vector<Complex>>& img_out, Matrix2D<RFL
 				grad3D.z = -(grad3D.z).conj();
 			}
 
-			img_out(xx, yy, 0).x = Ainv(0,0) * grad3D.x + Ainv(1,0) * grad3D.y + Ainv(2,0) * grad3D.z;
-			img_out(xx, yy, 0).y = Ainv(0,1) * grad3D.x + Ainv(1,1) * grad3D.y + Ainv(2,1) * grad3D.z;
+			img_out(xx, yy, 0).x = a00 * grad3D.x + a10 * grad3D.y + a20 * grad3D.z;
+			img_out(xx, yy, 0).y = a01 * grad3D.x + a11 * grad3D.y + a21 * grad3D.z;
 		} // endif x-loop
 	} // endif y-loop
 }

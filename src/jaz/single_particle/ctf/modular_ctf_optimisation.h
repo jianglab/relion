@@ -78,8 +78,15 @@ class ModularCtfOptimisation : public FastDifferentiableOptimization
 			const std::vector<Image<RFLOAT>>& frqWghByGroup;
 
 			// the pixels of each optics group with a non-zero frequency weight (the others add exactly 0)
-			struct Pixel { long index; double xu, yu, u2, u4, a1, bf, wght, gammaOffset; };
-			std::vector<std::vector<Pixel>> pixelsByGroup;
+			struct GroupPixels
+			{
+				std::vector<long> index;
+				std::vector<double> u2, u4, a1, a2, bf, wght, gammaOffset;
+			};
+			std::vector<GroupPixels> pixelsByGroup;
+			std::vector<int> particleOg;
+			std::vector<std::vector<double>> partA, partB;
+			std::vector<double> partC0;
 			
 					
 		inline double readParam(CtfParam param, const std::vector<double> &x, int p) const;

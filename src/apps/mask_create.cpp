@@ -293,14 +293,19 @@ int main(int argc, char *argv[])
 	try
 	{
 		prm.read(argc, argv);
+		relionFftwInitThreads();
+		if (prm.n_threads > 1)
+			relionFftwPlanThreads(prm.n_threads);
 		prm.run();
 	}
 	catch (RelionError XE)
 	{
 		std::cerr << XE;
 		//prm.usage();
+		relionFftwCleanupThreads();
 		return RELION_EXIT_FAILURE;
 	}
+	relionFftwCleanupThreads();
 	return RELION_EXIT_SUCCESS;
 }
 

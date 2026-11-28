@@ -113,6 +113,10 @@ public:
 	// Threads for the local resolution (-1: chosen from the cores and the free memory)
 	int locres_threads;
 
+	// Use GPU for local-resolution estimation (--gpu / --dont_gpu)
+	bool do_gpu, dont_gpu;
+	std::string gpu_ids;
+
 	//////// Sharpening
 
 	// Filename for the STAR-file with the MTF of the detector

@@ -71,6 +71,9 @@ class DifferentiableOptimization : public Optimization
 
 		virtual void grad(const std::vector<double>& x, std::vector<double>& gradDest, void* tempStorage) const = 0;
 
+		virtual bool supportsGradAndValue() const { return false; }
+		virtual double gradAndValue(const std::vector<double>& x, std::vector<double>& gradDest, void* tempStorage) const { return 0.0; }
+
 		void testGradient(const std::vector<double>& x, double eps);
 };
 

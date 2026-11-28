@@ -1115,6 +1115,11 @@ RFLOAT getKullbackLeiblerDivergence(MultidimArray<Complex> &Fimg,
 // Resize a map by windowing it's Fourier Transform
 void resizeMap(MultidimArray<RFLOAT> &img, int newsize);
 
+// Workspace-reusing variant of resizeMap (keeps FFTW plans cached across equal-sized calls)
+void resizeMap(MultidimArray<RFLOAT> &img, int newsize,
+               FourierTransformer &tf_fwd, FourierTransformer &tf_inv,
+               MultidimArray<Complex> &FT, MultidimArray<Complex> &FT2);
+
 // Apply a B-factor to a map (given it's Fourier transform)
 void applyBFactorToMap(MultidimArray<Complex> &FT, int ori_size, RFLOAT bfactor, RFLOAT angpix);
 

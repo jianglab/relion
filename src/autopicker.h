@@ -8,6 +8,8 @@
 #ifndef AUTOPICKER_H_
 #define AUTOPICKER_H_
 #include <stdlib.h>
+#include <unordered_map>
+#include <memory>
 #include "src/image.h"
 #include "src/multidim_array.h"
 #include "src/metadata_table.h"
@@ -328,6 +330,23 @@ public:
 
 	// Perform optimisation of the scale factor?
 	bool do_optimise_scale;
+
+	// O(1) lookup from micrograph name to row index in MDmic
+	std::unordered_map<std::string, long int> mic_to_md_idx;
+
+	// Per-rank CPU OpenMP thread budget
+	int nr_cpu_threads = 1;
+
+	// Persistent CPU transformers & buffers reused across micrographs
+	FourierTransformer mic_fwd_transformer_;
+	FourierTransformer mic_full_bwd_transformer_;
+	FourierTransformer work_bwd_transformer_;
+	std::vector<FourierTransformer> thr_work_transformers_;
+	MultidimArray<RFLOAT> persistent_Mfull_;
+	std::vector<std::vector<RFLOAT> > log_ey_, log_ex_;
+	int cached_log_workSize_ = -1;
+	int cached_log_micSize_ = -1;
+	RFLOAT cached_log_angpix_ = -1.;
 
 #ifdef TIMING
     Timer timer;

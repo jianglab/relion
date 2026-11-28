@@ -124,18 +124,21 @@ struct MRChead
 #define LITTLEVAX 3
 int systype()
 {
-	char *test = (char*)askMemory(12);
-	int *itest = (int*)test;
-	float *ftest = (float*)test;
-	memcpy(test, "jbh     ", 8);
+	static const int type = []() {
+		char test[8];
+		int itest0 = 0;
+		float ftest0 = 0.0f;
+		memcpy(test, "jbh     ", 8);
+		memcpy(&itest0, test, sizeof(int));
+		memcpy(&ftest0, test, sizeof(float));
 
-	int type = UNKNOWN_SYSTEM;
-	if (itest[0] == 1784834080 && fabs(ftest[0] - 6.84272e+25) < 1e+21)
-		type = BIGIEEE;
-	if (itest[0] == 543711850 && fabs(ftest[0] - 1.96837e-19) < 1e-23)
-		type = LITTLEIEEE;
-
-	freeMemory(test, 12);
+		int res = UNKNOWN_SYSTEM;
+		if (itest0 == 1784834080 && fabs(ftest0 - 6.84272e+25) < 1e+21)
+			res = BIGIEEE;
+		if (itest0 == 543711850 && fabs(ftest0 - 1.96837e-19) < 1e-23)
+			res = LITTLEIEEE;
+		return res;
+	}();
 
 	return type;
 }
@@ -257,7 +260,9 @@ int readMRC(long int img_select, bool isStack=false, const FileName &name="")
 	printf("DEBUG readMRC: Reading MRC file\n");
 #endif
 
-	MRChead *header = (MRChead*)askMemory(sizeof(MRChead));
+	MRChead header_buf;
+	memset(&header_buf, 0, sizeof(MRChead));
+	MRChead *header = &header_buf;
 	if (fread(header, MRCSIZE, 1, fimg) < 1)
 		REPORT_ERROR("rwMRC: error in reading header of image " + name);
 
@@ -265,7 +270,6 @@ int readMRC(long int img_select, bool isStack=false, const FileName &name="")
 
 	if (isStack && dataflag<0) // Don't read the individual header and the data if not necessary
 	{
-		freeMemory(header, sizeof(MRChead));
 		return 0;
 	}
 
@@ -275,8 +279,6 @@ int readMRC(long int img_select, bool isStack=false, const FileName &name="")
 	MD[0].write(std::cerr);
 #endif
 
-	freeMemory(header, sizeof(MRChead));
-
 	return readData(fimg, img_select, datatype, 0);
 }
 
@@ -285,7 +287,9 @@ int readMRC(long int img_select, bool isStack=false, const FileName &name="")
 */
 int writeMRC(long int img_select, bool isStack=false, const int mode=WRITE_OVERWRITE, const DataType datatype=Unknown_Type) /* TODO: add type */
 {
-	MRChead *header = (MRChead *) askMemory(sizeof(MRChead));
+	MRChead header_buf;
+	memset(&header_buf, 0, sizeof(MRChead));
+	MRChead *header = &header_buf;
 
 	// Map the parameters
 	strncpy(header->map, "MAP ", 4);
@@ -403,25 +407,29 @@ int writeMRC(long int img_select, bool isStack=false, const int mode=WRITE_OVERW
 
 	if (!MDMainHeader.isEmpty())
 	{
-		if (MDMainHeader.getValue(EMDL_IMAGE_STATS_MIN, aux))
-			header->amin = (float)aux;
-		else
-			header->amin = (float)data.computeMin();
+		const bool has_min = MDMainHeader.getValue(EMDL_IMAGE_STATS_MIN, aux);
+		double s_min = has_min ? (double)aux : 0.0;
+		const bool has_max = MDMainHeader.getValue(EMDL_IMAGE_STATS_MAX, aux);
+		double s_max = has_max ? (double)aux : 0.0;
+		const bool has_avg = MDMainHeader.getValue(EMDL_IMAGE_STATS_AVG, aux);
+		RFLOAT s_avg = has_avg ? aux : 0.0;
+		const bool has_std = MDMainHeader.getValue(EMDL_IMAGE_STATS_STDDEV, aux);
+		RFLOAT s_std = has_std ? aux : 0.0;
 
-		if (MDMainHeader.getValue(EMDL_IMAGE_STATS_MAX, aux))
-			header->amax = (float)aux;
-		else
-			header->amax = (float)data.computeMax();
-
-		if (MDMainHeader.getValue(EMDL_IMAGE_STATS_AVG, aux))
-			header->amean = (float)aux;
-		else
-			header->amean = (float)data.computeAvg();
-
-		if (MDMainHeader.getValue(EMDL_IMAGE_STATS_STDDEV, aux))
-			header->arms = (float)aux;
-		else
-			header->arms = (float)data.computeStddev();
+		if (!has_min || !has_max || !has_avg || !has_std)
+		{
+			RFLOAT c_avg = 0, c_std = 0;
+			T c_min = (T)0, c_max = (T)0;
+			data.computeStats(c_avg, c_std, c_min, c_max);
+			if (!has_min) s_min = (double)c_min;
+			if (!has_max) s_max = (double)c_max;
+			if (!has_avg) s_avg = c_avg;
+			if (!has_std) s_std = c_std;
+		}
+		header->amin  = (float)s_min;
+		header->amax  = (float)s_max;
+		header->amean = (float)s_avg;
+		header->arms  = (float)s_std;
 
 		//if(MDMainHeader.getValue(EMDL_ORIENT_ORIGIN_X, aux))
 		//	SAFESET(header->nxStart,(int)(aux-0.5));
@@ -507,16 +515,36 @@ int writeMRC(long int img_select, bool isStack=false, const int mode=WRITE_OVERW
 	// Write header
 	if(mode == WRITE_OVERWRITE || mode == WRITE_APPEND)
 		fwrite(header, MRCSIZE, 1, fimg);
-	freeMemory(header, sizeof(MRChead));
 
-	//write only once, ignore select_img
-	char* fdata = (char*)askMemory(datasize);
-	//think about writing in several chunks
+	// Write directly when T matches output_type; otherwise stream conversion in bounded (~4 MB) chunks
+	const bool direct_copy = (
+		(output_type == Float  && typeid(T) == typeid(float)) ||
+		(output_type == SShort && typeid(T) == typeid(short)) ||
+		(output_type == UShort && typeid(T) == typeid(unsigned short)));
+
+	size_t chunk_elems = 0;
+	char* fdata = NULL;
+	const size_t elem_size = gettypesize(output_type);
+	if (!direct_copy && datasize_n > 0)
+	{
+		chunk_elems = XMIPP_MIN(datasize_n, (size_t)1048576);
+		fdata = (char*)askMemory(chunk_elems * elem_size);
+	}
 
 	if ( NSIZE(data) == 1 && mode==WRITE_OVERWRITE)
 	{
-		castPage2Datatype(MULTIDIM_ARRAY(data), fdata, output_type, datasize_n);
-		fwrite(fdata, datasize, 1, fimg);
+		if (direct_copy)
+			fwrite(MULTIDIM_ARRAY(data), datasize, 1, fimg);
+		else
+		{
+			const T* src = MULTIDIM_ARRAY(data);
+			for (size_t off = 0; off < datasize_n; off += chunk_elems)
+			{
+				const size_t cnt = XMIPP_MIN(chunk_elems, datasize_n - off);
+				castPage2Datatype(const_cast<T*>(src + off), fdata, output_type, cnt);
+				fwrite(fdata, cnt * elem_size, 1, fimg);
+			}
+		}
 	}
 	else
 	{
@@ -529,8 +557,18 @@ int writeMRC(long int img_select, bool isStack=false, const int mode=WRITE_OVERW
 
 		for (size_t i = imgStart; i < imgEnd; i++)
 		{
-			castPage2Datatype(MULTIDIM_ARRAY(data) + i * datasize_n, fdata, output_type, datasize_n);
-			fwrite(fdata, datasize, 1, fimg);
+			const T* src = MULTIDIM_ARRAY(data) + i * datasize_n;
+			if (direct_copy)
+				fwrite(src, datasize, 1, fimg);
+			else
+			{
+				for (size_t off = 0; off < datasize_n; off += chunk_elems)
+				{
+					const size_t cnt = XMIPP_MIN(chunk_elems, datasize_n - off);
+					castPage2Datatype(const_cast<T*>(src + off), fdata, output_type, cnt);
+					fwrite(fdata, cnt * elem_size, 1, fimg);
+				}
+			}
 		}
 	}
 
@@ -538,7 +576,8 @@ int writeMRC(long int img_select, bool isStack=false, const int mode=WRITE_OVERW
 	fl.l_type = F_UNLCK;
 	fcntl(fileno(fimg), F_SETLK, &fl); /* unlocked */
 
-	freeMemory(fdata, datasize);
+	if (fdata != NULL)
+		freeMemory(fdata, chunk_elems * elem_size);
 
 	return(0);
 }

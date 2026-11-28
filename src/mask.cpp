@@ -103,46 +103,79 @@ void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine
 		boxShapeScales(vol, sx, sy, sz);
 
 
+	const RFLOAT radius2 = radius * radius;
+	const RFLOAT radius_p2 = radius_p * radius_p;
+	const long int xdim = XSIZE(vol), ydim = YSIZE(vol), zdim = ZSIZE(vol);
+	const long int sz0 = STARTINGZ(vol), sy0 = STARTINGY(vol), sx0 = STARTINGX(vol);
+	const int nt = relionBulkThreads(MULTIDIM_SIZE(vol));
+
 	if (Mnoise == NULL)
 	{
 		// Calculate average background value
-		FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
+		#pragma omp parallel for reduction(+:sum, sum_bg) num_threads(nt) if(nt > 1)
+		for (long int kz = 0; kz < zdim; kz++)
 		{
-			r = (follow_box_shape) ? sqrt((RFLOAT)(k*sz*k*sz + i*sy*i*sy + j*sx*j*sx)) : sqrt((RFLOAT)(k*k + i*i + j*j));
-			if (r < radius)
-				continue;
-			else if (r > radius_p)
+			const long int k = sz0 + kz;
+			const RFLOAT kz2 = follow_box_shape ? (k * sz) * (k * sz) : (RFLOAT)(k * k);
+			for (long int ky = 0; ky < ydim; ky++)
 			{
-				sum    += 1.;
-				sum_bg += A3D_ELEM(vol, k, i, j);
-			}
-			else
-			{
-				raisedcos = 0.5 + 0.5 * cos(PI * (radius_p - r) / cosine_width );
-				sum += raisedcos;
-				sum_bg += raisedcos * A3D_ELEM(vol, k, i, j);
+				const long int i = sy0 + ky;
+				const RFLOAT ky2z2 = kz2 + (follow_box_shape ? (i * sy) * (i * sy) : (RFLOAT)(i * i));
+				RFLOAT * __restrict vrow = &DIRECT_A3D_ELEM(vol, kz, ky, 0);
+				for (long int kx = 0; kx < xdim; kx++)
+				{
+					const long int j = sx0 + kx;
+					const RFLOAT r2 = ky2z2 + (follow_box_shape ? (j * sx) * (j * sx) : (RFLOAT)(j * j));
+					if (r2 < radius2)
+						continue;
+					else if (r2 > radius_p2)
+					{
+						sum    += 1.;
+						sum_bg += vrow[kx];
+					}
+					else
+					{
+						const RFLOAT r = sqrt(r2);
+						const RFLOAT rc = 0.5 + 0.5 * cos(PI * (radius_p - r) / cosine_width);
+						sum += rc;
+						sum_bg += rc * vrow[kx];
+					}
+				}
 			}
 		}
 		sum_bg /= sum;
 	}
 
 	// Apply noisy or average background value
-	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
+	#pragma omp parallel for num_threads(nt) if(nt > 1)
+	for (long int kz = 0; kz < zdim; kz++)
 	{
-		r = (follow_box_shape) ? sqrt((RFLOAT)(k*sz*k*sz + i*sy*i*sy + j*sx*j*sx)) : sqrt((RFLOAT)(k*k + i*i + j*j));
-		if (r < radius)
+		const long int k = sz0 + kz;
+		const RFLOAT kz2 = follow_box_shape ? (k * sz) * (k * sz) : (RFLOAT)(k * k);
+		for (long int ky = 0; ky < ydim; ky++)
 		{
-			continue;
-		}
-		else if (r > radius_p)
-		{
-			A3D_ELEM(vol, k, i, j) = (Mnoise == NULL) ? sum_bg : A3D_ELEM(*Mnoise, k, i, j);
-		}
-		else
-		{
-			raisedcos = 0.5 + 0.5 * cos(PI * (radius_p - r) / cosine_width );
-			RFLOAT add = (Mnoise == NULL) ?  sum_bg : A3D_ELEM(*Mnoise, k, i, j);
-			A3D_ELEM(vol, k, i, j) = (1 - raisedcos) * A3D_ELEM(vol, k, i, j) + raisedcos * add;
+			const long int i = sy0 + ky;
+			const RFLOAT ky2z2 = kz2 + (follow_box_shape ? (i * sy) * (i * sy) : (RFLOAT)(i * i));
+			RFLOAT * __restrict vrow = &DIRECT_A3D_ELEM(vol, kz, ky, 0);
+			const RFLOAT * __restrict nrow = (Mnoise != NULL) ? &DIRECT_A3D_ELEM(*Mnoise, kz, ky, 0) : NULL;
+			for (long int kx = 0; kx < xdim; kx++)
+			{
+				const long int j = sx0 + kx;
+				const RFLOAT r2 = ky2z2 + (follow_box_shape ? (j * sx) * (j * sx) : (RFLOAT)(j * j));
+				if (r2 < radius2)
+					continue;
+				const RFLOAT add = (nrow == NULL) ? sum_bg : nrow[kx];
+				if (r2 > radius_p2)
+				{
+					vrow[kx] = add;
+				}
+				else
+				{
+					const RFLOAT r = sqrt(r2);
+					const RFLOAT rc = 0.5 + 0.5 * cos(PI * (radius_p - r) / cosine_width);
+					vrow[kx] = (1 - rc) * vrow[kx] + rc * add;
+				}
+			}
 		}
 	}
 
@@ -453,12 +486,13 @@ void autoMask(MultidimArray<RFLOAT> &img_in, MultidimArray<RFLOAT> &msk_out,
 	msk_out.resize(img_in);
 
 	// A. Calculate initial binary mask based on density threshold
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(img_in)
+	const long int nr_vox = MULTIDIM_SIZE(img_in);
+	const RFLOAT * __restrict in_ptr = MULTIDIM_ARRAY(img_in);
+	RFLOAT * __restrict out_ptr = MULTIDIM_ARRAY(msk_out);
+	#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+	for (long int n = 0; n < nr_vox; n++)
 	{
-		if (DIRECT_MULTIDIM_ELEM(img_in, n) >= ini_mask_density_threshold)
-			DIRECT_MULTIDIM_ELEM(msk_out, n) = 1.;
-		else
-			DIRECT_MULTIDIM_ELEM(msk_out, n) = 0.;
+		out_ptr[n] = (in_ptr[n] >= ini_mask_density_threshold) ? 1. : 0.;
 	}
 
 	// B. extend/shrink initial binary mask. A voxel changes if a voxel of the other value lies closer than
@@ -478,18 +512,22 @@ void autoMask(MultidimArray<RFLOAT> &img_in, MultidimArray<RFLOAT> &msk_out,
 		RFLOAT extend_ini_mask2 = extend_ini_mask * extend_ini_mask;
 		// Sources: voxels that are one (extending) or zero (shrinking)
 		msk_cp.resize(msk_out);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(msk_out)
+		RFLOAT * __restrict cp_ptr = MULTIDIM_ARRAY(msk_cp);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
 		{
-			const RFLOAT m = DIRECT_MULTIDIM_ELEM(msk_out, n);
-			DIRECT_MULTIDIM_ELEM(msk_cp, n) = (extend ? m > 0.999 : m < 0.001) ? 1. : 0.;
+			const RFLOAT m = out_ptr[n];
+			cp_ptr[n] = (extend ? m > 0.999 : m < 0.001) ? 1. : 0.;
 		}
 		MultidimArray<RFLOAT> d2;
 		autoMaskSquaredDistance(msk_cp, d2, n_threads);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(msk_out)
+		const RFLOAT * __restrict d2_ptr = MULTIDIM_ARRAY(d2);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
 		{
-			RFLOAT &m = DIRECT_MULTIDIM_ELEM(msk_out, n);
-			if ((extend ? m < 0.001 : m > 0.999) && DIRECT_MULTIDIM_ELEM(d2, n) < extend_ini_mask2)
-				m = extend ? 1. : 0.;
+			const RFLOAT m = out_ptr[n];
+			if ((extend ? m < 0.001 : m > 0.999) && d2_ptr[n] < extend_ini_mask2)
+				out_ptr[n] = extend ? 1. : 0.;
 		}
 	}
 
@@ -501,16 +539,36 @@ void autoMask(MultidimArray<RFLOAT> &img_in, MultidimArray<RFLOAT> &msk_out,
 
 		RFLOAT width_soft_mask_edge2 = width_soft_mask_edge * width_soft_mask_edge;
 		msk_cp.resize(msk_out);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(msk_out)
-			DIRECT_MULTIDIM_ELEM(msk_cp, n) = (DIRECT_MULTIDIM_ELEM(msk_out, n) > 0.999) ? 1. : 0.;
+		RFLOAT * __restrict cp_ptr = MULTIDIM_ARRAY(msk_cp);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+			cp_ptr[n] = (out_ptr[n] > 0.999) ? 1. : 0.;
 		MultidimArray<RFLOAT> d2;
 		autoMaskSquaredDistance(msk_cp, d2, n_threads);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(msk_out)
+		const RFLOAT * __restrict d2_ptr = MULTIDIM_ARRAY(d2);
+		const long int max_d2 = (long int)floor(width_soft_mask_edge2);
+		std::vector<RFLOAT> edge_lut;
+		if (max_d2 >= 0 && max_d2 <= 1048576)
 		{
-			RFLOAT &m = DIRECT_MULTIDIM_ELEM(msk_out, n);
-			const RFLOAT min_r2 = DIRECT_MULTIDIM_ELEM(d2, n);
-			if (m < 0.001 && min_r2 < width_soft_mask_edge2)
-				m = 0.5 + 0.5 * cos( PI * sqrt(min_r2) / width_soft_mask_edge);
+			edge_lut.resize(max_d2 + 1, 0.);
+			for (long int d2i = 0; d2i <= max_d2; d2i++)
+			{
+				if ((RFLOAT)d2i < width_soft_mask_edge2)
+					edge_lut[d2i] = 0.5 + 0.5 * cos(PI * sqrt((RFLOAT)d2i) / width_soft_mask_edge);
+			}
+		}
+		const bool use_lut = !edge_lut.empty();
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+		{
+			const RFLOAT min_r2 = d2_ptr[n];
+			if (out_ptr[n] < 0.001 && min_r2 < width_soft_mask_edge2)
+			{
+				if (use_lut)
+					out_ptr[n] = edge_lut[(long int)(min_r2 + 0.5)];
+				else
+					out_ptr[n] = 0.5 + 0.5 * cos(PI * sqrt(min_r2) / width_soft_mask_edge);
+			}
 		}
 	}
 

@@ -36,16 +36,21 @@ void TiltHelper::updateTiltShift(
         Image<RFLOAT>& wDest)
 {
     const long w = prediction.data.xdim;
+    const Complex* __restrict prdRow = &DIRECT_A2D_ELEM(prediction.data, y, 0);
+    const Complex* __restrict obsRow = &DIRECT_A2D_ELEM(observation.data, y, 0);
+    const RFLOAT* __restrict ctfRow = &DIRECT_A2D_ELEM(ctfImg.data, y, 0);
+    Complex* __restrict xyRow = &DIRECT_A2D_ELEM(xyDest.data, y, 0);
+    RFLOAT* __restrict wRow = &DIRECT_A2D_ELEM(wDest.data, y, 0);
 
     for (long x = 0; x < w; x++)
     {
-        Complex vx = DIRECT_A2D_ELEM(prediction.data, y, x);
-        Complex vy = DIRECT_A2D_ELEM(observation.data, y, x);
+        const Complex vx = prdRow[x];
+        const Complex vy = obsRow[x];
+        const RFLOAT c = ctfRow[x];
 
-        RFLOAT c = ctfImg(y,x);
-
-        DIRECT_A2D_ELEM(xyDest.data, y, x) += c * vx.conj() * vy;
-        DIRECT_A2D_ELEM(wDest.data, y, x) += c * c * vx.norm();
+        xyRow[x].real += c * (vx.real * vy.real + vx.imag * vy.imag);
+        xyRow[x].imag += c * (vx.real * vy.imag - vx.imag * vy.real);
+        wRow[x] += c * c * (vx.real * vx.real + vx.imag * vx.imag);
     }
 }
 

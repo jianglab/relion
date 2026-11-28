@@ -19,7 +19,9 @@
  ***************************************************************************/
 #include "src/virtual_movie_averages.h"
 #include "src/ctffind_runner.h"
+#include <atomic>
 #include <cmath>
+#include <omp.h>
 
 #ifdef _CUDA_ENABLED
 #include "src/acc/cuda/cuda_mem_utils.h"
@@ -341,6 +343,7 @@ void CtffindRunner::initialise(bool is_leader)
 			if (newdir != prevdir)
 			{
 				mktree(newdir);
+				prevdir = newdir;
 			}
 			symlink(currdir + myname, output);
 		}
@@ -377,41 +380,83 @@ void CtffindRunner::run()
 		}
 
 		std::vector<std::string> allmicnames;
-		for (long int imic = 0; imic < fn_micrographs.size(); imic++)
+		const long int n_mics = fn_micrographs.size();
+		const EMDLabel mylabel = (is_tomo) ? EMDL_TOMO_TILT_SERIES_PIXEL_SIZE : EMDL_MICROGRAPH_PIXEL_SIZE;
+
+		struct MicCtfParams { RFLOAT cs, voltage, q0, angpix; };
+		std::vector<MicCtfParams> micParams(n_mics);
+		for (long int imic = 0; imic < n_mics; imic++)
 		{
-
-			// Abort through the pipeline_control system
-			if (pipeline_control_check_abort_job())
-				exit(RELION_EXIT_ABORTED);
-
-			// Get angpix and voltage from the optics groups:
-			obsModel.opticsMdt.getValue(EMDL_CTF_CS, Cs, optics_group_micrographs[imic]-1);
-			obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, Voltage, optics_group_micrographs[imic]-1);
-			obsModel.opticsMdt.getValue(EMDL_CTF_Q0, AmplitudeConstrast, optics_group_micrographs[imic]-1);
-            EMDLabel mylabel = (is_tomo) ? EMDL_TOMO_TILT_SERIES_PIXEL_SIZE : EMDL_MICROGRAPH_PIXEL_SIZE;
-            obsModel.opticsMdt.getValue(mylabel, angpix, optics_group_micrographs[imic]-1);
-
 			// CTFFIND reads the micrograph file itself; a virtual movie average
 			// holds no pixels (its power spectrum from MotionCorr does)
 			if (!use_given_ps && vmovies::isVirtualMovieAverageFile(fn_micrographs[imic]))
 				REPORT_ERROR(fn_micrographs[imic] + " is a virtual movie average, which CTFFIND cannot read. "
 				             "Use the power spectra from motion correction (--use_given_ps; \"Use power spectra from MotionCorr job?\" in the GUI).");
 
-			if (is_ctffind4)
+			const int og = optics_group_micrographs[imic] - 1;
+			obsModel.opticsMdt.getValue(EMDL_CTF_CS, micParams[imic].cs, og);
+			obsModel.opticsMdt.getValue(EMDL_CTF_VOLTAGE, micParams[imic].voltage, og);
+			obsModel.opticsMdt.getValue(EMDL_CTF_Q0, micParams[imic].q0, og);
+			obsModel.opticsMdt.getValue(mylabel, micParams[imic].angpix, og);
+		}
+
+		if (is_ctffind4 && nr_threads > 1 && n_mics > 1)
+		{
+			std::atomic<long int> nr_done(0);
+			std::atomic<bool> aborted(false);
+
+			#pragma omp parallel for schedule(dynamic, 1) num_threads(nr_threads)
+			for (long int imic = 0; imic < n_mics; imic++)
 			{
-				executeCtffind4(imic);
-			}
-			else
-			{
-				executeCtffind3(imic);
+				if (aborted.load(std::memory_order_relaxed)) continue;
+				if (pipeline_control_check_abort_job())
+				{
+					aborted.store(true, std::memory_order_relaxed);
+					continue;
+				}
+
+				const MicCtfParams& mp = micParams[imic];
+				executeCtffind4ForMic(imic, mp.cs, mp.voltage, mp.q0, mp.angpix);
+
+				const long int done = ++nr_done;
+				if (verb > 0 && done % barstep == 0)
+				{
+					#pragma omp critical(ctffind_progress)
+					progress_bar(done);
+				}
 			}
 
-			if (verb > 0 && imic % barstep == 0)
-				progress_bar(imic);
+			if (aborted.load()) exit(RELION_EXIT_ABORTED);
+		}
+		else
+		{
+			for (long int imic = 0; imic < n_mics; imic++)
+			{
+				// Abort through the pipeline_control system
+				if (pipeline_control_check_abort_job())
+					exit(RELION_EXIT_ABORTED);
+
+				Cs = micParams[imic].cs;
+				Voltage = micParams[imic].voltage;
+				AmplitudeConstrast = micParams[imic].q0;
+				angpix = micParams[imic].angpix;
+
+				if (is_ctffind4)
+				{
+					executeCtffind4ForMic(imic, Cs, Voltage, AmplitudeConstrast, angpix);
+				}
+				else
+				{
+					executeCtffind3(imic);
+				}
+
+				if (verb > 0 && imic % barstep == 0)
+					progress_bar(imic);
+			}
 		}
 
 		if (verb > 0)
-			progress_bar(fn_micrographs.size());
+			progress_bar(n_mics);
 	}
 
 	joinCtffindResults();
@@ -426,15 +471,47 @@ void CtffindRunner::joinCtffindResults()
 		init_progress_bar(fn_micrographs_all.size());
 	}
 
-	MetaDataTable MDctf;
-	for (long int imic = 0; imic < fn_micrographs_all.size(); imic++)
+	const long int n_all = fn_micrographs_all.size();
+	const EMDLabel mylabel = (is_tomo) ? EMDL_TOMO_TILT_SERIES_PIXEL_SIZE : EMDL_MICROGRAPH_PIXEL_SIZE;
+	std::vector<RFLOAT> allAngpix(n_all, angpix);
+	if (use_given_ps && do_extra_ice && obsModel.opticsMdt.containsLabel(mylabel))
 	{
-		FileName fn_microot = fn_micrographs_ctf_all[imic].withoutExtension();
-		RFLOAT defU, defV, defAng, CC, HT, CS, AmpCnst, XMAG, DStep;
+		for (long int imic = 0; imic < n_all; imic++)
+		{
+			obsModel.opticsMdt.getValue(mylabel, allAngpix[imic], optics_group_micrographs_all[imic] - 1);
+		}
+	}
+
+	struct CtfJoinRow
+	{
+		bool ok = false;
+		FileName fn_microot;
+		RFLOAT defU = 0, defV = 0, defAng = 0, CC = 0, HT = 0, CS = 0, AmpCnst = 0, XMAG = 0, DStep = 0;
 		RFLOAT maxres = -999., valscore = -999., phaseshift = -999., icering = 0., icepowerfrac = 0., icekurtosis = 0.;
-		bool has_this_ctf = getCtffindResults(fn_microot, defU, defV, defAng, CC,
-		                                      HT, CS, AmpCnst, XMAG, DStep, maxres, valscore, phaseshift,
-                                              icering, icepowerfrac, icekurtosis);
+	};
+	std::vector<CtfJoinRow> rows(n_all);
+
+	const int join_threads = std::min(omp_get_max_threads(), std::max(nr_threads, (n_all >= 16) ? 4 : 1));
+	#pragma omp parallel for schedule(dynamic, 1) num_threads(join_threads) if(join_threads > 1 && n_all >= 8)
+	for (long int imic = 0; imic < n_all; imic++)
+	{
+		CtfJoinRow& r = rows[imic];
+		r.fn_microot = fn_micrographs_ctf_all[imic].withoutExtension();
+		r.ok = getCtffindResults(r.fn_microot, r.defU, r.defV, r.defAng, r.CC,
+		                         r.HT, r.CS, r.AmpCnst, r.XMAG, r.DStep, r.maxres, r.valscore, r.phaseshift,
+		                         r.icering, r.icepowerfrac, r.icekurtosis, true, allAngpix[imic]);
+	}
+
+	MetaDataTable MDctf;
+	for (long int imic = 0; imic < n_all; imic++)
+	{
+		const CtfJoinRow& r = rows[imic];
+		const FileName& fn_microot = r.fn_microot;
+		const RFLOAT defU = r.defU, defV = r.defV, defAng = r.defAng;
+		RFLOAT CC = r.CC;
+		const RFLOAT maxres = r.maxres, valscore = r.valscore, phaseshift = r.phaseshift;
+		const RFLOAT icering = r.icering, icepowerfrac = r.icepowerfrac, icekurtosis = r.icekurtosis;
+		const bool has_this_ctf = r.ok;
 
 		if (!has_this_ctf)
 		{
@@ -690,6 +767,11 @@ void CtffindRunner::executeCtffind3(long int imic)
 
 void CtffindRunner::executeCtffind4(long int imic)
 {
+	executeCtffind4ForMic(imic, Cs, Voltage, AmplitudeConstrast, angpix);
+}
+
+void CtffindRunner::executeCtffind4ForMic(long int imic, RFLOAT my_cs, RFLOAT my_voltage, RFLOAT my_q0, RFLOAT my_angpix)
+{
 	FileName fn_mic = getOutputFileWithNewUniqueDate(fn_micrographs_ctf[imic], fn_out);
 	FileName fn_root = fn_mic.withoutExtension();
 	FileName fn_script = fn_root + "_ctffind4.com";
@@ -728,7 +810,7 @@ void CtffindRunner::executeCtffind4(long int imic)
 		fn_mic_win = fn_mic;
 
 	int ctf_boxsize = box_size;
-	RFLOAT ctf_angpix = angpix;
+	RFLOAT ctf_angpix = my_angpix;
 	if (use_given_ps)
 	{
 		Image<RFLOAT> Ihead;
@@ -759,9 +841,9 @@ void CtffindRunner::executeCtffind4(long int imic)
 	// line 2: diagnostic .ctf image
 	fh << fn_ctf << std::endl;
 	fh << ctf_angpix << std::endl;
-	fh << Voltage << std::endl;
-	fh << Cs << std::endl;
-	fh << AmplitudeConstrast << std::endl;
+	fh << my_voltage << std::endl;
+	fh << my_cs << std::endl;
+	fh << my_q0 << std::endl;
 	fh << ctf_boxsize << std::endl;
 	fh << resol_min << std::endl;
 	fh << my_maxres << std::endl;
@@ -819,12 +901,12 @@ void CtffindRunner::executeCtffind4(long int imic)
 
 bool CtffindRunner::getCtffindResults(FileName fn_microot, RFLOAT &defU, RFLOAT &defV, RFLOAT &defAng, RFLOAT &CC,
 		RFLOAT &HT, RFLOAT &CS, RFLOAT &AmpCnst, RFLOAT &XMAG, RFLOAT &DStep,
-		RFLOAT &maxres, RFLOAT &valscore, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis, bool do_warn)
+		RFLOAT &maxres, RFLOAT &valscore, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis, bool do_warn, RFLOAT my_angpix)
 {
 	if (is_ctffind4)
 	{
 		return getCtffind4Results(fn_microot, defU, defV, defAng, CC, HT, CS, AmpCnst, XMAG, DStep,
-		                          maxres, phaseshift, icering, icepowerfrac, icekurtosis, do_warn);
+		                          maxres, phaseshift, icering, icepowerfrac, icekurtosis, do_warn, my_angpix);
 	}
 	else
 	{
@@ -911,7 +993,7 @@ bool CtffindRunner::getCtffind3Results(FileName fn_microot, RFLOAT &defU, RFLOAT
 
 bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT &defV, RFLOAT &defAng, RFLOAT &CC,
 		RFLOAT &HT, RFLOAT &CS, RFLOAT &AmpCnst, RFLOAT &XMAG, RFLOAT &DStep,
-		RFLOAT &maxres, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis, bool do_warn)
+		RFLOAT &maxres, RFLOAT &phaseshift, RFLOAT &icering, RFLOAT &icepowerfrac, RFLOAT &icekurtosis, bool do_warn, RFLOAT my_angpix)
 {
 	FileName fn_root = getOutputFileWithNewUniqueDate(fn_microot, fn_out);
 	FileName fn_log = fn_root + "_ctffind4.log";
@@ -1043,7 +1125,8 @@ bool CtffindRunner::getCtffind4Results(FileName fn_microot, RFLOAT &defU, RFLOAT
         FileName fn_ps = fn_root + ".mrc";
         Ips.read(fn_ps);
         Ips().setXmippOrigin();
-        RFLOAT mysize = angpix*XSIZE(Ips());
+        const RFLOAT eff_angpix = (my_angpix > 0.) ? my_angpix : angpix;
+        RFLOAT mysize = eff_angpix*XSIZE(Ips());
         RFLOAT r2ice_min=4*mysize*mysize/(3.9*3.9);
         RFLOAT r2ice_max=4*mysize*mysize/(3.5*3.5);
         RFLOAT r2low_min=4*mysize*mysize/(4.5*4.5);

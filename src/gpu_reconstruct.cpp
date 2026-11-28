@@ -62,12 +62,25 @@ bool helicalSymmetryFourier(const HelixFourierInput &, RFLOAT *, RFLOAT *, std::
 	return false;
 }
 
+int selectDevice(const std::string &, int, int)
+{
+	return -1;
+}
+
 bool helicalSymmetryRealSpace(const HelixRealSpaceInput &, RFLOAT *, std::string &reason, bool &bad)
 {
 	bad = false;
 	reason = "this build has no CUDA";
 	return false;
 }
+
+ScopedReconstructCache::ScopedReconstructCache(bool) : active_(false) {}
+ScopedReconstructCache::~ScopedReconstructCache() {}
+ScopedHelixRealSpaceCache::ScopedHelixRealSpaceCache(bool) : active_(false) {}
+ScopedHelixRealSpaceCache::~ScopedHelixRealSpaceCache() {}
+ScopedDownsampleCache::ScopedDownsampleCache(bool) : active_(false) {}
+ScopedDownsampleCache::~ScopedDownsampleCache() {}
+bool downsampleVolume3D(const RFLOAT *, int, RFLOAT *, int) { return false; }
 #endif
 
 }

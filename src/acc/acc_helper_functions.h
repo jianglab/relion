@@ -332,6 +332,30 @@ inline bool gpuBpShift()
 	return on;
 }
 
+// RELION_GPU_FINE_SEPARABLE: fine-pass 2D difference kernel reads separable 1D phase factors
+// (g_shx, g_shy) instead of calling sincosf per (pixel, orientation, translation); on by default
+inline bool gpuFineSeparable()
+{
+	static const bool on = gpuswitch::on("RELION_GPU_FINE_SEPARABLE");
+	return on;
+}
+
+// RELION_GPU_BP_SEPARABLE: 3D back-projection of 2D data reads separable 1D phase factors
+// (g_shx, g_shy) shared with wavg_sum instead of calling sincosf or allocating a 2D table; on by default
+inline bool gpuBpSeparable()
+{
+	static const bool on = gpuswitch::on("RELION_GPU_BP_SEPARABLE");
+	return on;
+}
+
+// RELION_GPU_BP_DIVHOIST: compacted 3D back-projection divides significant weights by weight_norm
+// once per translation instead of per pixel; on by default
+inline bool gpuBpDivHoist()
+{
+	static const bool on = gpuswitch::on("RELION_GPU_BP_DIVHOIST");
+	return on;
+}
+
 // RELION_GPU_FUSED_WEIGHTS: the significance pass of the weights (maximum, exponentiation, sort,
 // scan, threshold, significance mask) as a few launches and one copy instead of about fifty driver
 // calls per pass (see CudaKernels::fusedWeightPass); on by default, RELION_GPU_FUSED_WEIGHTS=0 turns it off
@@ -364,13 +388,10 @@ inline int gpuAsyncFine()
 
 // RELION_GPU_FUSED_PREP=1: the particle preparation with fewer round trips to the host: the
 // background value of the soft mask is made on the GPU from the partial sums, and the wait
-// after the mask is left to the copy that follows; off by default while it is validated
+// after the mask is left to the copy that follows; on by default, =0 or =off disables it
 inline bool gpuFusedPrep()
 {
-	static const bool on = []() {
-		const char *e = getenv("RELION_GPU_FUSED_PREP");
-		return e && std::string(e) != "0" && std::string(e) != "off";
-	}();
+	static const bool on = gpuswitch::on("RELION_GPU_FUSED_PREP");
 	return on;
 }
 
@@ -432,6 +453,17 @@ void minOnDeviceBatched(const std::vector<std::pair<const XFLOAT *, size_t> > &a
 #endif
 
 #ifdef _CUDA_ENABLED
+// Precompute 1D separable Fourier shift tables (shx[t * imgX + x], shy[t * imgY + y]) on shx.getStream().
+void buildSeparableShiftTables(
+		XFLOAT *trans_x,
+		XFLOAT *trans_y,
+		AccPtr<float2> &shx,
+		AccPtr<float2> &shy,
+		unsigned long translation_num,
+		int imgX,
+		int imgY,
+		int maxR);
+
 // All classes' mappings in one launch (RELION_GPU_CLASS_BATCH, default; the per-class
 // launch is 2-3 us of GPU and a launch for each of up to 100 classes per particle)
 void mapAllWeightsToMweightsBatched(
@@ -459,7 +491,9 @@ void runWavgKernelBatched(
 		XFLOAT part_scale,
 		bool refs_are_ctf_corrected,
 		bool data_is_3D,
-		AccPtr<char> &table);
+		AccPtr<char> &table,
+		const void *pre_shx = NULL,
+		const void *pre_shy = NULL);
 
 void runDiff2KernelFineBatched(
 		std::vector<FineClassJob> &jobs,
@@ -531,7 +565,9 @@ void runBackProjectKernelBatched(
 		bool ctf_premultiplied,
 		AccPtr<char> &table,
 		const std::vector<unsigned> *slots = NULL,
-		const BPAccumView *accum = NULL);
+		const BPAccumView *accum = NULL,
+		const void *pre_shx = NULL,
+		const void *pre_shy = NULL);
 
 void runBackProjectAccumFlush(
 		AccBackprojector &BP,

@@ -163,3 +163,60 @@ TEST_CASE("GpMotionFit on correlation windows matches whole maps inside the wind
 	cropped.f(far);
 	REQUIRE(cropped.leftWindow());
 }
+
+TEST_CASE("GpMotionFit gradAndValue matches f and grad and supports float CCs and unitBasis", "[gp_motion_fit]")
+{
+	const int pc = 12, fc = 6, s = 32;
+	const Problem pr = makeProblem(pc, fc, s);
+
+	std::vector<std::vector<Image<float>>> cc_f(pc);
+	std::vector<std::vector<Image<double>>> cc_exact_from_f(pc);
+	for (int p = 0; p < pc; p++)
+	{
+		cc_f[p].resize(fc);
+		cc_exact_from_f[p].resize(fc);
+		for (int f = 0; f < fc; f++)
+		{
+			cc_f[p][f] = Image<float>(s, s);
+			cc_exact_from_f[p][f] = Image<double>(s, s);
+			for (int y = 0; y < s; y++)
+			for (int x = 0; x < s; x++)
+			{
+				const float v = (float)pr.cc[p][f](y, x);
+				cc_f[p][f](y, x) = v;
+				cc_exact_from_f[p][f](y, x) = (double)v;
+			}
+		}
+	}
+
+	const double sv = 1.5, sd = 200.0, sa = 2.0;
+	Matrix2D<double> K_unit(pc, pc);
+	for (int i = 0; i < pc; i++)
+	for (int j = 0; j < pc; j++)
+	{
+		const double dd = (pr.positions[i] - pr.positions[j]).norm2();
+		K_unit(i, j) = std::exp(-std::sqrt(dd / (sd * sd)));
+	}
+	GaussianProcess::Basis ub = GaussianProcess::getUnitBasis(K_unit, -1, 1e-16);
+
+	GpMotionFit fit_d(cc_exact_from_f, 1.0, sv, sd, sa, -1, pr.positions, pr.offsets, 1, true);
+	GpMotionFit fit_f(cc_f, 1.0, sv, sd, sa, -1, pr.positions, pr.offsets, 4, true, &ub);
+	const std::vector<double> x = startParams(fit_d, pc, fc);
+
+	std::vector<double> gd(x.size()), gfv(x.size()), gf1(x.size());
+	const double ed = fit_d.f(x);
+	fit_d.grad(x, gd);
+
+	void* ts = fit_f.allocateTempStorage();
+	const double efv = fit_f.gradAndValue(x, gfv, ts);
+	fit_f.deallocateTempStorage(ts);
+
+	GpMotionFit fit_f1(cc_f, 1.0, sv, sd, sa, -1, pr.positions, pr.offsets, 1, true, &ub);
+	const double ef1 = fit_f1.gradAndValue(x, gf1);
+
+	REQUIRE(efv == Approx(ed).epsilon(1e-12).margin(1e-12));
+	REQUIRE(efv == ef1);
+	REQUIRE(gfv == gf1);
+	for (size_t i = 0; i < x.size(); i++)
+		REQUIRE(gfv[i] == Approx(gd[i]).epsilon(1e-12).margin(1e-12));
+}

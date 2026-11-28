@@ -25,8 +25,12 @@
 
 #include <src/image.h>
 #include <src/time.h>
+#include <src/jaz/math/Gaussian_process.h>
 
 #include <src/jaz/gravis/t4Vector.h>
+#include <map>
+#include <memory>
+#include <mutex>
 
 
 //#define TIMING 1
@@ -114,6 +118,13 @@ class MotionParamEstimator
 
 
         void prepAlignment();
+
+        std::vector<std::vector<double>> distVal;
+        std::vector<int> cachedPc;
+        std::vector<std::map<double, std::shared_ptr<const GaussianProcess::Basis>>> unitBasisCache;
+        std::shared_ptr<std::mutex> gpCacheMutex;
+
+        std::shared_ptr<const GaussianProcess::Basis> getOrComputeUnitBasis(int g, double sig_div_px);
 };
 
 #endif

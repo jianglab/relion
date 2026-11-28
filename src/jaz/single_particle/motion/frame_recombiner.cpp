@@ -21,6 +21,8 @@
 #include "frame_recombiner.h"
 #include "polish_timing.h"
 #include <src/async_file_writer.h>
+#include <src/fftw.h>
+#include <fftw3.h>
 #include <map>
 #include "motion_refiner.h"
 #include "motion_helper.h"
@@ -53,11 +55,15 @@ static void addShifted(
 	const double xshift = -dx / (2 * (w - 1));
 	const double yshift = -dy / h;
 
-	std::vector<double> cx(w), sx(w), cy(h), sy(h);
+	thread_local std::vector<double> cx, sx, cy, sy;
+	if ((int)cx.size() < w) { cx.resize(w); sx.resize(w); }
+	if ((int)cy.size() < h) { cy.resize(h); sy.resize(h); }
 
+	double* __restrict cxp = cx.data();
+	double* __restrict sxp = sx.data();
 	for (int x = 0; x < w; x++)
 	{
-		SINCOS(2 * PI * x * xshift, &sx[x], &cx[x]);
+		SINCOS(2 * PI * x * xshift, &sxp[x], &cxp[x]);
 	}
 
 	for (int y = 0; y < h; y++)
@@ -67,18 +73,22 @@ static void addShifted(
 	}
 
 	for (int y = 0; y < h; y++)
-	for (int x = 0; x < w; x++)
 	{
-		const double a = cy[y] * cx[x] - sy[y] * sx[x];
-		const double b = sy[y] * cx[x] + cy[y] * sx[x];
-
-		const double c = frame(x,y).real;
-		const double d = frame(x,y).imag;
-		const double ac = a * c;
-		const double bd = b * d;
-		const double ab_cd = (a + b) * (c + d);
-
-		sum(x,y,p) += weight(y,x) * Complex(ac - bd, ab_cd - ac - bd);
+		const double cyy = cy[y];
+		const double syy = sy[y];
+		const Complex* __restrict fr = &frame(0, y);
+		const RFLOAT* __restrict wr = &DIRECT_A2D_ELEM(weight.data, y, 0);
+		Complex* __restrict sr = &sum(0, y, p);
+		for (int x = 0; x < w; x++)
+		{
+			const double a = cyy * cxp[x] - syy * sxp[x];
+			const double b = syy * cxp[x] + cyy * sxp[x];
+			const double c = fr[x].real;
+			const double d = fr[x].imag;
+			const double wv = wr[x];
+			sr[x].real += wv * (a * c - b * d);
+			sr[x].imag += wv * (a * d + b * c);
+		}
 	}
 }
 
@@ -176,6 +186,61 @@ BufferedImage<Complex> FrameRecombiner::sumMicrograph(
 	return sumStack;
 }
 
+FrameRecombiner::FinishWorkspace::~FinishWorkspace()
+{
+	bool any = false;
+	for (const auto& kv : plans)
+	{
+		if (kv.second.plan != 0) { any = true; break; }
+	}
+	if (!any) return;
+
+	#pragma omp critical(FourierTransformer_fftw_plan)
+	{
+		for (auto& kv : plans)
+		{
+			if (kv.second.plan != 0)
+			{
+#ifdef RELION_SINGLE_PRECISION
+				fftwf_destroy_plan((fftwf_plan)kv.second.plan);
+#else
+				fftw_destroy_plan((fftw_plan)kv.second.plan);
+#endif
+				kv.second.plan = 0;
+			}
+		}
+	}
+}
+
+void FrameRecombiner::FinishWorkspace::prepare(int new_s)
+{
+	if (active != 0 && s == new_s && active->plan != 0) return;
+
+	PlanSlot& slot = plans[new_s];
+	if (slot.plan == 0)
+	{
+		slot.scratch = BufferedImage<Complex>(new_s / 2 + 1, new_s);
+		slot.real = BufferedImage<RFLOAT>(new_s, new_s);
+
+		int N[2] = {new_s, new_s};
+		#pragma omp critical(FourierTransformer_fftw_plan)
+		{
+#ifdef RELION_SINGLE_PRECISION
+			slot.plan = (void*)fftwf_plan_dft_c2r(2, N, (fftwf_complex*)slot.scratch.getData(), slot.real.getData(), FFTW_ESTIMATE);
+#else
+			slot.plan = (void*)fftw_plan_dft_c2r(2, N, (fftw_complex*)slot.scratch.getData(), slot.real.getData(), FFTW_ESTIMATE);
+#endif
+		}
+
+		if (slot.plan == 0)
+		{
+			REPORT_ERROR("FFTW plans cannot be created in FrameRecombiner::FinishWorkspace");
+		}
+	}
+	s = new_s;
+	active = &slot;
+}
+
 void FrameRecombiner::finishParticles(
 		BufferedImage<Complex>& sumStack, int threads,
 		const std::function<bool(int p, MultidimArray<RFLOAT>& ctf)>& ctf,
@@ -184,36 +249,92 @@ void FrameRecombiner::finishParticles(
 	const int pc = sumStack.zdim;
 
 	polishtiming::Scope tfin("rec: CTF, normalise, iFFT");
-	#pragma omp parallel for num_threads(threads)
-	for (int p = 0; p < pc; p++)
+	#pragma omp parallel num_threads(threads) if(threads > 1 && pc > 1)
 	{
-		BufferedImage<Complex> sumCopy = sumStack.getSliceRef(p);
+		FinishWorkspace ws;
 
-		MultidimArray<RFLOAT> ctfImg_xmipp;
-		const bool hasCtf = ctf(p, ctfImg_xmipp);
-
-		finishParticle(sumCopy, hasCtf? &ctfImg_xmipp : 0, out.getSliceRef(p));
+		#pragma omp for schedule(static)
+		for (int p = 0; p < pc; p++)
+		{
+			BufferedImage<Complex> sumRef = sumStack.getSliceRef(p);
+			const bool hasCtf = ctf(p, ws.ctfImg);
+			finishParticle(sumRef, hasCtf? &ws.ctfImg : 0, out.getSliceRef(p), ws);
+		}
 	}
+}
+
+void FrameRecombiner::finishParticle(
+		BufferedImage<Complex>& sum, MultidimArray<RFLOAT>* ctf, RawImage<RFLOAT> out,
+		FinishWorkspace& ws)
+{
+	const int s = sum.ydim;
+	const int wh = sum.xdim;
+
+	ws.prepare(s);
+	FinishWorkspace::PlanSlot& slot = *ws.active;
+
+	const RFLOAT* __restrict ctf_p = ctf ? MULTIDIM_ARRAY(*ctf) : 0;
+	const Complex* __restrict src = sum.getData();
+	Complex* __restrict dst = slot.scratch.getData();
+
+	double var = 0.0;
+	double cnt = 0.0;
+
+	if (ctf_p)
+	{
+		for (int y = 0; y < s; y++)
+		for (int x = 0; x < wh; x++)
+		{
+			const size_t idx = (size_t)y * wh + x;
+			const Complex z = src[idx] * ctf_p[idx];
+			dst[idx] = z;
+			if (x != 0 || y != 0)
+			{
+				const double sc = (x > 0) ? 2.0 : 1.0;
+				var += sc * (z.real * z.real + z.imag * z.imag);
+				cnt += sc;
+			}
+		}
+	}
+	else
+	{
+		for (int y = 0; y < s; y++)
+		for (int x = 0; x < wh; x++)
+		{
+			const size_t idx = (size_t)y * wh + x;
+			const Complex z = src[idx];
+			dst[idx] = z;
+			if (x != 0 || y != 0)
+			{
+				const double sc = (x > 0) ? 2.0 : 1.0;
+				var += sc * (z.real * z.real + z.imag * z.imag);
+				cnt += sc;
+			}
+		}
+	}
+
+	const RFLOAT inv_scale = 1.0 / (out.xdim * sqrt(var / cnt));
+	const size_t total = (size_t)wh * s;
+	for (size_t idx = 0; idx < total; idx++)
+	{
+		dst[idx].real *= inv_scale;
+		dst[idx].imag *= inv_scale;
+	}
+
+#ifdef RELION_SINGLE_PRECISION
+	fftwf_execute_dft_c2r((fftwf_plan)slot.plan, (fftwf_complex*)dst, slot.real.getData());
+#else
+	fftw_execute_dft_c2r((fftw_plan)slot.plan, (fftw_complex*)dst, slot.real.getData());
+#endif
+
+	Padding::copyUnpaddedCenter2D_full(slot.real, out);
 }
 
 void FrameRecombiner::finishParticle(
 		BufferedImage<Complex>& sum, MultidimArray<RFLOAT>* ctf, RawImage<RFLOAT> out)
 {
-	const int s = sum.ydim;
-
-	if (ctf)
-	{
-		RawImage<RFLOAT> ctfImg(*ctf);
-		sum *= ctfImg;
-	}
-
-	RFLOAT scale2 = StackHelper::computePower(sum, false);
-	sum /= out.xdim * sqrt(scale2);
-
-	BufferedImage<RFLOAT> real(s, s);
-	FFT::inverseFourierTransform(sum, real);
-
-	Padding::copyUnpaddedCenter2D_full(real, out);
+	FinishWorkspace ws;
+	finishParticle(sum, ctf, out, ws);
 }
 
 FrameRecombiner::FrameRecombiner()
@@ -369,6 +490,7 @@ void FrameRecombiner::init(
 	data_angpix.resize(nog);
 	freqWeights.resize(nog);
 	bkFactors.clear();
+	windowWeightsCache_.clear();
 
 	const double angpix_mov = micrographHandler->movie_angpix; // TODO: TAKANORI: make sure the movie_angpix is the same for all micrographs
 
@@ -629,30 +751,83 @@ void FrameRecombiner::process(const std::vector<MetaDataTable>& mdts, long g_sta
 						tracks.push_back(priorShift[p]);
 					}
 					// The dose weights fall off over the same resolution in every window
-					std::vector<d2Vector> bk = bkFactors[ogmg];
-					if (s != s_out[ogmg]) for (d2Vector& b : bk) b.x = b.x * s / s_out[ogmg];
-					const std::vector<Image<RFLOAT> > weights = DamageHelper::computeWeights(bk, s / 2 + 1);
+					const std::pair<int, int> wkey(ogmg, s);
+					auto w_it = windowWeightsCache_.find(wkey);
+					if (w_it == windowWeightsCache_.end())
+					{
+						std::vector<d2Vector> bk = bkFactors[ogmg];
+						if (s != s_out[ogmg]) for (d2Vector& b : bk) b.x = b.x * s / s_out[ogmg];
+						w_it = windowWeightsCache_.emplace(wkey, DamageHelper::computeWeights(bk, s / 2 + 1)).first;
+					}
+					const std::vector<Image<RFLOAT> >& weights = w_it->second;
 					BufferedImage<Complex> sums = sumMicrograph(sub, *micrographHandler, tracks, s, angpix_out[ogmg],
 						data_angpix[ogmg], weights, nr_omp_threads);
-					#pragma omp parallel for num_threads(nr_omp_threads)
-					for (long i = 0; i < (long)g.second.size(); i++)
+					#pragma omp parallel num_threads(nr_omp_threads) if(nr_omp_threads > 1 && g.second.size() > 1)
 					{
-						BufferedImage<Complex> sum = sums.getSliceRef(i);
-						MultidimArray<RFLOAT> ctfImg;
-						vparticles::ctfImage(ctfs[g.second[i]], s, angpix_out[ogmg], ctfImg);
-						finishParticle(sum, &ctfImg, out.getSliceRef(g.second[i]));
+						FinishWorkspace ws;
+						#pragma omp for schedule(static)
+						for (long i = 0; i < (long)g.second.size(); i++)
+						{
+							BufferedImage<Complex> sum = sums.getSliceRef(i);
+							vparticles::ctfImage(ctfs[g.second[i]], s, angpix_out[ogmg], ws.ctfImg);
+							finishParticle(sum, &ws.ctfImg, out.getSliceRef(g.second[i]), ws);
+						}
 					}
 				}
 			}
 
 			stackFn = fn_root + "_shiny" + suffix + ".mrcs";
 
-			outStack_ptr->setSamplingRateInHeader(angpix_out[ogmg]);
-			const DataType datatype = write_float16 ? Float16: Float;
-			AsyncFileWriter::putFile(stackFn, MULTIDIM_SIZE((*outStack_ptr)()) * sizeof(RFLOAT), [outStack_ptr, datatype](const std::string &tmp)
+			if (!write_float16 && sizeof(RFLOAT) != sizeof(float))
 			{
-				outStack_ptr->write(tmp, -1, true, WRITE_OVERWRITE, datatype);
-			});
+				const long int nvox = (long int)MULTIDIM_SIZE((*outStack_ptr)());
+				std::shared_ptr<Image<float> > fstack = std::make_shared<Image<float> >();
+				fstack->data.resizeNoCp(pc, 1, out_size, out_size);
+				if (nvox > 0)
+				{
+					const RFLOAT * __restrict__ sptr = MULTIDIM_ARRAY((*outStack_ptr)());
+					float * __restrict__ dptr = MULTIDIM_ARRAY(fstack->data);
+					double sum = 0., sum2 = 0.;
+					double dmin = (double)sptr[0], dmax = (double)sptr[0];
+					const int nt_c = relionBulkThreads((size_t)nvox);
+					#pragma omp parallel for reduction(+:sum,sum2) reduction(min:dmin) reduction(max:dmax) schedule(static) num_threads(nt_c) if(nt_c > 1)
+					for (long int n = 0; n < nvox; n++)
+					{
+						const double val = static_cast<double>(sptr[n]);
+						dptr[n] = static_cast<float>(val);
+						sum += val;
+						sum2 += val * val;
+						if (val < dmin) dmin = val;
+						if (val > dmax) dmax = val;
+					}
+					const double avg = sum / (double)nvox;
+					double stddev = 0.;
+					if (nvox > 1)
+					{
+						stddev = sum2 / (double)nvox - avg * avg;
+						stddev *= (double)(nvox / (nvox - 1));
+						stddev = sqrt(fabs(stddev));
+					}
+					fstack->MDMainHeader.setValue(EMDL_IMAGE_STATS_AVG, (RFLOAT)avg);
+					fstack->MDMainHeader.setValue(EMDL_IMAGE_STATS_STDDEV, (RFLOAT)stddev);
+					fstack->MDMainHeader.setValue(EMDL_IMAGE_STATS_MIN, (RFLOAT)dmin);
+					fstack->MDMainHeader.setValue(EMDL_IMAGE_STATS_MAX, (RFLOAT)dmax);
+				}
+				fstack->setSamplingRateInHeader(angpix_out[ogmg]);
+				AsyncFileWriter::putFile(stackFn, (size_t)nvox * sizeof(float), [fstack](const std::string &tmp)
+				{
+					fstack->write(tmp, -1, true, WRITE_OVERWRITE, Float);
+				});
+			}
+			else
+			{
+				outStack_ptr->setSamplingRateInHeader(angpix_out[ogmg]);
+				const DataType datatype = write_float16 ? Float16: Float;
+				AsyncFileWriter::putFile(stackFn, MULTIDIM_SIZE((*outStack_ptr)()) * sizeof(RFLOAT), [outStack_ptr, datatype](const std::string &tmp)
+				{
+					outStack_ptr->write(tmp, -1, true, WRITE_OVERWRITE, datatype);
+				});
+			}
 		}
 
 		for (int p = 0; p < pc; p++)
@@ -752,14 +927,19 @@ std::vector<Image<RFLOAT>> FrameRecombiner::weightsFromFCC(
 	}
 
 	Image<RFLOAT> fccData, fccWgh0, fccWgh1;
-	Image<RFLOAT> fccDataMg, fccWgh0Mg, fccWgh1Mg;
 
-	bool first = true;
+	struct FccMic
+	{
+		bool ok = false;
+		Image<RFLOAT> cc, w0, w1;
+	};
+	std::vector<FccMic> mgs(allMdts.size());
 
 	// Compute B/k-factors from all available FCCs (allMdts),
 	// even if only a subset of micrographs (chosenMdts) is being recombined.
 	// TODO: BUG: og_name is not used.
-	for (long g = 0; g < allMdts.size(); g++)
+	#pragma omp parallel for schedule(dynamic, 1) num_threads(nr_omp_threads) if(nr_omp_threads > 1 && allMdts.size() > 1)
+	for (long g = 0; g < (long)allMdts.size(); g++)
 	{
 		FileName fn_root = MotionRefiner::getOutputFileNameRoot(outPath, allMdts[g]);
 
@@ -770,9 +950,20 @@ std::vector<Image<RFLOAT>> FrameRecombiner::weightsFromFCC(
 			continue;
 		}
 
-		fccDataMg.read(fn_root + "_FCC_cc.mrc");
-		fccWgh0Mg.read(fn_root + "_FCC_w0.mrc");
-		fccWgh1Mg.read(fn_root + "_FCC_w1.mrc");
+		mgs[g].cc.read(fn_root + "_FCC_cc.mrc");
+		mgs[g].w0.read(fn_root + "_FCC_w0.mrc");
+		mgs[g].w1.read(fn_root + "_FCC_w1.mrc");
+		mgs[g].ok = true;
+	}
+
+	bool first = true;
+	for (long g = 0; g < (long)allMdts.size(); g++)
+	{
+		if (!mgs[g].ok) continue;
+
+		Image<RFLOAT>& fccDataMg = mgs[g].cc;
+		Image<RFLOAT>& fccWgh0Mg = mgs[g].w0;
+		Image<RFLOAT>& fccWgh1Mg = mgs[g].w1;
 
 		if (first)
 		{
@@ -799,6 +990,8 @@ std::vector<Image<RFLOAT>> FrameRecombiner::weightsFromFCC(
 			if (fccWgh0Mg(y,x) == fccWgh0Mg(y,x)) fccWgh0(y,x) += fccWgh0Mg(y,x);
 			if (fccWgh1Mg(y,x) == fccWgh1Mg(y,x)) fccWgh1(y,x) += fccWgh1Mg(y,x);
 		}
+
+		mgs[g] = FccMic();
 	}
 
 	if (first)

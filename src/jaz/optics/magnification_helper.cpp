@@ -103,23 +103,30 @@ void MagnificationHelper::updateScaleFreq(
 		Volume<Equation2x2> &eqs)
 {
 	const long w = prediction.data.xdim;
+	const Complex* __restrict prdRow = &DIRECT_A2D_ELEM(prediction.data, y, 0);
+	const Complex* __restrict obsRow = &DIRECT_A2D_ELEM(observation.data, y, 0);
+	const RFLOAT* __restrict ctfRow = &DIRECT_A2D_ELEM(ctfImg.data, y, 0);
+	const t2Vector<Complex>* __restrict gradRow = &predGradient(0, y, 0);
+	Equation2x2* __restrict eqRow = &eqs(0, y, 0);
 
 	for (long x = 0; x < w; x++)
 	{
-		Complex vx = DIRECT_A2D_ELEM(prediction.data, y, x);
-		Complex vy = DIRECT_A2D_ELEM(observation.data, y, x);
+		const Complex vx = prdRow[x];
+		const Complex vy = obsRow[x];
+		const double c = ctfRow[x];
+		const double c2 = c * c;
+		const double dr = vy.real - c * vx.real;
+		const double di = vy.imag - c * vx.imag;
 
-		double c = ctfImg(y,x);
+		const double grx = gradRow[x].x.real, gry = gradRow[x].y.real;
+		const double gix = gradRow[x].x.imag, giy = gradRow[x].y.imag;
 
-		gravis::d2Vector gr(predGradient(x,y,0).x.real, predGradient(x,y,0).y.real);
-		gravis::d2Vector gi(predGradient(x,y,0).x.imag, predGradient(x,y,0).y.imag);
+		eqRow[x].Axx += c2 * (grx * grx + gix * gix);
+		eqRow[x].Axy += c2 * (grx * gry + gix * giy);
+		eqRow[x].Ayy += c2 * (gry * gry + giy * giy);
 
-		eqs(x,y,0).Axx += c * c * (gr.x * gr.x + gi.x * gi.x);
-		eqs(x,y,0).Axy += c * c * (gr.x * gr.y + gi.x * gi.y);
-		eqs(x,y,0).Ayy += c * c * (gr.y * gr.y + gi.y * gi.y);
-
-		eqs(x,y,0).bx += c * (gr.x * (vy.real - c * vx.real) + gi.x * (vy.imag - c * vx.imag));
-		eqs(x,y,0).by += c * (gr.y * (vy.real - c * vx.real) + gi.y * (vy.imag - c * vx.imag));
+		eqRow[x].bx += c * (grx * dr + gix * di);
+		eqRow[x].by += c * (gry * dr + giy * di);
 	}
 }
 

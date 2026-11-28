@@ -8,6 +8,7 @@
 
 #include "src/gpu_switch.h"
 #include "src/gpu_reconstruct.h"
+#include "src/gpu_locres.h"
 
 #include <cstdlib>
 #include <string>
@@ -106,4 +107,31 @@ TEST_CASE("Opt-in GPU switches are off unless asked for", "[gpu_switch]")
 	setenv(name, "check", 1);
 	CHECK(gpuswitch::optIn(name) == 2);
 	unsetenv(name);
+}
+
+TEST_CASE("GPU LocalRes switch defaults to on and honors overrides", "[gpu_switch]")
+{
+	unsetenv("RELION_GPU_LOCRES");
+	CHECK(gpulocres::requested(false, false));
+	CHECK(gpulocres::requested(true, false));
+	CHECK(!gpulocres::requested(false, true));
+	CHECK(!gpulocres::requested(true, true));
+	CHECK(!gpulocres::doublePrecision());
+
+	setenv("RELION_GPU_LOCRES", "0", 1);
+	CHECK(!gpulocres::requested(false, false));
+	CHECK(gpulocres::requested(true, false));
+
+	setenv("RELION_GPU_LOCRES", "off", 1);
+	CHECK(!gpulocres::requested(false, false));
+
+	setenv("RELION_GPU_LOCRES", "single", 1);
+	CHECK(gpulocres::requested(false, false));
+	CHECK(!gpulocres::doublePrecision());
+
+	setenv("RELION_GPU_LOCRES", "double", 1);
+	CHECK(gpulocres::requested(false, false));
+	CHECK(gpulocres::doublePrecision());
+
+	unsetenv("RELION_GPU_LOCRES");
 }

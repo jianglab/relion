@@ -199,6 +199,7 @@ public:
 	struct DecodedMovie
 	{
 		int nx = 0, ny = 0, nn = 0;
+		int det_w = 0, det_h = 0;
 		std::vector<int> frames; // 0-indexed, the ones that are summed
 		std::vector<Image<float> > Iframes;
 		double seconds = 0;
@@ -219,6 +220,7 @@ public:
 
 	// Plot the shifts
 	void plotShifts(FileName fn_mic, Micrograph &mic);
+	void plotShiftsAsync(const FileName &fn_mic, const Micrograph &mic) const;
 
 	// Save micrograph model
 	void saveModel(Micrograph &mic);
@@ -297,8 +299,11 @@ private:
 
 	// shiftx, shifty is relative to the (real space) image size
 	void shiftNonSquareImageInFourierTransform(MultidimArray<fComplex> &frame, RFLOAT shiftx, RFLOAT shifty);
+	void shiftNonSquareImageInFourierTransformCrop(MultidimArray<fComplex> &frame, RFLOAT shiftx, RFLOAT shifty, int ccf_nfx, int ccf_nfy_half, int ccf_nfy);
+	void shiftNonSquareImageInFourierTransformOuter(MultidimArray<fComplex> &frame, RFLOAT shiftx, RFLOAT shifty, int ccf_nfx, int ccf_nfy_half, int ccf_nfy);
 
-	bool alignPatch(std::vector<MultidimArray<fComplex> > &Fframes, const int pnx, const int pny, const RFLOAT scaled_B, std::vector<RFLOAT> &xshifts, std::vector<RFLOAT> &yshifts, std::ostream &logfile);
+	struct PatchAlignCacheEntry;
+	bool alignPatch(std::vector<MultidimArray<fComplex> > &Fframes, const int pnx, const int pny, const RFLOAT scaled_B, std::vector<RFLOAT> &xshifts, std::vector<RFLOAT> &yshifts, std::ostream &logfile, bool keep_full_shifted = true, PatchAlignCacheEntry* cache = nullptr);
 
 	void binNonSquareImage(Image<float> &Iwork, RFLOAT bin_factor);
 

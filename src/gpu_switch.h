@@ -52,6 +52,12 @@ inline const char *const *defaultOnNames(size_t &count)
 		"RELION_GPU_ALLOC_CACHE",
 		"RELION_GPU_BP_SCATTER_HOST",
 		"RELION_GPU_CC_COARSE",
+		"RELION_GPU_FINE_SEPARABLE",
+		"RELION_GPU_BP_SEPARABLE",
+		"RELION_GPU_BP_DIVHOIST",
+		"RELION_GPU_FUSED_PREP",
+		"RELION_GPU_WDIFF2_REDUCE",
+		"RELION_GPU_LOCRES",
 	};
 	count = sizeof(names) / sizeof(names[0]);
 	return names;

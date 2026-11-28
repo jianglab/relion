@@ -59,17 +59,51 @@ public:
 
 	void run();
 
-	void autoPickOneMicrograph(FileName &fn_mic, long int imic);
+	// Reuse device & pinned host buffers across micrographs to eliminate per-mic cudaMalloc/cudaFree syncs
+	AccPtr< ACCCOMPLEX > d_Fmsk, d_Fmsk2, d_Ftmp, d_Fcov, d_Fmic;
+	AccPtr< XFLOAT > d_Mstddev, d_Mstddev_inv, d_Mstddev_tmp, d_Mmean;
+	AccPtr< XFLOAT > d_Mstddev2, d_Mavg;
+	AccPtr< XFLOAT > d_Mccf_best[2], d_Mpsi_best[2];
+	AccPtr< XFLOAT > d_Mccf_combined, d_Mpsi_combined;
+	AccPtr< int > d_Mclass_combined;
+	AccPtr< XFLOAT > d_ctf, d_prep_patches;
 
-	void calculateStddevAndMeanUnderMask(AccPtr< ACCCOMPLEX > &d_Fmic, 
-			AccPtr< ACCCOMPLEX > &d_Fmic2, 
+	XFLOAT *h_ccf[2] = {NULL, NULL};
+	XFLOAT *h_psi[2] = {NULL, NULL};
+	XFLOAT *h_Mstddev = NULL;
+	XFLOAT *h_Mmean = NULL;
+	int *h_class_combined = NULL;
+	XFLOAT *h_prep = NULL;
+	cudaEvent_t ev_ref_done[2] = {NULL, NULL};
+	cudaEvent_t ev_stats_done = NULL;
+
+	int prep_chunk_size = 0;
+	bool persistent_init = false;
+	bool need_h_stddev = false;
+	bool need_h_mean = false;
+
+	void initPersistentBuffers(int Npsi);
+	void releasePersistentBuffers();
+	void calculateStddevAndMeanUnderMask(
+			AccPtr< ACCCOMPLEX > &d_Fmic,
+			AccPtr< ACCCOMPLEX > &d_Fmic2,
 			AccPtr< ACCCOMPLEX > &d_Fmsk,
-			int nr_nonzero_pixels_mask, AccPtr< XFLOAT > &d_Mstddev, 
+			int nr_nonzero_pixels_mask,
+			AccPtr< XFLOAT > &d_Mstddev,
 			AccPtr< XFLOAT > &d_Mmean,
+			XFLOAT *d_Mstddev_inv_ptr,
 			size_t x, size_t y, size_t mic_size, size_t workSize);
+
+	void autoPickOneMicrograph(FileName &fn_mic, long int imic);
+	void autoPickOneMicrographPrepared(
+			const FileName &fn_mic,
+			long int imic,
+			const XFLOAT *h_mic_reals,
+			const XFLOAT *h_ctf_data);
 
 	~AutoPickerCuda()
 	{
+		releasePersistentBuffers();
 		for (int i = 0; i < classStreams.size(); i++)
 			HANDLE_ERROR(cudaStreamDestroy(classStreams[i]));
 	}

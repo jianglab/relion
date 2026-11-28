@@ -709,17 +709,23 @@ __global__ void cuda_kernel_cosineFilter(	XFLOAT *vol,
 	long int texel_pass_num = ceilfracf(vol_size,SOFTMASK_BLOCK_SIZE*gridDim.x);
 	int texel = bid*SOFTMASK_BLOCK_SIZE*texel_pass_num + tid;
 
+	__shared__ XFLOAT s_defVal;
 	defVal = bg_value;
 	if (g_sum != NULL)
 	{
-		// the background value of the particle from the partial sums, no round trip to the host
-		double sum = 0., sum_bg = 0.;
-		for (int i = 0; i < SOFTMASK_BLOCK_SIZE; i++)
+		// the background value of the particle from the partial sums, computed once per block
+		if (tid == 0)
 		{
-			sum    += (double) g_sum[i];
-			sum_bg += (double) g_sum_bg[i];
+			double sum = 0., sum_bg = 0.;
+			for (int i = 0; i < SOFTMASK_BLOCK_SIZE; i++)
+			{
+				sum    += (double) g_sum[i];
+				sum_bg += (double) g_sum_bg[i];
+			}
+			s_defVal = (XFLOAT) (sum_bg / sum);
 		}
-		defVal = (XFLOAT) (sum_bg / sum);
+		__syncthreads();
+		defVal = s_defVal;
 	}
 	for (int pass = 0; pass < texel_pass_num; pass++, texel+=SOFTMASK_BLOCK_SIZE) // loop the available warps enough to complete all translations for this orientation
 	{
@@ -906,6 +912,258 @@ __global__ void cuda_kernel_rotateAndCtf( ACCCOMPLEX *d_Faux,
 	}
 }
 
+template <bool DO_CTF>
+__global__ void cuda_kernel_rotateAndConvol(
+		ACCCOMPLEX *d_Faux,
+		const XFLOAT * __restrict__ d_ctf,
+		const ACCCOMPLEX * __restrict__ d_Fmic,
+		XFLOAT psi,
+		AccProjectorKernel projector,
+		int startPsi)
+{
+	__shared__ XFLOAT s_sa, s_ca;
+	int proj = blockIdx.z;
+	if (threadIdx.x == 0 && threadIdx.y == 0)
+		sincos((proj + startPsi) * psi, &s_sa, &s_ca);
+	__syncthreads();
+
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y_orig = blockIdx.y * blockDim.y + threadIdx.y;
+	if (x < projector.imgX && y_orig < projector.imgY)
+	{
+		int y = y_orig;
+		int x_q = x;
+		if (y > projector.maxR)
+		{
+			if (y >= projector.imgY - projector.maxR)
+				y = y - projector.imgY;
+			else
+				x_q = projector.maxR;
+		}
+
+		XFLOAT sa = s_sa, ca = s_ca;
+		ACCCOMPLEX val;
+		projector.project2Dmodel(x_q, y, ca, -sa, sa, ca, val.x, val.y);
+
+		size_t pixel = (size_t)y_orig * (size_t)projector.imgX + (size_t)x;
+		if (DO_CTF)
+		{
+			XFLOAT c = d_ctf[pixel];
+			val.x *= c;
+			val.y *= c;
+		}
+
+		XFLOAT tr = val.x;
+		XFLOAT ti = -val.y;
+		ACCCOMPLEX b = d_Fmic[pixel];
+		size_t out_pixel = (size_t)proj * ((size_t)projector.imgX * (size_t)projector.imgY) + pixel;
+		d_Faux[out_pixel].x = tr * b.x - ti * b.y;
+		d_Faux[out_pixel].y = ti * b.x + tr * b.y;
+	}
+}
+
+template __global__ void cuda_kernel_rotateAndConvol<true>(ACCCOMPLEX*, const XFLOAT* __restrict__, const ACCCOMPLEX* __restrict__, XFLOAT, AccProjectorKernel, int);
+template __global__ void cuda_kernel_rotateAndConvol<false>(ACCCOMPLEX*, const XFLOAT* __restrict__, const ACCCOMPLEX* __restrict__, XFLOAT, AccProjectorKernel, int);
+
+__global__ void cuda_kernel_probRatio_centered(
+		XFLOAT * __restrict__ d_Mccf,
+		XFLOAT * __restrict__ d_Mpsi,
+		const XFLOAT * __restrict__ d_Maux,
+		const XFLOAT * __restrict__ d_Mmean,
+		const XFLOAT * __restrict__ d_Mstddev,
+		int W,
+		XFLOAT normfft,
+		XFLOAT sum_ref_under_circ_mask,
+		XFLOAT sum_ref2_under_circ_mask,
+		XFLOAT expected_Pratio,
+		int NpsiThisBatch,
+		int startPsi,
+		int totalPsis,
+		bool isFirstBatch)
+{
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+	if (x >= W || y >= W || NpsiThisBatch <= 0) return;
+
+	int half = W >> 1;
+	int src_x = (x < half) ? (x + half) : (x - half);
+	int src_y = (y < half) ? (y + half) : (y - half);
+	size_t image_size = (size_t)W * (size_t)W;
+	size_t pixel = (size_t)y * (size_t)W + (size_t)x;
+	size_t src_pixel = (size_t)src_y * (size_t)W + (size_t)src_x;
+
+	XFLOAT Kccf = isFirstBatch ? (XFLOAT)(-LARGE_NUMBER) : d_Mccf[pixel];
+	XFLOAT Kpsi = (XFLOAT)(-1.0);
+
+	// normfft < 0 and d_Mstddev > 0 make diff2(A) monotone, so expf/div only run for winning psi.
+	if (expected_Pratio != (XFLOAT)1.0)
+	{
+		const bool find_max = (expected_Pratio > (XFLOAT)1.0);
+		XFLOAT best_A = d_Maux[src_pixel];
+		int best_psi = 0;
+		if (find_max)
+		{
+			#pragma unroll 4
+			for (int psi = 1; psi < NpsiThisBatch; psi++)
+			{
+				XFLOAT a = d_Maux[(size_t)psi * image_size + src_pixel];
+				if (a > best_A) { best_A = a; best_psi = psi; }
+			}
+		}
+		else
+		{
+			#pragma unroll 4
+			for (int psi = 1; psi < NpsiThisBatch; psi++)
+			{
+				XFLOAT a = d_Maux[(size_t)psi * image_size + src_pixel];
+				if (a < best_A) { best_A = a; best_psi = psi; }
+			}
+		}
+
+		XFLOAT diff2 = normfft * best_A;
+		diff2 += d_Mmean[pixel] * sum_ref_under_circ_mask;
+		diff2 *= d_Mstddev[pixel];
+		diff2 += sum_ref2_under_circ_mask;
+#if defined(ACC_DOUBLE_PRECISION)
+		diff2 = exp(-diff2 / 2.);
+#else
+		diff2 = expf(-diff2 / 2.f);
+#endif
+		diff2 = (diff2 - (XFLOAT)1.0) / (expected_Pratio - (XFLOAT)1.0);
+		if (diff2 > Kccf)
+		{
+			Kccf = diff2;
+			Kpsi = (XFLOAT)((startPsi + best_psi) * (360 / totalPsis));
+		}
+	}
+	else
+	{
+		XFLOAT mean_term = d_Mmean[pixel] * sum_ref_under_circ_mask;
+		XFLOAT inv_std = d_Mstddev[pixel];
+		for (int psi = 0; psi < NpsiThisBatch; psi++)
+		{
+			XFLOAT diff2 = normfft * d_Maux[(size_t)psi * image_size + src_pixel] + mean_term;
+			diff2 *= inv_std;
+			diff2 += sum_ref2_under_circ_mask;
+#if defined(ACC_DOUBLE_PRECISION)
+			diff2 = exp(-diff2 / 2.);
+#else
+			diff2 = expf(-diff2 / 2.f);
+#endif
+			diff2 = (diff2 - (XFLOAT)1.0) / (expected_Pratio - (XFLOAT)1.0);
+			if (diff2 > Kccf)
+			{
+				Kccf = diff2;
+				Kpsi = (XFLOAT)((startPsi + psi) * (360 / totalPsis));
+			}
+		}
+	}
+
+	d_Mccf[pixel] = Kccf;
+	if (Kpsi >= (XFLOAT)0.0)
+		d_Mpsi[pixel] = Kpsi;
+}
+
+__global__ void cuda_kernel_centerScaleAndNegSq(
+		const XFLOAT * __restrict__ d_reals,
+		XFLOAT * __restrict__ d_Mmean,
+		XFLOAT * __restrict__ d_Mstddev_tmp,
+		int W,
+		XFLOAT normfft)
+{
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+	if (x >= W || y >= W) return;
+
+	size_t idx = (size_t)y * (size_t)W + (size_t)x;
+	XFLOAT val = d_reals[idx] * normfft;
+	d_Mstddev_tmp[idx] = -(val * val);
+
+	int half = W >> 1;
+	int cx = (x < half) ? (x + half) : (x - half);
+	int cy = (y < half) ? (y + half) : (y - half);
+	d_Mmean[(size_t)cy * (size_t)W + (size_t)cx] = val;
+}
+
+__global__ void cuda_kernel_finalizeMstddev_centered(
+		const XFLOAT * __restrict__ d_Mstddev_tmp,
+		const XFLOAT * __restrict__ d_aux,
+		XFLOAT * __restrict__ d_Mstddev,
+		XFLOAT * __restrict__ d_Mstddev_inv,
+		int W,
+		XFLOAT normfft)
+{
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+	if (x >= W || y >= W) return;
+
+	size_t idx = (size_t)y * (size_t)W + (size_t)x;
+	XFLOAT temp = d_Mstddev_tmp[idx] + normfft * d_aux[idx];
+	XFLOAT s = (temp > (XFLOAT)0) ? sqrt(temp) : (XFLOAT)0;
+
+	int half = W >> 1;
+	int cx = (x < half) ? (x + half) : (x - half);
+	int cy = (y < half) ? (y + half) : (y - half);
+	size_t cidx = (size_t)cy * (size_t)W + (size_t)cx;
+	d_Mstddev[cidx] = s;
+	if (d_Mstddev_inv != NULL)
+		d_Mstddev_inv[cidx] = (s > (XFLOAT)1E-10) ? ((XFLOAT)1.0 / s) : (XFLOAT)1.0;
+}
+
+__global__ void cuda_kernel_extractPrepPatch(
+		const XFLOAT * __restrict__ d_full,
+		XFLOAT * __restrict__ d_patch,
+		int N,
+		int P,
+		int p_first,
+		bool is_uncentered_even)
+{
+	int px = blockIdx.x * blockDim.x + threadIdx.x;
+	int py = blockIdx.y * blockDim.y + threadIdx.y;
+	if (px >= P || py >= P) return;
+
+	int i = py + p_first;
+	int j = px + p_first;
+	int sy, sx;
+	if (is_uncentered_even)
+	{
+		sy = (i < 0) ? (i + N) : i;
+		sx = (j < 0) ? (j + N) : j;
+	}
+	else
+	{
+		sy = i + (N / 2);
+		sx = j + (N / 2);
+	}
+	if (sy < 0) sy += N; else if (sy >= N) sy -= N;
+	if (sx < 0) sx += N; else if (sx >= N) sx -= N;
+	d_patch[(size_t)py * (size_t)P + (size_t)px] = d_full[(size_t)sy * (size_t)N + (size_t)sx];
+}
+
+__global__ void cuda_kernel_combineHelicalBest(
+		const XFLOAT * __restrict__ d_Mccf_best,
+		const XFLOAT * __restrict__ d_Mpsi_best,
+		XFLOAT * __restrict__ d_Mccf_combined,
+		XFLOAT * __restrict__ d_Mpsi_combined,
+		int * __restrict__ d_Mclass_combined,
+		size_t image_size,
+		int iref,
+		bool do_amyloid)
+{
+	size_t pixel = (size_t)blockIdx.x * (size_t)blockDim.x + (size_t)threadIdx.x;
+	if (pixel >= image_size) return;
+
+	XFLOAT new_ccf = d_Mccf_best[pixel];
+	if (iref == 0 || new_ccf > d_Mccf_combined[pixel])
+	{
+		d_Mccf_combined[pixel] = new_ccf;
+		if (do_amyloid)
+			d_Mpsi_combined[pixel] = d_Mpsi_best[pixel];
+		else
+			d_Mclass_combined[pixel] = iref;
+	}
+}
+
 
 __global__ void cuda_kernel_convol_A( ACCCOMPLEX *d_A,
 									 ACCCOMPLEX *d_B,
@@ -1086,6 +1344,196 @@ __global__ void cuda_kernel_initOrientations(RFLOAT *pdfs, XFLOAT *pdf_orientati
 			pdf_orientation[idx] = 0.f;
 		else
 			pdf_orientation[idx] = log(pdfs[idx]);
+	}
+}
+
+__global__ void cuda_kernel_initOrientationsSeparable(
+		const RFLOAT *class_factor,
+		const RFLOAT *dir_prior,
+		const RFLOAT *psi_prior,
+		int mode,
+		unsigned long nr_classes,
+		unsigned long nr_dir,
+		unsigned long nr_psi,
+		XFLOAT *pdf_orientation,
+		bool *pdf_orientation_zeros)
+{
+	size_t idx = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+	size_t total = (size_t) nr_classes * nr_dir * nr_psi;
+	if (idx >= total)
+		return;
+	size_t ipsi = idx % nr_psi;
+	size_t tmp = idx / nr_psi;
+	size_t idir = tmp % nr_dir;
+	size_t c = tmp / nr_dir;
+	RFLOAT p;
+	if (mode == 0)
+		p = class_factor[c];
+	else if (mode == 1)
+		p = dir_prior[c * nr_dir + idir] * class_factor[c];
+	else
+		p = (dir_prior[idir] * psi_prior[ipsi]) * class_factor[c];
+	if (p == 0.)
+	{
+		pdf_orientation_zeros[idx] = true;
+		pdf_orientation[idx] = (XFLOAT) 0.f;
+	}
+	else
+	{
+		pdf_orientation_zeros[idx] = false;
+		pdf_orientation[idx] = (XFLOAT) log(p);
+	}
+}
+
+__global__ void cuda_kernel_reduce_wdiff2s(
+		const XFLOAT * __restrict__ d_sum,
+		const XFLOAT * __restrict__ d_AA,
+		const XFLOAT * __restrict__ d_XA,
+		const int * __restrict__ d_Mresol,
+		const unsigned char * __restrict__ d_scale_mask,
+		Wdiff2UsedClasses64 u64,
+		const int * __restrict__ d_used_cls_ext,
+		int nr_used,
+		int sigma_shells,
+		int scale_stride,
+		unsigned long image_size,
+		bool do_scale,
+		double *d_out)
+{
+	__shared__ double s_norm[256];
+	__shared__ double s_AA[256];
+	__shared__ double s_XA[256];
+
+	const int tid = threadIdx.x;
+	double local_norm = 0.0;
+	double local_AA = 0.0;
+	double local_XA = 0.0;
+
+	const unsigned long stride = (unsigned long) gridDim.x * blockDim.x;
+	for (unsigned long j = (unsigned long) blockIdx.x * blockDim.x + tid; j < image_size; j += stride)
+	{
+		const int ires = d_Mresol[j];
+		if (ires > -1 && ires < sigma_shells)
+		{
+			const double sv = (double) d_sum[j];
+			cuda_atomic_add_double(&d_out[ires], sv);
+			local_norm += sv;
+			if (do_scale && nr_used > 0 && ires < scale_stride)
+			{
+				for (int u = 0; u < nr_used; u++)
+				{
+					const int cls = (d_used_cls_ext != NULL) ? d_used_cls_ext[u] : u64.cls[u];
+					if (d_scale_mask[(size_t) cls * scale_stride + ires])
+					{
+						local_AA += (double) d_AA[(size_t) u * image_size + j];
+						local_XA += (double) d_XA[(size_t) u * image_size + j];
+					}
+				}
+			}
+		}
+	}
+
+	s_norm[tid] = local_norm;
+	s_AA[tid] = local_AA;
+	s_XA[tid] = local_XA;
+	__syncthreads();
+
+	for (int s = 128; s > 0; s >>= 1)
+	{
+		if (tid < s)
+		{
+			s_norm[tid] += s_norm[tid + s];
+			s_AA[tid] += s_AA[tid + s];
+			s_XA[tid] += s_XA[tid + s];
+		}
+		__syncthreads();
+	}
+
+	if (tid == 0)
+	{
+		cuda_atomic_add_double(&d_out[sigma_shells + 0], s_norm[0]);
+		if (do_scale)
+		{
+			cuda_atomic_add_double(&d_out[sigma_shells + 1], s_AA[0]);
+			cuda_atomic_add_double(&d_out[sigma_shells + 2], s_XA[0]);
+		}
+	}
+}
+
+__global__ void cuda_kernel_per_class_best(
+		const XFLOAT * __restrict__ d_weights,
+		const PerClassBestJob * __restrict__ jobs,
+		int n_jobs,
+		PerClassBestOut * __restrict__ out)
+{
+	const int bid = blockIdx.x;
+	if (bid >= n_jobs)
+		return;
+
+	__shared__ long int s_best_s[256];
+	__shared__ XFLOAT s_best_w[256];
+	__shared__ long int s_last_z[256];
+	__shared__ int s_z_par[256];
+
+	const PerClassBestJob job = jobs[bid];
+	const int tid = threadIdx.x;
+
+	long int best_s = -1;
+	XFLOAT best_w = (XFLOAT) 0.;
+	long int last_z = -1;
+	int z_cnt = 0;
+
+	const long int firstPos = job.firstPos;
+	const long int lastPos = firstPos + job.weightNum;
+	for (long int s = firstPos + tid; s < lastPos; s += 256)
+	{
+		const XFLOAT w = __ldg(&d_weights[s]);
+		if (best_s < 0 || w > best_w)
+		{
+			best_w = w;
+			best_s = s;
+		}
+		if (w == (XFLOAT) 0.)
+		{
+			last_z = s;
+			z_cnt ^= 1;
+		}
+	}
+
+	s_best_s[tid] = best_s;
+	s_best_w[tid] = best_w;
+	s_last_z[tid] = last_z;
+	s_z_par[tid] = z_cnt;
+	__syncthreads();
+
+	for (int s = 128; s > 0; s >>= 1)
+	{
+		if (tid < s)
+		{
+			const long int sB = s_best_s[tid + s];
+			const XFLOAT wB = s_best_w[tid + s];
+			const long int sA = s_best_s[tid];
+			const XFLOAT wA = s_best_w[tid];
+			if (sB >= 0 && (sA < 0 || wB > wA || (wB == wA && sB < sA)))
+			{
+				s_best_s[tid] = sB;
+				s_best_w[tid] = wB;
+			}
+			if (s_last_z[tid + s] > s_last_z[tid])
+				s_last_z[tid] = s_last_z[tid + s];
+			s_z_par[tid] ^= s_z_par[tid + s];
+		}
+		__syncthreads();
+	}
+
+	if (tid == 0)
+	{
+		PerClassBestOut res;
+		res.best_s = s_best_s[0];
+		res.best_w = s_best_w[0];
+		res.last_zero_s = s_last_z[0];
+		res.zero_parity = s_z_par[0];
+		out[bid] = res;
 	}
 }
 

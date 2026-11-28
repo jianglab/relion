@@ -294,8 +294,14 @@ void ParFourierTransformer::Transform(int sign)
         else
             REPORT_ERROR("No complex nor real data defined");
 
-        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(fFourier)
-            DIRECT_MULTIDIM_ELEM(fFourier,n) /= size;
+        const RFLOAT inv_size = (RFLOAT)1.0 / (RFLOAT)size;
+        Complex* __restrict fdata = MULTIDIM_ARRAY(fFourier);
+        const size_t total = MULTIDIM_SIZE(fFourier);
+        for (size_t n = 0; n < total; n++)
+        {
+            fdata[n].real *= inv_size;
+            fdata[n].imag *= inv_size;
+        }
     }
     else if (sign == FFTW_BACKWARD)
     {

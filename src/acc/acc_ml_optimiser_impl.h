@@ -359,7 +359,7 @@ void getFourierTransformsAndCtfs(long int part_id,
 		size_t current_size_y = baseMLO->image_current_size[optics_group];
 		size_t current_size_z = (accMLO->dataIs3D) ? baseMLO->image_current_size[optics_group] : 1;
 		accMLO->transformer1.setSize(img().xdim,img().ydim,img().zdim);
-		Fimg.initZeros(current_size_z, current_size_y, current_size_x);
+		Fimg.resizeNoCp(current_size_z, current_size_y, current_size_x);
 
 		// ------------------------------------------------------------------------------------------
 #ifdef _HIP_ENABLED
@@ -429,13 +429,49 @@ void getFourierTransformsAndCtfs(long int part_id,
 
 		// ------------------------------------------------------------------------------------------
 
+		MultidimArray<RFLOAT> Mnoise;
+		bool is_helical_segment = (baseMLO->do_helical_refine) || ((baseMLO->mymodel.ref_dim == 2) && (baseMLO->helical_tube_outer_diameter > 0.));
+
+		// For multibodies: have the mask radius equal to maximum radius within body mask plus the translational offset search range
+		RFLOAT my_mask_radius = (baseMLO->mymodel.nr_bodies > 1 ) ?
+		    (baseMLO->mymodel.max_radius_mask_bodies[ibody] + baseMLO->sampling.offset_range) / my_pixel_size :
+		    baseMLO->particle_diameter / (2. * my_pixel_size);
+
+#ifdef _CUDA_ENABLED
+		// Helical mask on the GPU (2D images, zeros outside): no copy to the host and
+		// back per particle. RELION_GPU_HELICAL_MASK=off uses the CPU version.
+		static const bool gpu_helical_mask = []() {
+		    const char *e = getenv("RELION_GPU_HELICAL_MASK");
+		    return !(e && (std::string(e) == "off" || std::string(e) == "0"));
+		}();
+		static thread_local int *helixMaskBad = NULL; // pinned, written by the kernel
+		bool helixMaskOnGpu = false;
+		const bool helixCanRunOnGpu = is_helical_segment && gpu_helical_mask && baseMLO->do_zero_mask && !op.is_tomo && !accMLO->dataIs3D;
+		const bool pipelineGpuPrep = gpuFusedPrep() && (!is_helical_segment || helixCanRunOnGpu);
+		const size_t fimg_n = (size_t)current_size_x * current_size_y * current_size_z;
+		const bool need_power = (baseMLO->image_current_size[optics_group] < baseMLO->image_full_size[optics_group]);
+		const size_t spec_n = need_power ? (size_t)(baseMLO->image_full_size[optics_group]/2 + 1) + 1 : 0;
+		const size_t off_masked = 2 * fimg_n;
+		const size_t off_spec = 4 * fimg_n;
+		AccPtr<XFLOAT> prepOut = ptrFactory.make<XFLOAT>(pipelineGpuPrep ? (off_spec + spec_n) : 0);
+		AsyncDownload prepDl;
+		bool prepAsync = false;
+#else
+		const bool pipelineGpuPrep = false;
+#endif
+
 		CTIC(accMLO->timer,"TranslateAndNormCorrect");
 
 		AccDataTypes::Image<XFLOAT> d_img(img.data, ptrFactory);
 		AccDataTypes::Image<XFLOAT> d_rec_img(img.data, ptrFactory);
 
-		d_img.allAlloc();
-		d_img.allInit(0);
+		if (pipelineGpuPrep && !op.is_tomo)
+		    d_img.deviceAlloc();
+		else
+		{
+		    d_img.allAlloc();
+		    d_img.allInit(0);
+		}
 
         // TODO!: think about applying 3D offsets as 2D shifts to the 2D STA stacks here...
         if (!op.is_tomo)
@@ -463,8 +499,13 @@ void getFourierTransformsAndCtfs(long int part_id,
             if(baseMLO->has_converged && baseMLO->do_use_reconstruct_images)
             {
                 CTIC(accMLO->timer, "TranslateAndNormCorrect_recImg");
-                d_rec_img.allAlloc();
-                d_rec_img.allInit(0);
+                if (pipelineGpuPrep)
+                    d_rec_img.deviceAlloc();
+                else
+                {
+                    d_rec_img.allAlloc();
+                    d_rec_img.allInit(0);
+                }
                 AccUtilities::TranslateAndNormCorrect(rec_img.data,    // input   	host-side 	MultidimArray
                                                       d_rec_img,        // output  	acc-side  	Array
                                                       normcorr_val,
@@ -496,6 +537,147 @@ void getFourierTransformsAndCtfs(long int part_id,
             }
         }
 
+#ifdef _CUDA_ENABLED
+        if (pipelineGpuPrep)
+        {
+            prepOut.deviceAlloc();
+            AccPtr<ACCCOMPLEX> d_Fimg_nomask((ACCCOMPLEX *) NULL, (ACCCOMPLEX *) (~prepOut),
+                                             fimg_n, prepOut.getStream(), accMLO->getAllocator());
+            AccPtr<ACCCOMPLEX> d_Fimg_masked((ACCCOMPLEX *) NULL, (ACCCOMPLEX *) (&(~prepOut)[off_masked]),
+                                             fimg_n, prepOut.getStream(), accMLO->getAllocator());
+
+            CTIC(cudaMLO->timer,"normalizeAndTransform_recImg");
+            AccDataTypes::Image<XFLOAT> &src_unmasked =
+                (baseMLO->has_converged && baseMLO->do_use_reconstruct_images) ? d_rec_img : d_img;
+            AccUtilities::normalizeAndTransformImageOnDevice<MlClass>(
+                src_unmasked, d_Fimg_nomask, accMLO, current_size_x, current_size_y, current_size_z);
+            LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
+            CTOC(cudaMLO->timer,"normalizeAndTransform_recImg");
+
+            if (helixCanRunOnGpu)
+            {
+                CTIC(accMLO->timer,"applyHelicalMaskGpu");
+                if (helixMaskBad == NULL)
+                    HANDLE_ERROR(cudaMallocHost((void **) &helixMaskBad, sizeof(int)));
+                *helixMaskBad = 0;
+                RFLOAT a00, a01, a10, a11, R1, R2, D1, D2;
+                helixMaskParameters2D(img.data.xdim, img.data.ydim, psi_deg, my_mask_radius,
+                                      (baseMLO->helical_tube_outer_diameter / (2. * my_pixel_size)),
+                                      baseMLO->width_mask_edge, a00, a01, a10, a11, R1, R2, D1, D2);
+                static thread_local double *helixPartials = NULL; // this thread's, device
+                if (helixPartials == NULL)
+                    HANDLE_ERROR(cudaMalloc((void **) &helixPartials, 2 * HELIX_MASK_PARTIALS * sizeof(double)));
+                const int n = img.data.xdim * img.data.ydim;
+                static const bool mask_fused = []() {
+                    const char *e = getenv("RELION_GPU_MASK_FUSED");
+                    return e && std::string(e) != "0" && std::string(e) != "off";
+                }();
+                bool mask_done = false;
+                if (mask_fused && !baseMLO->helical_cylindrical_mask)
+                {
+                    XFLOAT *fimg = ~d_img;
+                    int fxd = img.data.xdim, fyd = img.data.ydim, fnp = HELIX_MASK_PARTIALS;
+                    double fa10 = a10, fa11 = a11, fR1 = R1, fR2 = R2, fD1 = D1, fD2 = D2, fcw = baseMLO->width_mask_edge;
+                    double *fpart = helixPartials;
+                    int *fbad = helixMaskBad;
+                    void *args[] = { &fimg, &fxd, &fyd, &fa10, &fa11, &fR1, &fR2, &fD1, &fD2, &fcw, &fpart, &fnp, &fbad };
+                    const int fblocks = std::max<int>((n + HELIX_MASK_BLOCK - 1) / HELIX_MASK_BLOCK, HELIX_MASK_PARTIALS);
+                    mask_done = cudaLaunchCooperativeKernel((void *) cuda_kernel_helixMaskFused2D, dim3(fblocks), dim3(HELIX_MASK_BLOCK),
+                            args, 0, d_img.getStream()) == cudaSuccess;
+                    if (!mask_done)
+                        cudaGetLastError();
+                }
+                if (!mask_done)
+                {
+                    cuda_kernel_helixMaskBackground2D<<<HELIX_MASK_PARTIALS, HELIX_MASK_BLOCK, 0, d_img.getStream()>>>(
+                            ~d_img, img.data.xdim, img.data.ydim, a10, a11, D1, D2,
+                            baseMLO->width_mask_edge, helixPartials);
+                    cuda_kernel_helixMaskApply2D<<<(n + HELIX_MASK_BLOCK - 1) / HELIX_MASK_BLOCK, HELIX_MASK_BLOCK, 0, d_img.getStream()>>>(
+                            ~d_img, img.data.xdim, img.data.ydim, a00, a01, a10, a11, baseMLO->helical_cylindrical_mask, R1, R2, D1, D2,
+                            baseMLO->width_mask_edge, helixPartials, HELIX_MASK_PARTIALS, helixMaskBad);
+                }
+                LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
+                helixMaskOnGpu = true;
+                CTOC(accMLO->timer,"applyHelicalMaskGpu");
+            }
+            else
+            {
+                CTIC(accMLO->timer,"applyMask");
+                XFLOAT cosine_width = baseMLO->width_mask_edge;
+                XFLOAT radius = (XFLOAT) my_mask_radius;
+                if (radius < 0)
+                    radius = ((RFLOAT)img.data.xdim)/2.;
+                XFLOAT radius_p = radius + cosine_width;
+                XFLOAT bg_val(0.);
+                AccPtr<XFLOAT> maskSums = ptrFactory.make<XFLOAT>((size_t)(2 * SOFTMASK_BLOCK_SIZE));
+                if (baseMLO->do_zero_mask)
+                {
+                    maskSums.accAlloc();
+                    maskSums.accInit(0);
+                    AccPtr<XFLOAT> sumView(maskSums, 0, (size_t) SOFTMASK_BLOCK_SIZE);
+                    AccPtr<XFLOAT> sumBgView(maskSums, (size_t) SOFTMASK_BLOCK_SIZE, (size_t) SOFTMASK_BLOCK_SIZE);
+                    AccUtilities::softMaskBackgroundValue(d_img, radius, radius_p, cosine_width, sumView, sumBgView);
+                    LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
+                    RandomImage.setAccPtr(d_img);
+                    AccUtilities::cosineFilter(d_img, true, RandomImage, radius, radius_p, cosine_width, bg_val,
+                                               &(~maskSums)[0], &(~maskSums)[SOFTMASK_BLOCK_SIZE]);
+                }
+                else
+                {
+                    AccUtilities::cosineFilter(d_img, false, RandomImage, radius, radius_p, cosine_width, bg_val);
+                }
+                LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
+                CTOC(accMLO->timer,"applyMask");
+            }
+
+            CTIC(cudaMLO->timer,"normalizeAndTransform");
+            AccUtilities::normalizeAndTransformImageOnDevice<MlClass>(
+                d_img, d_Fimg_masked, accMLO, current_size_x, current_size_y, current_size_z);
+            LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
+            CTOC(cudaMLO->timer,"normalizeAndTransform");
+
+            CTIC(accMLO->timer,"powerClass");
+            if (need_power)
+            {
+                DEBUG_HANDLE_ERROR(cudaMemsetAsync(&(~prepOut)[off_spec], 0, spec_n * sizeof(XFLOAT), prepOut.getStream()));
+                int gridSize = CEIL((float)(accMLO->transformer1.fouriers.getSize()) / (float)POWERCLASS_BLOCK_SIZE);
+                if (accMLO->dataIs3D)
+                    AccUtilities::powerClass<true>(gridSize, POWERCLASS_BLOCK_SIZE,
+                                                   ~accMLO->transformer1.fouriers,
+                                                   &(~prepOut)[off_spec],
+                                                   accMLO->transformer1.fouriers.getSize(),
+                                                   spec_n - 1,
+                                                   accMLO->transformer1.xFSize,
+                                                   accMLO->transformer1.yFSize,
+                                                   accMLO->transformer1.zFSize,
+                                                   (baseMLO->image_current_size[optics_group]/2)+1,
+                                                   &(~prepOut)[off_spec + spec_n - 1],
+                                                   prepOut.getStream());
+                else
+                    AccUtilities::powerClass<false>(gridSize, POWERCLASS_BLOCK_SIZE,
+                                                    ~accMLO->transformer1.fouriers,
+                                                    &(~prepOut)[off_spec],
+                                                    accMLO->transformer1.fouriers.getSize(),
+                                                    spec_n - 1,
+                                                    accMLO->transformer1.xFSize,
+                                                    accMLO->transformer1.yFSize,
+                                                    accMLO->transformer1.zFSize,
+                                                    (baseMLO->image_current_size[optics_group]/2)+1,
+                                                    &(~prepOut)[off_spec + spec_n - 1],
+                                                    prepOut.getStream());
+                LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
+            }
+            else
+            {
+                op.highres_Xi2_img.at(img_id) = 0.;
+            }
+            CTOC(accMLO->timer,"powerClass");
+
+            prepAsync = prepDl.start(~prepOut, prepOut.getSize() * sizeof(XFLOAT), NULL, 0, prepOut.getStream());
+        }
+        else
+#endif
+        {
         if(baseMLO->has_converged && baseMLO->do_use_reconstruct_images)
         {
 
@@ -554,29 +736,11 @@ void getFourierTransformsAndCtfs(long int part_id,
 
         // ------------------------------------------------------------------------------------------
 
-        MultidimArray<RFLOAT> Mnoise;
-        bool is_helical_segment = (baseMLO->do_helical_refine) || ((baseMLO->mymodel.ref_dim == 2) && (baseMLO->helical_tube_outer_diameter > 0.));
-
-        // For multibodies: have the mask radius equal to maximum radius within body mask plus the translational offset search range
-        RFLOAT my_mask_radius = (baseMLO->mymodel.nr_bodies > 1 ) ?
-            (baseMLO->mymodel.max_radius_mask_bodies[ibody] + baseMLO->sampling.offset_range) / my_pixel_size :
-            baseMLO->particle_diameter / (2. * my_pixel_size);
-
-        // ------------------------------------------------------------------------------------------
-        
         // We are now done with the unmasked image used for reconstruction.
         // Now make the masked image used for alignment and classification.
 
 #ifdef _CUDA_ENABLED
-        // Helical mask on the GPU (2D images, zeros outside): no copy to the host and
-        // back per particle. RELION_GPU_HELICAL_MASK=off uses the CPU version.
-        static const bool gpu_helical_mask = []() {
-            const char *e = getenv("RELION_GPU_HELICAL_MASK");
-            return !(e && (std::string(e) == "off" || std::string(e) == "0"));
-        }();
-        static thread_local int *helixMaskBad = NULL; // pinned, written by the kernel
-        bool helixMaskOnGpu = false;
-        if (is_helical_segment && gpu_helical_mask && baseMLO->do_zero_mask && !op.is_tomo && !accMLO->dataIs3D)
+        if (helixCanRunOnGpu)
         {
             CTIC(accMLO->timer,"applyHelicalMaskGpu");
             if (helixMaskBad == NULL)
@@ -865,6 +1029,7 @@ void getFourierTransformsAndCtfs(long int part_id,
 			op.highres_Xi2_img.at(img_id) = 0.;
 		}
 		CTOC(accMLO->timer,"powerClass");
+        }
 
 		Fctf.resize(Fimg);
 		// Now calculate the actual CTF
@@ -986,10 +1151,63 @@ void getFourierTransformsAndCtfs(long int part_id,
 		}
 		CTOC(accMLO->timer,"ctfCorr");
 
+#ifdef _CUDA_ENABLED
+		if (pipelineGpuPrep)
+		{
+		    const XFLOAT *h_prep = NULL;
+		    if (prepAsync)
+		    {
+		        prepDl.wait();
+		        h_prep = prepDl.first<XFLOAT>();
+		    }
+		    else
+		    {
+		        prepOut.hostAlloc();
+		        prepOut.cpToHostWait();
+		        h_prep = &prepOut[0];
+		    }
+		    if (helixMaskOnGpu && *helixMaskBad)
+		        REPORT_ERROR("mask.cpp::softMaskOutsideMapForHelix(): No background (noise) areas found in this particle!");
+
+		    const ACCCOMPLEX *h_nomask = (const ACCCOMPLEX *) h_prep;
+		    MultidimArray<Complex> &Fnomask = op.Fimg_nomask.at(img_id);
+		    Fnomask.resizeNoCp(current_size_z, current_size_y, current_size_x);
+		    for (size_t i = 0; i < fimg_n; i++)
+		    {
+		        Fnomask.data[i].real = (RFLOAT) h_nomask[i].x;
+		        Fnomask.data[i].imag = (RFLOAT) h_nomask[i].y;
+		    }
+		    CTIC(accMLO->timer,"selfApplyBeamTilt");
+		    baseMLO->mydata.obsModel.demodulatePhase(optics_group, Fnomask);
+		    baseMLO->mydata.obsModel.divideByMtf(optics_group, Fnomask);
+
+		    const ACCCOMPLEX *h_masked = (const ACCCOMPLEX *) (h_prep + off_masked);
+		    Fimg.resizeNoCp(current_size_z, current_size_y, current_size_x);
+		    for (size_t i = 0; i < fimg_n; i++)
+		    {
+		        Fimg.data[i].real = (RFLOAT) h_masked[i].x;
+		        Fimg.data[i].imag = (RFLOAT) h_masked[i].y;
+		    }
+		    baseMLO->mydata.obsModel.demodulatePhase(optics_group, Fimg);
+		    baseMLO->mydata.obsModel.divideByMtf(optics_group, Fimg);
+		    CTOC(accMLO->timer,"selfApplyBeamTilt");
+
+		    if (need_power)
+		    {
+		        op.power_img.at(img_id).resize(baseMLO->image_full_size[optics_group]/2 + 1);
+		        for (size_t i = 0; i < spec_n - 1; i++)
+		            op.power_img.at(img_id).data[i] = h_prep[off_spec + i];
+		        op.highres_Xi2_img.at(img_id) = h_prep[off_spec + spec_n - 1];
+		    }
+		}
+		else
+#endif
+		{
 		CTIC(accMLO->timer,"selfApplyBeamTilt");
 		baseMLO->mydata.obsModel.demodulatePhase(optics_group, Fimg);
 		baseMLO->mydata.obsModel.divideByMtf(optics_group, Fimg);
 		CTOC(accMLO->timer,"selfApplyBeamTilt");
+		}
 
 		// Store Fimg and Fctf
 		op.Fimg.at(img_id) = Fimg;
@@ -1614,7 +1832,7 @@ void getAllSquaredDifferencesCoarse(
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
     #elif _CUDA_ENABLED
 		if (hold == NULL) // a deferred pass keeps its inputs alive instead
-   			accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+   			accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 	#elif _SYCL_ENABLED
 		if (accMLO->useStream())
 			for (int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -1809,7 +2027,7 @@ void getAllSquaredDifferencesCoarse(
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread)); // does not appear to be NEEDED FOR NON-BLOCKING CLASS STREAMS in tests, but should be to sync against classStreams
     #elif _CUDA_ENABLED
-		accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+		accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 	#elif _SYCL_ENABLED
 		if (accMLO->useStream())
 			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -1841,6 +2059,26 @@ void getAllSquaredDifferencesCoarse(
 
 #if defined(_SYCL_ENABLED) && ! defined(USE_ONEDPL)
 	allWeights.setAccType(accCPU);
+#endif
+#ifdef _CUDA_ENABLED
+    const size_t fused_n_coarse = (size_t)(sp.iclass_max - sp.iclass_min + 1) * sp.nr_dir * sp.nr_psi * sp.nr_trans;
+    if (op.coarse_min_diff2_ptr != NULL &&
+        allWeights.getAccType() == accCUDA && allWeights.getSize() > 1 &&
+        gpuAsyncFine() == 1 && gpuFusedWeights() && gpuClassBatching() &&
+        !baseMLO->needFilamentLoglik() &&
+        baseMLO->adaptive_oversampling != 0 &&
+        !(baseMLO->iter == 1 && baseMLO->do_firstiter_cc) && !baseMLO->do_always_cc && !baseMLO->is_som_iter &&
+        fused_n_coarse > 1 && fused_n_coarse <= ((size_t) 1 << 22))
+    {
+        AccPtr<XFLOAT> *cm = (AccPtr<XFLOAT> *) op.coarse_min_diff2_ptr;
+        cm->setStream(allWeights.getStream());
+        cm->setSize(1);
+        cm->allAlloc();
+        CudaKernels::minToDevice<XFLOAT>(allWeights, ~(*cm));
+        op.coarse_min_diff2_deferred = true;
+        op.min_diff2 = 0.;
+    }
+    else
 #endif
     op.min_diff2 = AccUtilities::getMinOnDevice<XFLOAT>(allWeights);
     //std::cerr << " min_diff2 coarse= " << op.min_diff2 << std::endl;
@@ -1936,7 +2174,9 @@ void getAllSquaredDifferencesFine(
 
     // Make sure entire array initialized, as loop over img_id now sums to old value...
     deviceInitValue<XFLOAT>(FinePassWeights.weights, 0);
+#ifndef _CUDA_ENABLED
 	FinePassWeights.weights.streamSync();
+#endif
 
     CUSTOM_ALLOCATOR_REGION_NAME("DIFF_FINE");
 	CTIC(accMLO->timer,"diff_pre_gpu");
@@ -2329,7 +2569,7 @@ void getAllSquaredDifferencesFine(
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
     #elif _CUDA_ENABLED
-		accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+		accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 	#elif _SYCL_ENABLED
 		if (accMLO->useStream())
 			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -2464,7 +2704,7 @@ void getAllSquaredDifferencesFine(
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 		DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
     #elif _CUDA_ENABLED
-		accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+		accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 	#elif _SYCL_ENABLED
 		if (accMLO->useStream())
 			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -2566,6 +2806,16 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 	// Ready the "prior-containers" for all classes (remake every img_id)
 	AccPtr<XFLOAT>  pdf_orientation       = ptrFactory.make<XFLOAT>((size_t)((sp.iclass_max-sp.iclass_min+1) * sp.nr_dir * sp.nr_psi));
 	AccPtr<bool>    pdf_orientation_zeros = ptrFactory.make<bool>(pdf_orientation.getSize());
+#ifdef _CUDA_ENABLED
+	const size_t n_poff = (size_t)(sp.iclass_max - sp.iclass_min + 1) * sp.nr_trans;
+	const size_t poff_bytes = ((n_poff * sizeof(XFLOAT)) + 15) & ~(size_t)15;
+	AccPtr<char> pdfOffsetBuf = ptrFactory.make<char>(poff_bytes + n_poff * sizeof(bool));
+	pdfOffsetBuf.allAlloc();
+	AccPtr<XFLOAT> pdf_offset((XFLOAT *)&pdfOffsetBuf[0], (XFLOAT *)&(~pdfOffsetBuf)[0], n_poff, pdfOffsetBuf.getStream(), accMLO->getAllocator());
+	AccPtr<bool> pdf_offset_zeros((bool *)&pdfOffsetBuf[poff_bytes], (bool *)&(~pdfOffsetBuf)[poff_bytes], n_poff, pdfOffsetBuf.getStream(), accMLO->getAllocator());
+	pdf_orientation.accAlloc();
+	pdf_orientation_zeros.accAlloc();
+#else
 	AccPtr<XFLOAT>  pdf_offset            = ptrFactory.make<XFLOAT>((size_t)((sp.iclass_max-sp.iclass_min+1)*sp.nr_trans));
 	AccPtr<bool>    pdf_offset_zeros      = ptrFactory.make<bool>(pdf_offset.getSize());
 
@@ -2584,16 +2834,77 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 #endif
 	pdf_offset.allAlloc();
 	pdf_offset_zeros.allAlloc();
+#endif
 
 	CUSTOM_ALLOCATOR_REGION_NAME("CASDTW_PDF");
 
 	// pdf_orientation is img_id-independent, so we keep it above img_id scope
 	CTIC(accMLO->timer,"get_orient_priors");
 	{ stagetimer::Scope st_priors(stagetimer::PRIORS);
+#ifdef _CUDA_ENABLED
+	const unsigned long nr_c = (sp.iclass_max >= sp.iclass_min) ? (sp.iclass_max - sp.iclass_min + 1) : 0;
+	const bool useSepPriors = !baseMLO->do_only_sample_tilt && nr_c > 0 && sp.nr_dir > 0 && sp.nr_psi > 0 &&
+	        (sp.idir_max >= sp.idir_min) && (sp.ipsi_max >= sp.ipsi_min) &&
+	        (sp.idir_max - sp.idir_min + 1 == sp.nr_dir) &&
+	        (sp.ipsi_max - sp.ipsi_min + 1 == sp.nr_psi);
+	if (useSepPriors)
+	{
+	    const int mode = (baseMLO->do_skip_align || baseMLO->do_skip_rotate) ? 0
+	                     : (baseMLO->mymodel.orientational_prior_mode == NOPRIOR ? 1 : 2);
+	    const size_t total_r = (mode == 0) ? (size_t)nr_c
+	                         : (mode == 1) ? ((size_t)nr_c + (size_t)nr_c * sp.nr_dir)
+	                                       : ((size_t)nr_c + (size_t)sp.nr_dir + (size_t)sp.nr_psi);
+	    AccPtr<RFLOAT> priorBuf = ptrFactory.make<RFLOAT>(total_r);
+	    priorBuf.setStream(pdf_orientation.getStream());
+	    priorBuf.allAlloc();
+	    for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
+	    {
+	        const unsigned long c = exp_iclass - sp.iclass_min;
+	        RFLOAT cf = baseMLO->helicalContextPrior(op.part_id, exp_iclass) *
+	                    baseMLO->helical2dClassFactor(op.part_id, exp_iclass) *
+	                    baseMLO->filamentClassFactor(op.part_id, exp_iclass) *
+	                    baseMLO->sharedRefSeedFactor(op.part_id, exp_iclass);
+	        if (mode == 0)
+	            cf *= baseMLO->mymodel.pdf_class[exp_iclass];
+	        priorBuf[c] = cf;
+	        if (mode == 1)
+	        {
+	            RFLOAT *dst = &priorBuf[nr_c + c * sp.nr_dir];
+	            for (unsigned long idir = sp.idir_min, d = 0; idir <= sp.idir_max; idir++, d++)
+	                dst[d] = DIRECT_MULTIDIM_ELEM(baseMLO->mymodel.pdf_direction[exp_iclass], idir);
+	        }
+	    }
+	    if (mode == 2)
+	    {
+	        for (unsigned long idir = sp.idir_min, d = 0; idir <= sp.idir_max; idir++, d++)
+	            priorBuf[nr_c + d] = op.directions_prior[idir];
+	        for (unsigned long ipsi = sp.ipsi_min, p = 0; ipsi <= sp.ipsi_max; ipsi++, p++)
+	            priorBuf[nr_c + sp.nr_dir + p] = op.psi_prior[ipsi];
+	    }
+	    priorBuf.cpToDevice();
+	    const RFLOAT *d_cf = ~priorBuf;
+	    const RFLOAT *d_dir = (mode == 0) ? NULL : (d_cf + nr_c);
+	    const RFLOAT *d_psi = (mode == 2) ? (d_dir + sp.nr_dir) : NULL;
+	    const size_t n_total = (size_t)nr_c * sp.nr_dir * sp.nr_psi;
+	    const int bs = 512;
+	    const int gs = (int)((n_total + bs - 1) / bs);
+	    cuda_kernel_initOrientationsSeparable<<<gs, bs, 0, pdf_orientation.getStream()>>>(
+	            d_cf, d_dir, d_psi, mode, nr_c, sp.nr_dir, sp.nr_psi,
+	            ~pdf_orientation, ~pdf_orientation_zeros);
+	    LAUNCH_HANDLE_ERROR(cudaGetLastError());
+	}
+	else
+#endif
+	{
 	AccPtr<RFLOAT> pdfs				= ptrFactory.make<RFLOAT>((size_t)((sp.iclass_max-sp.iclass_min+1) * sp.nr_dir * sp.nr_psi));
 	pdfs.allAlloc();
 
 	for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
+	{
+		const RFLOAT cf = baseMLO->helicalContextPrior(op.part_id, exp_iclass) *
+		                  baseMLO->helical2dClassFactor(op.part_id, exp_iclass) *
+		                  baseMLO->filamentClassFactor(op.part_id, exp_iclass) *
+		                  baseMLO->sharedRefSeedFactor(op.part_id, exp_iclass);
 		for (unsigned long idir = sp.idir_min, iorientclass = (exp_iclass-sp.iclass_min) * sp.nr_dir * sp.nr_psi; idir <=sp.idir_max; idir++)
 			for (unsigned long ipsi = sp.ipsi_min; ipsi <= sp.ipsi_max; ipsi++, iorientclass++)
 			{
@@ -2605,12 +2916,10 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 					pdf = DIRECT_MULTIDIM_ELEM(baseMLO->mymodel.pdf_direction[exp_iclass], idir);
 				else
 					pdf = op.directions_prior[idir] * op.psi_prior[ipsi];
-				pdf *= baseMLO->helicalContextPrior(op.part_id, exp_iclass);
-				pdf *= baseMLO->helical2dClassFactor(op.part_id, exp_iclass);
 
-				pdfs[iorientclass] = pdf * baseMLO->filamentClassFactor(op.part_id, exp_iclass) *
-				                     baseMLO->sharedRefSeedFactor(op.part_id, exp_iclass);
+				pdfs[iorientclass] = pdf * cf;
 			}
+	}
 
 	pdfs.cpToDevice();
 	AccUtilities::initOrientations(pdfs, pdf_orientation, pdf_orientation_zeros);
@@ -2618,6 +2927,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 	pdf_orientation.cpToDevice();
 	pdf_orientation_zeros.cpToDevice();
 #endif
+	}
 	}
 	CTOC(accMLO->timer,"get_orient_priors");
 
@@ -2837,8 +3147,12 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
             }
         }
 
+#ifdef _CUDA_ENABLED
+        pdfOffsetBuf.cpToDevice();
+#else
         pdf_offset_zeros.cpToDevice();
         pdf_offset.cpToDevice();
+#endif
 
         CTOC(accMLO->timer,"get_offset_priors");
         CTIC(accMLO->timer,"sumweight1");
@@ -2849,7 +3163,21 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     Mweight, sp.nr_dir * sp.nr_psi * sp.nr_trans * sp.iclass_min,
                     (sp.iclass_max-sp.iclass_min+1) * sp.nr_dir * sp.nr_psi * sp.nr_trans);
 
+#ifndef _CUDA_ENABLED
             pdf_offset.streamSync();
+#endif
+
+            const XFLOAT *d_coarse_min = NULL;
+#ifdef _CUDA_ENABLED
+            AccPtr<XFLOAT> *coarse_cm = (op.coarse_min_diff2_deferred && op.coarse_min_diff2_ptr != NULL)
+                    ? (AccPtr<XFLOAT> *) op.coarse_min_diff2_ptr : NULL;
+            if (coarse_cm != NULL)
+            {
+                if (coarse_cm->getStream() != ipartMweight.getStream())
+                    coarse_cm->streamSync();
+                d_coarse_min = ~(*coarse_cm);
+            }
+#endif
 
             AccUtilities::kernel_weights_exponent_coarse(
                     sp.iclass_max-sp.iclass_min+1,
@@ -2860,7 +3188,8 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                     ipartMweight,
                     (XFLOAT)op.min_diff2,
                     sp.nr_dir*sp.nr_psi,
-                    sp.nr_trans);
+                    sp.nr_trans,
+                    d_coarse_min);
 
 
             // Filament polarity: sums of the coarse weights over psi angles that are not / are
@@ -2925,6 +3254,11 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 long int my_nr_significant_coarse_samples = (long int) fused_n - (long int) r.idx;
                 if (op.sum_weight == 0 || my_nr_significant_coarse_samples == 0)
                 {
+                    if (coarse_cm != NULL)
+                    {
+                        coarse_cm->cpToHostWait();
+                        op.min_diff2 = (RFLOAT)(*coarse_cm)[0];
+                    }
                     std::cerr << std::endl;
                     std::cerr << " fn_img= " << sp.current_img << std::endl;
                     std::cerr << " adaptive_fraction= " << baseMLO->adaptive_fraction << std::endl;
@@ -3171,7 +3505,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
             DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
 #elif _CUDA_ENABLED
-            accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+            accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 #elif defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
 			if (accMLO->useStream())
 				for (int exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -3181,15 +3515,21 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
 
             XFLOAT weights_max = std::numeric_limits<XFLOAT>::lowest();
 
+#ifdef _CUDA_ENABLED
+            if (!accMLO->classStreamsShared)
+                pdf_offset.streamSync();
+#else
             pdf_offset.streamSync();
+#endif
             auto resolveMin = [&]()
             {
 #ifdef _CUDA_ENABLED
                 if (minPending)
                 {
                     minPending = false;
-                    accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
-                    pdf_offset.streamSync();
+                    accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
+                    if (!accMLO->classStreamsShared)
+                        pdf_offset.streamSync();
                     op.min_diff2 = (RFLOAT) AccUtilities::getMinOnDevice<XFLOAT>(PassWeights.weights);
                 }
 #endif
@@ -3426,7 +3766,7 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
                 DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
             DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
 #elif _CUDA_ENABLED
-            accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+            accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 #elif defined(_SYCL_ENABLED) && defined(USE_ONEDPL)
 			if (accMLO->useStream())
 				for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -3654,13 +3994,21 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 
 	// Make local copies of weighted sums (except BPrefs, which are too big)
 	// so that there are not too many mutex locks below
+	struct DirWeightEntry { unsigned ithr; long int dir; RFLOAT w; };
+	std::vector<DirWeightEntry> dir_updates;
 	std::vector<MultidimArray<RFLOAT> > thr_wsum_pdf_direction;
 	std::vector<RFLOAT> thr_wsum_norm_correction, thr_wsum_pdf_class, thr_wsum_prior_offsetx_class, thr_wsum_prior_offsety_class;
 	RFLOAT thr_wsum_sigma2_offset, thr_sumw_group;
 	MultidimArray<RFLOAT> thr_metadata, zeroArray;
-	// wsum_pdf_direction is a 1D-array (of length sampling.NrDirections()) for each class
-	zeroArray.initZeros(baseMLO->sampling.NrDirections());
-	thr_wsum_pdf_direction.resize(baseMLO->mymodel.nr_classes * baseMLO->mymodel.nr_bodies, zeroArray);
+	const int n_dir_arr = baseMLO->mymodel.nr_classes * baseMLO->mymodel.nr_bodies;
+	const bool use_sparse_dir = !(baseMLO->do_skip_align || baseMLO->do_skip_rotate) && !baseMLO->do_skip_maximization &&
+			((size_t) n_dir_arr * (size_t) baseMLO->sampling.NrDirections() > 512);
+	if (!use_sparse_dir)
+	{
+		// wsum_pdf_direction is a 1D-array (of length sampling.NrDirections()) for each class
+		zeroArray.initZeros(baseMLO->sampling.NrDirections());
+		thr_wsum_pdf_direction.resize(n_dir_arr, zeroArray);
+	}
 	// sumw_group is a RFLOAT for each group
 	thr_sumw_group= 0.;
 	// wsum_pdf_class is a RFLOAT for each class
@@ -3809,8 +4157,6 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 
 #ifdef _HIP_ENABLED
     DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
-#else
-    DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
 #endif
 
     // here we introduce offsets for the clases in an array as it is more efficient to
@@ -3823,8 +4169,22 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     AccPtr<XFLOAT>                      p_weights = ptrFactory.make<XFLOAT>((size_t)sumBlockNum);
     AccPtr<XFLOAT> p_thr_wsum_prior_offsetxyz_class = ptrFactory.make<XFLOAT>((size_t)sumBlockNum*4);
 
+#ifdef _CUDA_ENABLED
+    const int asyncStoreMode = gpuAsyncStore();
+    if (asyncStoreMode == 1)
+    {
+        p_weights.deviceAlloc();
+        p_thr_wsum_prior_offsetxyz_class.deviceAlloc();
+    }
+    else
+    {
+        p_weights.allAlloc();
+        p_thr_wsum_prior_offsetxyz_class.allAlloc();
+    }
+#else
     p_weights.allAlloc();
     p_thr_wsum_prior_offsetxyz_class.allAlloc();
+#endif
     CTOC(accMLO->timer,"collect_data_2_pre_kernel");
     int partial_pos=0;
 
@@ -3923,10 +4283,44 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     // RELION_GPU_ASYNC_STORE: the two arrays come down as queued copies into a pinned buffer and the
     // host adds them up (in the same order as below) only when the maximization has been queued, so
     // the GPU is not left waiting while the host adds. "check" also takes the blocking copy and compares.
+#ifndef _CUDA_ENABLED
     const int asyncStoreMode = gpuAsyncStore();
+#endif
+    const bool needHostFineWeights = (ibody == 0 && baseMLO->needPerClassMetadata());
+    bool deviceScatter = false;
+#ifdef _CUDA_ENABLED
+    deviceScatter = asyncStoreMode != 0;
+#endif
     bool collectAsync = false;
 #ifdef _CUDA_ENABLED
-    AsyncDownload collectDl;
+    AsyncDownload collectDl, bestDl;
+    std::vector<long int> bestClasses;
+    AccPtr<PerClassBestOut> bestOut = ptrFactory.make<PerClassBestOut>();
+    if (deviceScatter && needHostFineWeights)
+    {
+        std::vector<PerClassBestJob> hJobs;
+        for (long int iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
+        {
+            if ((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0) || FPCMasks[iclass].weightNum == 0)
+                continue;
+            PerClassBestJob job = { (long int) FPCMasks[iclass].firstPos, (long int) FPCMasks[iclass].weightNum };
+            hJobs.push_back(job);
+            bestClasses.push_back(iclass);
+        }
+        if (!hJobs.empty())
+        {
+            AccPtr<PerClassBestJob> dJobs = ptrFactory.make<PerClassBestJob>(hJobs.size());
+            dJobs.allAlloc();
+            memcpy(&dJobs[0], hJobs.data(), hJobs.size() * sizeof(PerClassBestJob));
+            dJobs.cpToDevice();
+            bestOut.setSize(hJobs.size());
+            bestOut.deviceAlloc();
+            cuda_kernel_per_class_best<<<(unsigned) hJobs.size(), 256, 0, cudaStreamPerThread>>>(
+                    ~FinePassWeights.weights, ~dJobs, (int) hJobs.size(), ~bestOut);
+            LAUNCH_HANDLE_ERROR(cudaGetLastError());
+            bestDl.start(~bestOut, hJobs.size() * sizeof(PerClassBestOut), NULL, 0, cudaStreamPerThread);
+        }
+    }
     if (asyncStoreMode != 0)
         collectAsync = collectDl.start(~p_weights, p_weights.getSize() * sizeof(XFLOAT),
                 ~p_thr_wsum_prior_offsetxyz_class, p_thr_wsum_prior_offsetxyz_class.getSize() * sizeof(XFLOAT),
@@ -3934,6 +4328,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 #endif
     if (!collectAsync || asyncStoreMode == 2)
     {
+    if (p_weights.getHostPtr() == NULL) p_weights.hostAlloc();
+    if (p_thr_wsum_prior_offsetxyz_class.getHostPtr() == NULL) p_thr_wsum_prior_offsetxyz_class.hostAlloc();
     p_weights.cpToHost();
     p_thr_wsum_prior_offsetxyz_class.cpToHost();
 
@@ -3948,8 +4344,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
     {
     if (collectSumsDone) return;
     collectSumsDone = true;
-    const XFLOAT *pw = &p_weights[0];
-    const XFLOAT *pt = &p_thr_wsum_prior_offsetxyz_class[0];
+    const XFLOAT *pw = p_weights.getHostPtr();
+    const XFLOAT *pt = p_thr_wsum_prior_offsetxyz_class.getHostPtr();
 #ifdef _CUDA_ENABLED
     if (collectAsync)
     {
@@ -3994,7 +4390,10 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 
                 // store partials according to indices of the relevant dimension
                 unsigned ithr_wsum_pdf_direction = baseMLO->mymodel.nr_bodies > 1 ? ibody : iclass;
-                DIRECT_MULTIDIM_ELEM(thr_wsum_pdf_direction[ithr_wsum_pdf_direction], mydir) += pw[n];
+                if (use_sparse_dir)
+                    dir_updates.push_back({ithr_wsum_pdf_direction, mydir, pw[n]});
+                else
+                    DIRECT_MULTIDIM_ELEM(thr_wsum_pdf_direction[ithr_wsum_pdf_direction], mydir) += pw[n];
             }
             thr_sumw_group                                                               += pw[n];
             thr_wsum_pdf_class[iclass]                                                   += pw[n];
@@ -4079,17 +4478,17 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 
     // Per-class best orientation tracking for filament consistency (see CPU storeWeightedSums)
     // The host copy of the fine weights and their orientation indices is also what the dense weight map
-    // is made from below; with RELION_GPU_ASYNC_STORE that is done on the device, and the copy is left
-    // out unless the consistency check needs it (or "check" compares the two ways of making the map).
-    const bool needHostFineWeights = (ibody == 0 && baseMLO->needPerClassMetadata());
-    bool deviceScatter = false;
+    // is made from below; with RELION_GPU_ASYNC_STORE both the scatter and per-class argmax run on the device.
 #ifdef _CUDA_ENABLED
-    deviceScatter = asyncStoreMode != 0;
+    const bool useGpuClassBest = deviceScatter && bestDl.active();
+#else
+    const bool useGpuClassBest = false;
 #endif
-    if (!deviceScatter || needHostFineWeights || asyncStoreMode == 2)
+    if (!deviceScatter || (needHostFineWeights && !useGpuClassBest) || asyncStoreMode == 2)
     {
     FinePassWeights.weights.cpToHost();
-    FinePassWeights.rot_idx.cpToHost();
+    if (!deviceScatter || asyncStoreMode == 2 || FinePassWeights.rot_idx.getHostPtr() == NULL)
+        FinePassWeights.rot_idx.cpToHost();
 #ifdef _HIP_ENABLED
     DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
 #else
@@ -4099,6 +4498,15 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 
     if (needHostFineWeights)
     {
+#ifdef _CUDA_ENABLED
+        const PerClassBestOut *gpu_best_res = NULL;
+        if (useGpuClassBest)
+        {
+            bestDl.wait();
+            gpu_best_res = bestDl.first<PerClassBestOut>();
+        }
+        size_t best_job_idx = 0;
+#endif
         for (long int iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
         {
             if ((baseMLO->mymodel.pdf_class[iclass] == 0.) || (ProjectionData.class_entries[iclass] == 0))
@@ -4112,21 +4520,68 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
             RFLOAT &class_best_weight = DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, class_base + 6);
 
             long int best_s = -1;
-            long int firstPos = (long int)FPCMasks[iclass].firstPos;
-            long int lastPos = firstPos + (long int)FPCMasks[iclass].weightNum;
-            for (long int s = firstPos; s < lastPos; s++)
+            const RFLOAT init_class_best = class_best_weight;
+            bool need_host_scan = true;
+#ifdef _CUDA_ENABLED
+            long int gpu_best_s = -1;
+            RFLOAT gpu_best_w = init_class_best;
+            if (useGpuClassBest && best_job_idx < bestClasses.size() && bestClasses[best_job_idx] == iclass)
             {
-                RFLOAT w = (RFLOAT)FinePassWeights.weights[s];
-                if (w > class_best_weight)
+                const PerClassBestOut &r = gpu_best_res[best_job_idx++];
+                if (r.best_s >= 0 && (RFLOAT) r.best_w > std::max(init_class_best, (RFLOAT) 0.))
                 {
-                    class_best_weight = w;
-                    best_s = s;
+                    gpu_best_w = (RFLOAT) r.best_w;
+                    gpu_best_s = r.best_s;
                 }
-                else if (w == 0. && class_best_weight == 0.)
+                else if (init_class_best <= (RFLOAT) 0. && r.last_zero_s >= 0)
                 {
-                    best_s = s;
-                    class_best_weight = -1.; // sentinel: recorded orientation from zero-weight sample
+                    gpu_best_s = r.last_zero_s;
+                    const int flip = (init_class_best == (RFLOAT) 0.) ? 1 : 0;
+                    gpu_best_w = ((r.zero_parity ^ flip) == 0) ? (RFLOAT) -1. : (RFLOAT) 0.;
                 }
+                else if (r.best_s >= 0 && (RFLOAT) r.best_w > init_class_best)
+                {
+                    gpu_best_w = (RFLOAT) r.best_w;
+                    gpu_best_s = r.best_s;
+                }
+                if (asyncStoreMode != 2)
+                {
+                    best_s = gpu_best_s;
+                    class_best_weight = gpu_best_w;
+                    need_host_scan = false;
+                }
+            }
+#endif
+            if (need_host_scan)
+            {
+                long int firstPos = (long int)FPCMasks[iclass].firstPos;
+                long int lastPos = firstPos + (long int)FPCMasks[iclass].weightNum;
+                for (long int s = firstPos; s < lastPos; s++)
+                {
+                    RFLOAT w = (RFLOAT)FinePassWeights.weights[s];
+                    if (w > class_best_weight)
+                    {
+                        class_best_weight = w;
+                        best_s = s;
+                    }
+                    else if (w == 0. && class_best_weight == 0.)
+                    {
+                        best_s = s;
+                        class_best_weight = -1.; // sentinel: recorded orientation from zero-weight sample
+                    }
+                }
+#ifdef _CUDA_ENABLED
+                if (useGpuClassBest && asyncStoreMode == 2)
+                {
+                    if (gpu_best_s != best_s || gpu_best_w != class_best_weight)
+                    {
+                        fprintf(stderr, "ASYNC_STORE_CHECK per-class best differs (part %ld class %ld): gpu=(%ld, %.9g) host=(%ld, %.9g)\n",
+                                (long) op.part_id, (long) iclass, (long) gpu_best_s, (double) gpu_best_w,
+                                (long) best_s, (double) class_best_weight);
+                        CRITICAL("RELION_GPU_ASYNC_STORE=check: GPU per-class best differs from host");
+                    }
+                }
+#endif
             }
 
             if (best_s >= 0)
@@ -4217,18 +4672,48 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 		size_t trans_y_offset = 1*(size_t)translation_num;
 		size_t trans_z_offset = 2*(size_t)translation_num;
 
+#ifndef _CUDA_ENABLED
 		AccPtr<XFLOAT> trans_xyz = ptrFactory.make<XFLOAT>((size_t)translation_num*3);
 #ifdef _SYCL_ENABLED
 		trans_xyz.setStreamAccType(devAcc);
 #endif
 		trans_xyz.allAlloc();
+#endif
 
         for (unsigned long img_id = 0; img_id < sp.nr_images; img_id++)
 		{
 
 			/*======================================================
-			                     TRANSLATIONS
+			                     IMAGES & TRANSLATIONS
 			======================================================*/
+
+			CUSTOM_ALLOCATOR_REGION_NAME("TRANS_3");
+
+			CTIC(accMLO->timer,"translation_3");
+
+			MultidimArray<Complex > Fimg, Fimg_nonmask;
+			windowFourierTransform(op.Fimg[img_id], Fimg, baseMLO->image_current_size[optics_group]); //TODO PO isen't this already done in getFourierTransformsAndCtfs?
+			windowFourierTransform(op.Fimg_nomask[img_id], Fimg_nonmask, baseMLO->image_current_size[optics_group]);
+			unsigned long image_size = Fimg.nzyxdim;
+
+			size_t re_offset = 0*(size_t)image_size;
+			size_t im_offset = 1*(size_t)image_size;
+			size_t re_nomask_offset = 2*(size_t)image_size;
+			size_t im_nomask_offset = 3*(size_t)image_size;
+
+#ifdef _CUDA_ENABLED
+			// The images, CTFs, noise weights and translations in one buffer, one upload (below)
+			AccPtr<XFLOAT> storeInputs = ptrFactory.make<XFLOAT>(6*(size_t)image_size + (size_t)translation_num*3);
+			storeInputs.allAlloc();
+			AccPtr<XFLOAT> Fimgs(storeInputs, 0, 4*(size_t)image_size);
+			AccPtr<XFLOAT> trans_xyz(storeInputs, 6*(size_t)image_size, (size_t)translation_num*3);
+#else
+			AccPtr<XFLOAT> Fimgs = ptrFactory.make<XFLOAT>(4*(size_t)image_size);
+#ifdef _SYCL_ENABLED
+			Fimgs.setStreamAccType(devAcc);
+#endif
+			Fimgs.allAlloc();
+#endif
 
 			const bool helical_shifts = (baseMLO->do_helical_refine) && (! baseMLO->ignore_helical_symmetry);
 			HelicalCoordsRotation helical_rotation(
@@ -4281,38 +4766,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				}
 			}
 
+#ifndef _CUDA_ENABLED
 			trans_xyz.cpToDevice();
-
-
-			/*======================================================
-			                     IMAGES
-			======================================================*/
-
-			CUSTOM_ALLOCATOR_REGION_NAME("TRANS_3");
-
-			CTIC(accMLO->timer,"translation_3");
-
-			MultidimArray<Complex > Fimg, Fimg_nonmask;
-			windowFourierTransform(op.Fimg[img_id], Fimg, baseMLO->image_current_size[optics_group]); //TODO PO isen't this already done in getFourierTransformsAndCtfs?
-			windowFourierTransform(op.Fimg_nomask[img_id], Fimg_nonmask, baseMLO->image_current_size[optics_group]);
-			unsigned long image_size = Fimg.nzyxdim;
-
-			size_t re_offset = 0*(size_t)image_size;
-			size_t im_offset = 1*(size_t)image_size;
-			size_t re_nomask_offset = 2*(size_t)image_size;
-			size_t im_nomask_offset = 3*(size_t)image_size;
-
-#ifdef _CUDA_ENABLED
-			// The images, CTFs and noise weights in one buffer, one upload (below)
-			AccPtr<XFLOAT> storeInputs = ptrFactory.make<XFLOAT>(6*(size_t)image_size);
-			storeInputs.allAlloc();
-			AccPtr<XFLOAT> Fimgs(storeInputs, 0, 4*(size_t)image_size);
-#else
-			AccPtr<XFLOAT> Fimgs = ptrFactory.make<XFLOAT>(4*(size_t)image_size);
-#ifdef _SYCL_ENABLED
-			Fimgs.setStreamAccType(devAcc);
-#endif
-			Fimgs.allAlloc();
 #endif
 
 			for (unsigned long i = 0; i < image_size; i ++)
@@ -4419,11 +4874,24 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			size_t XA_offset =  1*(size_t)(baseMLO->mymodel.nr_classes*image_size);
 			size_t sum_offset = 2*(size_t)(baseMLO->mymodel.nr_classes*image_size);
 
+#ifdef _CUDA_ENABLED
+			static const int wdiff2RedMode = gpuswitch::mode("RELION_GPU_WDIFF2_REDUCE");
+			const auto &wdiff2_tbl = accMLO->bundle->getWdiff2Tables();
+			const bool useGpuWdiff2Red = (wdiff2RedMode != 0) && wdiff2_tbl.valid &&
+			        optics_group >= 0 && optics_group < (int) wdiff2_tbl.Mresol_size.size() &&
+			        wdiff2_tbl.Mresol_size[optics_group] == image_size;
+			AccPtr<XFLOAT> wdiff2s    = ptrFactory.make<XFLOAT>(wdiff2s_buf);
+			if (useGpuWdiff2Red && wdiff2RedMode == 1)
+			    wdiff2s.deviceAlloc();
+			else
+			    wdiff2s.allAlloc();
+#else
 			AccPtr<XFLOAT> wdiff2s    = ptrFactory.make<XFLOAT>(wdiff2s_buf);
 #ifdef _SYCL_ENABLED
 			wdiff2s.setStreamAccType(devAcc);
 #endif
 			wdiff2s.allAlloc();
+#endif
 			wdiff2s.accInit(0);
 
 			unsigned long AAXA_pos=0;
@@ -4495,7 +4963,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[exp_iclass]));
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
         #elif _CUDA_ENABLED
-			accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+			accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 		#elif _SYCL_ENABLED
 			if (accMLO->useStream())
 				for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -4669,7 +5137,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[iclass]));
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
         #elif _CUDA_ENABLED
-			accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+			accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 		#elif _SYCL_ENABLED
 			if (accMLO->useStream())
 				for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
@@ -4682,6 +5150,30 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			// All classes in one launch (see runWavgKernelBatched); the per-class
 			// pointers are those of the loop below
 			AccPtr<char> wavgTable = ptrFactory.make<char>();
+			const float2 *shared_shx = NULL;
+			const float2 *shared_shy = NULL;
+#ifndef ACC_DOUBLE_PRECISION
+			AccPtr<float2> sep_shx = ptrFactory.make<float2>();
+			AccPtr<float2> sep_shy = ptrFactory.make<float2>();
+			static const bool wavg_sep_on = [] { const char *e = getenv("RELION_GPU_WAVG_SEPARABLE"); return !e || atoi(e) != 0; }();
+			if (gpuClassBatching() && !accMLO->dataIs3D && translation_num > 0 && translation_num <= 1024 &&
+				((gpuWavgSum() && wavg_sep_on && image_size * translation_num * sizeof(float2) <= ((size_t) 64 << 20)) ||
+				 (!baseMLO->do_grad && !gpuBpShift() && gpuBpSeparable())))
+			{
+				const int sx = op.local_Minvsigma2.xdim;
+				const int sy = op.local_Minvsigma2.ydim;
+				const int smaxr = sx - 1;
+				if ((size_t) translation_num * (sx + sy) * sizeof(float2) <= ((size_t) 64 << 20))
+				{
+					sep_shx.setStream(wavgTable.getStream());
+					buildSeparableShiftTables(
+							&(~trans_xyz)[trans_x_offset], &(~trans_xyz)[trans_y_offset],
+							sep_shx, sep_shy, translation_num, sx, sy, smaxr);
+					shared_shx = ~sep_shx;
+					shared_shy = ~sep_shy;
+				}
+			}
+#endif
 			if (gpuClassBatching())
 			{
 				std::vector<WavgClassJob> jobs;
@@ -4701,8 +5193,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 							op.local_Minvsigma2.xdim-1),
 						~eulers[iclass],
 						&(~sorted_weights)[classPos],
-						&(~wdiff2s)[AA_offset+AAXA_pos],
-						&(~wdiff2s)[XA_offset+AAXA_pos] };
+						baseMLO->do_scale_correction ? &(~wdiff2s)[AA_offset+AAXA_pos] : NULL,
+						baseMLO->do_scale_correction ? &(~wdiff2s)[XA_offset+AAXA_pos] : NULL };
 					jobs.push_back(job);
 					nums.push_back(orientation_num);
 					AAXA_pos += image_size;
@@ -4723,7 +5215,9 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 						part_scale,
 						baseMLO->refs_are_ctf_corrected,
 						accMLO->dataIs3D,
-						wavgTable);
+						wavgTable,
+						shared_shx,
+						shared_shy);
 			}
 			else
 #endif
@@ -4837,8 +5331,7 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					DEBUG_HANDLE_ERROR(hipStreamSynchronize(accMLO->classStreams[iclass]));
 				DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
 		#elif _CUDA_ENABLED
-				accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
-				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+				accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 		#elif _SYCL_ENABLED
 				if (accMLO->useStream())
 					for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
@@ -4866,12 +5359,11 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 							tilt_factors[o++] = (XFLOAT) baseMLO->helicalTiltWeight(ProjectionData.tilts[i]);
 					}
 					tilt_factors.cpToDevice();
-					tilt_factors.streamSync();
 					const size_t n = nr_orient * translation_num;
 					cuda_kernel_scale_orientation_weights<<<(unsigned) ((n + 255) / 256), 256, 0, sorted_weights.getStream()>>>(
 							~tilt_factors, n, translation_num, bp_significant_weight, none, ~sorted_weights);
 					LAUNCH_HANDLE_ERROR(cudaGetLastError());
-					sorted_weights.streamSync();
+					accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 				}
 #else
 				if (sorted_weights.getHostPtr() == NULL)
@@ -4989,7 +5481,9 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 							ctf_premultiplied,
 							bpTable,
 							accView ? &accSlots : NULL,
-							accView);
+							accView,
+							shared_shx,
+							shared_shy);
 					bpBatched = true;
 				}
 			}
@@ -5140,14 +5634,64 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			wdiff2s.cpToHost();
 			DEBUG_HANDLE_ERROR(hipStreamSynchronize(hipStreamPerThread));
     #elif _CUDA_ENABLED
-			// NOTE: We've never seen that this sync is necessary, but it is needed in principle, and
-			// its absence in other parts of the code has caused issues. It is also very low-cost.
-			accMLO->syncClassStreams(sp.iclass_min, sp.iclass_max);
+			accMLO->orderClassStreams(sp.iclass_min, sp.iclass_max);
 
-			// Only the parts read below: the sum, and (with scale correction) the AA and
-			// XA images of the classes used, which come first. All of wdiff2s was a
-			// third of a megabyte per particle with 50 classes, mostly unused.
+			const int sigma_shells = (int) XSIZE(thr_wsum_sigma2_noise);
+			double gpu_norm = 0., gpu_AA = 0., gpu_XA = 0.;
+			std::vector<double> gpu_sigma;
+			bool didGpuWdiff2Red = false;
+			if (useGpuWdiff2Red && sigma_shells > 0)
 			{
+				std::vector<int> used_cls;
+				Wdiff2UsedClasses64 u64;
+				u64.n = 0;
+				for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
+					if ((baseMLO->mymodel.pdf_class[c] != 0.) && (ProjectionData.class_entries[c] != 0))
+						used_cls.push_back((int) c);
+				const int nr_used = (int) used_cls.size();
+				const int *d_used_ext = NULL;
+				AccPtr<int> usedClsDev = ptrFactory.make<int>(nr_used > 64 ? (size_t) nr_used : 0);
+				if (nr_used <= 64)
+				{
+					u64.n = nr_used;
+					for (int u = 0; u < nr_used; u++)
+						u64.cls[u] = used_cls[u];
+				}
+				else
+				{
+					usedClsDev.allAlloc();
+					memcpy(&usedClsDev[0], used_cls.data(), (size_t) nr_used * sizeof(int));
+					usedClsDev.cpToDevice();
+					d_used_ext = ~usedClsDev;
+				}
+
+				AccPtr<double> d_wred = ptrFactory.make<double>((size_t) (sigma_shells + 3));
+				d_wred.setStream(wdiff2s.getStream());
+				d_wred.allAlloc();
+				d_wred.deviceInit(0);
+				const unsigned red_blocks = (unsigned) std::min<size_t>((image_size + 255) / 256, 128);
+				cuda_kernel_reduce_wdiff2s<<<red_blocks, 256, 0, wdiff2s.getStream()>>>(
+						&(~wdiff2s)[sum_offset],
+						baseMLO->do_scale_correction ? &(~wdiff2s)[AA_offset] : NULL,
+						baseMLO->do_scale_correction ? &(~wdiff2s)[XA_offset] : NULL,
+						wdiff2_tbl.d_Mresol_fine[optics_group],
+						wdiff2_tbl.d_scale_mask,
+						u64, d_used_ext, nr_used,
+						sigma_shells, wdiff2_tbl.scale_stride,
+						image_size, baseMLO->do_scale_correction,
+						~d_wred);
+				LAUNCH_HANDLE_ERROR(cudaGetLastError());
+				d_wred.cpToHostWait();
+				didGpuWdiff2Red = true;
+				gpu_sigma.assign(&d_wred[0], &d_wred[sigma_shells]);
+				gpu_norm = d_wred[sigma_shells + 0];
+				gpu_AA   = d_wred[sigma_shells + 1];
+				gpu_XA   = d_wred[sigma_shells + 2];
+			}
+			if (!didGpuWdiff2Red || wdiff2RedMode == 2)
+			{
+				// Only the parts read below: the sum, and (with scale correction) the AA and
+				// XA images of the classes used, which come first.
 				size_t nr_used = 0;
 				for (unsigned long c = sp.iclass_min; c <= sp.iclass_max; c++)
 					if ((baseMLO->mymodel.pdf_class[c] != 0.) && (ProjectionData.class_entries[c] != 0))
@@ -5159,8 +5703,8 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					CudaShortcuts::cpyDeviceToHost<XFLOAT>(&(~wdiff2s)[AA_offset], &wdiff2s[AA_offset], nr_used * image_size, ws);
 					CudaShortcuts::cpyDeviceToHost<XFLOAT>(&(~wdiff2s)[XA_offset], &wdiff2s[XA_offset], nr_used * image_size, ws);
 				}
+				DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
 			}
-			DEBUG_HANDLE_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
 	#elif _SYCL_ENABLED
 			if (accMLO->useStream())
 				for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -5170,6 +5714,12 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 			wdiff2s.cpToHostWait();
 	#endif
 
+#ifdef _CUDA_ENABLED
+			if (!didGpuWdiff2Red || wdiff2RedMode == 2)
+			{
+			double host_norm = 0., host_AA = 0., host_XA = 0.;
+			std::vector<double> host_sigma(didGpuWdiff2Red ? sigma_shells : 0, 0.0);
+#endif
 			AAXA_pos=0;
 
 			for (unsigned long exp_iclass = sp.iclass_min; exp_iclass <= sp.iclass_max; exp_iclass++)
@@ -5182,8 +5732,13 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 					if (ires > -1 && baseMLO->do_scale_correction &&
 							DIRECT_A1D_ELEM(baseMLO->mymodel.data_vs_prior_class[exp_iclass], ires) > 3.)
 					{
+#ifdef _CUDA_ENABLED
+						host_AA += wdiff2s[AA_offset+AAXA_pos+j];
+						host_XA += wdiff2s[XA_offset+AAXA_pos+j];
+#else
 						exp_wsum_scale_correction_AA += wdiff2s[AA_offset+AAXA_pos+j];
 						exp_wsum_scale_correction_XA += wdiff2s[XA_offset+AAXA_pos+j];
+#endif
 					}
 				}
 				AAXA_pos += image_size;
@@ -5194,11 +5749,59 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
 				int ires = DIRECT_MULTIDIM_ELEM(baseMLO->Mresol_fine[optics_group], j);
 				if (ires > -1)
 				{
+#ifdef _CUDA_ENABLED
+					if (didGpuWdiff2Red)
+					{
+						if (ires < sigma_shells)
+							host_sigma[ires] += (double) wdiff2s[sum_offset+j];
+						host_norm += (double) wdiff2s[sum_offset+j];
+					}
+					else
+					{
+						thr_wsum_sigma2_noise.data[ires] += (RFLOAT) wdiff2s[sum_offset+j]/(RFLOAT)sp.nr_images;
+						exp_wsum_norm_correction += (RFLOAT) wdiff2s[sum_offset+j]/(RFLOAT)sp.nr_images;
+					}
+#else
 					// For multiple images, divide by sp.nr_images!
                     thr_wsum_sigma2_noise.data[ires] += (RFLOAT) wdiff2s[sum_offset+j]/(RFLOAT)sp.nr_images;
 					exp_wsum_norm_correction += (RFLOAT) wdiff2s[sum_offset+j]/(RFLOAT)sp.nr_images; //TODO could be gpu-reduced
+#endif
 				}
 			}
+#ifdef _CUDA_ENABLED
+			if (didGpuWdiff2Red && wdiff2RedMode == 2)
+			{
+				auto checkRel = [&](const char *lbl, double gv, double hv)
+				{
+					double scale = std::max(1.0, std::max(fabs(gv), fabs(hv)));
+					if (fabs(gv - hv) > 1e-10 * scale)
+					{
+						fprintf(stderr, "WDIFF2_REDUCE_CHECK %s differs (part %ld): gpu=%.15g host=%.15g\n",
+								lbl, (long) op.part_id, gv, hv);
+						CRITICAL("RELION_GPU_WDIFF2_REDUCE=check: GPU reduction differs from host");
+					}
+				};
+				checkRel("norm", gpu_norm, host_norm);
+				checkRel("AA", gpu_AA, host_AA);
+				checkRel("XA", gpu_XA, host_XA);
+				for (int ires = 0; ires < sigma_shells; ires++)
+					checkRel("sigma2", gpu_sigma[ires], host_sigma[ires]);
+			}
+			if (!didGpuWdiff2Red)
+			{
+				exp_wsum_scale_correction_AA += host_AA;
+				exp_wsum_scale_correction_XA += host_XA;
+			}
+			}
+			if (didGpuWdiff2Red)
+			{
+				exp_wsum_scale_correction_AA += gpu_AA;
+				exp_wsum_scale_correction_XA += gpu_XA;
+				exp_wsum_norm_correction += (RFLOAT) gpu_norm / (RFLOAT) sp.nr_images;
+				for (int ires = 0; ires < sigma_shells; ires++)
+					thr_wsum_sigma2_noise.data[ires] += (RFLOAT) gpu_sigma[ires] / (RFLOAT) sp.nr_images;
+			}
+#endif
 
 		} // end loop img_id
 		CTOC(accMLO->timer,"maximization");
@@ -5267,14 +5870,22 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
         // Calculate DLL for each particle
         RFLOAT logsigma2 = 0.;
         RFLOAT remap_image_sizes = (baseMLO->mymodel.ori_size * baseMLO->mymodel.pixel_size) / (my_image_size * my_pixel_size);
-        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(baseMLO->Mresol_fine[optics_group])
+        if ((size_t)optics_group < baseMLO->exp_logsigma2_cache_.size() &&
+            remap_image_sizes == baseMLO->exp_logsigma2_cache_[optics_group].first)
         {
-            int ires = DIRECT_MULTIDIM_ELEM(baseMLO->Mresol_fine[optics_group], n);
-            int ires_remapped = ROUND(remap_image_sizes * ires);
-            // Note there is no sqrt in the normalisation term because of the 2-dimensionality of the complex-plane
-            // Also exclude origin from logsigma2, as this will not be considered in the P-calculations
-            if (ires > 0 && ires_remapped < XSIZE(baseMLO->mymodel.sigma2_noise[optics_group]))
-                logsigma2 += sp.nr_images * log( 2. * PI * DIRECT_A1D_ELEM(baseMLO->mymodel.sigma2_noise[optics_group], ires_remapped));
+            logsigma2 = sp.nr_images * baseMLO->exp_logsigma2_cache_[optics_group].second;
+        }
+        else
+        {
+            FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(baseMLO->Mresol_fine[optics_group])
+            {
+                int ires = DIRECT_MULTIDIM_ELEM(baseMLO->Mresol_fine[optics_group], n);
+                int ires_remapped = ROUND(remap_image_sizes * ires);
+                // Note there is no sqrt in the normalisation term because of the 2-dimensionality of the complex-plane
+                // Also exclude origin from logsigma2, as this will not be considered in the P-calculations
+                if (ires > 0 && ires_remapped < XSIZE(baseMLO->mymodel.sigma2_noise[optics_group]))
+                    logsigma2 += sp.nr_images * log( 2. * PI * DIRECT_A1D_ELEM(baseMLO->mymodel.sigma2_noise[optics_group], ires_remapped));
+            }
         }
 
         RFLOAT dLL;
@@ -5290,37 +5901,52 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
         // Also store sum of Pmax
         thr_sum_Pmax += DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_PMAX);
 
+        if (baseMLO->mydata.obsModel.getCtfPremultiplied(optics_group))
+        {
+            RFLOAT myscale = XMIPP_MAX(0.001, baseMLO->mymodel.scale_correction[group_id]);
+            for (int img_id = 0; img_id < sp.nr_images; img_id++)
+            {
+                FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(baseMLO->Mresol_fine[optics_group])
+                {
+                    int ires = DIRECT_MULTIDIM_ELEM(baseMLO->Mresol_fine[optics_group], n);
+                    if (ires > -1)
+                        DIRECT_MULTIDIM_ELEM(thr_wsum_ctf2, ires) +=
+                                myscale * DIRECT_MULTIDIM_ELEM(op.local_Fctf[img_id], n);
+                }
+            }
+        }
+
+        if (do_subtomo_correction) {
+            FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(baseMLO->Mresol_fine[optics_group]) {
+                int ires = DIRECT_MULTIDIM_ELEM(baseMLO->Mresol_fine[optics_group], n);
+                if (ires > -1)
+                    DIRECT_MULTIDIM_ELEM(thr_wsum_stMulti, ires) += DIRECT_MULTIDIM_ELEM(
+                            exp_local_STMulti, n);
+            }
+        }
+
+        if (use_sparse_dir && dir_updates.size() > 1)
+        {
+            std::sort(dir_updates.begin(), dir_updates.end(), [](const DirWeightEntry &a, const DirWeightEntry &b) {
+                return (a.ithr != b.ithr) ? (a.ithr < b.ithr) : (a.dir < b.dir);
+            });
+            size_t out_n = 0;
+            for (size_t i = 0; i < dir_updates.size(); i++)
+            {
+                if (out_n > 0 && dir_updates[out_n - 1].ithr == dir_updates[i].ithr &&
+                    dir_updates[out_n - 1].dir == dir_updates[i].dir)
+                    dir_updates[out_n - 1].w += dir_updates[i].w;
+                else
+                    dir_updates[out_n++] = dir_updates[i];
+            }
+            dir_updates.resize(out_n);
+        }
 
 		// Now, inside a global_mutex, update the other weighted sums among all threads
 		#pragma omp critical(AccMLO_global)
         {
             long int igroup = baseMLO->mydata.getGroupId(op.part_id);
             int optics_group = baseMLO->mydata.getOpticsGroup(op.part_id);
-
-
-            if (baseMLO->mydata.obsModel.getCtfPremultiplied(optics_group))
-            {
-                RFLOAT myscale = XMIPP_MAX(0.001, baseMLO->mymodel.scale_correction[igroup]);
-                for (int img_id = 0; img_id < sp.nr_images; img_id++)
-                {
-                    FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(baseMLO->Mresol_fine[optics_group])
-                    {
-                        int ires = DIRECT_MULTIDIM_ELEM(baseMLO->Mresol_fine[optics_group], n);
-                        if (ires > -1)
-                            DIRECT_MULTIDIM_ELEM(thr_wsum_ctf2, ires) +=
-                                    myscale * DIRECT_MULTIDIM_ELEM(op.local_Fctf[img_id], n);
-                    }
-                }
-            }
-
-            if (do_subtomo_correction) {
-                FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(baseMLO->Mresol_fine[optics_group]) {
-                    int ires = DIRECT_MULTIDIM_ELEM(baseMLO->Mresol_fine[optics_group], n);
-                    if (ires > -1)
-                        DIRECT_MULTIDIM_ELEM(thr_wsum_stMulti, ires) += DIRECT_MULTIDIM_ELEM(
-                                exp_local_STMulti, n);
-                }
-            }
 
             int my_image_size = baseMLO->mydata.getOpticsImageSize(optics_group);
             RFLOAT my_pixel_size = baseMLO->mydata.getOpticsPixelSize(optics_group);
@@ -5356,9 +5982,14 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
                 }
             }
 
-            for (int n = 0; n < baseMLO->mymodel.nr_classes * baseMLO->mymodel.nr_bodies; n++) {
-                if (!(baseMLO->do_skip_align || baseMLO->do_skip_rotate))
-                    baseMLO->wsum_model.pdf_direction[n] += thr_wsum_pdf_direction[n];
+            if (!(baseMLO->do_skip_align || baseMLO->do_skip_rotate)) {
+                if (use_sparse_dir) {
+                    for (const DirWeightEntry &e : dir_updates)
+                        DIRECT_MULTIDIM_ELEM(baseMLO->wsum_model.pdf_direction[e.ithr], e.dir) += e.w;
+                } else {
+                    for (int n = 0; n < n_dir_arr; n++)
+                        baseMLO->wsum_model.pdf_direction[n] += thr_wsum_pdf_direction[n];
+                }
             }
 
             baseMLO->wsum_model.sigma2_offset += thr_wsum_sigma2_offset;
@@ -5566,17 +6197,27 @@ baseMLO->timer.toc(baseMLO->TIMING_ESP_DIFF2_B);
 				{ stagetimer::Scope st_m(stagetimer::MWEIGHT_INIT);
 				Mweight.deviceAlloc();
 				deviceInitValue<XFLOAT>(Mweight, std::numeric_limits<XFLOAT>::lowest());
-                // SHWS 7July2022: not entirely sure about how this works, but as I'm adding to the diff2 for loop over all img_id, this can no longer be a large negative value...
-                //deviceInitValue<XFLOAT>(Mweight, 0.);
-				Mweight.streamSync(); }
+#ifndef _CUDA_ENABLED
+				Mweight.streamSync();
+#endif
+				}
 
 				CTIC(timer,"getAllSquaredDifferencesCoarse");
+#ifdef _CUDA_ENABLED
+				AccPtr<XFLOAT> coarseMinDev = ptrFactory.make<XFLOAT>();
+				op.coarse_min_diff2_ptr = &coarseMinDev;
+				op.coarse_min_diff2_deferred = false;
+#endif
 				{ stagetimer::Scope st_s(stagetimer::COARSE); getAllSquaredDifferencesCoarse<MlClass>(ipass, op, sp, baseMLO, myInstance, Mweight, ptrFactory, ibody); }
 				CTOC(timer,"getAllSquaredDifferencesCoarse");
 
 				CTIC(timer,"convertAllSquaredDifferencesToWeightsCoarse");
 				{ stagetimer::Scope st_s(stagetimer::CONVERT); convertAllSquaredDifferencesToWeights<MlClass>(ipass, op, sp, baseMLO, myInstance, CoarsePassWeights, FinePassClassMasks, Mweight, ptrFactory, ibody); }
                 CTOC(timer,"convertAllSquaredDifferencesToWeightsCoarse");
+#ifdef _CUDA_ENABLED
+				op.coarse_min_diff2_ptr = NULL;
+				op.coarse_min_diff2_deferred = false;
+#endif
 			}
 			else
 			{
@@ -5630,7 +6271,9 @@ baseMLO->timer.toc(baseMLO->TIMING_ESP_DIFF2_D);
                 CTIC(timer,"getAllSquaredDifferencesFine");
 				{ stagetimer::Scope st_s(stagetimer::FINE); getAllSquaredDifferencesFine<MlClass>(ipass, op, sp, baseMLO, myInstance, FinePassWeights, FinePassClassMasks, FineProjectionData, ptrFactory, ibody); }
 				CTOC(timer,"getAllSquaredDifferencesFine");
+#ifndef _CUDA_ENABLED
 				FinePassWeights.weights.cpToHost();
+#endif
 
 				AccPtr<XFLOAT> Mweight = ptrFactory.make<XFLOAT>(); //DUMMY
 
@@ -5761,7 +6404,8 @@ void accDoExpectationParticleGroup(MlClass *myInstance, const std::vector<unsign
 		op.metadata_offset = part_id_sorted - baseMLO->exp_my_first_part_id;
 
 		CTIC(timer,"getFourierTransformsAndCtfs");
-		getFourierTransformsAndCtfs<MlClass>(w->part_id, op, sp, baseMLO, myInstance, ptrFactory, ibody);
+		{ stagetimer::Scope st_f(stagetimer::FOURIER);
+		getFourierTransformsAndCtfs<MlClass>(w->part_id, op, sp, baseMLO, myInstance, ptrFactory, ibody); }
 		CTOC(timer,"getFourierTransformsAndCtfs");
 
 		if (baseMLO->do_skip_align)
@@ -5825,8 +6469,12 @@ void accDoExpectationParticleGroup(MlClass *myInstance, const std::vector<unsign
 		Mweight.setHostPtr(op.Mweight.data);
 		Mweight.deviceAlloc();
 		deviceInitValue<XFLOAT>(Mweight, std::numeric_limits<XFLOAT>::lowest());
+#ifndef _CUDA_ENABLED
 		if (sync)
 			Mweight.streamSync();
+#else
+		(void) sync;
+#endif
 	};
 	auto convertCoarse = [&](AccParticleWork<MlClass> &w)
 	{
@@ -5890,7 +6538,9 @@ void accDoExpectationParticleGroup(MlClass *myInstance, const std::vector<unsign
 				M2.setSize(n);
 				M2.deviceAlloc();
 				deviceInitValue<XFLOAT>(M2, std::numeric_limits<XFLOAT>::lowest());
+#ifndef _CUDA_ENABLED
 				M2.streamSync();
+#endif
 				getAllSquaredDifferencesCoarse<MlClass>(0, w->op, w->sp, baseMLO, myInstance, M2, ptrFactory, ibody);
 				HANDLE_ERROR(cudaMemcpy(b.data(), ~M2, n * sizeof(XFLOAT), cudaMemcpyDeviceToHost));
 				const bool same = memcmp(a.data(), b.data(), n * sizeof(XFLOAT)) == 0;
@@ -5945,7 +6595,9 @@ void accDoExpectationParticleGroup(MlClass *myInstance, const std::vector<unsign
 		CTIC(timer,"getAllSquaredDifferencesFine");
 		{ stagetimer::Scope st_s(stagetimer::FINE); getAllSquaredDifferencesFine<MlClass>(1, op, sp, baseMLO, myInstance, w->FinePassWeights, w->FinePassClassMasks, FineProjectionData, ptrFactory, ibody); }
 		CTOC(timer,"getAllSquaredDifferencesFine");
+#ifndef _CUDA_ENABLED
 		w->FinePassWeights.weights.cpToHost();
+#endif
 		AccPtr<XFLOAT> Mweight = ptrFactory.make<XFLOAT>(); //DUMMY
 		CTIC(timer,"convertAllSquaredDifferencesToWeightsFine");
 		{ stagetimer::Scope st_s(stagetimer::CONVERT); convertAllSquaredDifferencesToWeights<MlClass>(1, op, sp, baseMLO, myInstance, w->FinePassWeights, w->FinePassClassMasks, Mweight, ptrFactory, ibody); }

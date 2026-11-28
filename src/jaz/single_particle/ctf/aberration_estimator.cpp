@@ -94,40 +94,80 @@ void AberrationEstimator::processMicrograph(
 			bxSum(sh[og],s[og]), bySum(sh[og],s[og]);
 
 		const double as = (double)s[og] * angpix[og];
+		const bool hasMag = obsModel->hasMagMatrices;
+		double m00 = 1.0, m01 = 0.0, m10 = 0.0, m11 = 1.0;
+		if (hasMag)
+		{
+			const Matrix2D<RFLOAT>& M = obsModel->getMagMatrix(og);
+			m00 = M(0, 0); m01 = M(0, 1);
+			m10 = M(1, 0); m11 = M(1, 1);
+		}
 
-		std::vector<CTF> ctfs(orderedsum::chunk);
+		struct CtfQuad { double k1, axx, axy, ayy, k2, k5, k3; };
+		std::vector<CtfQuad> ctfs(orderedsum::chunk);
+		const int xmax = sh[og];
+		std::vector<double> xtab(xmax);
+		for (int x = 0; x < xmax; x++) xtab[x] = (double)x / as;
 
 		orderedsum::run(pc, s[og], nr_omp_threads,
 			[&](int pp, int slot)
 			{
-				ctfs[slot].readByGroup(mdt, obsModel, partIndices[pp]);
+				CTF ctf;
+				ctf.readByGroup(mdt, obsModel, partIndices[pp]);
+				const std::vector<double> K = ctf.getK();
+				ctfs[slot].k1 = K[1];
+				ctfs[slot].axx = ctf.getAxx();
+				ctfs[slot].axy = ctf.getAxy();
+				ctfs[slot].ayy = ctf.getAyy();
+				ctfs[slot].k2 = K[2];
+				ctfs[slot].k5 = K[5];
+				ctfs[slot].k3 = K[3];
 			},
 			[&](int pp, int slot, int y)
 			{
 				const int p = partIndices[pp];
-				const CTF& ctf = ctfs[slot];
+				const CtfQuad& q = ctfs[slot];
+				const double yy0 = (double)(y < xmax ? y : y - s[og]) / as;
+				const double* __restrict xt = xtab.data();
 
-				for (int x = 0; x < sh[og]; x++)
+				const Complex* __restrict obsRow = &DIRECT_A2D_ELEM(obs[p].data, y, 0);
+				const Complex* __restrict prdRow = &DIRECT_A2D_ELEM(pred[p].data, y, 0);
+				RFLOAT* __restrict axxRow = &DIRECT_A2D_ELEM(AxxSum.data, y, 0);
+				RFLOAT* __restrict axyRow = &DIRECT_A2D_ELEM(AxySum.data, y, 0);
+				RFLOAT* __restrict ayyRow = &DIRECT_A2D_ELEM(AyySum.data, y, 0);
+				RFLOAT* __restrict bxRow = &DIRECT_A2D_ELEM(bxSum.data, y, 0);
+				RFLOAT* __restrict byRow = &DIRECT_A2D_ELEM(bySum.data, y, 0);
+
+				for (int x = 0; x < xmax; x++)
 				{
-					const double xf = x;
-					const double yf = y < sh[og]? y : y - s[og];
+					double X = xt[x];
+					double Y = yy0;
+					if (hasMag)
+					{
+						const double Xd = m00 * X + m01 * Y;
+						const double Yd = m10 * X + m11 * Y;
+						X = Xd;
+						Y = Yd;
+					}
 
-					const double gamma_i = ctf.getLowOrderGamma(xf/as, yf/as);
-					const double cg = cos(gamma_i);
-					const double sg = sin(gamma_i);
+					const double u2 = X * X + Y * Y;
+					const double u4 = u2 * u2;
+					const double gamma_i = q.k1 * (q.axx * X * X + 2.0 * q.axy * X * Y + q.ayy * Y * Y) + q.k2 * u4 - q.k5 - q.k3;
+					double sg, cg;
+					SINCOS(gamma_i, &sg, &cg);
 
-					Complex zobs = obs[p](y,x);
-					Complex zprd = pred[p](y,x);
+					const Complex zobs = obsRow[x];
+					const Complex zprd = prdRow[x];
 
-					double zz = zobs.real * zprd.real + zobs.imag * zprd.imag;
-					double nr = zprd.norm();
+					const double zz = zobs.real * zprd.real + zobs.imag * zprd.imag;
+					const double nr = zprd.real * zprd.real + zprd.imag * zprd.imag;
 
-					AxxSum(y,x) += nr * sg * sg;
-					AxySum(y,x) += nr * cg * sg;
-					AyySum(y,x) += nr * cg * cg;
+					axxRow[x] += nr * sg * sg;
+					axyRow[x] += nr * cg * sg;
+					ayyRow[x] += nr * cg * cg;
 
-					bxSum(y,x) -= zz * sg;
-					bySum(y,x) -= zz * cg;
+					bxRow[x] -= zz * sg;
+					byRow[x] -= zz * cg;
 				}
 			});
 
@@ -174,7 +214,7 @@ void AberrationEstimator::parametricFit(
 	// https://github.com/3dem/relion/pull/1361
 	std::vector<char> groupUsed(ogc,false);
 
-	#pragma omp parallel for num_threads(nr_omp_threads)
+	#pragma omp parallel for num_threads(nr_omp_threads) if(ogc > 1 && ogc >= nr_omp_threads)
 	for (int og = 0; og < ogc; og++)
 	{
 		std::stringstream sts;
@@ -185,6 +225,14 @@ void AberrationEstimator::parametricFit(
 			AxxSum(sh[og],s[og]), AxySum(sh[og],s[og]), AyySum(sh[og],s[og]),
 			bxSum(sh[og],s[og]), bySum(sh[og],s[og]);
 
+		struct AberrMic
+		{
+			bool ok = false;
+			Image<RFLOAT> axx, axy, ayy, bx, by;
+		};
+		std::vector<AberrMic> mgs(gc);
+
+		#pragma omp parallel for schedule(dynamic, 1) num_threads(nr_omp_threads) if(ogc < nr_omp_threads && nr_omp_threads > 1 && gc > 1)
 		for (long g = 0; g < gc; g++)
 		{
 			std::string outRoot = CtfRefiner::getOutputFilenameRoot(mdts[g], outPath);
@@ -195,27 +243,26 @@ void AberrationEstimator::parametricFit(
 				&& exists(outRoot+"_aberr-bx_optics-group_" + ogstr + ".mrc")
 				&& exists(outRoot+"_aberr-by_optics-group_" + ogstr + ".mrc"))
 			{
-
-				Image<RFLOAT>
-					Axx(sh[og],s[og]), Axy(sh[og],s[og]), Ayy(sh[og],s[og]),
-					bx(sh[og],s[og]), by(sh[og],s[og]);
-
-				Axx.read(outRoot+"_aberr-Axx_optics-group_" + ogstr + ".mrc");
-				Axy.read(outRoot+"_aberr-Axy_optics-group_" + ogstr + ".mrc");
-				Ayy.read(outRoot+"_aberr-Ayy_optics-group_" + ogstr + ".mrc");
-
-				bx.read(outRoot+"_aberr-bx_optics-group_" + ogstr + ".mrc");
-				by.read(outRoot+"_aberr-by_optics-group_" + ogstr + ".mrc");
-
-				AxxSum() += Axx();
-				AxySum() += Axy();
-				AyySum() += Ayy();
-
-				bxSum() += bx();
-				bySum() += by();
-
-				groupUsed[og] = true;
+				mgs[g].axx.read(outRoot+"_aberr-Axx_optics-group_" + ogstr + ".mrc");
+				mgs[g].axy.read(outRoot+"_aberr-Axy_optics-group_" + ogstr + ".mrc");
+				mgs[g].ayy.read(outRoot+"_aberr-Ayy_optics-group_" + ogstr + ".mrc");
+				mgs[g].bx.read(outRoot+"_aberr-bx_optics-group_" + ogstr + ".mrc");
+				mgs[g].by.read(outRoot+"_aberr-by_optics-group_" + ogstr + ".mrc");
+				mgs[g].ok = true;
 			}
+		}
+
+		for (long g = 0; g < gc; g++)
+		{
+			if (!mgs[g].ok) continue;
+
+			AxxSum() += mgs[g].axx();
+			AxySum() += mgs[g].axy();
+			AyySum() += mgs[g].ayy();
+			bxSum()  += mgs[g].bx();
+			bySum()  += mgs[g].by();
+			groupUsed[og] = true;
+			mgs[g] = AberrMic();
 		}
 
 		if (!groupUsed[og])

@@ -45,6 +45,9 @@
 
 #include <condition_variable>
 #include <mutex>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include "src/macros.h"
 #include "src/fftw.h"
 #include "src/rect_refusal.h"
@@ -825,23 +828,72 @@ void getFSC(MultidimArray< Complex > &FT1,
 		REPORT_ERROR("fourierShellCorrelation ERROR: MultidimArrays have different shapes!");
 
 	MultidimArray<RFLOAT> num(XSIZE(FT1)), den1(XSIZE(FT1)), den2(XSIZE(FT1));
-	Matrix1D<RFLOAT> f(3);
 	num.initZeros();
 	den1.initZeros();
 	den2.initZeros();
 	fsc.initZeros(num);
-	FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(FT1)
+	const long int nx = XSIZE(FT1), ny = YSIZE(FT1), nz = ZSIZE(FT1);
+	const int nt = (NZYXSIZE(FT1) >= 65536) ? relionBulkThreads(NZYXSIZE(FT1)) : 1;
+	if (nt <= 1)
 	{
-		int idx = ROUND(sqrt(kp*kp + ip*ip + jp*jp));
-		if (idx >= XSIZE(FT1))
-			continue;
-		Complex z1=DIRECT_A3D_ELEM(FT1, k, i, j);
-		Complex z2=DIRECT_A3D_ELEM(FT2, k, i, j);
-		RFLOAT absz1=abs(z1);
-		RFLOAT absz2=abs(z2);
-		num(idx)+= (conj(z1) * z2).real;
-		den1(idx)+= absz1*absz1;
-		den2(idx)+= absz2*absz2;
+		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(FT1)
+		{
+			int idx = ROUND(sqrt(kp*kp + ip*ip + jp*jp));
+			if (idx >= nx)
+				continue;
+			Complex z1 = DIRECT_A3D_ELEM(FT1, k, i, j);
+			Complex z2 = DIRECT_A3D_ELEM(FT2, k, i, j);
+			num(idx)  += (conj(z1) * z2).real;
+			den1(idx) += norm(z1);
+			den2(idx) += norm(z2);
+		}
+	}
+	else
+	{
+		std::vector<RFLOAT> num_t((size_t)nt * nx, 0.), den1_t((size_t)nt * nx, 0.), den2_t((size_t)nt * nx, 0.);
+		#pragma omp parallel num_threads(nt)
+		{
+			const int tid =
+#ifdef _OPENMP
+				omp_get_thread_num();
+#else
+				0;
+#endif
+			RFLOAT *ln  = &num_t [(size_t)tid * nx];
+			RFLOAT *ld1 = &den1_t[(size_t)tid * nx];
+			RFLOAT *ld2 = &den2_t[(size_t)tid * nx];
+			#pragma omp for collapse(2) schedule(static)
+			for (long int k = 0; k < nz; k++)
+			{
+				for (long int i = 0; i < ny; i++)
+				{
+					const long int kp = (k < nx) ? k : k - nz;
+					const long int ip = (i < nx) ? i : i - ny;
+					const long int k2i2 = kp * kp + ip * ip;
+					for (long int j = 0; j < nx; j++)
+					{
+						const int idx = ROUND(sqrt((RFLOAT)(k2i2 + j * j)));
+						if (idx >= nx)
+							continue;
+						const Complex z1 = DIRECT_A3D_ELEM(FT1, k, i, j);
+						const Complex z2 = DIRECT_A3D_ELEM(FT2, k, i, j);
+						ln [idx] += z1.real * z2.real + z1.imag * z2.imag;
+						ld1[idx] += z1.real * z1.real + z1.imag * z1.imag;
+						ld2[idx] += z2.real * z2.real + z2.imag * z2.imag;
+					}
+				}
+			}
+		}
+		for (int t = 0; t < nt; t++)
+		{
+			const size_t base = (size_t)t * nx;
+			for (long int idx = 0; idx < nx; idx++)
+			{
+				num(idx)  += num_t [base + idx];
+				den1(idx) += den1_t[base + idx];
+				den2(idx) += den2_t[base + idx];
+			}
+		}
 	}
 
 	FOR_ALL_ELEMENTS_IN_ARRAY1D(fsc)
@@ -857,9 +909,9 @@ void getFSC(MultidimArray< RFLOAT > &m1,
 			MultidimArray< RFLOAT > &fsc)
 {
 	MultidimArray< Complex > FT1, FT2;
-	FourierTransformer transformer;
-	transformer.FourierTransform(m1, FT1);
-	transformer.FourierTransform(m2, FT2);
+	FourierTransformer t1, t2;
+	t1.FourierTransform(m1, FT1, false);
+	t2.FourierTransform(m2, FT2, false);
 	getFSC(FT1, FT2, fsc);
 }
 
@@ -1211,6 +1263,7 @@ void shiftImageInFourierTransform(MultidimArray<Complex > &in,
 		}
 		break;
 	case 2:
+	{
 		xshift /= -oridim;
 		yshift /= -oridim;
 		if (ABS(xshift) < XMIPP_EQUAL_ACCURACY && ABS(yshift) < XMIPP_EQUAL_ACCURACY)
@@ -1218,36 +1271,32 @@ void shiftImageInFourierTransform(MultidimArray<Complex > &in,
 			out = in;
 			return;
 		}
-		for (long int i=0; i<XSIZE(in); i++)
-			for (long int j=0; j<XSIZE(in); j++)
-			{
-				x = j;
-				y = i;
-				dotp = 2 * PI * (x * xshift + y * yshift);
-#ifdef RELION_SINGLE_PRECISION
-				SINCOSF(dotp, &b, &a);
-#else
-				SINCOS(dotp, &b, &a);
-#endif
-				c = DIRECT_A2D_ELEM(in, i, j).real;
-				d = DIRECT_A2D_ELEM(in, i, j).imag;
-				ac = a * c;
-				bd = b * d;
-				ab_cd = (a + b) * (c + d);
-				DIRECT_A2D_ELEM(out, i, j) = Complex(ac - bd, ab_cd - ac - bd);
-			}
-		for (long int i=YSIZE(in)-1; i>=XSIZE(in); i--)
+		const long int nx = XSIZE(in);
+		const long int ny = YSIZE(in);
+		std::vector<RFLOAT> cx(nx), sx(nx);
+		for (long int j = 0; j < nx; j++)
 		{
-			y = i - YSIZE(in);
-			for (long int j=0; j<XSIZE(in); j++)
-			{
-				x = j;
-				dotp = 2 * PI * (x * xshift + y * yshift);
+			dotp = 2 * PI * ((RFLOAT)j * xshift);
 #ifdef RELION_SINGLE_PRECISION
-				SINCOSF(dotp, &b, &a);
+			SINCOSF(dotp, &sx[j], &cx[j]);
 #else
-				SINCOS(dotp, &b, &a);
+			SINCOS(dotp, &sx[j], &cx[j]);
 #endif
+		}
+		for (long int i = 0; i < ny; i++)
+		{
+			y = (i < nx) ? (RFLOAT)i : (RFLOAT)(i - ny);
+			RFLOAT cy, sy;
+			dotp = 2 * PI * (y * yshift);
+#ifdef RELION_SINGLE_PRECISION
+			SINCOSF(dotp, &sy, &cy);
+#else
+			SINCOS(dotp, &sy, &cy);
+#endif
+			for (long int j = 0; j < nx; j++)
+			{
+				a = cy * cx[j] - sy * sx[j];
+				b = sy * cx[j] + cy * sx[j];
 				c = DIRECT_A2D_ELEM(in, i, j).real;
 				d = DIRECT_A2D_ELEM(in, i, j).imag;
 				ac = a * c;
@@ -1257,7 +1306,9 @@ void shiftImageInFourierTransform(MultidimArray<Complex > &in,
 			}
 		}
 		break;
+	}
 	case 3:
+	{
 		xshift /= -oridim;
 		yshift /= -oridim;
 		zshift /= -oridim;
@@ -1266,21 +1317,47 @@ void shiftImageInFourierTransform(MultidimArray<Complex > &in,
 			out = in;
 			return;
 		}
-		for (long int k=0; k<ZSIZE(in); k++)
+		const long int nx = XSIZE(in);
+		const long int ny = YSIZE(in);
+		const long int nz = ZSIZE(in);
+		std::vector<RFLOAT> cx(nx), sx(nx), cy(ny), sy(ny);
+		for (long int j = 0; j < nx; j++)
 		{
-			z = (k < XSIZE(in)) ? k : k - ZSIZE(in);
-			for (long int i=0; i<YSIZE(in); i++)
-			{
-				y = (i < XSIZE(in)) ? i : i - YSIZE(in);
-				for (long int j=0; j<XSIZE(in); j++)
-				{
-					x = j;
-					dotp = 2 * PI * (x * xshift + y * yshift + z * zshift);
+			dotp = 2 * PI * ((RFLOAT)j * xshift);
 #ifdef RELION_SINGLE_PRECISION
-					SINCOSF(dotp, &b, &a);
+			SINCOSF(dotp, &sx[j], &cx[j]);
 #else
-					SINCOS(dotp, &b, &a);
+			SINCOS(dotp, &sx[j], &cx[j]);
 #endif
+		}
+		for (long int i = 0; i < ny; i++)
+		{
+			y = (i < nx) ? (RFLOAT)i : (RFLOAT)(i - ny);
+			dotp = 2 * PI * (y * yshift);
+#ifdef RELION_SINGLE_PRECISION
+			SINCOSF(dotp, &sy[i], &cy[i]);
+#else
+			SINCOS(dotp, &sy[i], &cy[i]);
+#endif
+		}
+		for (long int k = 0; k < nz; k++)
+		{
+			z = (k < nx) ? (RFLOAT)k : (RFLOAT)(k - nz);
+			RFLOAT cz, sz;
+			dotp = 2 * PI * (z * zshift);
+#ifdef RELION_SINGLE_PRECISION
+			SINCOSF(dotp, &sz, &cz);
+#else
+			SINCOS(dotp, &sz, &cz);
+#endif
+			for (long int i = 0; i < ny; i++)
+			{
+				const RFLOAT czy = cz * cy[i] - sz * sy[i];
+				const RFLOAT szy = sz * cy[i] + cz * sy[i];
+				for (long int j = 0; j < nx; j++)
+				{
+					a = czy * cx[j] - szy * sx[j];
+					b = szy * cx[j] + czy * sx[j];
 					c = DIRECT_A3D_ELEM(in, k, i, j).real;
 					d = DIRECT_A3D_ELEM(in, k, i, j).imag;
 					ac = a * c;
@@ -1291,6 +1368,7 @@ void shiftImageInFourierTransform(MultidimArray<Complex > &in,
 			}
 		}
 		break;
+	}
 	default:
 		REPORT_ERROR("shiftImageInFourierTransform ERROR: dimension should be 1, 2 or 3!");
 	}
@@ -1557,19 +1635,46 @@ void resizeMap(MultidimArray<RFLOAT > &img, int newsize)
 
 }
 
+void resizeMap(MultidimArray<RFLOAT > &img, int newsize,
+               FourierTransformer &tf_fwd, FourierTransformer &tf_inv,
+               MultidimArray<Complex > &FT, MultidimArray<Complex > &FT2)
+{
+	tf_fwd.FourierTransform(img, FT, false);
+	windowFourierTransform(FT, FT2, newsize);
+	if (img.getDim() == 2)
+		img.resize(newsize, newsize);
+	else if (img.getDim() == 3)
+		img.resize(newsize, newsize, newsize);
+	tf_inv.inverseFourierTransform(FT2, img);
+}
+
 void applyBFactorToMap(MultidimArray<Complex > &FT, int ori_size, RFLOAT bfactor, RFLOAT angpix)
 {
-	FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(FT)
+	const long int nx = XSIZE(FT), ny = YSIZE(FT), nz = ZSIZE(FT);
+	const RFLOAT len = (RFLOAT)ori_size * angpix;
+	const RFLOAT inv_len2 = 1.0 / (len * len);
+	const RFLOAT scale = -(bfactor / 4.0) * inv_len2;
+	const RFLOAT nyq = 1.0 / (angpix * 2.0);
+	const RFLOAT nyq2 = nyq * nyq;
+	const int nt = relionBulkThreads(NZYXSIZE(FT));
+	#pragma omp parallel for collapse(2) num_threads(nt) if(nt > 1)
+	for (long int k = 0; k < nz; k++)
 	{
-		int r2 = kp * kp + ip * ip + jp * jp;
-		RFLOAT res = sqrt((RFLOAT)r2)/(ori_size * angpix); // get resolution in 1/Angstrom
-		if (res <= 1. / (angpix * 2.) ) // Apply B-factor sharpening until Nyquist, then low-pass filter later on (with a soft edge)
+		for (long int i = 0; i < ny; i++)
 		{
-			DIRECT_A3D_ELEM(FT, k, i, j) *= exp( -(bfactor / 4.)  * res * res);
-		}
-		else
-		{
-			DIRECT_A3D_ELEM(FT, k, i, j) = 0.;
+			const long int kp = (k < nx) ? k : k - nz;
+			const long int ip = (i < nx) ? i : i - ny;
+			const long int k2i2 = kp * kp + ip * ip;
+			Complex * __restrict row = &DIRECT_A3D_ELEM(FT, k, i, 0);
+			for (long int j = 0; j < nx; j++)
+			{
+				const long int r2 = k2i2 + j * j;
+				const RFLOAT res2 = (RFLOAT)r2 * inv_len2;
+				if (res2 <= nyq2) // Apply B-factor sharpening until Nyquist, then low-pass filter later on (with a soft edge)
+					row[j] *= exp(scale * (RFLOAT)r2);
+				else
+					row[j] = 0.;
+			}
 		}
 	}
 }
@@ -1682,30 +1787,56 @@ void lowPassFilterMap(MultidimArray<Complex > &FT, int ori_size,
 	RFLOAT edge_low = XMIPP_MAX(0., (ires_filter - filter_edge_halfwidth) / (RFLOAT)ori_size); // in 1/pix
 	RFLOAT edge_high = XMIPP_MIN(XSIZE(FT), (ires_filter + filter_edge_halfwidth) / (RFLOAT)ori_size); // in 1/pix
 	RFLOAT edge_width = edge_high - edge_low;
+	const RFLOAT r2_low_safe = (edge_low * ori_size) * (edge_low * ori_size) * (1.0 - 1e-12);
+	const RFLOAT r2_high_safe = (edge_high * ori_size) * (edge_high * ori_size) * (1.0 + 1e-12);
 
+	const long int nx = XSIZE(FT), ny = YSIZE(FT), nz = ZSIZE(FT);
+	const int nt = relionBulkThreads(NZYXSIZE(FT));
 	// Put a raised cosine from edge_low to edge_high
-	FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(FT)
+	#pragma omp parallel for collapse(2) num_threads(nt) if(nt > 1)
+	for (long int k = 0; k < nz; k++)
 	{
-		RFLOAT r2 = (RFLOAT)kp * (RFLOAT)kp + (RFLOAT)ip * (RFLOAT)ip + (RFLOAT)jp * (RFLOAT)jp;
-		RFLOAT res = sqrt((RFLOAT)r2)/ori_size; // get resolution in 1/pixel
-
-		if (do_highpass_instead)
+		for (long int i = 0; i < ny; i++)
 		{
-			if (res < edge_low)
-				DIRECT_A3D_ELEM(FT, k, i, j) = 0.;
-			else if (res > edge_high)
-				continue;
-			else
-				DIRECT_A3D_ELEM(FT, k, i, j) *= 0.5 - 0.5 * cos( PI * (res-edge_low)/edge_width);
-		}
-		else
-		{
-			if (res < edge_low)
-				continue;
-			else if (res > edge_high)
-				DIRECT_A3D_ELEM(FT, k, i, j) = 0.;
-			else
-				DIRECT_A3D_ELEM(FT, k, i, j) *= 0.5 + 0.5 * cos( PI * (res-edge_low)/edge_width);
+			const long int kp = (k < nx) ? k : k - nz;
+			const long int ip = (i < nx) ? i : i - ny;
+			const long int k2i2 = kp * kp + ip * ip;
+			Complex * __restrict row = &DIRECT_A3D_ELEM(FT, k, i, 0);
+			for (long int j = 0; j < nx; j++)
+			{
+				const RFLOAT r2 = (RFLOAT)(k2i2 + j * j);
+				if (r2 < r2_low_safe)
+				{
+					if (do_highpass_instead)
+						row[j] = 0.;
+					continue;
+				}
+				if (r2 > r2_high_safe)
+				{
+					if (!do_highpass_instead)
+						row[j] = 0.;
+					continue;
+				}
+				const RFLOAT res = sqrt(r2) / ori_size; // get resolution in 1/pixel
+				if (do_highpass_instead)
+				{
+					if (res < edge_low)
+						row[j] = 0.;
+					else if (res > edge_high)
+						continue;
+					else
+						row[j] *= 0.5 - 0.5 * cos(PI * (res - edge_low) / edge_width);
+				}
+				else
+				{
+					if (res < edge_low)
+						continue;
+					else if (res > edge_high)
+						row[j] = 0.;
+					else
+						row[j] *= 0.5 + 0.5 * cos(PI * (res - edge_low) / edge_width);
+				}
+			}
 		}
 	}
 
@@ -2178,7 +2309,7 @@ static bool relionFftwThreadsAllowed()
 
 void relionFftwInitThreads()
 {
-	if (!relionFftwThreadsAllowed())
+	if (g_fftw_threads_inited || !relionFftwThreadsAllowed())
 		return;
 	if (0 == RELION_FFTW_THREADS_API(init_threads)())
 		REPORT_ERROR("Multithreaded FFTW failed to initialize");
@@ -2189,7 +2320,7 @@ void relionFftwInitThreads()
 // (relionFftwSetThreadPlanThreads) changes the planner's count and restores it inside that lock
 void relionFftwPlanThreads(int nr_threads)
 {
-	if (relionFftwThreadsAllowed())
+	if (g_fftw_threads_inited && relionFftwThreadsAllowed())
 	{
 		#pragma omp critical(FourierTransformer_fftw_plan)
 		RELION_FFTW_THREADS_API(plan_with_nthreads)(nr_threads);

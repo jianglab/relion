@@ -364,20 +364,24 @@ Image<RFLOAT> FilterHelper::cropCorner2D(const Image<RFLOAT>& img, int w, int h)
 
     Image<RFLOAT> out(w,h);
 
-    for (int y = 0; y < h1; y++)
-    for (int x = 0; x < w1; x++)
+    const int px = std::min(w1 / 2, w / 2);
+    const int nx = std::min(w1 - w1 / 2, w / 2);
+    const int py = std::min(h1 / 2, h / 2);
+    const int ny = std::min(h1 - h1 / 2, h / 2);
+
+    auto copyRow = [&](int y, int y0)
     {
-        int x1 = x < w1/2? x : x - w1;
-        int y1 = y < h1/2? y : y - h1;
+        const RFLOAT* src = &DIRECT_A2D_ELEM(img.data, y, 0);
+        RFLOAT* dst = &DIRECT_A2D_ELEM(out.data, y0, 0);
+        if (px > 0) memcpy(dst, src, (size_t)px * sizeof(RFLOAT));
+        if (nx > 0) memcpy(dst + w - nx, src + w1 - nx, (size_t)nx * sizeof(RFLOAT));
+    };
 
-        if (x1 < w/2 && y1 < h/2 && x1 >= -w/2 && y1 >= -h/2)
-        {
-            int x0 = x1 < 0? x1 + w : x1;
-            int y0 = y1 < 0? y1 + h : y1;
+    for (int y = 0; y < py; y++)
+        copyRow(y, y);
 
-            DIRECT_A2D_ELEM(out.data, y0, x0) = DIRECT_A2D_ELEM(img.data, y, x);
-        }
-    }
+    for (int k = 0; k < ny; k++)
+        copyRow(h1 - ny + k, h - ny + k);
 
     return out;
 }
@@ -389,20 +393,22 @@ Image<Complex> FilterHelper::cropCorner2D(const Image<Complex>& img, int w, int 
 
     Image<Complex> out(w,h);
 
-    for (int y = 0; y < h1; y++)
-    for (int x = 0; x < w1; x++)
+    const int cx = std::min(w1, w);
+    const int py = std::min(h1 / 2, h / 2);
+    const int ny = std::min(h1 - h1 / 2, h / 2);
+
+    auto copyRow = [&](int y, int y0)
     {
-        int x1 = x;
-        int y1 = y < h1/2? y : y - h1;
+        const Complex* src = &DIRECT_A2D_ELEM(img.data, y, 0);
+        Complex* dst = &DIRECT_A2D_ELEM(out.data, y0, 0);
+        for (int x = 0; x < cx; x++) dst[x] = src[x];
+    };
 
-        if (x1 < w && y1 < h/2 && y1 >= -h/2)
-        {
-            int x0 = x1;
-            int y0 = y1 < 0? y1 + h : y1;
+    for (int y = 0; y < py; y++)
+        copyRow(y, y);
 
-            DIRECT_A2D_ELEM(out.data, y0, x0) = DIRECT_A2D_ELEM(img.data, y, x);
-        }
-    }
+    for (int k = 0; k < ny; k++)
+        copyRow(h1 - ny + k, h - ny + k);
 
     return out;
 }

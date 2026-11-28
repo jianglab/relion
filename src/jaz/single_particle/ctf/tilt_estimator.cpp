@@ -121,6 +121,10 @@ void TiltEstimator::processMicrograph(
 		wAccSum.data.initZeros();
 
 		std::vector<Image<RFLOAT>> ctfImgs(orderedsum::chunk);
+		for (int slot = 0; slot < orderedsum::chunk; slot++)
+		{
+			ctfImgs[slot] = Image<RFLOAT>(sh[og], s[og]);
+		}
 
 		orderedsum::run(pc, s[og], nr_omp_threads,
 			[&](int pp, int slot)
@@ -128,7 +132,6 @@ void TiltEstimator::processMicrograph(
 				CTF ctf;
 				ctf.readByGroup(mdt, obsModel, partIndices[pp]);
 
-				ctfImgs[slot] = Image<RFLOAT>(sh[og], s[og]);
 				ctf.getFftwImage(ctfImgs[slot](), s[og], s[og], angpix[og], false, false, false, true, do_ctf_padding);
 			},
 			[&](int pp, int slot, int y)
@@ -179,7 +182,7 @@ void TiltEstimator::parametricFit(
 	// https://github.com/3dem/relion/pull/1361
 	std::vector<char> groupUsed(ogc, false);
 
-	#pragma omp parallel for num_threads(nr_omp_threads)
+	#pragma omp parallel for num_threads(nr_omp_threads) if(ogc > 1 && ogc >= nr_omp_threads)
 	for (int og = 0; og < ogc; og++)
 	{
 		double Cs = obsModel->getSphericalAberration(og);
@@ -195,6 +198,15 @@ void TiltEstimator::parametricFit(
 		xyAccSum.data.initZeros();
 		wAccSum.data.initZeros();
 
+		struct TiltMic
+		{
+			bool ok = false;
+			Image<Complex> xy;
+			Image<RFLOAT> w;
+		};
+		std::vector<TiltMic> mgs(gc);
+
+		#pragma omp parallel for schedule(dynamic, 1) num_threads(nr_omp_threads) if(ogc < nr_omp_threads && nr_omp_threads > 1 && gc > 1)
 		for (long g = 0; g < gc; g++)
 		{
 			std::string outRoot = CtfRefiner::getOutputFilenameRoot(mdts[g], outPath);
@@ -203,17 +215,20 @@ void TiltEstimator::parametricFit(
 				&& exists(outRoot+"_xyAcc_optics-group_"+ogstr+"_imag.mrc")
 				&& exists(outRoot+ "_wAcc_optics-group_"+ogstr+".mrc"))
 			{
-				Image<Complex> xyAcc;
-				Image<RFLOAT> wAcc;
-
-				wAcc.read(outRoot+"_wAcc_optics-group_"+ogstr+".mrc");
-				ComplexIO::read(xyAcc, outRoot+"_xyAcc_optics-group_"+ogstr, ".mrc");
-
-				xyAccSum() += xyAcc();
-				wAccSum()  +=  wAcc();
-
-				groupUsed[og] = true;
+				mgs[g].w.read(outRoot+"_wAcc_optics-group_"+ogstr+".mrc");
+				ComplexIO::read(mgs[g].xy, outRoot+"_xyAcc_optics-group_"+ogstr, ".mrc");
+				mgs[g].ok = true;
 			}
+		}
+
+		for (long g = 0; g < gc; g++)
+		{
+			if (!mgs[g].ok) continue;
+
+			xyAccSum() += mgs[g].xy();
+			wAccSum()  += mgs[g].w();
+			groupUsed[og] = true;
+			mgs[g] = TiltMic();
 		}
 
 		if (!groupUsed[og])

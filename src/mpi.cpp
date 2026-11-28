@@ -46,6 +46,7 @@
 #ifdef USE_MPI_COLLECTIVE
  #include <vector>
 #endif
+#include <algorithm>
 #include "src/mpi.h"
 
 // maximum amount of data that can be sent in MPI
@@ -75,23 +76,19 @@ MpiNode::MpiNode(int &argc, char ** argv)
 	if (rank != 0)
 	{
 		MPI_Group_rank(followerG, &followerRank);
-#ifdef USE_MPI_COLLECTIVE
-		// Create seperate communicator and rank for split_random_halves case run
+		// Create separate communicator and rank for split_random_halves case run
 		const int myColor = followerRank % 2;
 		MPI_Comm_split(followerC, myColor, followerRank, &splitC);
 		MPI_Comm_rank(splitC, &splitRank);
-#endif
 	}
 	else
 	{
 		// Leader does not belong to follower
 		followerC = MPI_COMM_NULL;
 		followerRank = -1;
-#ifdef USE_MPI_COLLECTIVE
 		// Leader does not belong to split_random_halves case run
 		splitC = MPI_COMM_NULL;
 		splitRank = -1;
-#endif
 	}
 
 #ifdef USE_MPI_COLLECTIVE
@@ -173,14 +170,18 @@ MpiNode::MpiNode(int &argc, char ** argv)
 
 MpiNode::~MpiNode()
 {
+	if (splitC != MPI_COMM_NULL)
+		MPI_Comm_free(&splitC);
 #ifdef USE_MPI_COLLECTIVE
-	MPI_Comm_free(&root_evenC);
-	MPI_Comm_free(&root_oddC);
-	MPI_Comm_free(&splitC);
+	if (root_evenC != MPI_COMM_NULL)
+		MPI_Comm_free(&root_evenC);
+	if (root_oddC != MPI_COMM_NULL)
+		MPI_Comm_free(&root_oddC);
 	MPI_Group_free(&root_evenG);
 	MPI_Group_free(&root_oddG);
 #endif
-	MPI_Comm_free(&followerC);
+	if (followerC != MPI_COMM_NULL)
+		MPI_Comm_free(&followerC);
 	MPI_Group_free(&followerG);
 	MPI_Group_free(&worldG);
 
@@ -346,7 +347,7 @@ int MpiNode::relion_MPI_Recv(void *buf, std::ptrdiff_t count, MPI_Datatype datat
 
 int MpiNode::relion_MPI_Bcast(void *buffer, std::ptrdiff_t count, MPI_Datatype datatype, int root, MPI_Comm comm)
 {
-	int result;
+	int result = MPI_SUCCESS;
 	int unitsize(0);
 	MPI_Type_size(datatype, &unitsize);
 
@@ -394,41 +395,74 @@ int MpiNode::relion_MPI_Bcast(void *buffer, std::ptrdiff_t count, MPI_Datatype d
  #ifdef MPI_DEBUG
 		std::cout << "relion_MPI_Bcast: rank = " << rank << " count = " << count << " root = " << root << " comm = " << comm << std::endl;
  #endif
-#else	// End of USE_MPI_COLLECTIVE
-		int rank_in_group = rank, size_of_group = size;
-		if (comm != MPI_COMM_WORLD)
+#else	// Chunked collective Bcast (O(log P) instead of linear point-to-point)
+		const std::ptrdiff_t bcastBlockBytes = 64LL * 1024 * 1024;
+		const std::ptrdiff_t blockCount = std::max<std::ptrdiff_t>(1, bcastBlockBytes / static_cast<std::ptrdiff_t>(unitsize));
+		const std::ptrdiff_t ntimes(count / blockCount);
+		const int nremain(static_cast<int>(count % blockCount));
+		std::ptrdiff_t i(0);
+		for(; i < ntimes; ++i)
 		{
-			MPI_Group group_of_comm;
-			MPI_Comm_group(comm, &group_of_comm);
-			MPI_Group_rank(group_of_comm, &rank_in_group);
-			MPI_Group_size(group_of_comm, &size_of_group);
-		}
-
-#ifdef MPI_DEBUG
-		std::cout << "relion_MPI_Bcast: global_rank = " << rank << " rank_in_comm = " << rank_in_group << " size_of_group = " << size_of_group << std::endl;
-#endif
-		if (rank_in_group == root)
-		{
-			for (int dest = 0; dest < size_of_group; dest++)
-			{
-				if (dest != root)
-				{
-					result = relion_MPI_Send(buffer, count, datatype, dest, MPITAG_BCAST, comm);
-					if (result != MPI_SUCCESS)
-						report_MPI_ERROR(result);
-				}
-			}
-		}
-		else
-		{
-			MPI_Status status;
-			result = relion_MPI_Recv(buffer, count, datatype, root, MPITAG_BCAST, comm, status);
+			const std::ptrdiff_t offset(i * blockCount * static_cast<std::ptrdiff_t>(unitsize));
+			char* const Bbuffer(reinterpret_cast<char*>(buffer) + offset);
+			result = MPI_Bcast(Bbuffer, static_cast<int>(blockCount), datatype, root, comm);
 			if (result != MPI_SUCCESS)
 				report_MPI_ERROR(result);
 		}
-#endif	// End of the original pt-2-pt implementation of Bcast
+		if (nremain > 0)
+		{
+			const std::ptrdiff_t offset(i * blockCount * static_cast<std::ptrdiff_t>(unitsize));
+			char* const Bbuffer(reinterpret_cast<char*>(buffer) + offset);
+			result = MPI_Bcast(Bbuffer, nremain, datatype, root, comm);
+			if (result != MPI_SUCCESS)
+				report_MPI_ERROR(result);
+		}
+#endif
 	}
 
+	return result;
+}
+
+int MpiNode::relion_MPI_Allreduce_inplace(void *buf, std::ptrdiff_t count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm)
+{
+	if (count < 0)
+		report_MPI_ERROR(MPI_ERR_COUNT);
+	if (count == 0)
+		return MPI_SUCCESS;
+
+	int unitsize(0);
+	MPI_Type_size(datatype, &unitsize);
+	if (unitsize <= 0)
+		report_MPI_ERROR(MPI_ERR_TYPE);
+
+	std::ptrdiff_t collBytes = 64LL * 1024 * 1024;
+	if (const char *pEnvColl = std::getenv("MAX_MPI_COLL_BLOCK"))
+	{
+		const std::ptrdiff_t v = std::strtoul(pEnvColl, nullptr, 10);
+		if (v > 0)
+			collBytes = std::min<std::ptrdiff_t>(v, 1024LL * 1024 * 1024);
+	}
+	const std::ptrdiff_t blockCount = std::max<std::ptrdiff_t>(1,
+		std::min<std::ptrdiff_t>(collBytes / static_cast<std::ptrdiff_t>(unitsize), 256LL * 1024 * 1024));
+
+	int result = MPI_SUCCESS;
+	const std::ptrdiff_t ntimes = count / blockCount;
+	const int nremain = static_cast<int>(count % blockCount);
+	std::ptrdiff_t i = 0;
+	for (; i < ntimes; ++i)
+	{
+		char * const cbuf = reinterpret_cast<char *>(buf) + i * blockCount * static_cast<std::ptrdiff_t>(unitsize);
+		result = MPI_Allreduce(MPI_IN_PLACE, cbuf, static_cast<int>(blockCount), datatype, op, comm);
+		if (result != MPI_SUCCESS)
+			report_MPI_ERROR(result);
+	}
+	if (nremain > 0)
+	{
+		char * const cbuf = reinterpret_cast<char *>(buf) + i * blockCount * static_cast<std::ptrdiff_t>(unitsize);
+		result = MPI_Allreduce(MPI_IN_PLACE, cbuf, nremain, datatype, op, comm);
+		if (result != MPI_SUCCESS)
+			report_MPI_ERROR(result);
+	}
 	return result;
 }
 

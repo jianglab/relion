@@ -658,6 +658,104 @@ void MlDeviceBundle::setupBackprojectAccumulator()
 				cap, slots, (int) (bytes >> 20));
 }
 
+void MlDeviceBundle::releaseWdiff2Tables()
+{
+	if (wdiff2_tables.d_blob != NULL)
+	{
+		int prev_dev = 0;
+		cudaGetDevice(&prev_dev);
+		cudaSetDevice(device_id);
+		cudaFree(wdiff2_tables.d_blob);
+		if (prev_dev != device_id)
+			cudaSetDevice(prev_dev);
+		wdiff2_tables.d_blob = NULL;
+	}
+	wdiff2_tables.d_Mresol_fine.clear();
+	wdiff2_tables.Mresol_size.clear();
+	wdiff2_tables.d_scale_mask = NULL;
+	wdiff2_tables.scale_stride = 0;
+	wdiff2_tables.nr_classes = 0;
+	wdiff2_tables.valid = false;
+	wdiff2_tables.ready = false;
+}
+
+const MlDeviceBundle::Wdiff2Tables &MlDeviceBundle::getWdiff2Tables()
+{
+	std::lock_guard<std::mutex> g(wdiff2_tables.mtx);
+	if (wdiff2_tables.ready)
+		return wdiff2_tables;
+	wdiff2_tables.ready = true;
+	wdiff2_tables.valid = false;
+	if (baseMLO == NULL || baseMLO->Mresol_fine.empty())
+		return wdiff2_tables;
+
+	const size_t n_og = baseMLO->Mresol_fine.size();
+	const int nr_classes = baseMLO->mymodel.nr_classes;
+	int scale_stride = 0;
+	if (baseMLO->do_scale_correction)
+	{
+		if ((int) baseMLO->mymodel.data_vs_prior_class.size() < nr_classes)
+			return wdiff2_tables;
+		for (int c = 0; c < nr_classes; c++)
+			scale_stride = std::max(scale_stride, (int) XSIZE(baseMLO->mymodel.data_vs_prior_class[c]));
+	}
+
+	auto align256 = [](size_t b) -> size_t { return (b + 255) & ~(size_t) 255; };
+	std::vector<size_t> mresol_off(n_og, 0);
+	size_t total_bytes = 0;
+	for (size_t og = 0; og < n_og; og++)
+	{
+		mresol_off[og] = total_bytes;
+		total_bytes += align256(baseMLO->Mresol_fine[og].nzyxdim * sizeof(int));
+	}
+	const size_t mask_off = total_bytes;
+	const size_t mask_bytes = (size_t) nr_classes * (size_t) scale_stride * sizeof(unsigned char);
+	total_bytes += align256(mask_bytes);
+	if (total_bytes == 0)
+		return wdiff2_tables;
+
+	std::vector<char> staging(total_bytes, 0);
+	for (size_t og = 0; og < n_og; og++)
+	{
+		const size_t n = baseMLO->Mresol_fine[og].nzyxdim;
+		if (n > 0)
+			memcpy(&staging[mresol_off[og]], baseMLO->Mresol_fine[og].data, n * sizeof(int));
+	}
+	if (mask_bytes > 0)
+	{
+		unsigned char *h_mask = (unsigned char *) &staging[mask_off];
+		for (int c = 0; c < nr_classes; c++)
+		{
+			const MultidimArray<RFLOAT> &dvp = baseMLO->mymodel.data_vs_prior_class[c];
+			const int xs = (int) XSIZE(dvp);
+			for (int ires = 0; ires < xs; ires++)
+				h_mask[(size_t) c * scale_stride + ires] = (DIRECT_A1D_ELEM(dvp, ires) > 3.) ? 1 : 0;
+		}
+	}
+
+	HANDLE_ERROR(cudaSetDevice(device_id));
+	if (cudaMalloc(&wdiff2_tables.d_blob, total_bytes) != cudaSuccess)
+	{
+		cudaGetLastError();
+		wdiff2_tables.d_blob = NULL;
+		return wdiff2_tables;
+	}
+	HANDLE_ERROR(cudaMemcpy(wdiff2_tables.d_blob, staging.data(), total_bytes, cudaMemcpyHostToDevice));
+	char *d_base = (char *) wdiff2_tables.d_blob;
+	wdiff2_tables.d_Mresol_fine.resize(n_og);
+	wdiff2_tables.Mresol_size.resize(n_og);
+	for (size_t og = 0; og < n_og; og++)
+	{
+		wdiff2_tables.d_Mresol_fine[og] = (const int *) (d_base + mresol_off[og]);
+		wdiff2_tables.Mresol_size[og] = baseMLO->Mresol_fine[og].nzyxdim;
+	}
+	wdiff2_tables.d_scale_mask = mask_bytes > 0 ? (const unsigned char *) (d_base + mask_off) : NULL;
+	wdiff2_tables.scale_stride = scale_stride;
+	wdiff2_tables.nr_classes = nr_classes;
+	wdiff2_tables.valid = true;
+	return wdiff2_tables;
+}
+
 void MlDeviceBundle::flushBackprojectAccumulator()
 {
 	HANDLE_ERROR(cudaSetDevice(device_id));

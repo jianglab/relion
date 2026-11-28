@@ -34,6 +34,7 @@ int main(int argc, char *argv[])
 		MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN);
 
 		prm.read(argc, argv);
+		relionFftwInitThreads();
 
 		// Don't put any output to screen for mpi followers
 		prm.verb = (rank == 0) ? 1 : 0;
@@ -47,9 +48,11 @@ int main(int argc, char *argv[])
 	{
 		//prm.usage();
 		std::cerr << XE;
+		relionFftwCleanupThreads();
 		return RELION_EXIT_FAILURE;
 	}
 
+	relionFftwCleanupThreads();
         MPI_Barrier(MPI_COMM_WORLD);
 	MPI_Finalize();
 

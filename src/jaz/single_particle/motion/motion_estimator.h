@@ -23,6 +23,7 @@
 
 #include <src/image.h>
 #include <src/jaz/gravis/t2Vector.h>
+#include <src/jaz/math/Gaussian_process.h>
 #include <vector>
 
 class IOParser;
@@ -76,15 +77,23 @@ class MotionEstimator
             const std::vector<gravis::d2Vector>& positions,
             const std::vector<gravis::d2Vector>& globComp,
             const std::vector<std::vector<gravis::i2Vector>>* ccCentres = 0, int ccWindow = 0,
-            bool* leftWindow = 0) const;
+            bool* leftWindow = 0,
+            int threads_override = -1,
+            const GaussianProcess::Basis* unitBasis = 0) const;
 
-        // syntactic sugar for float-valued CCs
+        // float-valued CCs directly without full double copy
         std::vector<std::vector<gravis::d2Vector>> optimize(
             const std::vector<std::vector<Image<float>>>& movieCC,
             const std::vector<std::vector<gravis::d2Vector>>& inTracks,
             double sig_vel_px, double sig_acc_px, double sig_div_px,
             const std::vector<gravis::d2Vector>& positions,
-            const std::vector<gravis::d2Vector>& globComp) const;
+            const std::vector<gravis::d2Vector>& globComp,
+            int threads_override = -1,
+            const GaussianProcess::Basis* unitBasis = 0) const;
+
+        void expectNext(const MetaDataTable* mdt, const MetaDataTable* afterIt = 0);
+        int getMaxEDs() const { return maxEDs; }
+        bool isExpKer() const { return expKer; }
 
 	std::vector<Image<RFLOAT>> computeDamageWeights(int opticsGroup);
 		
@@ -138,6 +147,7 @@ class MotionEstimator
             bool debug, no_whitening, all_groups;
 			
 			std::vector<std::vector<Image<RFLOAT>>> damageWeights;
+			std::vector<std::vector<int>> fccBins_;
 
 			// Correlation maps cropped to ccWindow pixels around the initial tracks (0: whole maps);
 			// a micrograph whose fit leaves the window is fitted again on whole maps, and the window grows

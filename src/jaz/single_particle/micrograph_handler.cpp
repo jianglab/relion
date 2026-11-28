@@ -116,23 +116,35 @@ std::vector<MetaDataTable> MicrographHandler::cullMissingMovies(
 		REPORT_ERROR("ERROR: MicrographHandler::cullMissingMovies - MicrographHandler not initialized.");
 	}
 
-	std::vector<MetaDataTable> good(0);
-	std::vector<std::string> bad(0);
-
 	const int mc = mdts.size();
+	std::vector<char> present(mc, 0);
+	std::vector<std::string> badNames(mc);
+	const int nt = std::max(1, nr_omp_threads);
 
+	#pragma omp parallel for schedule(dynamic, 1) num_threads(nt) if(nt > 1 && mc > 1)
 	for (int m = 0; m < mc; m++)
 	{
 		if (isMoviePresent(mdts[m], false))
 		{
-			good.push_back(mdts[m]);
+			present[m] = 1;
 		}
 		else
 		{
 			FileName fn_movie;
 			mdts[m].getValueToString(EMDL_MICROGRAPH_NAME, fn_movie, 0);
-			bad.push_back(fn_movie);
+			badNames[m] = fn_movie;
 		}
+	}
+
+	std::vector<MetaDataTable> good(0);
+	std::vector<std::string> bad(0);
+	good.reserve(mc);
+	for (int m = 0; m < mc; m++)
+	{
+		if (present[m])
+			good.push_back(mdts[m]);
+		else
+			bad.push_back(badNames[m]);
 	}
 
 	if (verb && bad.size() > 0)
@@ -163,17 +175,33 @@ void MicrographHandler::findLowestFrameCount(
 		REPORT_ERROR("ERROR: MicrographHandler::findLowestFrameCount - MicrographHandler not initialized.");
 	}
 
-	int fcmin = std::numeric_limits<int>::max();
 	const int mc = mdts.size();
+	std::vector<int> counts(mc, std::numeric_limits<int>::max());
+	const int nt = std::max(1, nr_omp_threads);
+	std::mutex err_m;
+	std::unique_ptr<RelionError> err_first;
 
+	#pragma omp parallel for schedule(dynamic, 1) num_threads(nt) if(nt > 1 && mc > 1)
 	for (int m = 0; m < mc; m++)
 	{
-		int fcm = determineFrameCount(mdts[m]);
-
-		if (fcm < fcmin)
+		if (err_first) continue;
+		try
 		{
-			fcmin = fcm;
+			counts[m] = determineFrameCount(mdts[m]);
 		}
+		catch (RelionError &e)
+		{
+			std::lock_guard<std::mutex> g(err_m);
+			if (!err_first) err_first.reset(new RelionError(e));
+		}
+	}
+	if (err_first) throw *err_first;
+
+	int fcmin = std::numeric_limits<int>::max();
+	for (int m = 0; m < mc; m++)
+	{
+		if (counts[m] < fcmin)
+			fcmin = counts[m];
 	}
 
 	if (lastFrame >= fcmin)
@@ -201,23 +229,41 @@ std::vector<MetaDataTable> MicrographHandler::findLongEnoughMovies(
 		REPORT_ERROR("ERROR: MicrographHandler::findLongEnoughMovies - MicrographHandler not initialized.");
 	}
 
+	const int mc = mdts.size();
+	std::vector<int> counts(mc, 0);
+	std::vector<std::string> movieNames(mc);
+	const int nt = std::max(1, nr_omp_threads);
+	std::mutex err_m;
+	std::unique_ptr<RelionError> err_first;
+
+	#pragma omp parallel for schedule(dynamic, 1) num_threads(nt) if(nt > 1 && mc > 1)
+	for (int m = 0; m < mc; m++)
+	{
+		if (err_first) continue;
+		try
+		{
+			counts[m] = determineFrameCount(mdts[m]);
+			if (counts[m] < fc)
+				movieNames[m] = getMovieFilename(mdts[m]);
+		}
+		catch (RelionError &e)
+		{
+			std::lock_guard<std::mutex> g(err_m);
+			if (!err_first) err_first.reset(new RelionError(e));
+		}
+	}
+	if (err_first) throw *err_first;
+
 	std::vector<MetaDataTable> good(0);
 	std::vector<std::string> bad(0);
-
-	const int mc = mdts.size();
+	good.reserve(mc);
 
 	for (int m = 0; m < mc; m++)
 	{
-		int fcm = determineFrameCount(mdts[m]);
-
-		if (fcm < fc)
-		{
-			bad.push_back(getMovieFilename(mdts[m]));
-		}
+		if (counts[m] < fc)
+			bad.push_back(movieNames[m]);
 		else
-		{
 			good.push_back(mdts[m]);
-		}
 	}
 
 	if (good.size() == 0)
@@ -434,13 +480,18 @@ std::string MicrographHandler::movieCacheReport() const
 }
 
 std::shared_ptr<Image<RFLOAT>> MicrographHandler::gainReference(
-		const std::string &gainFn, const std::string &movieFn, bool isEER, int upsampling)
+		const std::string &gainFn, const std::string &movieFn, bool isEER, int upsampling,
+		std::shared_ptr<std::vector<long int>>* zeroDefectsOut)
 {
 	std::lock_guard<std::mutex> guard(gainMutex);
 
 	const std::string key = isEER? gainFn + "#eer" + integerToString(upsampling) : gainFn;
 	std::map<std::string, std::shared_ptr<Image<RFLOAT>>>::iterator it = gains.find(key);
-	if (it != gains.end()) return it->second;
+	if (it != gains.end())
+	{
+		if (zeroDefectsOut) *zeroDefectsOut = gainZeroDefects[key];
+		return it->second;
+	}
 
 	// (e.msg starts with "ERROR: \n")
 	auto gainError = [&](const RelionError &e)
@@ -463,7 +514,14 @@ std::shared_ptr<Image<RFLOAT>> MicrographHandler::gainReference(
 		catch (RelionError &e) { throw gainError(e); }
 	}
 
+	std::shared_ptr<std::vector<long int>> zeros(new std::vector<long int>());
+	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY((*gain)())
+		if (DIRECT_MULTIDIM_ELEM((*gain)(), n) == 0)
+			zeros->push_back(n);
+
 	gains[key] = gain;
+	gainZeroDefects[key] = zeros;
+	if (zeroDefectsOut) *zeroDefectsOut = zeros;
 	return gain;
 }
 
@@ -478,8 +536,21 @@ std::shared_ptr<MicrographHandler::Decoded> MicrographHandler::decodeMovie(
 	const FileName movieFn = micrograph.getMovieFilename();
 	const std::string gainFn = micrograph.getGainFilename();
 	const bool mgHasGain = (gainFn != "");
-	const bool hasDefect = (mgHasGain || micrograph.fnDefect != "" || micrograph.hotpixelX.size() != 0);
+	const bool hasFileOrHot = (micrograph.fnDefect != "" || micrograph.hotpixelX.size() != 0);
 	const bool isEER = EERRenderer::isEER(movieFn);
+
+	std::shared_ptr<Image<RFLOAT>> gain;
+	std::shared_ptr<std::vector<long int>> gainZeros;
+
+	if (mgHasGain)
+	{
+		gain = gainReference(gainFn, movieFn, isEER,
+			eer_upsampling < 0 && isEER? micrograph.getEERUpsampling() : eer_upsampling,
+			&gainZeros);
+	}
+
+	const bool hasZeroGain = (gainZeros && !gainZeros->empty());
+	const bool hasDefect = (hasFileOrHot || hasZeroGain);
 
 	if (debug)
 	{
@@ -496,20 +567,17 @@ std::shared_ptr<MicrographHandler::Decoded> MicrographHandler::decodeMovie(
 
 	if (hasDefect)
 	{
-		micrograph.fillDefectAndHotpixels(defectMask);
-	}
+		if (hasFileOrHot)
+			micrograph.fillDefectAndHotpixels(defectMask);
+		else
+			defectMask.initZeros(gain->data.ydim, gain->data.xdim);
 
-	std::shared_ptr<Image<RFLOAT>> gain;
-
-	if (mgHasGain)
-	{
-		gain = gainReference(gainFn, movieFn, isEER,
-			eer_upsampling < 0 && isEER? micrograph.getEERUpsampling() : eer_upsampling);
-
-		// Mask pixels with zero gain
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(defectMask)
-			if (DIRECT_MULTIDIM_ELEM((*gain)(), n) == 0)
-				DIRECT_MULTIDIM_ELEM(defectMask, n) = true;
+		if (hasZeroGain)
+		{
+			const long int maskN = NZYXSIZE(defectMask);
+			for (long int idx : *gainZeros)
+				if (idx < maskN) DIRECT_MULTIDIM_ELEM(defectMask, idx) = true;
+		}
 	}
 
 	RawImage<RFLOAT> gainRef_new = mgHasGain? RawImage<RFLOAT>(*gain) : RawImage<RFLOAT>();
@@ -977,18 +1045,41 @@ Micrograph MicrographHandler::loadMicrographMetadata(
 	return Micrograph(getMicrographMetadataFilename(mdt, die_on_error));
 }
 
+MicrographHandler::MicMetaSummary MicrographHandler::getMetaSummary(const std::string& metaFn) const
+{
+	{
+		std::lock_guard<std::mutex> lock(metaCacheMutex_);
+		auto it = metaCache_.find(metaFn);
+		if (it != metaCache_.end()) return it->second;
+	}
+
+	Micrograph micrograph = Micrograph(metaFn);
+	MicMetaSummary s;
+	s.movieFn = micrograph.getMovieFilename();
+	s.nframes = micrograph.getNframes();
+
+	if (exists(metaFn))
+	{
+		std::lock_guard<std::mutex> lock(metaCacheMutex_);
+		if (metaCache_.size() >= 65536) metaCache_.clear();
+		metaCache_[metaFn] = s;
+	}
+	return s;
+}
+
 // TODO: TAKANORI: This needs to handle changes in EER grouping
 int MicrographHandler::determineFrameCount(const MetaDataTable &mdt)
 {
-	Micrograph micrograph = loadMicrographMetadata(mdt, true); // TODO: TAKANORI: shouldn't read hot pixels
+	const std::string metaFn = getMicrographMetadataFilename(mdt, true);
+	const MicMetaSummary s = getMetaSummary(metaFn);
 
-	if (!exists(micrograph.getMovieFilename()))
+	if (!exists(s.movieFn))
 	{
 		return -1;
 	}
 	else
 	{
-		return micrograph.getNframes();
+		return s.nframes;
 	}
 }
 
@@ -998,9 +1089,9 @@ bool MicrographHandler::isMoviePresent(const MetaDataTable &mdt, bool die_on_err
 	
 	if (exists(metaFn))
 	{
-		Micrograph micrograph = Micrograph(metaFn);
+		const MicMetaSummary s = getMetaSummary(metaFn);
 		
-		return exists(micrograph.getMovieFilename());
+		return exists(s.movieFn);
 	}
 	else
 	{
@@ -1014,9 +1105,9 @@ std::string MicrographHandler::getMovieFilename(const MetaDataTable& mdt, bool d
 
 	if (exists(metaFn))
 	{
-		Micrograph micrograph = Micrograph(metaFn);
+		const MicMetaSummary s = getMetaSummary(metaFn);
 
-		return micrograph.getMovieFilename();
+		return s.movieFn;
 	}
 	else
 	{

@@ -24,6 +24,7 @@
 #include <src/jaz/math/Gaussian_process.h>
 
 #include <omp.h>
+#include <functional>
 
 using namespace gravis;
 
@@ -34,23 +35,84 @@ GpMotionFit::GpMotionFit(
 		int maxDims,
 		const std::vector<d2Vector>& positions,
 		const std::vector<d2Vector>& perFrameOffsets,
-		int threads, bool expKer)
+		int threads, bool expKer,
+		const GaussianProcess::Basis* unitBasis)
 	:
 	  expKer(expKer),
 	  pc(correlation.size()),
-	  fc(correlation[0].size()),
+	  fc(pc > 0 ? correlation[0].size() : 0),
 	  threads(threads),
 	  cc_pad(cc_pad),
 	  sig_vel_px(sig_vel_px),
 	  sig_div_px(sig_div_px),
 	  sig_acc_px(sig_acc_px),
-	  correlation(correlation),
+	  corrD(&correlation),
+	  corrF(0),
 	  positions(positions),
 	  perFrameOffsets(perFrameOffsets)
 {
+	initBasis(maxDims, unitBasis);
+}
+
+GpMotionFit::GpMotionFit(
+		const std::vector<std::vector<Image<float>>>& correlation,
+		double cc_pad,
+		double sig_vel_px, double sig_div_px, double sig_acc_px,
+		int maxDims,
+		const std::vector<d2Vector>& positions,
+		const std::vector<d2Vector>& perFrameOffsets,
+		int threads, bool expKer,
+		const GaussianProcess::Basis* unitBasis)
+	:
+	  expKer(expKer),
+	  pc(correlation.size()),
+	  fc(pc > 0 ? correlation[0].size() : 0),
+	  threads(threads),
+	  cc_pad(cc_pad),
+	  sig_vel_px(sig_vel_px),
+	  sig_div_px(sig_div_px),
+	  sig_acc_px(sig_acc_px),
+	  corrD(0),
+	  corrF(&correlation),
+	  positions(positions),
+	  perFrameOffsets(perFrameOffsets)
+{
+	initBasis(maxDims, unitBasis);
+}
+
+void GpMotionFit::initBasis(int maxDims, const GaussianProcess::Basis* unitBasis)
+{
+	const double sv2 = sig_vel_px * sig_vel_px;
+
+	if (unitBasis != 0)
+	{
+		const int unit_dc = unitBasis->eigenvalues.size();
+		int cap_dc = (maxDims < 0 || maxDims > unit_dc) ? unit_dc : maxDims;
+		dc = 0;
+		while (dc < cap_dc && sv2 * unitBasis->eigenvalues[dc] >= 1e-10)
+			dc++;
+
+		basisRow.resize((size_t)pc * dc);
+		basisT.resize((size_t)dc * pc);
+		eigenVals.resize(dc);
+
+		for (int d = 0; d < dc; d++)
+		{
+			const double ev = sv2 * unitBasis->eigenvalues[d];
+			const double l = sqrt(ev);
+			eigenVals[d] = ev;
+			for (int p = 0; p < pc; p++)
+			{
+				const double val = l * unitBasis->eigenvectors[(size_t)unit_dc * p + d];
+				basisRow[(size_t)p * dc + d] = val;
+				basisT[(size_t)d * pc + p] = val;
+			}
+		}
+		return;
+	}
+
 	Matrix2D<double> A(pc,pc);
 
-	const double sv2 = sig_vel_px * sig_vel_px;
 	const double sd2 = sig_div_px * sig_div_px;
 	const double sd1 = sig_div_px;
 
@@ -67,31 +129,28 @@ GpMotionFit::GpMotionFit(
 
 	dc = defBasis.eigenvalues.size();
 
-	basis = Matrix2D<RFLOAT>(pc,dc);
+	basisRow.resize((size_t)pc * dc);
+	basisT.resize((size_t)dc * pc);
+	eigenVals.resize(dc);
 
 	for (int d = 0; d < dc; d++)
 	{
 		for (int p = 0; p < pc; p++)
 		{
-			basis(p,d) = (RFLOAT) defBasis.eigenvectors[dc*p + d];
+			const double val = (RFLOAT) defBasis.eigenvectors[(size_t)dc * p + d];
+			basisRow[(size_t)p * dc + d] = val;
+			basisT[(size_t)d * pc + p] = val;
 		}
-	}
-
-	eigenVals = std::vector<double>(dc);
-
-	for (int d = 0; d < dc; d++)
-	{
 		eigenVals[d] = (RFLOAT) defBasis.eigenvalues[d];
 	}
 }
 
-
 double GpMotionFit::f(const std::vector<double> &x) const
 {
-	std::vector<std::vector<d2Vector>> pos(pc, std::vector<d2Vector>(fc));
+	std::vector<d2Vector> pos_flat((size_t)pc * fc);
 	std::vector<double> e_p(pc);
 
-	return energy(x, pos, e_p);
+	return energy(x, pos_flat, e_p);
 }
 
 double GpMotionFit::f(const std::vector<double> &x, void* tempStorage) const
@@ -100,162 +159,294 @@ double GpMotionFit::f(const std::vector<double> &x, void* tempStorage) const
 
 	TempStorage* ts = (TempStorage*) tempStorage;
 
-	return energy(x, ts->pos, ts->e_p);
+	return energy(x, ts->pos_flat, ts->e_p);
 }
 
 void GpMotionFit::grad(const std::vector<double> &x,
 					   std::vector<double> &gradDest) const
 {
-	std::vector<std::vector<d2Vector>> pos(pc, std::vector<d2Vector>(fc));
-	std::vector<std::vector<d2Vector>> ccg_pf(pc, std::vector<d2Vector>(fc));
+	const size_t fp_sz = (size_t)(fc > 1 ? fc - 1 : 0) * pc;
+	std::vector<double> ccgx_fp(fp_sz), ccgy_fp(fp_sz);
 
-	gradient(x, pos, ccg_pf, gradDest);
+	gradient(x, ccgx_fp, ccgy_fp, gradDest);
 }
 
 void GpMotionFit::grad(const std::vector<double> &x,
 					   std::vector<double> &gradDest,
 					   void* tempStorage) const
 {
-	if (tempStorage == 0) return grad(x, gradDest);
+	if (tempStorage == 0) { grad(x, gradDest); return; }
 
 	TempStorage* ts = (TempStorage*) tempStorage;
 
-	gradient(x, ts->pos, ts->ccg_pf, gradDest);
+	gradient(x, ts->ccgx_fp, ts->ccgy_fp, gradDest);
 }
 
-// Every sum below has a single owner and a fixed order, so the result is the same at any thread count
-double GpMotionFit::energy(
-		const std::vector<double> &x,
-		std::vector<std::vector<d2Vector>>& pos,
-		std::vector<double>& e_p) const
+double GpMotionFit::gradAndValue(const std::vector<double>& x,
+                                 std::vector<double>& gradDest,
+                                 void* tempStorage) const
 {
-	paramsToPos(x, pos);
+	if (tempStorage != 0)
+	{
+		TempStorage* ts = (TempStorage*) tempStorage;
+		return gradAndValueImpl(x, gradDest, ts->e_p, ts->ccgx_fp, ts->ccgy_fp);
+	}
+	const size_t fp_sz = (size_t)(fc > 1 ? fc - 1 : 0) * pc;
+	std::vector<double> e_p(pc), ccgx_fp(fp_sz), ccgy_fp(fp_sz);
+	return gradAndValueImpl(x, gradDest, e_p, ccgx_fp, ccgy_fp);
+}
 
-#pragma omp parallel for num_threads(threads)
+static inline void accumulateRegEnergyAndGrad(
+		const std::vector<double>& x,
+		int pc, int fc, int dc,
+		double sig_acc_px,
+		const std::vector<double>& eigenVals,
+		double& e_tot,
+		std::vector<double>* gradDest)
+{
+	for (int f = 0; f < fc - 1; f++)
+	for (int d = 0; d < dc; d++)
+	{
+		const int i = 2 * (pc + dc * f + d);
+		const double cx = x[i];
+		const double cy = x[i + 1];
+		e_tot += cx * cx + cy * cy;
+	}
+
+	if (sig_acc_px > 0.0)
+	{
+		const double inv_sa2 = 1.0 / (sig_acc_px * sig_acc_px);
+		for (int f = 0; f < fc - 2; f++)
+		for (int d = 0; d < dc; d++)
+		{
+			const double dcx = x[2 * (pc + dc * (f + 1) + d)    ] - x[2 * (pc + dc * f + d)    ];
+			const double dcy = x[2 * (pc + dc * (f + 1) + d) + 1] - x[2 * (pc + dc * f + d) + 1];
+			e_tot += eigenVals[d] * (dcx * dcx + dcy * dcy) * inv_sa2;
+		}
+	}
+	(void)gradDest;
+}
+
+template<typename CC_T>
+static double computeEnergyTyped(
+		const std::vector<std::vector<Image<CC_T>>>& corr,
+		const std::vector<double>& x,
+		const std::vector<double>& basisRow,
+		const std::vector<d2Vector>& perFrameOffsets,
+		const std::vector<std::vector<i2Vector>>* centres,
+		int window, int pc, int fc, int dc, int threads, double cc_pad,
+		double sig_acc_px, const std::vector<double>& eigenVals,
+		std::vector<char>& outside,
+		std::vector<double>& e_p,
+		const std::function<bool(int,int,double,double)>& inWin)
+{
+	#pragma omp parallel for num_threads(threads) if(threads > 1 && pc > 1)
 	for (int p = 0; p < pc; p++)
 	{
+		d2Vector pp(x[2 * p], x[2 * p + 1]);
+		const double* __restrict br = &basisRow[(size_t)p * dc];
 		double e = 0.0;
 
 		for (int f = 0; f < fc; f++)
 		{
-			const double x = cc_pad * (pos[p][f].x + perFrameOffsets[f].x);
-			const double y = cc_pad * (pos[p][f].y + perFrameOffsets[f].y);
+			const double px = cc_pad * (pp.x + perFrameOffsets[f].x);
+			const double py = cc_pad * (pp.y + perFrameOffsets[f].y);
 
-			if (centres && !inWindow(p, f, x, y)) outside[p] = 1;
+			if (centres && !inWin(p, f, px, py)) outside[p] = 1;
 
-			e -= Interpolation::cubicXY(correlation[p][f], x, y, 0, 0, true);
+			e -= (double) Interpolation::cubicXY(corr[p][f], px, py, 0, 0, true);
+
+			if (f < fc - 1)
+			{
+				double vx = 0.0, vy = 0.0;
+				const double* __restrict xf = &x[2 * (pc + dc * f)];
+				for (int d = 0; d < dc; d++)
+				{
+					const double b = br[d];
+					vx += xf[2 * d    ] * b;
+					vy += xf[2 * d + 1] * b;
+				}
+				pp.x += vx;
+				pp.y += vy;
+			}
 		}
 
 		e_p[p] = e;
 	}
 
 	double e_tot = 0.0;
-
 	for (int p = 0; p < pc; p++)
-	{
 		e_tot += e_p[p];
+
+	accumulateRegEnergyAndGrad(x, pc, fc, dc, sig_acc_px, eigenVals, e_tot, 0);
+	return e_tot;
+}
+
+template<typename CC_T>
+static double computeGradAndValTyped(
+		const std::vector<std::vector<Image<CC_T>>>& corr,
+		const std::vector<double>& x,
+		const std::vector<double>& basisRow,
+		const std::vector<double>& basisT,
+		const std::vector<d2Vector>& perFrameOffsets,
+		const std::vector<std::vector<i2Vector>>* centres,
+		int pc, int fc, int dc, int threads, double cc_pad,
+		double sig_acc_px, const std::vector<double>& eigenVals,
+		bool needEnergy,
+		std::vector<char>& outside,
+		std::vector<double>& e_p,
+		std::vector<double>& ccgx_fp,
+		std::vector<double>& ccgy_fp,
+		std::vector<double>& gradDest,
+		const std::function<bool(int,int,double,double)>& inWin)
+{
+	#pragma omp parallel num_threads(threads) if(threads > 1 && pc > 1)
+	{
+		std::vector<double> gx_f(fc), gy_f(fc);
+
+		#pragma omp for schedule(static)
+		for (int p = 0; p < pc; p++)
+		{
+			d2Vector pp(x[2 * p], x[2 * p + 1]);
+			const double* __restrict br = &basisRow[(size_t)p * dc];
+			double e = 0.0;
+			double g0x = 0.0, g0y = 0.0;
+
+			for (int f = 0; f < fc; f++)
+			{
+				const double px = cc_pad * (pp.x + perFrameOffsets[f].x);
+				const double py = cc_pad * (pp.y + perFrameOffsets[f].y);
+
+				if (centres && !inWin(p, f, px, py)) outside[p] = 1;
+
+				double v = 0.0;
+				d2Vector cg;
+				Interpolation::cubicXYValAndGrad(corr[p][f], px, py, v, cg, 0, 0, true);
+
+				e -= v;
+				g0x -= cg.x;
+				g0y -= cg.y;
+				gx_f[f] = cg.x;
+				gy_f[f] = cg.y;
+
+				if (f < fc - 1)
+				{
+					double vx = 0.0, vy = 0.0;
+					const double* __restrict xf = &x[2 * (pc + dc * f)];
+					for (int d = 0; d < dc; d++)
+					{
+						const double b = br[d];
+						vx += xf[2 * d    ] * b;
+						vy += xf[2 * d + 1] * b;
+					}
+					pp.x += vx;
+					pp.y += vy;
+				}
+			}
+
+			if (needEnergy) e_p[p] = e;
+			gradDest[2 * p    ] = g0x;
+			gradDest[2 * p + 1] = g0y;
+
+			double after_x = 0.0, after_y = 0.0;
+			for (int f = fc - 1; f >= 1; f--)
+			{
+				after_x += gx_f[f];
+				after_y += gy_f[f];
+				ccgx_fp[(size_t)(f - 1) * pc + p] = after_x;
+				ccgy_fp[(size_t)(f - 1) * pc + p] = after_y;
+			}
+		}
 	}
 
-	for (int f = 0; f < fc-1; f++)
+	double e_tot = 0.0;
+	if (needEnergy)
+	{
+		for (int p = 0; p < pc; p++)
+			e_tot += e_p[p];
+		accumulateRegEnergyAndGrad(x, pc, fc, dc, sig_acc_px, eigenVals, e_tot, 0);
+	}
+
+	const double sa2 = sig_acc_px * sig_acc_px;
+
+	#pragma omp parallel for collapse(2) num_threads(threads) if(threads > 1 && (fc - 1) * dc > 1)
+	for (int f = 0; f < fc - 1; f++)
 	for (int d = 0; d < dc; d++)
 	{
-		const double cx = x[2*(pc + dc*f + d)    ];
-		const double cy = x[2*(pc + dc*f + d) + 1];
+		const int i = 2 * (pc + dc * f + d);
+		const double* __restrict b = &basisT[(size_t)d * pc];
+		const double* __restrict cx = &ccgx_fp[(size_t)f * pc];
+		const double* __restrict cy = &ccgy_fp[(size_t)f * pc];
 
-		e_tot += cx*cx + cy*cy;
-	}
-
-	if (sig_acc_px > 0.0)
-	{
-		for (int f = 0; f < fc-2; f++)
-		for (int d = 0; d < dc; d++)
+		double gx = 0.0, gy = 0.0;
+		for (int p = 0; p < pc; p++)
 		{
-			const double dcx = x[2*(pc + dc*(f+1) + d)    ] - x[2*(pc + dc*f + d)    ];
-			const double dcy = x[2*(pc + dc*(f+1) + d) + 1] - x[2*(pc + dc*f + d) + 1];
-
-			e_tot += eigenVals[d]*(dcx*dcx + dcy*dcy) / (sig_acc_px*sig_acc_px);
+			gx -= b[p] * cx[p];
+			gy -= b[p] * cy[p];
 		}
+
+		gx += 2.0 * x[i];
+		gy += 2.0 * x[i + 1];
+
+		if (sig_acc_px > 0.0)
+		{
+			if (f < fc - 2)
+			{
+				gx -= 2.0 * eigenVals[d] * (x[i + 2 * dc    ] - x[i    ]) / sa2;
+				gy -= 2.0 * eigenVals[d] * (x[i + 2 * dc + 1] - x[i + 1]) / sa2;
+			}
+			if (f > 0)
+			{
+				gx += 2.0 * eigenVals[d] * (x[i    ] - x[i - 2 * dc    ]) / sa2;
+				gy += 2.0 * eigenVals[d] * (x[i + 1] - x[i - 2 * dc + 1]) / sa2;
+			}
+		}
+
+		gradDest[i    ] = gx;
+		gradDest[i + 1] = gy;
 	}
 
 	return e_tot;
 }
 
+// Every sum below has a single owner and a fixed order, so the result is the same at any thread count
+double GpMotionFit::energy(
+		const std::vector<double> &x,
+		std::vector<d2Vector>& pos_flat,
+		std::vector<double>& e_p) const
+{
+	(void)pos_flat;
+	auto inWin = [this](int p, int f, double px, double py) { return inWindow(p, f, px, py); };
+	if (corrD)
+		return computeEnergyTyped(*corrD, x, basisRow, perFrameOffsets, centres, window, pc, fc, dc, threads, cc_pad, sig_acc_px, eigenVals, outside, e_p, inWin);
+	return computeEnergyTyped(*corrF, x, basisRow, perFrameOffsets, centres, window, pc, fc, dc, threads, cc_pad, sig_acc_px, eigenVals, outside, e_p, inWin);
+}
+
 void GpMotionFit::gradient(
 		const std::vector<double> &x,
-		std::vector<std::vector<d2Vector>>& pos,
-		std::vector<std::vector<d2Vector>>& ccg_pf,
+		std::vector<double>& ccgx_fp,
+		std::vector<double>& ccgy_fp,
 		std::vector<double> &gradDest) const
 {
-	paramsToPos(x, pos);
+	std::vector<double> dummy_ep;
+	auto inWin = [this](int p, int f, double px, double py) { return inWindow(p, f, px, py); };
+	if (corrD)
+		computeGradAndValTyped(*corrD, x, basisRow, basisT, perFrameOffsets, centres, pc, fc, dc, threads, cc_pad, sig_acc_px, eigenVals, false, outside, dummy_ep, ccgx_fp, ccgy_fp, gradDest, inWin);
+	else
+		computeGradAndValTyped(*corrF, x, basisRow, basisT, perFrameOffsets, centres, pc, fc, dc, threads, cc_pad, sig_acc_px, eigenVals, false, outside, dummy_ep, ccgx_fp, ccgy_fp, gradDest, inWin);
+}
 
-	// Per particle: the gradient of its start position, then ccg_pf[p][f] becomes the sum over the frames after f
-#pragma omp parallel for num_threads(threads)
-	for (int p = 0; p < pc; p++)
-	{
-		d2Vector g0(0.0, 0.0);
-
-		for (int f = 0; f < fc; f++)
-		{
-			const double x = cc_pad * (pos[p][f].x + perFrameOffsets[f].x);
-			const double y = cc_pad * (pos[p][f].y + perFrameOffsets[f].y);
-
-			if (centres && !inWindow(p, f, x, y)) outside[p] = 1;
-
-			ccg_pf[p][f] = Interpolation::cubicXYgrad(correlation[p][f], x, y, 0, 0, true);
-
-			g0 -= ccg_pf[p][f];
-		}
-
-		gradDest[2*p  ] = g0.x;
-		gradDest[2*p+1] = g0.y;
-
-		d2Vector after(0.0, 0.0);
-
-		for (int f = fc-1; f >= 0; f--)
-		{
-			const d2Vector g = ccg_pf[p][f];
-			ccg_pf[p][f] = after;
-			after += g;
-		}
-	}
-
-	const double sa2 = sig_acc_px*sig_acc_px;
-
-	// Per velocity coefficient, summed over the particles in order
-#pragma omp parallel for collapse(2) num_threads(threads)
-	for (int f = 0; f < fc-1; f++)
-	for (int d = 0; d < dc; d++)
-	{
-		const int i = 2*(pc + dc*f + d);
-
-		d2Vector g(0.0, 0.0);
-
-		for (int p = 0; p < pc; p++)
-		{
-			g -= (double) basis(p,d) * ccg_pf[p][f];
-		}
-
-		g.x += 2.0 * x[i];
-		g.y += 2.0 * x[i+1];
-
-		if (sig_acc_px > 0.0)
-		{
-			if (f < fc-2)
-			{
-				g.x -= 2.0 * eigenVals[d] * (x[i + 2*dc]     - x[i])     / sa2;
-				g.y -= 2.0 * eigenVals[d] * (x[i + 2*dc + 1] - x[i + 1]) / sa2;
-			}
-
-			if (f > 0)
-			{
-				g.x += 2.0 * eigenVals[d] * (x[i]     - x[i - 2*dc])     / sa2;
-				g.y += 2.0 * eigenVals[d] * (x[i + 1] - x[i - 2*dc + 1]) / sa2;
-			}
-		}
-
-		gradDest[i  ] = g.x;
-		gradDest[i+1] = g.y;
-	}
+double GpMotionFit::gradAndValueImpl(
+		const std::vector<double> &x,
+		std::vector<double> &gradDest,
+		std::vector<double> &e_p,
+		std::vector<double> &ccgx_fp,
+		std::vector<double> &ccgy_fp) const
+{
+	auto inWin = [this](int p, int f, double px, double py) { return inWindow(p, f, px, py); };
+	if (corrD)
+		return computeGradAndValTyped(*corrD, x, basisRow, basisT, perFrameOffsets, centres, pc, fc, dc, threads, cc_pad, sig_acc_px, eigenVals, true, outside, e_p, ccgx_fp, ccgy_fp, gradDest, inWin);
+	return computeGradAndValTyped(*corrF, x, basisRow, basisT, perFrameOffsets, centres, pc, fc, dc, threads, cc_pad, sig_acc_px, eigenVals, true, outside, e_p, ccgx_fp, ccgy_fp, gradDest, inWin);
 }
 
 void GpMotionFit::setWindow(const std::vector<std::vector<i2Vector>>* centres, int window)
@@ -289,12 +480,11 @@ void *GpMotionFit::allocateTempStorage() const
 {
 	TempStorage* ts = new TempStorage;
 
-	const int pad = 512;
-
-	ts->pad = pad;
-	ts->pos = std::vector<std::vector<d2Vector>>(pc, std::vector<d2Vector>(fc + pad));
-	ts->ccg_pf = std::vector<std::vector<d2Vector>>(pc, std::vector<d2Vector>(fc + pad));
-	ts->e_p = std::vector<double>(pc, 0.0);
+	const size_t fp_sz = (size_t)(fc > 1 ? fc - 1 : 0) * pc;
+	ts->pos_flat.resize((size_t)pc * fc);
+	ts->ccgx_fp.resize(fp_sz);
+	ts->ccgy_fp.resize(fp_sz);
+	ts->e_p.assign(pc, 0.0);
 
 	return ts;
 }
@@ -308,10 +498,11 @@ void GpMotionFit::paramsToPos(
 		const std::vector<double>& x,
 		std::vector<std::vector<d2Vector>>& pos) const
 {
-#pragma omp parallel for num_threads(threads)
+#pragma omp parallel for num_threads(threads) if(threads > 1 && pc > 1)
 	for (int p = 0; p < pc; p++)
 	{
 		d2Vector pp(x[2*p], x[2*p+1]);
+		const double* __restrict br = &basisRow[(size_t)p * dc];
 
 		for (int f = 0; f < fc; f++)
 		{
@@ -320,14 +511,13 @@ void GpMotionFit::paramsToPos(
 			if (f < fc-1)
 			{
 				d2Vector vel(0.0, 0.0);
+				const double* __restrict xf = &x[2*(pc + dc*f)];
 
 				for (int d = 0; d < dc; d++)
 				{
-					const double cx = x[2*(pc + dc*f + d)    ];
-					const double cy = x[2*(pc + dc*f + d) + 1];
-
-					vel.x += cx * basis(p,d);
-					vel.y += cy * basis(p,d);
+					const double b = br[d];
+					vel.x += xf[2*d    ] * b;
+					vel.y += xf[2*d + 1] * b;
 				}
 
 				pp += vel;
@@ -352,13 +542,14 @@ void GpMotionFit::posToParams(
 		for (int d = 0; d < dc; d++)
 		{
 			d2Vector c(0.0, 0.0);
+			const double* __restrict bt = &basisT[(size_t)d * pc];
 
 			for (int p = 0; p < pc; p++)
 			{
 				d2Vector v = pos[p][f+1] - pos[p][f];
 
-				c.x += v.x * basis(p,d);
-				c.y += v.y * basis(p,d);
+				c.x += v.x * bt[p];
+				c.y += v.y * bt[p];
 			}
 
 			x[2*(pc + dc*f + d)  ] = c.x/eigenVals[d];

@@ -20,6 +20,7 @@ class GaussianProcess
 				GpKernel* kernel);
 		
 		static Basis getBasis(const Matrix2D<double>& C, int maxDims, double eps = 1e-10);
+		static Basis getUnitBasis(const Matrix2D<double>& K_unit, int maxDims, double eps = 1e-16);
 };
 
 class GpKernel

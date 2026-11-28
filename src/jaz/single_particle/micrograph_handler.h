@@ -177,6 +177,7 @@ class MicrographHandler
 		// Gain references by file (and EER upsampling), shared with the background reader
 		std::mutex gainMutex;
 		std::map<std::string, std::shared_ptr<Image<RFLOAT>>> gains;
+		std::map<std::string, std::shared_ptr<std::vector<long int>>> gainZeroDefects;
 
 		// Decoded movies kept for frame combination, in the order they were decoded
 		std::deque<std::pair<std::string, std::shared_ptr<Decoded>>> kept;
@@ -205,7 +206,8 @@ class MicrographHandler
 		double aheadWait;
 
 		std::shared_ptr<Image<RFLOAT>> gainReference(
-				const std::string& gainFn, const std::string& movieFn, bool isEER, int upsampling);
+				const std::string& gainFn, const std::string& movieFn, bool isEER, int upsampling,
+				std::shared_ptr<std::vector<long int>>* zeroDefectsOut = 0);
 
 		// Frames [frame0, frame0 + fc) of a movie, gain-corrected and with defects filled; reads only
 		// settings and the gain references, so it also runs on the background reader
@@ -218,6 +220,15 @@ class MicrographHandler
 		void dropAhead();
 	
 		std::map<std::string, std::string> mic2meta;
+
+		struct MicMetaSummary
+		{
+			std::string movieFn;
+			int nframes = -1;
+		};
+		mutable std::mutex metaCacheMutex_;
+		mutable std::map<std::string, MicMetaSummary> metaCache_;
+		MicMetaSummary getMetaSummary(const std::string& metaFn) const;
 
 	void loadInitial(
 			const std::vector<MetaDataTable>& mdts, bool verb,

@@ -35,6 +35,8 @@ struct Outcome
 	bool exactFitOk = false;
 	// contents survive reuse (the block is the same memory, written on the same stream)
 	bool dataOk = false;
+	// free-list integrity under fragmentation, neighbor coalescing (prev/next/both), split, exact reuse, and multi-chunk growth
+	bool freeListOk = false;
 };
 
 // False if no GPU is usable.

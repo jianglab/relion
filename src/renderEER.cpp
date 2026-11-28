@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -9,6 +10,72 @@
 #include <src/metadata_table.h>
 #include <src/image.h>
 #include <src/renderEER.h>
+
+namespace
+{
+struct EerMemTiff
+{
+	const unsigned char *data;
+	tmsize_t size;
+	toff_t off;
+};
+
+tmsize_t eerMemRead(thandle_t h, void *dst, tmsize_t n)
+{
+	EerMemTiff *m = (EerMemTiff*)h;
+	if ((toff_t)n > (toff_t)m->size - m->off)
+		n = (tmsize_t)((toff_t)m->size - m->off);
+	if (n > 0)
+	{
+		memcpy(dst, m->data + m->off, n);
+		m->off += n;
+	}
+	return n;
+}
+
+tmsize_t eerMemWrite(thandle_t, void *, tmsize_t)
+{
+	return 0;
+}
+
+toff_t eerMemSeek(thandle_t h, toff_t off, int whence)
+{
+	EerMemTiff *m = (EerMemTiff*)h;
+	toff_t target = m->off;
+	if (whence == SEEK_SET) target = off;
+	else if (whence == SEEK_CUR) target += off;
+	else if (whence == SEEK_END) target = (toff_t)m->size + off;
+	if (target > (toff_t)m->size) return (toff_t)-1;
+	m->off = target;
+	return target;
+}
+
+int eerMemClose(thandle_t)
+{
+	return 0;
+}
+
+toff_t eerMemSize(thandle_t h)
+{
+	return (toff_t)((EerMemTiff*)h)->size;
+}
+
+int eerMemMap(thandle_t, void **, toff_t *)
+{
+	return 0;
+}
+
+void eerMemUnmap(thandle_t, void *, toff_t)
+{
+}
+
+bool hasTiffMagic(const unsigned char *b, long long n)
+{
+	if (n < 4) return false;
+	return (b[0] == 'I' && b[1] == 'I' && (b[2] == 42 || b[2] == 43) && b[3] == 0)
+	    || (b[0] == 'M' && b[1] == 'M' && b[2] == 0 && (b[3] == 42 || b[3] == 43));
+}
+}
 
 //#define DEBUG_EER
 
@@ -69,66 +136,84 @@ void EERRenderer::silenceTIFFWarnings()
 template <typename T>
 void EERRenderer::render4K_to_16K(MultidimArray<T> &image, std::vector<unsigned int> &positions, std::vector<unsigned char> &symbols, int n_electrons)
 {
+	T* __restrict dst = MULTIDIM_ARRAY(image);
+	const unsigned int* __restrict pos = positions.data();
+	const unsigned char* __restrict sym = symbols.data();
 	for (int i = 0; i < n_electrons; i++)
 	{
-		int x = ((positions[i] & 4095) << 2) | (symbols[i] & 3); // 4095 = 111111111111b, 3 = 00000011b
-		int y = ((positions[i] >> 12) << 2) | ((symbols[i] & 12) >> 2); //  4096 = 2^12, 12 = 00001100b
-		DIRECT_A2D_ELEM(image, y, x)++;
+		const unsigned int p = pos[i];
+		const unsigned char s = sym[i];
+		const int x = ((p & 4095u) << 2) | (s & 3u);
+		const int y = ((p >> 12) << 2) | ((s & 12u) >> 2);
+		dst[(size_t)y * 16384u + x]++;
 	}
 }
 
 template <typename T>
 void EERRenderer::render4K_to_8K(MultidimArray<T> &image, std::vector<unsigned int> &positions, std::vector<unsigned char> &symbols, int n_electrons)
 {
+	T* __restrict dst = MULTIDIM_ARRAY(image);
+	const unsigned int* __restrict pos = positions.data();
+	const unsigned char* __restrict sym = symbols.data();
 	for (int i = 0; i < n_electrons; i++)
 	{
-		int x = ((positions[i] & 4095) << 1) | ((symbols[i] & 2) >> 1); // 4095 = 111111111111b, 2 = 00000010b
-		int y = ((positions[i] >> 12) << 1) | ((symbols[i] & 8) >> 3); //  4096 = 2^12, 8 = 00001000b
-		DIRECT_A2D_ELEM(image, y, x)++;
+		const unsigned int p = pos[i];
+		const unsigned char s = sym[i];
+		const int x = ((p & 4095u) << 1) | ((s & 2u) >> 1);
+		const int y = ((p >> 12) << 1) | ((s & 8u) >> 3);
+		dst[(size_t)y * 8192u + x]++;
 	}
 }
 
 template <typename T>
 void EERRenderer::render4K_to_4K(MultidimArray<T> &image, std::vector<unsigned int> &positions, std::vector<unsigned char> &symbols, int n_electrons)
 {
+	T* __restrict dst = MULTIDIM_ARRAY(image);
+	const unsigned int* __restrict pos = positions.data();
 	for (int i = 0; i < n_electrons; i++)
 	{
-		int x = positions[i] & 4095; // 4095 = 111111111111b
-		int y = positions[i] >> 12; //  4096 = 2^12
-		DIRECT_A2D_ELEM(image, y, x)++;
+		dst[pos[i]]++;
 	}
 }
 
 template <typename T>
 void EERRenderer::render2K_to_4K(MultidimArray<T> &image, std::vector<unsigned int> &positions, std::vector<unsigned char> &symbols, int n_electrons)
 {
+	T* __restrict dst = MULTIDIM_ARRAY(image);
+	const unsigned int* __restrict pos = positions.data();
+	const unsigned char* __restrict sym = symbols.data();
 	for (int i = 0; i < n_electrons; i++)
 	{
-		int x = ((positions[i] & 2047) << 1) | (symbols[i] & 1); // 2047 = 11111111111b
-		int y = ((positions[i] >> 11) << 1) | (symbols[i] >> 1); //  2048 = 2^11
-		DIRECT_A2D_ELEM(image, y, x)++;
+		const unsigned int p = pos[i];
+		const unsigned char s = sym[i];
+		const int x = ((p & 2047u) << 1) | (s & 1u);
+		const int y = ((p >> 11) << 1) | (s >> 1);
+		dst[(size_t)y * 4096u + x]++;
 	}
 }
 
 template <typename T>
 void EERRenderer::render4K_to_2K(MultidimArray<T> &image, std::vector<unsigned int> &positions, std::vector<unsigned char> &symbols, int n_electrons)
 {
+	T* __restrict dst = MULTIDIM_ARRAY(image);
+	const unsigned int* __restrict pos = positions.data();
 	for (int i = 0; i < n_electrons; i++)
 	{
-		int x = (positions[i] & 4095) >> 1; // 4095 = 111111111111b
-		int y = (positions[i] >> 12) >> 1; //  4096 = 2^12
-		DIRECT_A2D_ELEM(image, y, x)++;
+		const unsigned int p = pos[i];
+		const int x = (p & 4095u) >> 1;
+		const int y = (p >> 12) >> 1;
+		dst[(size_t)y * 2048u + x]++;
 	}
 }
 
 template <typename T>
 void EERRenderer::render2K_to_2K(MultidimArray<T> &image, std::vector<unsigned int> &positions, std::vector<unsigned char> &symbols, int n_electrons)
 {
+	T* __restrict dst = MULTIDIM_ARRAY(image);
+	const unsigned int* __restrict pos = positions.data();
 	for (int i = 0; i < n_electrons; i++)
 	{
-		int x = positions[i] & 2047; // 2047 = 11111111111b
-		int y = positions[i] >> 11; //  2048 = 2^11
-		DIRECT_A2D_ELEM(image, y, x)++;
+		dst[pos[i]]++;
 	}
 }
 
@@ -142,7 +227,7 @@ EERRenderer::EERRenderer()
 	eer_upsampling = 1;
 }
 
-void EERRenderer::read(FileName _fn_movie, int eer_upsampling)
+void EERRenderer::read(FileName _fn_movie, int eer_upsampling, bool header_only)
 {
 	if (ready)
 		REPORT_ERROR("Logic error: you cannot recycle EERRenderer for multiple files (now)");
@@ -157,8 +242,7 @@ void EERRenderer::read(FileName _fn_movie, int eer_upsampling)
 
 	fn_movie = _fn_movie;
 
-	// First of all, check the file size
-	FILE *fh = fopen(fn_movie.c_str(), "r");
+	FILE *fh = fopen(fn_movie.c_str(), "rb");
 	if (fh == NULL)
 		REPORT_ERROR("Failed to open " + fn_movie);
 
@@ -168,13 +252,55 @@ void EERRenderer::read(FileName _fn_movie, int eer_upsampling)
 
 	silenceTIFFWarnings();
 
-	// Try reading as TIFF
-	TIFF *ftiff = TIFFOpen(fn_movie.c_str(), "r");
+	TIFF *ftiff = NULL;
+	EerMemTiff memctx{NULL, (tmsize_t)file_size, 0};
+	if (header_only)
+	{
+		unsigned char hdr[4] = {0, 0, 0, 0};
+		const size_t nread = fread(hdr, 1, sizeof(hdr), fh);
+		if (hasTiffMagic(hdr, (long long)nread))
+		{
+			ftiff = TIFFOpen(fn_movie.c_str(), "rm");
+			if (ftiff != NULL)
+			{
+				fclose(fh);
+				fh = NULL;
+			}
+		}
+		if (fh != NULL)
+			fseek(fh, 0, SEEK_SET);
+	}
+
+	if (fh != NULL)
+	{
+		// Load whole EER file in one sequential read, then parse TIFF/legacy from memory
+		buf = (unsigned char*)malloc((size_t)file_size + 16);
+		if (buf == NULL)
+		{
+			fclose(fh);
+			REPORT_ERROR("Failed to allocate the buffer for " + fn_movie);
+		}
+		RCTIC(TIMING_READ_EER);
+		if ((long long)fread(buf, sizeof(char), file_size, fh) != file_size)
+		{
+			fclose(fh);
+			REPORT_ERROR("EERRenderer::read: Failed to read the expected size from " + fn_movie);
+		}
+		RCTOC(TIMING_READ_EER);
+		memset(buf + file_size, 0, 16);
+		fclose(fh);
+
+		memctx.data = buf;
+		ftiff = hasTiffMagic(buf, file_size)
+			? TIFFClientOpen(fn_movie.c_str(), "rm", (thandle_t)&memctx,
+			                 eerMemRead, eerMemWrite, eerMemSeek, eerMemClose, eerMemSize, eerMemMap, eerMemUnmap)
+			: NULL;
+	}
 
 	if (ftiff == NULL)
 	{
 		is_legacy = true;
-		readLegacy(fh);
+		readLegacy(NULL);
 	}
 	else
 	{
@@ -218,6 +344,7 @@ void EERRenderer::read(FileName _fn_movie, int eer_upsampling)
 
 			if (rle_bits != 7 || *subpix_h != *subpix_v || *subpix_h != 1)
 			{
+				TIFFClose(ftiff);
 				REPORT_ERROR("Unsupported compression scheme: type = " + integerToString(compression) +
 				             ", rle_bits = " + integerToString(rle_bits) + ", subpix_h = " + integerToString(*subpix_h) +
 				             ", subpix_v = " + integerToString(*subpix_v));
@@ -226,40 +353,124 @@ void EERRenderer::read(FileName _fn_movie, int eer_upsampling)
 
 			if (subpixel_bits == 2 && (eer_upsampling == -1 || eer_upsampling >= 3))
 			{
+				TIFFClose(ftiff);
 				REPORT_ERROR("For subpixel_bits = 2, eer_upsamling must be 1 or 2.");
 			}
 		}
 		else
+		{
+			TIFFClose(ftiff);
 			REPORT_ERROR("Unknown compression scheme for EER: " + integerToString(compression));
+		}
 
 		if (width != height || (width != EER_4K && width != EER_2K))
+		{
+			TIFFClose(ftiff);
 			REPORT_ERROR("Currently we support only 4096x4096 or 2048x2048 pixel EER movies.");
+		}
 
 		total_pixels = (long long)width * height;
 
-		// Find the number of frames
-		// TODO: FIXME: an EER movie might contain a summed frame
-		nframes = TIFFNumberOfDirectories(ftiff);
+		if (header_only && buf == NULL)
+		{
+			nframes = TIFFNumberOfDirectories(ftiff);
+			read_data = false;
+			TIFFClose(ftiff);
+			ready = true;
+			return;
+		}
+
+		// Walk IFDs once in memory and index single-strip frames directly into buf (zero copy)
+		RCTIC(TIMING_BUILD_INDEX);
+		bool zero_copy = true;
+		frame_starts.clear();
+		frame_sizes.clear();
+		do
+		{
+			const uint32_t nstrips = TIFFNumberOfStrips(ftiff);
+			uint64_t *offsets = NULL, *counts = NULL;
+			if (nstrips != 1
+			 || TIFFGetField(ftiff, TIFFTAG_STRIPOFFSETS, &offsets) != 1
+			 || TIFFGetField(ftiff, TIFFTAG_STRIPBYTECOUNTS, &counts) != 1
+			 || offsets == NULL || counts == NULL
+			 || (long long)offsets[0] < 0
+			 || (long long)(offsets[0] + counts[0]) > file_size)
+			{
+				zero_copy = false;
+				break;
+			}
+			frame_starts.push_back((long long)offsets[0]);
+			frame_sizes.push_back((long long)counts[0]);
+		}
+		while (TIFFReadDirectory(ftiff));
+
+		if (!zero_copy)
+		{
+			TIFFSetDirectory(ftiff, 0);
+			nframes = TIFFNumberOfDirectories(ftiff);
+			frame_starts.assign(nframes, 0);
+			frame_sizes.assign(nframes, 0);
+			unsigned char *sbuf = (unsigned char*)malloc((size_t)file_size + 16);
+			if (sbuf == NULL)
+			{
+				TIFFClose(ftiff);
+				REPORT_ERROR("Failed to allocate the buffer for " + fn_movie);
+			}
+			memset(sbuf + file_size, 0, 16);
+			long long pos = 0;
+			for (int frame = 0; frame < nframes; frame++)
+			{
+				if (!(frame == 0 ? TIFFSetDirectory(ftiff, 0) : TIFFReadDirectory(ftiff)))
+				{
+					free(sbuf);
+					TIFFClose(ftiff);
+					REPORT_ERROR("EER: cannot read the directory of frame " + integerToString(frame + 1) + " in " + fn_movie);
+				}
+				const int nstrips = TIFFNumberOfStrips(ftiff);
+				frame_starts[frame] = pos;
+				for (int strip = 0; strip < nstrips; strip++)
+				{
+					const tmsize_t strip_size = TIFFRawStripSize(ftiff, strip);
+					if (strip_size < 0 || pos + strip_size > file_size)
+					{
+						free(sbuf);
+						TIFFClose(ftiff);
+						REPORT_ERROR("EER: buffer overflow when reading raw strips.");
+					}
+					TIFFReadRawStrip(ftiff, strip, sbuf + pos, strip_size);
+					pos += strip_size;
+					frame_sizes[frame] += strip_size;
+				}
+			}
+			free(buf);
+			buf = sbuf;
+		}
+		RCTOC(TIMING_BUILD_INDEX);
+
+		nframes = frame_starts.size();
+		read_data = true;
 		TIFFClose(ftiff);
 #ifdef DEBUG_EER
 		printf("EER in TIFF: %s rle_bits = %d, subpixel_bits = %d, nframes = %d\n", fn_movie.c_str(), rle_bits, subpixel_bits, nframes);
 #endif
 	}
 
-	fclose(fh);
 	ready = true;
 }
 
 void EERRenderer::readLegacy(FILE *fh)
 {
-	/* Load everything first */
-	RCTIC(TIMING_READ_EER);
-	buf = (unsigned char*)malloc(file_size);
 	if (buf == NULL)
-		REPORT_ERROR("Failed to allocate the buffer.");
-	if (fread(buf, sizeof(char), file_size, fh) != file_size)
-		REPORT_ERROR("EERRenderer::readLegacy: Failed to read the expected size from " + fn_movie);
-	RCTOC(TIMING_READ_EER);
+	{
+		RCTIC(TIMING_READ_EER);
+		buf = (unsigned char*)malloc((size_t)file_size + 16);
+		if (buf == NULL)
+			REPORT_ERROR("Failed to allocate the buffer.");
+		if ((long long)fread(buf, sizeof(char), file_size, fh) != file_size)
+			REPORT_ERROR("EERRenderer::readLegacy: Failed to read the expected size from " + fn_movie);
+		memset(buf + file_size, 0, 16);
+		RCTOC(TIMING_READ_EER);
+	}
 
 	/* Build frame index */
 	RCTIC(TIMING_BUILD_INDEX);
@@ -393,6 +604,18 @@ long long EERRenderer::renderFrames(int frame_start, int frame_end, MultidimArra
 	// Make this 0-indexed
 	frame_start--;
 	frame_end--;
+
+	if (sizeof(T) > sizeof(unsigned short) && (frame_end - frame_start + 1) <= 16383)
+	{
+		MultidimArray<unsigned short> counts;
+		const long long tot = renderFrames<unsigned short>(frame_start + 1, frame_end + 1, counts);
+		image.resizeNoCp(1, 1, counts.ydim, counts.xdim);
+		const size_t n = NZYXSIZE(counts);
+		const unsigned short* __restrict src = MULTIDIM_ARRAY(counts);
+		T* __restrict dst = MULTIDIM_ARRAY(image);
+		for (size_t i = 0; i < n; i++) dst[i] = (T)src[i];
+		return tot;
+	}
 
 	long long total_n_electron = 0;
 

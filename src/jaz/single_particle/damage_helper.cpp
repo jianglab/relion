@@ -652,18 +652,26 @@ std::vector<Image<RFLOAT>> DamageHelper::computeWeights(
     const int kc2 = 2 * (kc - 1);
 
     std::vector<Image<RFLOAT>> out(fc);
+    std::vector<double> ex(kc), ey(kc2);
 
     for (int f = 0; f < fc; f++)
     {
         out[f] = Image<RFLOAT>(kc,kc2);
+        const double inv_2sig2 = -0.5 / (bkFacs[f].x * bkFacs[f].x);
+        const double kf = bkFacs[f].y;
+
+        for (int x = 0; x < kc; x++)
+            ex[x] = exp(inv_2sig2 * (double)x * x);
 
         for (int y = 0; y < kc2; y++)
-        for (int x = 0; x < kc; x++)
         {
-            double yy = y < kc? y : y - kc2;
-            double r2 = x*x + yy*yy;
-
-            out[f](y,x) = bkFacs[f].y * exp(-0.5*r2/(bkFacs[f].x*bkFacs[f].x));
+            const double yy = y < kc ? y : y - kc2;
+            const double sy = kf * exp(inv_2sig2 * yy * yy);
+            RFLOAT* __restrict dst = &out[f](y, 0);
+            for (int x = 0; x < kc; x++)
+            {
+                dst[x] = sy * ex[x];
+            }
         }
     }
 
@@ -679,9 +687,10 @@ std::vector<Image<RFLOAT>> DamageHelper::computeWeights(
                 sum += out[f](y,x);
             }
 
+            const double inv_sum = 1.0 / sum;
             for (int f = 0; f < fc; f++)
             {
-                out[f](y,x) /= sum;
+                out[f](y,x) *= inv_sum;
             }
         }
     }

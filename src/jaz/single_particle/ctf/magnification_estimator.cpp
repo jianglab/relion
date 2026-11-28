@@ -105,6 +105,10 @@ void MagnificationEstimator::processMicrograph(
 		Volume<Equation2x2> magEq(sh[og], s[og],1);
 
 		std::vector<Image<RFLOAT>> ctfImgs(orderedsum::chunk);
+		for (int slot = 0; slot < orderedsum::chunk; slot++)
+		{
+			ctfImgs[slot] = Image<RFLOAT>(sh[og], s[og]);
+		}
 
 		orderedsum::run(pc, s[og], nr_omp_threads,
 			[&](int pp, int slot)
@@ -112,7 +116,6 @@ void MagnificationEstimator::processMicrograph(
 				CTF ctf;
 				ctf.readByGroup(mdt, obsModel, partIndices[pp]);
 
-				ctfImgs[slot] = Image<RFLOAT>(sh[og], s[og]);
 				ctf.getFftwImage(ctfImgs[slot](), s[og], s[og], angpix[og], false, false, false, true, do_ctf_padding);
 			},
 			[&](int pp, int slot, int y)
@@ -156,16 +159,22 @@ void MagnificationEstimator::parametricFit(
 
 	std::vector<Matrix2D<RFLOAT>> mat_by_optGroup(ogc);
 
-	#pragma omp parallel for num_threads(nr_omp_threads)
+	#pragma omp parallel for num_threads(nr_omp_threads) if(ogc > 1 && ogc >= nr_omp_threads)
 	for (int og = 0; og < ogc; og++)
 	{
-		Volume<Equation2x2> magEqs(sh[og],s[og],1), magEqsG(sh[og],s[og],1);
+		Volume<Equation2x2> magEqs(sh[og],s[og],1);
 
 		std::stringstream sts;
 		sts << (og+1);
 
-		bool groupPresent = false;
+		struct MagMic
+		{
+			bool ok = false;
+			Volume<Equation2x2> eqs;
+		};
+		std::vector<MagMic> mgs(gc);
 
+		#pragma omp parallel for schedule(dynamic, 1) num_threads(nr_omp_threads) if(ogc < nr_omp_threads && nr_omp_threads > 1 && gc > 1)
 		for (long g = 0; g < gc; g++)
 		{
 			std::string outRoot = CtfRefiner::getOutputFilenameRoot(mdts[g], outPath);
@@ -180,13 +189,23 @@ void MagnificationEstimator::parametricFit(
 			{
 				try
 				{
-					MagnificationHelper::readEQs(fn, magEqsG);
-					magEqs += magEqsG;
-					groupPresent = true;
+					mgs[g].eqs = Volume<Equation2x2>(sh[og], s[og], 1);
+					MagnificationHelper::readEQs(fn, mgs[g].eqs);
+					mgs[g].ok = true;
 				}
 				catch (RelionError e)
 				{}
 			}
+		}
+
+		bool groupPresent = false;
+		for (long g = 0; g < gc; g++)
+		{
+			if (!mgs[g].ok) continue;
+
+			magEqs += mgs[g].eqs;
+			groupPresent = true;
+			mgs[g] = MagMic();
 		}
 
 		if (!groupPresent)

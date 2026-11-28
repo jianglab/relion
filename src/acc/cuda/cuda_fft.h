@@ -109,7 +109,7 @@ public:
 		return res;
 	}
 
-	void setSize(size_t x, size_t y, size_t z, int batch = 1, int setDirection = 0)
+	void setSize(size_t x, size_t y, size_t z, int batch = 1, int setDirection = 0, bool allocHost = true)
 	{
 
 		/* Optional direction input restricts transformer to
@@ -242,11 +242,13 @@ public:
 
 		reals.setSize(idist*batchSize[0]);
 		reals.deviceAlloc();
-		reals.hostAlloc();
+		if (allocHost)
+			reals.hostAlloc();
 
 		fouriers.setSize(odist*batchSize[0]);
 		fouriers.deviceAlloc();
-		fouriers.hostAlloc();
+		if (allocHost)
+			fouriers.hostAlloc();
 		gpuMemTrace("image FFT buffers", (double) (reals.getSize() + fouriers.getSize()) * sizeof(XFLOAT));
 
 //		DEBUG_HANDLE_ERROR(cudaMemGetInfo( &avail, &total ));

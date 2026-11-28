@@ -21,6 +21,15 @@
 #include <src/rect_refusal.h>
 #include "src/particle_subtractor.h"
 #include "src/async_mrc_stack.h"
+#include "src/prefetch.h"
+#include "src/resource_report.h"
+#include "src/relion_finufft.h"
+#include <cstdlib>
+#include <exception>
+#include <memory>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 void ParticleSubtractor::read(int argc, char **argv)
 {
@@ -34,6 +43,7 @@ void ParticleSubtractor::read(int argc, char **argv)
 	fn_revert = parser.getOption("--revert", "Name of particle STAR file to revert. When this is provided, all other options are ignored.", "");
 	do_ssnr = parser.checkOption("--ssnr", "Don't subtract, only calculate average spectral SNR in the images");
 	write_float16  = parser.checkOption("--float16", "Write in half-precision 16 bit floating point numbers (MRC mode 12), instead of 32 bit (MRC mode 0).");
+	nr_threads = textToInteger(parser.getOption("--j", "Number of threads per process (-1 = automatic)", "-1"));
 
 	int center_section = parser.addSection("Centering options");
 	do_recenter_on_mask = parser.checkOption("--recenter_on_mask", "Use this flag to center the subtracted particles on projections of the centre-of-mass of the input mask");
@@ -93,6 +103,27 @@ void ParticleSubtractor::initialise(int _rank, int _size)
 	size = _size;
 
 	if (rank > 0) verb = 0;
+
+	if (nr_threads <= 0)
+	{
+		if (const char *omp_env = getenv("OMP_NUM_THREADS"))
+		{
+			if (atoi(omp_env) > 0) nr_threads = atoi(omp_env);
+		}
+		if (nr_threads <= 0)
+		{
+			int local_ranks = size;
+			if (const char *e = getenv("OMPI_COMM_WORLD_LOCAL_SIZE"))
+				local_ranks = std::max(1, atoi(e));
+			else if (const char *e2 = getenv("MPI_LOCALNRANKS"))
+				local_ranks = std::max(1, atoi(e2));
+			const int n_cores = std::max<int>(1, (int)resrep::allowedCores().size());
+			nr_threads = std::max(1, std::min(16, n_cores / std::max(1, local_ranks)));
+		}
+	}
+#ifdef _OPENMP
+	if (omp_in_parallel()) nr_threads = 1;
+#endif
 
 	if (fn_revert != "")
 		return;
@@ -196,8 +227,12 @@ void ParticleSubtractor::initialise(int _rank, int _size)
 			}
 
 			RFLOAT overlap = 0.;
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Imask())
-				overlap += DIRECT_MULTIDIM_ELEM(opt.mymodel.masks_bodies[ibody], n) * DIRECT_MULTIDIM_ELEM(Imask(), n);
+			const long int n_elems = MULTIDIM_SIZE(Imask());
+			const RFLOAT *m_body = MULTIDIM_ARRAY(opt.mymodel.masks_bodies[ibody]);
+			const RFLOAT *m_keep = MULTIDIM_ARRAY(Imask());
+			#pragma omp parallel for reduction(+:overlap) schedule(static) num_threads(nr_threads) if(nr_threads > 1)
+			for (long int n = 0; n < n_elems; n++)
+				overlap += m_body[n] * m_keep[n];
 
 			if (overlap > best_overlap)
 			{
@@ -212,10 +247,12 @@ void ParticleSubtractor::initialise(int _rank, int _size)
 		for (int obody = 0; obody < opt.mymodel.nr_bodies; obody++)
 		{
 			int ii = DIRECT_A2D_ELEM(opt.mymodel.pointer_body_overlap, subtract_body, obody);
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Imask())
-			{
-				DIRECT_MULTIDIM_ELEM(opt.mymodel.masks_bodies[ii], n) *= (1. - DIRECT_MULTIDIM_ELEM(Imask(), n));
-			}
+			const long int n_elems = MULTIDIM_SIZE(Imask());
+			RFLOAT *m_body = MULTIDIM_ARRAY(opt.mymodel.masks_bodies[ii]);
+			const RFLOAT *m_keep = MULTIDIM_ARRAY(Imask());
+			#pragma omp parallel for schedule(static) num_threads(nr_threads) if(nr_threads > 1)
+			for (long int n = 0; n < n_elems; n++)
+				m_body[n] *= (1. - m_keep[n]);
 		}
 	}
 	else
@@ -230,10 +267,12 @@ void ParticleSubtractor::initialise(int _rank, int _size)
 				REPORT_ERROR("ERROR: input mask is not of same shape as reference inside the optimiser.");
 			}
 
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Imask())
-			{
-				DIRECT_MULTIDIM_ELEM(opt.mymodel.Iref[iclass], n) *= (1. - DIRECT_MULTIDIM_ELEM(Imask(), n));
-			}
+			const long int n_elems = MULTIDIM_SIZE(Imask());
+			RFLOAT *m_ref = MULTIDIM_ARRAY(opt.mymodel.Iref[iclass]);
+			const RFLOAT *m_keep = MULTIDIM_ARRAY(Imask());
+			#pragma omp parallel for schedule(static) num_threads(nr_threads) if(nr_threads > 1)
+			for (long int n = 0; n < n_elems; n++)
+				m_ref[n] *= (1. - m_keep[n]);
 		}
 	}
 
@@ -243,9 +282,11 @@ void ParticleSubtractor::initialise(int _rank, int _size)
 	}
 
 	// Now set up the Projectors inside the model
+	relionFftwInitThreads();
+	relionFftwPlanThreads(nr_threads);
 	projector_interpolator = Projector::resolveForwardInterpolator(false, verb);
 	opt.mymodel.projector_interpolator = (projector_interpolator == FINUFFT) ? FINUFFT : opt.mymodel.interpolator;
-	opt.mymodel.setFourierTransformMaps(false); // false means ignore tau2_class
+	opt.mymodel.setFourierTransformMaps(false, nr_threads); // false means ignore tau2_class
 
 	// ensure even boxsize of subtracted images
 	if (boxsize > 0)
@@ -326,22 +367,543 @@ void ParticleSubtractor::run()
 	}
 
 	MDimg_out.clear();
-	//for (long int part_id_sorted = my_first_part_id, cc = 0; part_id_sorted <= my_last_part_id; part_id_sorted++, cc++)
-	for (long int part_id_sorted = my_first_part_id, cc = 0; part_id_sorted <= my_last_part_id; part_id_sorted++, cc++)
+	if (nr_parts <= 0)
 	{
+		if (verb > 0) progress_bar(nr_parts);
+		return;
+	}
 
-		//long int part_id = opt.mydata.sorted_idx[part_id_sorted];
-		if (cc % barstep == 0)
+	const bool has_class_col = (!ignore_class && opt.mydata.MDimg.containsLabel(EMDL_PARTICLE_CLASS));
+	const bool is_multibody = (opt.fn_body_masks != "None");
+	const bool can_batch_finufft = (!is_multibody && projector_interpolator == FINUFFT);
+	const int my_subset = (rank % 2 == 1) ? 1 : 2;
+	const long int chunk_max = std::min<long int>(256, std::max<long int>(64, (long int)nr_threads * 16));
+	const DataType datatype = write_float16 ? Float16 : Float;
+
+	struct SubBodyMeta
+	{
+		RFLOAT rot = 0., tilt = 0., psi = 0.;
+		Matrix1D<RFLOAT> offset;
+	};
+	struct SubItem
+	{
+		long int part_id = 0;
+		long int counter = 0;
+		int optics_group = 0;
+		int myclass = 0;
+		int group_id = 0;
+		bool ctf_premultiplied = false;
+		RFLOAT my_pixel_size = 1.;
+		RFLOAT mynorm = 1.;
+		RFLOAT rot = 0., tilt = 0., psi = 0.;
+		FileName part_name, fn_ctf;
+		CTF ctf;
+		Matrix1D<RFLOAT> my_old_offset, my_residual_offset, my_projected_com, my_refined_ibody_offset;
+		Matrix2D<RFLOAT> Aori, A3D_pure_rot, A3D;
+		std::vector<SubBodyMeta> body_meta;
+		Image<RFLOAT> img;
+		MultidimArray<Complex> Fimg, Fsubtract;
+		MultidimArray<RFLOAT> Fctf;
+	};
+	struct SubWorkerWs
+	{
+		OpenStacks open_stacks;
+		FourierTransformer transformer;
+		MultidimArray<Complex> FTo, Faux;
+		Image<RFLOAT> Ictf;
+		MultidimArray<RFLOAT> sum_S2, sum_N2, sum_count;
+		explicit SubWorkerWs(size_t max_open, bool do_ssnr, long int ssnr_len)
+			: open_stacks(max_open)
 		{
-			if (pipeline_control_check_abort_job())
+			if (do_ssnr)
+			{
+				sum_S2.initZeros(ssnr_len);
+				sum_N2.initZeros(ssnr_len);
+				sum_count.initZeros(ssnr_len);
+			}
+		}
+	};
+
+	const int n_ws = std::max(1, nr_threads);
+	const size_t max_open_per_ws = std::max<size_t>(8, 128 / (size_t)n_ws);
+	const long int ssnr_len = do_ssnr ? (long int)MULTIDIM_SIZE(sum_S2) : 0;
+	std::vector<std::unique_ptr<SubWorkerWs> > ws_pool(n_ws);
+	for (int t = 0; t < n_ws; t++)
+		ws_pool[t].reset(new SubWorkerWs(max_open_per_ws, do_ssnr, ssnr_len));
+
+	relionFftwInitThreads();
+
+	std::vector<SubItem> chunk(chunk_max);
+	for (long int cc_base = 0; cc_base < nr_parts; cc_base += chunk_max)
+	{
+		const long int chunk_n = std::min(chunk_max, nr_parts - cc_base);
+
+		// Sequential pre-pass: validate subset, read metadata and precompute matrices cleanly
+		for (long int k = 0; k < chunk_n; k++)
+		{
+			const long int cc = cc_base + k;
+			if (cc % barstep == 0 && pipeline_control_check_abort_job())
 				exit(RELION_EXIT_ABORTED);
+
+			const long int part_id = opt.mydata.sorted_idx[my_first_part_id + cc];
+			SubItem &it = chunk[k];
+			it.part_id = part_id;
+			it.counter = cc;
+			it.optics_group = opt.mydata.getOpticsGroup(part_id);
+			it.part_name = opt.mydata.particles[part_id].name;
+
+			if (opt.do_split_random_halves && my_subset != opt.mydata.getRandomSubset(part_id))
+			{
+				std::cerr << " rank= " << rank << " part_id= " << part_id << " opt.mydata.getRandomSubset(part_id)= " << opt.mydata.getRandomSubset(part_id) << std::endl;
+				REPORT_ERROR("BUG:: gold-standard separation of halves is broken!");
+			}
+
+			it.my_pixel_size = opt.mydata.getImagePixelSize(part_id);
+			it.ctf_premultiplied = opt.mydata.obsModel.getCtfPremultiplied(it.optics_group);
+			it.group_id = opt.do_scale_correction ? opt.mydata.getGroupId(part_id) : 0;
+			it.myclass = 0;
+			if (has_class_col)
+			{
+				opt.mydata.MDimg.getValue(EMDL_PARTICLE_CLASS, it.myclass, part_id);
+				if (it.myclass > opt.mymodel.nr_classes)
+				{
+					std::cerr << "A particle belongs to class " << it.myclass << " while the number of classes in the optimiser.star is only " << opt.mymodel.nr_classes << "." << std::endl;
+					REPORT_ERROR("Tried to subtract a non-existing class from a particle. If you have performed non-alignment Class3D after Refine3D and want to subtract a map from the Refine3D job, use the --ignore_class option.");
+				}
+				it.myclass--;
+			}
+
+			opt.mydata.MDimg.getValue(EMDL_ORIENT_ROT, it.rot, part_id);
+			opt.mydata.MDimg.getValue(EMDL_ORIENT_TILT, it.tilt, part_id);
+			opt.mydata.MDimg.getValue(EMDL_ORIENT_PSI, it.psi, part_id);
+			it.my_old_offset.initZeros(3);
+			opt.mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, XX(it.my_old_offset), part_id);
+			opt.mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, YY(it.my_old_offset), part_id);
+			if (opt.mymodel.data_dim == 3)
+				opt.mydata.MDimg.getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, ZZ(it.my_old_offset), part_id);
+			it.my_old_offset /= it.my_pixel_size;
+
+			if (!opt.mydata.MDimg.getValue(EMDL_IMAGE_NORM_CORRECTION, it.mynorm, part_id))
+				it.mynorm = 1.;
+
+			if (opt.do_ctf_correction)
+			{
+				if (opt.mymodel.data_dim == 3)
+				{
+					if (!it.ctf_premultiplied)
+						REPORT_ERROR("3D data must be ctf_premultiplied for CTF correction.");
+					opt.mydata.MDimg.getValue(EMDL_CTF_IMAGE, it.fn_ctf, part_id);
+				}
+				else
+				{
+					it.ctf.readByGroup(opt.mydata.MDimg, &opt.mydata.obsModel, part_id);
+				}
+			}
+
+			if (is_multibody)
+			{
+				Euler_angles2matrix(it.rot, it.tilt, it.psi, it.Aori, false);
+				it.my_projected_com = it.Aori * opt.mymodel.com_bodies[subtract_body];
+				it.body_meta.resize(opt.mymodel.nr_bodies);
+				for (int obody = 0; obody < opt.mymodel.nr_bodies; obody++)
+				{
+					SubBodyMeta &bm = it.body_meta[obody];
+					bm.offset.initZeros(3);
+					opt.mydata.MDbodies[obody].getValue(EMDL_ORIENT_ROT, bm.rot, part_id);
+					opt.mydata.MDbodies[obody].getValue(EMDL_ORIENT_TILT, bm.tilt, part_id);
+					opt.mydata.MDbodies[obody].getValue(EMDL_ORIENT_PSI, bm.psi, part_id);
+					opt.mydata.MDbodies[obody].getValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, XX(bm.offset), part_id);
+					opt.mydata.MDbodies[obody].getValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, YY(bm.offset), part_id);
+					if (opt.mymodel.data_dim == 3)
+						opt.mydata.MDbodies[obody].getValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, ZZ(bm.offset), part_id);
+					bm.offset /= it.my_pixel_size;
+				}
+				it.my_refined_ibody_offset = it.body_meta[subtract_body].offset;
+			}
+			else
+			{
+				Euler_angles2matrix(it.rot, it.tilt, it.psi, it.A3D_pure_rot);
+				it.A3D = opt.mydata.obsModel.applyAnisoMag(it.A3D_pure_rot, it.optics_group);
+				it.A3D = opt.mydata.obsModel.applyScaleDifference(it.A3D, it.optics_group, opt.mymodel.ori_size, opt.mymodel.pixel_size);
+			}
 		}
 
-		long int part_id = opt.mydata.sorted_idx[part_id_sorted];
-		subtractOneParticle(part_id, 0, cc);
+		// Stage 1: Parallel image read (using persistent OpenStacks), multi-body shift, FFT, and CTF
+		std::exception_ptr err;
+		#pragma omp parallel num_threads(n_ws)
+		{
+			relionFftwSetThreadPlanThreads(1);
+#ifdef _OPENMP
+			const int tid = omp_get_thread_num();
+#else
+			const int tid = 0;
+#endif
+			SubWorkerWs &ws = *ws_pool[tid];
+			#pragma omp for schedule(dynamic, 1)
+			for (long int k = 0; k < chunk_n; k++)
+			{
+				try
+				{
+					SubItem &it = chunk[k];
+					if (opt.mymodel.data_dim == 2 && it.part_name.contains("@"))
+					{
+						long int img_no;
+						FileName fn_stack;
+						it.part_name.decompose(img_no, fn_stack);
+						if (img_no > 0 && fn_stack.getExtension() != "vstack")
+							it.img.readFromOpenFile(it.part_name, ws.open_stacks.get(fn_stack), -1, false);
+						else
+							it.img.read(it.part_name);
+					}
+					else
+					{
+						it.img.read(it.part_name);
+					}
+					it.img().setXmippOrigin();
 
-		if (cc % barstep == 0 && verb > 0) progress_bar(cc);
+					if (opt.do_norm_correction)
+						it.img() *= opt.mymodel.avg_norm_correction / it.mynorm;
+
+					if (is_multibody)
+					{
+						it.my_old_offset -= it.my_projected_com;
+						it.my_residual_offset = it.my_old_offset;
+						it.my_old_offset.selfROUND();
+						selfTranslate(it.img(), it.my_old_offset, WRAP);
+						it.my_residual_offset -= it.my_old_offset;
+					}
+
+					ws.transformer.FourierTransform(it.img(), it.Fimg);
+					CenterFFTbySign(it.Fimg);
+					it.Fctf.resize(it.Fimg);
+
+					if (opt.do_ctf_correction)
+					{
+						if (opt.mymodel.data_dim == 3)
+						{
+							ws.Ictf.read(it.fn_ctf);
+							if (XSIZE(ws.Ictf()) == YSIZE(ws.Ictf()))
+							{
+								ws.Ictf().setXmippOrigin();
+								FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(it.Fctf)
+									DIRECT_A3D_ELEM(it.Fctf, k, i, j) = A3D_ELEM(ws.Ictf(), -kp, -ip, -jp);
+							}
+							else if (XSIZE(ws.Ictf()) == YSIZE(ws.Ictf()) / 2 + 1)
+							{
+								if (ZSIZE(ws.Ictf()) == YSIZE(ws.Ictf()))
+									windowFourierTransform(ws.Ictf(), it.Fctf, YSIZE(it.Fctf));
+								else if (ZSIZE(ws.Ictf()) == YSIZE(ws.Ictf()) * 2)
+								{
+									MultidimArray<RFLOAT> &Mctf = ws.Ictf();
+									long int max_r2 = (XSIZE(Mctf) - 1) * (XSIZE(Mctf) - 1);
+									FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(it.Fctf)
+									{
+										if (kp * kp + ip * ip + jp * jp <= max_r2)
+											FFTW_ELEM(it.Fctf, kp, ip, jp) = DIRECT_A3D_ELEM(Mctf, ((kp < 0) ? (kp + YSIZE(Mctf)) : kp),
+												((ip < 0) ? (ip + YSIZE(Mctf)) : ip), jp);
+									}
+								}
+								else
+									REPORT_ERROR("3D CTF volume in FFTW format must cointain CTF or CTF and MULTI concatenated along Z !");
+							}
+							else
+								REPORT_ERROR("3D CTF volume must be either cubical or adhere to FFTW format!");
+						}
+						else
+						{
+							it.ctf.getFftwImage(it.Fctf, XSIZE(it.img()), YSIZE(it.img()), it.my_pixel_size,
+							                    opt.ctf_phase_flipped, false, opt.intact_ctf_first_peak, true);
+							if (it.ctf_premultiplied)
+							{
+								const long int nelem = MULTIDIM_SIZE(it.Fctf);
+								RFLOAT *fctf_p = MULTIDIM_ARRAY(it.Fctf);
+								for (long int n = 0; n < nelem; n++)
+									fctf_p[n] *= fctf_p[n];
+							}
+						}
+					}
+					else
+					{
+						it.Fctf.initConstant(1.);
+					}
+
+					it.Fsubtract.initZeros(it.Fimg);
+				}
+				catch (...)
+				{
+#pragma omp critical
+					if (!err) err = std::current_exception();
+				}
+			}
+			relionFftwSetThreadPlanThreads(0);
+		}
+		if (err) std::rethrow_exception(err);
+
+		// Stage 2: Batched FINUFFT central-slice projections (or parallel trilinear / multi-body)
+		if (can_batch_finufft)
+		{
+			relionFftwPlanThreads(nr_threads);
+			setFinufftThreadCount(nr_threads);
+			std::vector<MultidimArray<Complex>*> ptrs;
+			std::vector<Matrix2D<RFLOAT> > mats;
+			for (int c = 0; c < opt.mymodel.nr_classes; c++)
+			{
+				ptrs.clear();
+				mats.clear();
+				for (long int k = 0; k < chunk_n; k++)
+				{
+					if (chunk[k].myclass == c)
+					{
+						ptrs.push_back(&chunk[k].Fsubtract);
+						mats.push_back(chunk[k].A3D);
+					}
+				}
+				if (!ptrs.empty())
+					opt.mymodel.PPref[c].get2DFourierTransformMany(ptrs, mats);
+			}
+		}
+		else
+		{
+			if (projector_interpolator == FINUFFT)
+				setFinufftThreadCount(1);
+			#pragma omp parallel num_threads(n_ws)
+			{
+				relionFftwSetThreadPlanThreads(1);
+#ifdef _OPENMP
+				const int tid = omp_get_thread_num();
+#else
+				const int tid = 0;
+#endif
+				SubWorkerWs &ws = *ws_pool[tid];
+				#pragma omp for schedule(dynamic, 1)
+				for (long int k = 0; k < chunk_n; k++)
+				{
+					try
+					{
+						SubItem &it = chunk[k];
+						if (is_multibody)
+						{
+							Matrix2D<RFLOAT> Aresi_subtract;
+							for (int obody = 0; obody < opt.mymodel.nr_bodies; obody++)
+							{
+								const SubBodyMeta &bm = it.body_meta[obody];
+								Matrix2D<RFLOAT> Aresi, Abody;
+								Euler_angles2matrix(bm.rot, bm.tilt, bm.psi, Aresi, false);
+								if (obody == subtract_body) Aresi_subtract = Aresi;
+								Abody = it.Aori * (opt.mymodel.orient_bodies[obody]).transpose() * A_rot90 * Aresi * opt.mymodel.orient_bodies[obody];
+								Abody = opt.mydata.obsModel.applyAnisoMag(Abody, it.optics_group);
+								Abody = opt.mydata.obsModel.applyScaleDifference(Abody, it.optics_group, opt.mymodel.ori_size, opt.mymodel.pixel_size);
+
+								ws.FTo.initZeros(it.Fimg);
+								int oobody = DIRECT_A2D_ELEM(opt.mymodel.pointer_body_overlap, subtract_body, obody);
+								opt.mymodel.PPref[oobody].get2DFourierTransform(ws.FTo, Abody);
+
+								Matrix1D<RFLOAT> other_projected_com = it.Aori * (opt.mymodel.com_bodies[obody]);
+								other_projected_com -= bm.offset;
+								other_projected_com -= it.my_projected_com;
+
+								shiftImageInFourierTransform(ws.FTo, ws.Faux, (RFLOAT)XSIZE(it.img()),
+									XX(other_projected_com), YY(other_projected_com), ZZ(other_projected_com));
+								it.Fsubtract += ws.Faux;
+							}
+
+							Matrix2D<RFLOAT> Abody = it.Aori * (opt.mymodel.orient_bodies[subtract_body]).transpose() * A_rot90 * Aresi_subtract * opt.mymodel.orient_bodies[subtract_body];
+							Euler_matrix2angles(Abody, it.rot, it.tilt, it.psi);
+							it.my_residual_offset += it.my_refined_ibody_offset;
+							it.my_residual_offset += Abody * (opt.mymodel.com_bodies[subtract_body] - new_center * opt.mymodel.pixel_size / it.my_pixel_size);
+						}
+						else
+						{
+							opt.mymodel.PPref[it.myclass].get2DFourierTransform(it.Fsubtract, it.A3D);
+						}
+					}
+					catch (...)
+					{
+#pragma omp critical
+						if (!err) err = std::current_exception();
+					}
+				}
+				relionFftwSetThreadPlanThreads(0);
+			}
+			if (projector_interpolator == FINUFFT)
+				setFinufftThreadCount(nr_threads);
+			if (err) std::rethrow_exception(err);
+		}
+
+		// Stage 3: Parallel Fourier shift, CTF/optics/scale modulation, subtraction, iFFT, recenter & crop
+		#pragma omp parallel num_threads(n_ws)
+		{
+			relionFftwSetThreadPlanThreads(1);
+#ifdef _OPENMP
+			const int tid = omp_get_thread_num();
+#else
+			const int tid = 0;
+#endif
+			SubWorkerWs &ws = *ws_pool[tid];
+			#pragma omp for schedule(dynamic, 1)
+			for (long int k = 0; k < chunk_n; k++)
+			{
+				try
+				{
+					SubItem &it = chunk[k];
+					if (!is_multibody)
+					{
+						shiftImageInFourierTransform(it.Fsubtract, it.Fsubtract, (RFLOAT)XSIZE(it.img()),
+							-XX(it.my_old_offset), -YY(it.my_old_offset), -ZZ(it.my_old_offset));
+						if (do_center)
+							it.my_residual_offset = it.my_old_offset - it.A3D_pure_rot * (new_center * opt.mymodel.pixel_size / it.my_pixel_size);
+					}
+
+					const long int nelem = MULTIDIM_SIZE(it.Fsubtract);
+					if (opt.do_ctf_correction)
+					{
+						Complex *fsub_p = MULTIDIM_ARRAY(it.Fsubtract);
+						const RFLOAT *fctf_p = MULTIDIM_ARRAY(it.Fctf);
+						for (long int n = 0; n < nelem; n++)
+							fsub_p[n] *= fctf_p[n];
+						opt.mydata.obsModel.demodulatePhase(it.optics_group, it.Fsubtract, true);
+						opt.mydata.obsModel.divideByMtf(it.optics_group, it.Fsubtract, true);
+					}
+
+					if (opt.do_scale_correction)
+					{
+						const RFLOAT myscale = opt.mymodel.scale_correction[it.group_id];
+						Complex *fsub_p = MULTIDIM_ARRAY(it.Fsubtract);
+						for (long int n = 0; n < nelem; n++)
+							fsub_p[n] *= myscale;
+					}
+
+					{
+						Complex *fimg_p = MULTIDIM_ARRAY(it.Fimg);
+						const Complex *fsub_p = MULTIDIM_ARRAY(it.Fsubtract);
+						for (long int n = 0; n < nelem; n++)
+							fimg_p[n] -= fsub_p[n];
+					}
+
+					if (do_ssnr)
+					{
+						const RFLOAT remap_image_sizes = (opt.mymodel.ori_size * opt.mymodel.pixel_size) / (XSIZE(it.img()) * it.my_pixel_size);
+						const int max_shell = opt.mymodel.ori_size / 2 + 1;
+						FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(it.Fimg)
+						{
+							long int idx = ROUND(sqrt(kp*kp + ip*ip + jp*jp));
+							int idx_remapped = ROUND(remap_image_sizes * idx);
+							if (idx_remapped < max_shell)
+							{
+								RFLOAT S2 = norm(dAkij(it.Fsubtract, k, i, j));
+								RFLOAT N2 = norm(dAkij(it.Fimg, k, i, j));
+								ws.sum_S2(idx_remapped) += S2 / 2.;
+								ws.sum_N2(idx_remapped) += N2 / 2.;
+								ws.sum_count(idx_remapped) += 1.;
+							}
+						}
+					}
+					else
+					{
+						CenterFFTbySign(it.Fimg);
+						ws.transformer.inverseFourierTransform(it.Fimg, it.img());
+
+						if (do_center || is_multibody)
+						{
+							Matrix1D<RFLOAT> centering_offset = it.my_residual_offset;
+							centering_offset.selfROUND();
+							it.my_residual_offset -= centering_offset;
+							selfTranslate(it.img(), centering_offset, WRAP);
+						}
+
+						if (boxsize > 0)
+						{
+							if (it.img().getDim() == 2)
+							{
+								it.img().window(FIRST_XMIPP_INDEX(boxsize), FIRST_XMIPP_INDEX(boxsize),
+								                LAST_XMIPP_INDEX(boxsize), LAST_XMIPP_INDEX(boxsize));
+							}
+							else if (it.img().getDim() == 3)
+							{
+								it.img().window(FIRST_XMIPP_INDEX(boxsize), FIRST_XMIPP_INDEX(boxsize), FIRST_XMIPP_INDEX(boxsize),
+								                LAST_XMIPP_INDEX(boxsize), LAST_XMIPP_INDEX(boxsize), LAST_XMIPP_INDEX(boxsize));
+							}
+						}
+						it.img.setSamplingRateInHeader(it.my_pixel_size);
+					}
+				}
+				catch (...)
+				{
+#pragma omp critical
+					if (!err) err = std::current_exception();
+				}
+			}
+			relionFftwSetThreadPlanThreads(0);
+		}
+		if (err) std::rethrow_exception(err);
+
+		// Stage 4: Sequential metadata update & async stack write in deterministic order
+		for (long int k = 0; k < chunk_n; k++)
+		{
+			SubItem &it = chunk[k];
+			if (!do_ssnr)
+			{
+				if (is_multibody)
+				{
+					opt.mydata.MDimg.setValue(EMDL_ORIENT_ROT, it.rot, it.part_id);
+					opt.mydata.MDimg.setValue(EMDL_ORIENT_TILT, it.tilt, it.part_id);
+					opt.mydata.MDimg.setValue(EMDL_ORIENT_PSI, it.psi, it.part_id);
+				}
+				if (do_center || is_multibody)
+				{
+					opt.mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_X_ANGSTROM, it.my_pixel_size * XX(it.my_residual_offset), it.part_id);
+					opt.mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Y_ANGSTROM, it.my_pixel_size * YY(it.my_residual_offset), it.part_id);
+					if (opt.mymodel.data_dim == 3)
+						opt.mydata.MDimg.setValue(EMDL_ORIENT_ORIGIN_Z_ANGSTROM, it.my_pixel_size * ZZ(it.my_residual_offset), it.part_id);
+				}
+
+				FileName fn_img = getParticleName(it.counter, rank, it.optics_group);
+				opt.mydata.MDimg.setValue(EMDL_IMAGE_NAME, fn_img, it.part_id);
+				opt.mydata.MDimg.setValue(EMDL_IMAGE_ORI_NAME, opt.mydata.particles[it.part_id].name, it.part_id);
+				opt.mydata.MDimg.setValue(EMDL_IMAGE_ID, it.part_id, it.part_id);
+				MDimg_out.addObject();
+				MDimg_out.setObject(opt.mydata.MDimg.getObject(it.part_id));
+
+				if (opt.mymodel.data_dim == 3)
+				{
+					std::shared_ptr<Image<RFLOAT> > mine(new Image<RFLOAT>(it.img));
+					AsyncFileWriter::putFile(fn_img, MULTIDIM_SIZE(it.img()) * sizeof(RFLOAT), [mine, datatype](const std::string &tmp)
+					{
+						mine->write(tmp, -1, false, WRITE_OVERWRITE, datatype);
+					});
+				}
+				else
+				{
+					long int dummy;
+					FileName fn_stack;
+					fn_img.decompose(dummy, fn_stack);
+					std::shared_ptr<AsyncMrcStack> &stack = stacks[fn_stack];
+					if (!stack) stack.reset(new AsyncMrcStack(fn_stack, datatype));
+					stack->add(it.img);
+				}
+			}
+			it.img().clear();
+			it.Fimg.clear();
+			it.Fsubtract.clear();
+			it.Fctf.clear();
+
+			if (it.counter % barstep == 0 && verb > 0)
+				progress_bar(it.counter);
+		}
 	}
+
+	if (do_ssnr)
+	{
+		for (int t = 0; t < n_ws; t++)
+		{
+			sum_S2 += ws_pool[t]->sum_S2;
+			sum_N2 += ws_pool[t]->sum_N2;
+			sum_count += ws_pool[t]->sum_count;
+		}
+	}
+
+	relionFftwPlanThreads(nr_threads);
+	setFinufftThreadCount(nr_threads);
 
 	if (verb > 0) progress_bar(nr_parts);
 }

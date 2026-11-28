@@ -414,8 +414,8 @@ void CtfRefiner::processSubsetMicrographs(long g_start, long g_end)
 
 		if (newdir != prevdir)
 		{
-			std::string command = " mkdir -p " + newdir;
-			int res = system(command.c_str());
+			ZIO::makeDir(newdir);
+			prevdir = newdir;
 		}
 
 		std::vector<Image<Complex>>
@@ -601,43 +601,36 @@ std::vector<MetaDataTable> CtfRefiner::merge(const std::vector<MetaDataTable>& m
 		barstep = 1;
 	}
 
-	std::vector<MetaDataTable> mdtOut;
+	std::vector<MetaDataTable> mdtOut(gc);
+	std::vector<char> hasCtfEps(gc, 0), hasBfacEps(gc, 0);
 
+	#pragma omp parallel for schedule(dynamic, 1) num_threads(nr_omp_threads) if(nr_omp_threads > 1 && gc > 1)
 	for (long g = 0; g < gc; g++)
 	{
 		std::string outRoot = getOutputFilenameRoot(mdts[g], outPath);
-
-		MetaDataTable mdt;
 
 		// If a B-factor fit has been performed, then this has been done after a potential defocus fit,
 		// so the B-factor fit files are always more up-to-date.
 		if (do_bfac_fit)
 		{
 			// Read in STAR file with B-factor fit data
-			mdt.read(outRoot+"_bfactor_fit.star");
+			mdtOut[g].read(outRoot+"_bfactor_fit.star");
 		}
 		else if (do_defocus_fit)
 		{
 			// Read in STAR file with defocus fit data
-			mdt.read(outRoot+"_defocus_fit.star");
+			mdtOut[g].read(outRoot+"_defocus_fit.star");
 		}
 
-		mdtOut.push_back(mdt);
+		if (exists(outRoot+"_ctf-refine_fit.eps")) hasCtfEps[g] = 1;
+		if (exists(outRoot+"_bfactor_fit.eps")) hasBfacEps[g] = 1;
+	}
 
-		if (exists(outRoot+"_ctf-refine_fit.eps"))
-		{
-			fn_eps.push_back(outRoot+"_ctf-refine_fit.eps");
-		}
-
-		if (exists(outRoot+"_bfactor_fit.eps"))
-		{
-			fn_eps.push_back(outRoot+"_bfactor_fit.eps");
-		}
-
-		if (verb > 0)
-		{
-			progress_bar(g);
-		}
+	for (long g = 0; g < gc; g++)
+	{
+		std::string outRoot = getOutputFilenameRoot(mdts[g], outPath);
+		if (hasCtfEps[g]) fn_eps.push_back(outRoot+"_ctf-refine_fit.eps");
+		if (hasBfacEps[g]) fn_eps.push_back(outRoot+"_bfactor_fit.eps");
 	}
 
 	if (verb > 0)

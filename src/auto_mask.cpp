@@ -17,6 +17,8 @@
 #include <omp.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <queue>
@@ -43,22 +45,98 @@ static inline long int fftwShell(long int k, long int i, long int j, long int xd
 }
 
 static void fscOfTransforms(const MultidimArray<Complex> &F1, const MultidimArray<Complex> &F2,
-		long int xdim, long int ydim, long int zdim, MultidimArray<RFLOAT> &fsc)
+		long int xdim, long int ydim, long int zdim, MultidimArray<RFLOAT> &fsc, int n_threads = 1)
 {
 	const long int nr_shells = xdim / 2 + 1;
-	std::vector<double> num(nr_shells, 0.), den1(nr_shells, 0.), den2(nr_shells, 0.);
-	for (long int k = 0; k < ZSIZE(F1); k++)
-	for (long int i = 0; i < YSIZE(F1); i++)
-	for (long int j = 0; j < XSIZE(F1); j++)
+	const long int nx = XSIZE(F1), ny = YSIZE(F1), nz = ZSIZE(F1);
+	std::vector<RFLOAT> fx2(nx), fy2(ny), fz2(nz, 0.);
+	for (long int j = 0; j < nx; j++)
 	{
-		const long int r = fftwShell(k, i, j, xdim, ydim, zdim);
-		if (r >= nr_shells)
-			continue;
-		const Complex z1 = DIRECT_A3D_ELEM(F1, k, i, j);
-		const Complex z2 = DIRECT_A3D_ELEM(F2, k, i, j);
-		num[r] += z1.real * z2.real + z1.imag * z2.imag;
-		den1[r] += z1.real * z1.real + z1.imag * z1.imag;
-		den2[r] += z2.real * z2.real + z2.imag * z2.imag;
+		const RFLOAT fx = (RFLOAT)j / xdim;
+		fx2[j] = fx * fx;
+	}
+	for (long int i = 0; i < ny; i++)
+	{
+		const RFLOAT fy = fftwFrequency(i, ydim);
+		fy2[i] = fy * fy;
+	}
+	if (zdim > 1)
+	{
+		for (long int k = 0; k < nz; k++)
+		{
+			const RFLOAT fz = fftwFrequency(k, zdim);
+			fz2[k] = fz * fz;
+		}
+	}
+
+	std::vector<double> num(nr_shells, 0.), den1(nr_shells, 0.), den2(nr_shells, 0.);
+	const int nt = (n_threads > 1 && NZYXSIZE(F1) >= 65536) ? n_threads : 1;
+	if (nt <= 1)
+	{
+		for (long int k = 0; k < nz; k++)
+		{
+			const RFLOAT zk2 = fz2[k];
+			for (long int i = 0; i < ny; i++)
+			{
+				const RFLOAT yi2zk2 = fy2[i] + zk2;
+				const Complex * __restrict p1 = &DIRECT_A3D_ELEM(F1, k, i, 0);
+				const Complex * __restrict p2 = &DIRECT_A3D_ELEM(F2, k, i, 0);
+				for (long int j = 0; j < nx; j++)
+				{
+					const long int r = ROUND(xdim * sqrt(fx2[j] + yi2zk2));
+					if (r >= nr_shells)
+						continue;
+					const Complex z1 = p1[j];
+					const Complex z2 = p2[j];
+					num[r] += z1.real * z2.real + z1.imag * z2.imag;
+					den1[r] += z1.real * z1.real + z1.imag * z1.imag;
+					den2[r] += z2.real * z2.real + z2.imag * z2.imag;
+				}
+			}
+		}
+	}
+	else
+	{
+		std::vector<double> num_t((size_t)nt * nr_shells, 0.), den1_t((size_t)nt * nr_shells, 0.), den2_t((size_t)nt * nr_shells, 0.);
+		#pragma omp parallel num_threads(nt)
+		{
+			const int tid = omp_get_thread_num();
+			double * __restrict ln = &num_t[(size_t)tid * nr_shells];
+			double * __restrict ld1 = &den1_t[(size_t)tid * nr_shells];
+			double * __restrict ld2 = &den2_t[(size_t)tid * nr_shells];
+			#pragma omp for schedule(static)
+			for (long int k = 0; k < nz; k++)
+			{
+				const RFLOAT zk2 = fz2[k];
+				for (long int i = 0; i < ny; i++)
+				{
+					const RFLOAT yi2zk2 = fy2[i] + zk2;
+					const Complex * __restrict p1 = &DIRECT_A3D_ELEM(F1, k, i, 0);
+					const Complex * __restrict p2 = &DIRECT_A3D_ELEM(F2, k, i, 0);
+					for (long int j = 0; j < nx; j++)
+					{
+						const long int r = ROUND(xdim * sqrt(fx2[j] + yi2zk2));
+						if (r >= nr_shells)
+							continue;
+						const Complex z1 = p1[j];
+						const Complex z2 = p2[j];
+						ln[r] += z1.real * z2.real + z1.imag * z2.imag;
+						ld1[r] += z1.real * z1.real + z1.imag * z1.imag;
+						ld2[r] += z2.real * z2.real + z2.imag * z2.imag;
+					}
+				}
+			}
+		}
+		for (int t = 0; t < nt; t++)
+		{
+			const size_t base = (size_t)t * nr_shells;
+			for (long int r = 0; r < nr_shells; r++)
+			{
+				num[r] += num_t[base + r];
+				den1[r] += den1_t[base + r];
+				den2[r] += den2_t[base + r];
+			}
+		}
 	}
 	fsc.initZeros(nr_shells);
 	for (long int r = 0; r < nr_shells; r++)
@@ -66,7 +144,7 @@ static void fscOfTransforms(const MultidimArray<Complex> &F1, const MultidimArra
 			DIRECT_A1D_ELEM(fsc, r) = num[r] / sqrt(den1[r] * den2[r]);
 }
 
-void autoMaskFsc(const MultidimArray<RFLOAT> &m1, const MultidimArray<RFLOAT> &m2, MultidimArray<RFLOAT> &fsc)
+void autoMaskFsc(const MultidimArray<RFLOAT> &m1, const MultidimArray<RFLOAT> &m2, MultidimArray<RFLOAT> &fsc, int n_threads)
 {
 	if (!m1.sameShape(m2))
 		REPORT_ERROR("autoMaskFsc ERROR: the maps have different sizes");
@@ -75,7 +153,7 @@ void autoMaskFsc(const MultidimArray<RFLOAT> &m1, const MultidimArray<RFLOAT> &m
 	FourierTransformer transformer1, transformer2;
 	transformer1.FourierTransform(c1, F1, false);
 	transformer2.FourierTransform(c2, F2, false);
-	fscOfTransforms(F1, F2, XSIZE(m1), YSIZE(m1), ZSIZE(m1), fsc);
+	fscOfTransforms(F1, F2, XSIZE(m1), YSIZE(m1), ZSIZE(m1), fsc, n_threads);
 }
 
 RFLOAT autoMaskResolutionAtFsc(const MultidimArray<RFLOAT> &fsc, RFLOAT threshold, int box, RFLOAT angpix)
@@ -92,33 +170,56 @@ RFLOAT autoMaskResolutionAtFsc(const MultidimArray<RFLOAT> &fsc, RFLOAT threshol
 	return -1.;
 }
 
-void autoMaskGaussianLowPass(MultidimArray<RFLOAT> &map, RFLOAT lowpass, RFLOAT angpix)
+static void multiplyFourierGaussian1D(MultidimArray<Complex> &FT, long int xdim, long int ydim, long int zdim,
+		RFLOAT lowpass, RFLOAT angpix, int n_threads)
 {
 	const RFLOAT sigma = lowpass / (3.81 * angpix);
 	const RFLOAT c = -2. * PI * PI * sigma * sigma;
+	const long int nx = XSIZE(FT), ny = YSIZE(FT), nz = ZSIZE(FT);
+	std::vector<RFLOAT> gx(nx), gy(ny), gz(nz, 1.);
+	for (long int j = 0; j < nx; j++)
+	{
+		const RFLOAT fx = (RFLOAT)j / xdim;
+		gx[j] = exp(c * fx * fx);
+	}
+	for (long int i = 0; i < ny; i++)
+	{
+		const RFLOAT fy = fftwFrequency(i, ydim);
+		gy[i] = exp(c * fy * fy);
+	}
+	if (zdim > 1)
+	{
+		for (long int k = 0; k < nz; k++)
+		{
+			const RFLOAT fz = fftwFrequency(k, zdim);
+			gz[k] = exp(c * fz * fz);
+		}
+	}
+	#pragma omp parallel for collapse(2) num_threads(n_threads) if(n_threads > 1)
+	for (long int k = 0; k < nz; k++)
+	{
+		for (long int i = 0; i < ny; i++)
+		{
+			const RFLOAT gzy = gz[k] * gy[i];
+			Complex * __restrict row = &DIRECT_A3D_ELEM(FT, k, i, 0);
+			const RFLOAT * __restrict gxp = gx.data();
+			for (long int j = 0; j < nx; j++)
+				row[j] *= gzy * gxp[j];
+		}
+	}
+}
+
+void autoMaskGaussianLowPass(MultidimArray<RFLOAT> &map, RFLOAT lowpass, RFLOAT angpix, int n_threads)
+{
 	const long int xdim = XSIZE(map), ydim = YSIZE(map), zdim = ZSIZE(map);
 	MultidimArray<Complex> FT;
 	FourierTransformer transformer;
 	transformer.FourierTransform(map, FT, false);
-	for (long int k = 0; k < ZSIZE(FT); k++)
-	{
-		const RFLOAT fz = (zdim > 1) ? fftwFrequency(k, zdim) : 0.;
-		for (long int i = 0; i < YSIZE(FT); i++)
-		{
-			const RFLOAT fy = fftwFrequency(i, ydim);
-			for (long int j = 0; j < XSIZE(FT); j++)
-			{
-				const RFLOAT fx = (RFLOAT)j / xdim;
-				const RFLOAT g = exp(c * (fx * fx + fy * fy + fz * fz));
-				DIRECT_A3D_ELEM(FT, k, i, j).real *= g;
-				DIRECT_A3D_ELEM(FT, k, i, j).imag *= g;
-			}
-		}
-	}
+	multiplyFourierGaussian1D(transformer.getFourierReference(), xdim, ydim, zdim, lowpass, angpix, n_threads);
 	transformer.inverseFourierTransform();
 }
 
-RFLOAT autoMaskOtsuThreshold(const MultidimArray<RFLOAT> &map, int nr_bins)
+RFLOAT autoMaskOtsuThreshold(const MultidimArray<RFLOAT> &map, int nr_bins, int n_threads)
 {
 	const RFLOAT hmin = map.computeMin(), hmax = map.computeMax();
 	const RFLOAT bin_width = (hmax - hmin) / nr_bins;
@@ -126,13 +227,42 @@ RFLOAT autoMaskOtsuThreshold(const MultidimArray<RFLOAT> &map, int nr_bins)
 		return hmin;
 
 	std::vector<double> hist(nr_bins, 0.);
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(map)
+	const long int nr_vox = MULTIDIM_SIZE(map);
+	const RFLOAT * __restrict mptr = MULTIDIM_ARRAY(map);
+	const int nt = (n_threads > 1 && nr_vox >= 65536) ? n_threads : 1;
+	if (nt <= 1)
 	{
-		const RFLOAT v = DIRECT_MULTIDIM_ELEM(map, n);
-		if (v == 0.)
-			continue;
-		const int b = std::min(nr_bins - 1, (int)((v - hmin) / bin_width));
-		hist[b] += 1.;
+		for (long int n = 0; n < nr_vox; n++)
+		{
+			const RFLOAT v = mptr[n];
+			if (v == 0.)
+				continue;
+			const int b = std::min(nr_bins - 1, (int)((v - hmin) / bin_width));
+			hist[b] += 1.;
+		}
+	}
+	else
+	{
+		std::vector<double> hist_t((size_t)nt * nr_bins, 0.);
+		#pragma omp parallel num_threads(nt)
+		{
+			double * __restrict lh = &hist_t[(size_t)omp_get_thread_num() * nr_bins];
+			#pragma omp for schedule(static)
+			for (long int n = 0; n < nr_vox; n++)
+			{
+				const RFLOAT v = mptr[n];
+				if (v == 0.)
+					continue;
+				const int b = std::min(nr_bins - 1, (int)((v - hmin) / bin_width));
+				lh[b] += 1.;
+			}
+		}
+		for (int t = 0; t < nt; t++)
+		{
+			const size_t base = (size_t)t * nr_bins;
+			for (int b = 0; b < nr_bins; b++)
+				hist[b] += hist_t[base + b];
+		}
 	}
 
 	double total = 0., sum_all = 0.;
@@ -170,16 +300,19 @@ RFLOAT autoMaskOtsuThreshold(const MultidimArray<RFLOAT> &map, int nr_bins)
 }
 
 void autoMaskBinary(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT lowpass,
-		const AutoMaskOptions &opt, MultidimArray<RFLOAT> &binary, AutoMaskReport &report)
+		const AutoMaskOptions &opt, MultidimArray<RFLOAT> &binary, AutoMaskReport &report, int n_threads)
 {
-	MultidimArray<RFLOAT> lp = map;
-	if (lowpass > 2. * angpix)
+	MultidimArray<RFLOAT> lp_buf;
+	const bool do_lp = (lowpass > 2. * angpix);
+	if (do_lp)
 	{
-		autoMaskGaussianLowPass(lp, lowpass, angpix);
+		lp_buf = map;
+		autoMaskGaussianLowPass(lp_buf, lowpass, angpix, n_threads);
 		report.lowpass = lowpass;
 	}
 	else
 		report.lowpass = -1.;
+	const MultidimArray<RFLOAT> &lp = do_lp ? lp_buf : map;
 
 	const long int nr_voxels = MULTIDIM_SIZE(lp);
 	RFLOAT threshold;
@@ -197,7 +330,7 @@ void autoMaskBinary(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT lowp
 		threshold = values[idx];
 	}
 	else
-		threshold = autoMaskOtsuThreshold(lp);
+		threshold = autoMaskOtsuThreshold(lp, 256, n_threads);
 	report.threshold = threshold;
 
 	// The brightest voxels seed the regions to keep
@@ -320,23 +453,178 @@ static void squaredDistance1D(const std::vector<double> &f, std::vector<double> 
 	}
 }
 
-void autoMaskDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads)
+static void squaredDistance1DInt(const int32_t *f, int32_t *d,
+		std::vector<long int> &v, std::vector<double> &z, long int n)
 {
-	autoMaskSquaredDistance(binary, dist, n_threads);
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(dist)
-		DIRECT_MULTIDIM_ELEM(dist, n) = sqrt(DIRECT_MULTIDIM_ELEM(dist, n));
+	constexpr int32_t INF_I = 1073741823;
+	const double far = 1e30;
+	long int k = -1;
+	for (long int q = 0; q < n; q++)
+	{
+		if (f[q] >= INF_I)
+			continue;
+		if (k < 0)
+		{
+			k = 0;
+			v[0] = q;
+			z[0] = -far;
+			z[1] = far;
+			continue;
+		}
+		double s;
+		while (true)
+		{
+			const long int p = v[k];
+			s = (((double)f[q] + (double)q * q) - ((double)f[p] + (double)p * p)) / (2. * (q - p));
+			if (k > 0 && s <= z[k])
+				k--;
+			else
+				break;
+		}
+		k++;
+		v[k] = q;
+		z[k] = s;
+		z[k + 1] = far;
+	}
+	if (k < 0)
+	{
+		for (long int q = 0; q < n; q++)
+			d[q] = INF_I;
+		return;
+	}
+	long int j = 0;
+	for (long int q = 0; q < n; q++)
+	{
+		while (z[j + 1] < q)
+			j++;
+		const long int p = v[j];
+		d[q] = (int32_t)((q - p) * (q - p) + f[p]);
+	}
 }
 
-void autoMaskSquaredDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads)
+static void autoMaskDistanceImpl(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads, bool take_sqrt)
 {
-	const double far = 1e30;
 	const long int xdim = XSIZE(binary), ydim = YSIZE(binary), zdim = ZSIZE(binary);
 	dist.resize(binary);
+	const long long max_d2 = (long long)(xdim - 1) * (xdim - 1)
+	                       + (long long)(ydim - 1) * (ydim - 1)
+	                       + (long long)(zdim - 1) * (zdim - 1);
+	const long int nr_vox = MULTIDIM_SIZE(binary);
+	if (max_d2 < 1000000000LL)
+	{
+		constexpr int32_t INF_I = 1073741823;
+		constexpr int TILE = 16;
+		std::vector<int32_t> buf(nr_vox);
+		const RFLOAT * __restrict bptr = MULTIDIM_ARRAY(binary);
+		int32_t * __restrict iptr = buf.data();
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+			iptr[n] = (bptr[n] > 0.5) ? 0 : INF_I;
+
+		if (xdim >= 2)
+		{
+			const long int nr_lines = ydim * zdim;
+			#pragma omp parallel num_threads(n_threads) if(n_threads > 1)
+			{
+				std::vector<int32_t> f(xdim), d(xdim);
+				std::vector<long int> v(xdim);
+				std::vector<double> z(xdim + 1);
+				#pragma omp for schedule(static)
+				for (long int l = 0; l < nr_lines; l++)
+				{
+					int32_t *line = iptr + l * xdim;
+					std::memcpy(f.data(), line, (size_t)xdim * sizeof(int32_t));
+					squaredDistance1DInt(f.data(), line, v, z, xdim);
+				}
+			}
+		}
+		if (ydim >= 2)
+		{
+			#pragma omp parallel num_threads(n_threads) if(n_threads > 1)
+			{
+				std::vector<int32_t> tile_f(TILE * ydim), tile_d(TILE * ydim);
+				std::vector<long int> v(ydim);
+				std::vector<double> z(ydim + 1);
+				#pragma omp for collapse(2) schedule(static)
+				for (long int kz = 0; kz < zdim; kz++)
+				{
+					for (long int x0 = 0; x0 < xdim; x0 += TILE)
+					{
+						const int bx = (int)std::min((long int)TILE, xdim - x0);
+						const size_t base = (size_t)kz * ydim * xdim + x0;
+						for (long int ky = 0; ky < ydim; ky++)
+						{
+							const int32_t * __restrict src = iptr + base + (size_t)ky * xdim;
+							for (int b = 0; b < bx; b++)
+								tile_f[(size_t)b * ydim + ky] = src[b];
+						}
+						for (int b = 0; b < bx; b++)
+							squaredDistance1DInt(&tile_f[(size_t)b * ydim], &tile_d[(size_t)b * ydim], v, z, ydim);
+						for (long int ky = 0; ky < ydim; ky++)
+						{
+							int32_t * __restrict dst = iptr + base + (size_t)ky * xdim;
+							for (int b = 0; b < bx; b++)
+								dst[b] = tile_d[(size_t)b * ydim + ky];
+						}
+					}
+				}
+			}
+		}
+		RFLOAT * __restrict out_ptr = MULTIDIM_ARRAY(dist);
+		const RFLOAT far_out = take_sqrt ? sqrt(1e30) : 1e30;
+		if (zdim >= 2)
+		{
+			const size_t plane = (size_t)xdim * ydim;
+			#pragma omp parallel num_threads(n_threads) if(n_threads > 1)
+			{
+				std::vector<int32_t> tile_f(TILE * zdim), tile_d(TILE * zdim);
+				std::vector<long int> v(zdim);
+				std::vector<double> z(zdim + 1);
+				#pragma omp for collapse(2) schedule(static)
+				for (long int ky = 0; ky < ydim; ky++)
+				{
+					for (long int x0 = 0; x0 < xdim; x0 += TILE)
+					{
+						const int bx = (int)std::min((long int)TILE, xdim - x0);
+						const size_t col0 = (size_t)ky * xdim + x0;
+						for (long int kz = 0; kz < zdim; kz++)
+						{
+							const int32_t * __restrict src = iptr + col0 + (size_t)kz * plane;
+							for (int b = 0; b < bx; b++)
+								tile_f[(size_t)b * zdim + kz] = src[b];
+						}
+						for (int b = 0; b < bx; b++)
+							squaredDistance1DInt(&tile_f[(size_t)b * zdim], &tile_d[(size_t)b * zdim], v, z, zdim);
+						for (long int kz = 0; kz < zdim; kz++)
+						{
+							RFLOAT * __restrict dst = out_ptr + col0 + (size_t)kz * plane;
+							for (int b = 0; b < bx; b++)
+							{
+								const int32_t dv = tile_d[(size_t)b * zdim + kz];
+								dst[b] = (dv >= INF_I) ? far_out : (take_sqrt ? sqrt((RFLOAT)dv) : (RFLOAT)dv);
+							}
+						}
+					}
+				}
+			}
+		}
+		else
+		{
+			#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+			for (long int n = 0; n < nr_vox; n++)
+			{
+				const int32_t dv = iptr[n];
+				out_ptr[n] = (dv >= INF_I) ? far_out : (take_sqrt ? sqrt((RFLOAT)dv) : (RFLOAT)dv);
+			}
+		}
+		return;
+	}
+
+	const double far = 1e30;
 	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(binary)
 		DIRECT_MULTIDIM_ELEM(dist, n) = (DIRECT_MULTIDIM_ELEM(binary, n) > 0.5) ? 0. : far;
 
-	// One pass along each axis: lines of length len, nr_lines of them, the elements of line l at
-	// offset(l) + q * stride
+	// Fallback double path for extraordinary volumes
 	const long int lens[3] = {xdim, ydim, zdim};
 	const long int strides[3] = {1, xdim, xdim * ydim};
 	for (int axis = 0; axis < 3; axis++)
@@ -352,7 +640,6 @@ void autoMaskSquaredDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<
 			#pragma omp for
 			for (long int l = 0; l < nr_lines; l++)
 			{
-				// The first element of line l: the lines run along x, y or z
 				long int offset;
 				if (axis == 0)
 					offset = l * xdim;
@@ -368,6 +655,22 @@ void autoMaskSquaredDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<
 			}
 		}
 	}
+	if (take_sqrt)
+	{
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+			DIRECT_MULTIDIM_ELEM(dist, n) = sqrt(DIRECT_MULTIDIM_ELEM(dist, n));
+	}
+}
+
+void autoMaskDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads)
+{
+	autoMaskDistanceImpl(binary, dist, n_threads, true);
+}
+
+void autoMaskSquaredDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads)
+{
+	autoMaskDistanceImpl(binary, dist, n_threads, false);
 }
 
 static inline RFLOAT softEdgeValue(RFLOAT d, RFLOAT width)
@@ -379,45 +682,61 @@ static inline RFLOAT softEdgeValue(RFLOAT d, RFLOAT width)
 	return 0.5 + 0.5 * cos(PI * d / width);
 }
 
-void autoMaskSoftEdge(const MultidimArray<RFLOAT> &dist, RFLOAT width, MultidimArray<RFLOAT> &mask)
+void autoMaskSoftEdge(const MultidimArray<RFLOAT> &dist, RFLOAT width, MultidimArray<RFLOAT> &mask, int n_threads)
 {
 	mask.resize(dist);
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(dist)
-		DIRECT_MULTIDIM_ELEM(mask, n) = softEdgeValue(DIRECT_MULTIDIM_ELEM(dist, n), width);
+	const long int nr_vox = MULTIDIM_SIZE(dist);
+	const RFLOAT * __restrict dptr = MULTIDIM_ARRAY(dist);
+	RFLOAT * __restrict mptr = MULTIDIM_ARRAY(mask);
+	#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+	for (long int n = 0; n < nr_vox; n++)
+		mptr[n] = softEdgeValue(dptr[n], width);
 }
 
 // The distance to the binary mask, after growing or shrinking it by extend pixels
 static void distanceToExtendedMask(MultidimArray<RFLOAT> &binary, RFLOAT extend,
 		MultidimArray<RFLOAT> &dist, int n_threads)
 {
+	const long int nr_vox = MULTIDIM_SIZE(binary);
+	RFLOAT * __restrict bptr = MULTIDIM_ARRAY(binary);
 	if (extend < 0.)
 	{
 		// Keep the voxels at least -extend from the outside
 		MultidimArray<RFLOAT> outside(binary), dist_in;
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(binary)
-			DIRECT_MULTIDIM_ELEM(outside, n) = (DIRECT_MULTIDIM_ELEM(binary, n) > 0.5) ? 0. : 1.;
+		RFLOAT * __restrict optr = MULTIDIM_ARRAY(outside);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+			optr[n] = (bptr[n] > 0.5) ? 0. : 1.;
 		autoMaskDistance(outside, dist_in, n_threads);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(binary)
-			if (DIRECT_MULTIDIM_ELEM(dist_in, n) < -extend)
-				DIRECT_MULTIDIM_ELEM(binary, n) = 0.;
+		const RFLOAT * __restrict iptr = MULTIDIM_ARRAY(dist_in);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+			if (iptr[n] < -extend)
+				bptr[n] = 0.;
 	}
 	autoMaskDistance(binary, dist, n_threads);
 	// The distance to the mask grown by extend is extend less than that to the mask
 	if (extend > 0.)
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(dist)
-			DIRECT_MULTIDIM_ELEM(dist, n) = XMIPP_MAX(0., DIRECT_MULTIDIM_ELEM(dist, n) - extend);
+	{
+		RFLOAT * __restrict dptr = MULTIDIM_ARRAY(dist);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+			dptr[n] = XMIPP_MAX(0., dptr[n] - extend);
+	}
 }
 
-static void randomisePhasesFromShell(MultidimArray<RFLOAT> &map, long int shell, std::mt19937 &rng)
+static void randomisePhasesFromFft(const MultidimArray<Complex> &FT_src, long int xdim, long int ydim, long int zdim,
+		long int shell, std::mt19937 &rng, MultidimArray<RFLOAT> &map_out)
 {
-	const long int xdim = XSIZE(map), ydim = YSIZE(map), zdim = ZSIZE(map);
 	std::uniform_real_distribution<double> phase(0., 2. * PI);
-	MultidimArray<Complex> FT;
 	FourierTransformer transformer;
-	transformer.FourierTransform(map, FT, false);
-	for (long int k = 0; k < ZSIZE(FT); k++)
-	for (long int i = 0; i < YSIZE(FT); i++)
-	for (long int j = 0; j < XSIZE(FT); j++)
+	transformer.setReal(map_out);
+	MultidimArray<Complex> &FT = transformer.getFourierReference();
+	std::memcpy(MULTIDIM_ARRAY(FT), MULTIDIM_ARRAY(FT_src), MULTIDIM_SIZE(FT_src) * sizeof(Complex));
+	const long int nx = XSIZE(FT), ny = YSIZE(FT), nz = ZSIZE(FT);
+	for (long int k = 0; k < nz; k++)
+	for (long int i = 0; i < ny; i++)
+	for (long int j = 0; j < nx; j++)
 	{
 		if (fftwShell(k, i, j, xdim, ydim, zdim) < shell)
 			continue;
@@ -517,40 +836,58 @@ static RFLOAT boundedBrent(const std::function<RFLOAT(RFLOAT)> &f, RFLOAT a, RFL
 // masked half-maps (fsc_t) against that of the masked phase-randomised half-maps (fsc_n) and
 // the true FSC (fsc_t - fsc_n) / (1 - fsc_n), in shells first_shell to last_shell
 static RFLOAT optimiseSoftEdge(const MultidimArray<RFLOAT> &half1, const MultidimArray<RFLOAT> &half2,
+		const MultidimArray<Complex> &F1_in, const MultidimArray<Complex> &F2_in,
 		const MultidimArray<RFLOAT> &dist, long int randomise_shell, long int first_shell, long int last_shell,
-		RFLOAT angpix, bool verb)
+		RFLOAT angpix, bool verb, int n_threads)
 {
 	const long int xdim = XSIZE(half1), ydim = YSIZE(half1), zdim = ZSIZE(half1);
+	const long int nr_vox = MULTIDIM_SIZE(half1);
 
-	// The same random phases every time, for the same mask from the same maps
+	// The same random phases every time, for the same mask from the same maps (directly from F1_in/F2_in)
 	std::mt19937 rng(1993);
-	MultidimArray<RFLOAT> rand1 = half1, rand2 = half2;
-	randomisePhasesFromShell(rand1, randomise_shell, rng);
-	randomisePhasesFromShell(rand2, randomise_shell, rng);
+	MultidimArray<RFLOAT> rand1(half1), rand2(half2);
+	randomisePhasesFromFft(F1_in, xdim, ydim, zdim, randomise_shell, rng, rand1);
+	randomisePhasesFromFft(F2_in, xdim, ydim, zdim, randomise_shell, rng, rand2);
 
-	MultidimArray<RFLOAT> m1, m2, fsc_t, fsc_n;
+	MultidimArray<RFLOAT> m1, m2, mr1, mr2, fsc_t, fsc_n;
 	m1.resize(half1);
 	m2.resize(half1);
-	MultidimArray<Complex> F1, F2;
-	FourierTransformer transformer1, transformer2;
+	mr1.resize(half1);
+	mr2.resize(half1);
+	FourierTransformer t1, t2, tr1, tr2;
+	t1.setReal(m1);
+	t2.setReal(m2);
+	tr1.setReal(mr1);
+	tr2.setReal(mr2);
 
-	auto maskedFsc = [&](const MultidimArray<RFLOAT> &a, const MultidimArray<RFLOAT> &b, RFLOAT width, MultidimArray<RFLOAT> &fsc)
-	{
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(m1)
-		{
-			const RFLOAT w = softEdgeValue(DIRECT_MULTIDIM_ELEM(dist, n), width);
-			DIRECT_MULTIDIM_ELEM(m1, n) = w * DIRECT_MULTIDIM_ELEM(a, n);
-			DIRECT_MULTIDIM_ELEM(m2, n) = w * DIRECT_MULTIDIM_ELEM(b, n);
-		}
-		transformer1.FourierTransform(m1, F1, false);
-		transformer2.FourierTransform(m2, F2, false);
-		fscOfTransforms(F1, F2, xdim, ydim, zdim, fsc);
-	};
+	const RFLOAT * __restrict h1p = MULTIDIM_ARRAY(half1);
+	const RFLOAT * __restrict h2p = MULTIDIM_ARRAY(half2);
+	const RFLOAT * __restrict r1p = MULTIDIM_ARRAY(rand1);
+	const RFLOAT * __restrict r2p = MULTIDIM_ARRAY(rand2);
+	const RFLOAT * __restrict dp  = MULTIDIM_ARRAY(dist);
+	RFLOAT * __restrict m1p  = MULTIDIM_ARRAY(m1);
+	RFLOAT * __restrict m2p  = MULTIDIM_ARRAY(m2);
+	RFLOAT * __restrict mr1p = MULTIDIM_ARRAY(mr1);
+	RFLOAT * __restrict mr2p = MULTIDIM_ARRAY(mr2);
 
 	auto score = [&](RFLOAT width) -> RFLOAT
 	{
-		maskedFsc(half1, half2, width, fsc_t);
-		maskedFsc(rand1, rand2, width, fsc_n);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+		{
+			const RFLOAT w = softEdgeValue(dp[n], width);
+			m1p[n]  = w * h1p[n];
+			m2p[n]  = w * h2p[n];
+			mr1p[n] = w * r1p[n];
+			mr2p[n] = w * r2p[n];
+		}
+		t1.FourierTransform();
+		t2.FourierTransform();
+		tr1.FourierTransform();
+		tr2.FourierTransform();
+		fscOfTransforms(t1.getFourierReference(), t2.getFourierReference(), xdim, ydim, zdim, fsc_t, n_threads);
+		fscOfTransforms(tr1.getFourierReference(), tr2.getFourierReference(), xdim, ydim, zdim, fsc_n, n_threads);
+
 		double s1 = 0., s2 = 0., s3 = 0., s4 = 0.;
 		long int nr_shells = 0, crossing = -1;
 		for (long int r = first_shell; r <= last_shell; r++)
@@ -597,15 +934,30 @@ void autoMaskFromHalfMaps(const MultidimArray<RFLOAT> &half1, const MultidimArra
 	if (ZSIZE(half1) < 2)
 		REPORT_ERROR("autoMaskFromHalfMaps ERROR: the maps are not 3D");
 
+	if (n_threads > 1)
+	{
+		relionFftwInitThreads();
+		relionFftwPlanThreads(n_threads);
+	}
+
 	AutoMaskReport rep;
 	const long int box = XSIZE(half1);
+	const long int xdim = XSIZE(half1), ydim = YSIZE(half1), zdim = ZSIZE(half1);
 	long int last_shell = box / 2;
 	if (opt.max_shell > 0 && opt.max_shell < last_shell)
 		last_shell = opt.max_shell;
 
-	// FSC of the unmasked half-maps
+	// Transform both half-maps ONCE and reuse F1, F2 for FSC, filtered average, and phase randomization
+	MultidimArray<RFLOAT> c1 = half1, c2 = half2;
+	MultidimArray<Complex> F1, F2;
+	FourierTransformer tr1, tr2;
+	tr1.FourierTransform(c1, F1, false);
+	tr2.FourierTransform(c2, F2, false);
+	c1.clear();
+	c2.clear();
+
 	MultidimArray<RFLOAT> fsc;
-	autoMaskFsc(half1, half2, fsc);
+	fscOfTransforms(F1, F2, xdim, ydim, zdim, fsc, n_threads);
 	for (long int r = last_shell + 1; r < XSIZE(fsc); r++)
 		DIRECT_A1D_ELEM(fsc, r) = 0.;
 	rep.resolution = autoMaskResolutionAtFsc(fsc, 0.143, box, angpix);
@@ -625,10 +977,35 @@ void autoMaskFromHalfMaps(const MultidimArray<RFLOAT> &half1, const MultidimArra
 		std::cout << "  + auto mask: low-pass filter (and phase randomisation from): " << lowpass << " A" << std::endl;
 	}
 
-	MultidimArray<RFLOAT> avg = half1, binary, dist;
-	avg += half2;
-	avg *= 0.5;
-	autoMaskBinary(avg, angpix, lowpass, opt, binary, rep);
+	MultidimArray<RFLOAT> avg(half1), binary, dist;
+	if (lowpass > 2. * angpix)
+	{
+		FourierTransformer tr_avg;
+		tr_avg.setReal(avg);
+		MultidimArray<Complex> &Favg = tr_avg.getFourierReference();
+		const long int nf_vox = MULTIDIM_SIZE(F1);
+		const Complex * __restrict f1p = MULTIDIM_ARRAY(F1);
+		const Complex * __restrict f2p = MULTIDIM_ARRAY(F2);
+		Complex * __restrict favgp = MULTIDIM_ARRAY(Favg);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nf_vox; n++)
+			favgp[n] = (f1p[n] + f2p[n]) * 0.5;
+		multiplyFourierGaussian1D(Favg, xdim, ydim, zdim, lowpass, angpix, n_threads);
+		tr_avg.inverseFourierTransform();
+		autoMaskBinary(avg, angpix, -1., opt, binary, rep, n_threads);
+		rep.lowpass = lowpass;
+	}
+	else
+	{
+		const long int nr_vox = MULTIDIM_SIZE(half1);
+		const RFLOAT * __restrict h1p = MULTIDIM_ARRAY(half1);
+		const RFLOAT * __restrict h2p = MULTIDIM_ARRAY(half2);
+		RFLOAT * __restrict ap = MULTIDIM_ARRAY(avg);
+		#pragma omp parallel for num_threads(n_threads) if(n_threads > 1)
+		for (long int n = 0; n < nr_vox; n++)
+			ap[n] = (h1p[n] + h2p[n]) * 0.5;
+		autoMaskBinary(avg, angpix, lowpass, opt, binary, rep, n_threads);
+	}
 	avg.clear();
 	distanceToExtendedMask(binary, opt.extend, dist, n_threads);
 	binary.clear();
@@ -640,7 +1017,7 @@ void autoMaskFromHalfMaps(const MultidimArray<RFLOAT> &half1, const MultidimArra
 	{
 		if (opt.verb)
 			std::cout << "  + auto mask: searching for the soft edge that best separates signal from noise ..." << std::endl;
-		width = optimiseSoftEdge(half1, half2, dist, randomise_shell, first_shell, last_shell, angpix, opt.verb);
+		width = optimiseSoftEdge(half1, half2, F1, F2, dist, randomise_shell, first_shell, last_shell, angpix, opt.verb, n_threads);
 		rep.soft_edge_optimised = true;
 	}
 	else if (width < 0.)
@@ -654,7 +1031,7 @@ void autoMaskFromHalfMaps(const MultidimArray<RFLOAT> &half1, const MultidimArra
 	if (opt.verb)
 		std::cout << "  + auto mask soft edge: " << width * angpix << " A (" << width << " pixels)" << std::endl;
 
-	autoMaskSoftEdge(dist, width, mask);
+	autoMaskSoftEdge(dist, width, mask, n_threads);
 	mask.setXmippOrigin();
 	if (report != NULL)
 		*report = rep;
@@ -670,7 +1047,7 @@ void autoMaskFromMap(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT res
 	AutoMaskReport rep;
 	rep.resolution = resolution;
 	MultidimArray<RFLOAT> binary, dist;
-	autoMaskBinary(map, angpix, opt.lowpass, opt, binary, rep);
+	autoMaskBinary(map, angpix, opt.lowpass, opt, binary, rep, n_threads);
 	distanceToExtendedMask(binary, opt.extend, dist, n_threads);
 	binary.clear();
 
@@ -682,7 +1059,7 @@ void autoMaskFromMap(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT res
 	if (opt.verb)
 		std::cout << "  + auto mask soft edge: " << width * angpix << " A (" << width << " pixels)" << std::endl;
 
-	autoMaskSoftEdge(dist, width, mask);
+	autoMaskSoftEdge(dist, width, mask, n_threads);
 	mask.setXmippOrigin();
 	if (report != NULL)
 		*report = rep;

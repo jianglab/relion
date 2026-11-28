@@ -427,7 +427,10 @@ void MotionHelper::noiseNormalize(Image<Complex>& img, const std::vector<double>
 		{
 			const double d = divisors[y*wf + x];
 
-			DIRECT_A2D_ELEM(img.data, y, x) = d == 0.0? Complex(0.0) : DIRECT_A2D_ELEM(img.data, y, x) / d;
+			if (d == 0.0)
+				DIRECT_A2D_ELEM(img.data, y, x) = Complex(0.0);
+			else
+				DIRECT_A2D_ELEM(img.data, y, x) *= (RFLOAT)(1.0 / d);
 		}
 }
 

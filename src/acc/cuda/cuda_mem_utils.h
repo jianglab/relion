@@ -73,14 +73,122 @@ static inline void stagedHostToDevice(void *d_ptr, const void *h_ptr, size_t byt
 		const char *e = getenv("RELION_GPU_PINNED_STAGING");
 		return !(e && (std::string(e) == "off" || std::string(e) == "0"));
 	}();
-	stagetimer::countUp(bytes); 
-	const size_t min_bytes = (size_t) 64 << 10;
-	const size_t chunk = (size_t) 8 << 20;
-	if (!on || bytes < min_bytes)
+	stagetimer::countUp(bytes);
+	if (bytes == 0)
+		return;
+	if (!on)
 	{
 		DEBUG_HANDLE_ERROR(cudaMemcpyAsync(d_ptr, h_ptr, bytes, cudaMemcpyHostToDevice, stream));
 		return;
 	}
+	// Small/medium H2D copies (<= 512 KB) use a per-thread pinned ring buffer split into
+	// 8 segments with one event per segment. Copying straight from pageable memory (< 64 KB)
+	// forced the CUDA driver to stage synchronously behind a global driver lock.
+	const size_t kSmallMax = (size_t) 512 << 10;
+	if (bytes <= kSmallMax)
+	{
+		const int kNumSegs = 8;
+		struct SmallRing
+		{
+			char *base = NULL;
+			size_t cap = 0;
+			cudaEvent_t ev[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+			bool used[8] = {false, false, false, false, false, false, false, false};
+			int device = -1;
+			int cur = 0;
+			size_t pos = 0;
+			cudaStream_t last_stream = 0;
+
+			void advance()
+			{
+				DEBUG_HANDLE_ERROR(cudaEventRecord(ev[cur], last_stream));
+				used[cur] = true;
+				cur = (cur + 1) & 7;
+				pos = 0;
+				if (used[cur])
+				{
+					DEBUG_HANDLE_ERROR(cudaEventSynchronize(ev[cur]));
+					used[cur] = false;
+				}
+			}
+
+			~SmallRing()
+			{
+				if (device >= 0)
+				{
+					int prev_dev = -1;
+					cudaGetDevice(&prev_dev);
+					if (prev_dev != device)
+						cudaSetDevice(device);
+					if (pos > 0)
+						cudaStreamSynchronize(last_stream);
+					for (int i = 0; i < 8; i++)
+					{
+						if (ev[i] != NULL)
+						{
+							if (used[i])
+								cudaEventSynchronize(ev[i]);
+							cudaEventDestroy(ev[i]);
+						}
+					}
+					if (prev_dev >= 0 && prev_dev != device)
+						cudaSetDevice(prev_dev);
+				}
+				pinnedHostPool().release(base, cap);
+				cudaGetLastError();
+			}
+		};
+		thread_local SmallRing ring;
+		int dev = 0;
+		HANDLE_ERROR(cudaGetDevice(&dev));
+		if (ring.device != dev)
+		{
+			if (ring.device >= 0)
+			{
+				HANDLE_ERROR(cudaSetDevice(ring.device));
+				if (ring.pos > 0)
+					cudaStreamSynchronize(ring.last_stream);
+				for (int i = 0; i < kNumSegs; i++)
+				{
+					if (ring.ev[i] != NULL)
+					{
+						if (ring.used[i])
+							cudaEventSynchronize(ring.ev[i]);
+						cudaEventDestroy(ring.ev[i]);
+						ring.ev[i] = NULL;
+					}
+					ring.used[i] = false;
+				}
+				HANDLE_ERROR(cudaSetDevice(dev));
+			}
+			for (int i = 0; i < kNumSegs; i++)
+			{
+				ring.used[i] = false;
+				HANDLE_ERROR(cudaEventCreateWithFlags(&ring.ev[i], cudaEventDisableTiming));
+			}
+			if (ring.base == NULL)
+				ring.base = (char *) pinnedHostPool().acquire((size_t) kNumSegs * kSmallMax, ring.cap);
+			ring.cur = 0;
+			ring.pos = 0;
+			ring.last_stream = 0;
+			ring.device = dev;
+		}
+		if (ring.base != NULL && ring.cap >= (size_t) kNumSegs * kSmallMax)
+		{
+			const size_t aligned = (bytes + 63) & ~(size_t) 63;
+			if (ring.pos > 0 && (stream != ring.last_stream || ring.pos + aligned > kSmallMax))
+				ring.advance();
+			char *slot = ring.base + (size_t) ring.cur * kSmallMax + ring.pos;
+			memcpy(slot, h_ptr, bytes);
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(d_ptr, slot, bytes, cudaMemcpyHostToDevice, stream));
+			ring.pos += aligned;
+			ring.last_stream = stream;
+			return;
+		}
+		DEBUG_HANDLE_ERROR(cudaMemcpyAsync(d_ptr, h_ptr, bytes, cudaMemcpyHostToDevice, stream));
+		return;
+	}
+	const size_t chunk = (size_t) 8 << 20;
 	struct Stage
 	{
 		void *buf[2] = {NULL, NULL};
@@ -219,12 +327,14 @@ public:
 
 	bool start(const void *d1, size_t b1, const void *d2, size_t b2, cudaStream_t stream)
 	{
+		if (b1 == 0 && b2 == 0) return false;
 		off2_ = (b1 + 255) & ~(size_t) 255;
-		buf_ = pinnedHostPool().acquire(std::max(off2_ + b2, (size_t) 1 << 20), cap_);
+		const size_t total_need = (b2 > 0 && d2 != NULL) ? (off2_ + b2) : b1;
+		buf_ = pinnedHostPool().acquire(std::max(total_need, (size_t) 1 << 20), cap_);
 		if (buf_ == NULL) { cudaGetLastError(); drop(); return false; }
 		if (cudaEventCreateWithFlags(&ev_, cudaEventDisableTiming) != cudaSuccess ||
-			cudaMemcpyAsync(buf_, d1, b1, cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
-			cudaMemcpyAsync((char *) buf_ + off2_, d2, b2, cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+			(b1 > 0 && cudaMemcpyAsync(buf_, d1, b1, cudaMemcpyDeviceToHost, stream) != cudaSuccess) ||
+			(b2 > 0 && d2 != NULL && cudaMemcpyAsync((char *) buf_ + off2_, d2, b2, cudaMemcpyDeviceToHost, stream) != cudaSuccess) ||
 			cudaEventRecord(ev_, stream) != cudaSuccess)
 		{
 			cudaGetLastError();
@@ -233,7 +343,7 @@ public:
 			return false;
 		}
 		pending_ = true;
-		stagetimer::countDown(b1 + b2);
+		stagetimer::countDown(b1 + ((b2 > 0 && d2 != NULL) ? b2 : 0));
 		return true;
 	}
 	bool active() const { return buf_ != NULL; }
@@ -259,11 +369,15 @@ static inline bool pinnedBigCopyOn()
 	return on;
 }
 
-static inline cudaError_t pinnedBigUpload(void *d_ptr, const void *h_ptr, size_t bytes)
+static inline cudaError_t pinnedBigUpload(void *d_ptr, const void *h_ptr, size_t bytes, cudaStream_t stream = 0)
 {
 	const size_t chunk = (size_t) 8 << 20;
 	if (!pinnedBigCopyOn() || bytes < ((size_t) 1 << 20))
-		return cudaMemcpy(d_ptr, h_ptr, bytes, cudaMemcpyHostToDevice);
+	{
+		cudaError_t r = cudaMemcpyAsync(d_ptr, h_ptr, bytes, cudaMemcpyHostToDevice, stream);
+		if (r == cudaSuccess) r = cudaStreamSynchronize(stream);
+		return r;
+	}
 	void *buf[2] = {NULL, NULL};
 	size_t cap[2] = {0, 0};
 	cudaEvent_t ev[2] = {NULL, NULL};
@@ -284,12 +398,12 @@ static inline cudaError_t pinnedBigUpload(void *d_ptr, const void *h_ptr, size_t
 			e = cudaEventSynchronize(ev[b]);
 		if (e != cudaSuccess) break;
 		memcpy(buf[b], src + done, n);
-		e = cudaMemcpyAsync(dst + done, buf[b], n, cudaMemcpyHostToDevice, 0);
-		if (e == cudaSuccess) e = cudaEventRecord(ev[b], 0);
+		e = cudaMemcpyAsync(dst + done, buf[b], n, cudaMemcpyHostToDevice, stream);
+		if (e == cudaSuccess) e = cudaEventRecord(ev[b], stream);
 		used[b] = true;
 		done += n;
 	}
-	cudaError_t e2 = cudaStreamSynchronize(0);
+	cudaError_t e2 = cudaStreamSynchronize(stream);
 	if (e == cudaSuccess) e = e2;
 	for (int i = 0; i < 2; i++)
 	{
@@ -299,11 +413,15 @@ static inline cudaError_t pinnedBigUpload(void *d_ptr, const void *h_ptr, size_t
 	return e;
 }
 
-static inline cudaError_t pinnedBigDownload(void *h_ptr, const void *d_ptr, size_t bytes)
+static inline cudaError_t pinnedBigDownload(void *h_ptr, const void *d_ptr, size_t bytes, cudaStream_t stream = 0)
 {
 	const size_t chunk = (size_t) 8 << 20;
 	if (!pinnedBigCopyOn() || bytes < ((size_t) 1 << 20))
-		return cudaMemcpy(h_ptr, d_ptr, bytes, cudaMemcpyDeviceToHost);
+	{
+		cudaError_t r = cudaMemcpyAsync(h_ptr, d_ptr, bytes, cudaMemcpyDeviceToHost, stream);
+		if (r == cudaSuccess) r = cudaStreamSynchronize(stream);
+		return r;
+	}
 	void *buf[2] = {NULL, NULL};
 	size_t cap[2] = {0, 0};
 	cudaEvent_t ev[2] = {NULL, NULL};
@@ -317,8 +435,8 @@ static inline cudaError_t pinnedBigDownload(void *h_ptr, const void *d_ptr, size
 	auto issue = [&](size_t i)
 	{
 		const size_t off = i * chunk, n = std::min(chunk, bytes - off);
-		cudaError_t r = cudaMemcpyAsync(buf[i & 1], (const char *) d_ptr + off, n, cudaMemcpyDeviceToHost, 0);
-		if (r == cudaSuccess) r = cudaEventRecord(ev[i & 1], 0);
+		cudaError_t r = cudaMemcpyAsync(buf[i & 1], (const char *) d_ptr + off, n, cudaMemcpyDeviceToHost, stream);
+		if (r == cudaSuccess) r = cudaEventRecord(ev[i & 1], stream);
 		return r;
 	};
 	if (e == cudaSuccess) e = issue(0);
@@ -332,7 +450,7 @@ static inline cudaError_t pinnedBigDownload(void *h_ptr, const void *d_ptr, size
 		const size_t off = i * chunk, n = std::min(chunk, bytes - off);
 		memcpy((char *) h_ptr + off, buf[i & 1], n);
 	}
-	cudaError_t e2 = cudaStreamSynchronize(0);
+	cudaError_t e2 = cudaStreamSynchronize(stream);
 	if (e == cudaSuccess) e = e2;
 	for (int i = 0; i < 2; i++)
 	{

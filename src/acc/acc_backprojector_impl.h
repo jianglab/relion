@@ -11,6 +11,7 @@
 #include "src/acc/acc_projector.h"
 
 #ifdef _CUDA_ENABLED
+#include "src/acc/cuda/cuda_mem_utils.h"
 // Interleaved model layout (see AccBackprojector::interleaved): the default for 3D models
 static bool bpInterleavedLayout()
 {
@@ -201,6 +202,162 @@ void AccBackprojector::getMdlData(XFLOAT *r, XFLOAT *i, XFLOAT * w)
 	memcpy(r, d_mdlReal,   mdlXYZ * sizeof(XFLOAT));
 	memcpy(i, d_mdlImag,   mdlXYZ * sizeof(XFLOAT));
 	memcpy(w, d_mdlWeight, mdlXYZ * sizeof(XFLOAT));
+#endif
+}
+
+void AccBackprojector::addMdlDataToHost(Complex *data, RFLOAT *weights, int nr_threads)
+{
+	if (mdlXYZ == 0)
+		return;
+#ifdef _CUDA_ENABLED
+	DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+	const size_t total_bytes = mdlXYZ * 3 * sizeof(XFLOAT);
+	const size_t max_chunk_bytes = (size_t)8 << 20;
+
+	if (total_bytes <= max_chunk_bytes)
+	{
+		XFLOAT *buf = NULL;
+		size_t cap = 0;
+		std::vector<XFLOAT> fallback;
+		if (pinnedBigCopyOn() && total_bytes >= ((size_t)64 << 10))
+			buf = (XFLOAT *) pinnedHostPool().acquire(total_bytes, cap);
+		if (!buf)
+		{
+			fallback.resize(3 * mdlXYZ);
+			buf = fallback.data();
+		}
+		if (interleaved)
+		{
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(buf, d_mdlReal, 3 * mdlXYZ * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+		}
+		else
+		{
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(buf,               d_mdlReal,   mdlXYZ * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(buf + mdlXYZ,      d_mdlImag,   mdlXYZ * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(buf + 2 * mdlXYZ,  d_mdlWeight, mdlXYZ * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+		}
+		DEBUG_HANDLE_ERROR(cudaStreamSynchronize(stream));
+		if (interleaved)
+		{
+			#pragma omp parallel for schedule(static) num_threads(nr_threads) if(nr_threads > 1 && mdlXYZ >= 65536)
+			for (size_t k = 0; k < mdlXYZ; k++)
+			{
+				data[k].real += (RFLOAT) buf[3 * k];
+				data[k].imag += (RFLOAT) buf[3 * k + 1];
+				weights[k]   += (RFLOAT) buf[3 * k + 2];
+			}
+		}
+		else
+		{
+			const XFLOAT *sr = buf;
+			const XFLOAT *si = buf + mdlXYZ;
+			const XFLOAT *sw = buf + 2 * mdlXYZ;
+			#pragma omp parallel for schedule(static) num_threads(nr_threads) if(nr_threads > 1 && mdlXYZ >= 65536)
+			for (size_t k = 0; k < mdlXYZ; k++)
+			{
+				data[k].real += (RFLOAT) sr[k];
+				data[k].imag += (RFLOAT) si[k];
+				weights[k]   += (RFLOAT) sw[k];
+			}
+		}
+		if (cap > 0)
+			pinnedHostPool().release(buf, cap);
+		return;
+	}
+
+	const size_t chunk = std::min<size_t>(mdlXYZ, max_chunk_bytes / (3 * sizeof(XFLOAT)));
+	const size_t buf_el = 3 * chunk;
+	const size_t buf_bytes = buf_el * sizeof(XFLOAT);
+	XFLOAT *pin[2] = {NULL, NULL};
+	size_t cap[2] = {0, 0};
+	for (int b = 0; b < 2; b++)
+	{
+		if (pinnedBigCopyOn())
+			pin[b] = (XFLOAT *) pinnedHostPool().acquire(buf_bytes, cap[b]);
+		if (!pin[b])
+		{
+			pin[b] = new XFLOAT[buf_el];
+			cap[b] = 0;
+		}
+	}
+	cudaEvent_t ev = NULL;
+	DEBUG_HANDLE_ERROR(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
+
+	auto enqueueChunk = [&](int buf_idx, size_t from, size_t m)
+	{
+		XFLOAT *dst = pin[buf_idx];
+		if (interleaved)
+		{
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(dst, d_mdlReal + 3 * from, 3 * m * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+		}
+		else
+		{
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(dst,         d_mdlReal   + from, m * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(dst + m,     d_mdlImag   + from, m * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+			DEBUG_HANDLE_ERROR(cudaMemcpyAsync(dst + 2 * m, d_mdlWeight + from, m * sizeof(XFLOAT), cudaMemcpyDeviceToHost, stream));
+		}
+		DEBUG_HANDLE_ERROR(cudaEventRecord(ev, stream));
+	};
+
+	const size_t n_chunks = (mdlXYZ + chunk - 1) / chunk;
+	enqueueChunk(0, 0, std::min(chunk, mdlXYZ));
+	for (size_t c = 0; c < n_chunks; c++)
+	{
+		DEBUG_HANDLE_ERROR(cudaEventSynchronize(ev));
+		const int cur = (int)(c & 1);
+		const size_t from = c * chunk;
+		const size_t m = std::min(chunk, mdlXYZ - from);
+		if (c + 1 < n_chunks)
+		{
+			const size_t next_from = (c + 1) * chunk;
+			enqueueChunk(cur ^ 1, next_from, std::min(chunk, mdlXYZ - next_from));
+		}
+		const XFLOAT *src = pin[cur];
+		if (interleaved)
+		{
+			#pragma omp parallel for schedule(static) num_threads(nr_threads) if(nr_threads > 1 && m >= 65536)
+			for (size_t k = 0; k < m; k++)
+			{
+				data[from + k].real += (RFLOAT) src[3 * k];
+				data[from + k].imag += (RFLOAT) src[3 * k + 1];
+				weights[from + k]   += (RFLOAT) src[3 * k + 2];
+			}
+		}
+		else
+		{
+			const XFLOAT *sr = src;
+			const XFLOAT *si = src + m;
+			const XFLOAT *sw = src + 2 * m;
+			#pragma omp parallel for schedule(static) num_threads(nr_threads) if(nr_threads > 1 && m >= 65536)
+			for (size_t k = 0; k < m; k++)
+			{
+				data[from + k].real += (RFLOAT) sr[k];
+				data[from + k].imag += (RFLOAT) si[k];
+				weights[from + k]   += (RFLOAT) sw[k];
+			}
+		}
+	}
+	DEBUG_HANDLE_ERROR(cudaEventDestroy(ev));
+	for (int b = 0; b < 2; b++)
+	{
+		if (cap[b] > 0) pinnedHostPool().release(pin[b], cap[b]);
+		else delete [] pin[b];
+	}
+#else
+	XFLOAT *reals = new XFLOAT[mdlXYZ];
+	XFLOAT *imags = new XFLOAT[mdlXYZ];
+	XFLOAT *w = new XFLOAT[mdlXYZ];
+	getMdlData(reals, imags, w);
+	#pragma omp parallel for schedule(static) num_threads(nr_threads) if(nr_threads > 1 && mdlXYZ >= 65536)
+	for (size_t n = 0; n < mdlXYZ; n++)
+	{
+		data[n].real += (RFLOAT) reals[n];
+		data[n].imag += (RFLOAT) imags[n];
+		weights[n]   += (RFLOAT) w[n];
+	}
+	delete [] reals;
+	delete [] imags;
+	delete [] w;
 #endif
 }
 

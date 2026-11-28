@@ -54,6 +54,38 @@ using namespace gravis;
 namespace
 {
 
+template <bool HasMag, bool HasOffset>
+void fillFastCtfRow(
+		RFLOAT* __restrict row,
+		const RFLOAT* __restrict gammaRow,
+		const RFLOAT* __restrict xtab,
+		long int nx,
+		RFLOAT yy,
+		RFLOAT m00, RFLOAT m01, RFLOAT m10, RFLOAT m11,
+		RFLOAT k1, RFLOAT axx, RFLOAT axy, RFLOAT ayy,
+		RFLOAT k2, RFLOAT k5, RFLOAT k3, RFLOAT sc)
+{
+	for (long int j = 0; j < nx; j++)
+	{
+		RFLOAT X = xtab[j];
+		RFLOAT Y = yy;
+		if (HasMag)
+		{
+			const RFLOAT Xd = m00 * X + m01 * Y;
+			const RFLOAT Yd = m10 * X + m11 * Y;
+			X = Xd;
+			Y = Yd;
+		}
+		const RFLOAT u2 = X * X + Y * Y;
+		const RFLOAT u4 = u2 * u2;
+		const RFLOAT gammaOffset = HasOffset ? gammaRow[j] : (RFLOAT)0.0;
+		const RFLOAT gamma = k1 * (axx * X * X + (RFLOAT)2.0 * axy * X * Y + ayy * Y * Y) + k2 * u4 - k5 - k3 + gammaOffset;
+		RFLOAT retval = -sin(gamma) * sc;
+		if (fabs(retval) < 1e-8) retval = SGN(retval) * 1e-8;
+		row[j] = retval;
+	}
+}
+
 int getEffectiveCtfPadFactor(bool do_ctf_padding, int ctf_pad_factor, bool ctf_premultiplied)
 {
 	if (ctf_pad_factor < 1)
@@ -484,8 +516,18 @@ void CTF::getFftwImage(MultidimArray<RFLOAT> &result, int orixdim, int oriydim, 
 	}
 	else
 	{
-		RFLOAT xs = (RFLOAT)orixdim * angpix;
-		RFLOAT ys = (RFLOAT)oriydim * angpix;
+		const RFLOAT xs = (RFLOAT)orixdim * angpix;
+		const RFLOAT ys = (RFLOAT)oriydim * angpix;
+		const bool hasMag = (obsModel != 0 && obsModel->hasMagMatrices);
+		RFLOAT m00 = 1, m01 = 0, m10 = 0, m11 = 1;
+		if (hasMag)
+		{
+			const Matrix2D<RFLOAT>& M = obsModel->getMagMatrix(opticsGroup);
+			m00 = M(0,0); m01 = M(0,1);
+			m10 = M(1,0); m11 = M(1,1);
+		}
+		const bool has_exp_damp = do_damping && (dose >= 0.0 || K4 != 0.0);
+		const bool fast_path = !do_abs && !do_only_flip_phases && !do_intact_until_first_peak && !do_intact_after_first_peak && !has_exp_damp;
 
 		if (obsModel != 0 && obsModel->hasEvenZernike)
 		{
@@ -515,19 +557,73 @@ void CTF::getFftwImage(MultidimArray<RFLOAT> &result, int orixdim, int oriydim, 
 
 			const BufferedImage<RFLOAT>& gammaOffset = obsModel->getGammaOffset(opticsGroup, oriydim);
 
-			for (int y1 = 0; y1 < result.ydim; y1++)
-			for (int x1 = 0; x1 < result.xdim; x1++)
+			if (fast_path && result.xdim > 0)
 			{
-				RFLOAT x = x1 / xs;
-				RFLOAT y = y1 <= result.ydim/2? y1 / ys : (y1 - result.ydim) / ys;
+				const long int nx = result.xdim;
+				const long int ny = result.ydim;
+				RFLOAT xbuf[512];
+				std::vector<RFLOAT> xvec;
+				RFLOAT* xtab = xbuf;
+				if (nx > 512)
+				{
+					xvec.resize(nx);
+					xtab = xvec.data();
+				}
+				for (long int j = 0; j < nx; j++)
+					xtab[j] = (RFLOAT)j / xs;
+				for (int y1 = 0; y1 < ny; y1++)
+				{
+					const RFLOAT yy = (y1 <= ny/2 ? (RFLOAT)y1 : (RFLOAT)(y1 - ny)) / ys;
+					const int y0 = y1 <= ny/2 ? y1 : gammaOffset.ydim + y1 - ny;
+					RFLOAT* __restrict row = &DIRECT_A2D_ELEM(result, y1, 0);
+					const RFLOAT* __restrict gRow = &gammaOffset(0, y0);
+					if (hasMag)
+						fillFastCtfRow<true, true>(row, gRow, xtab, nx, yy, m00, m01, m10, m11, K1, Axx, Axy, Ayy, K2, K5, K3, scale);
+					else
+						fillFastCtfRow<false, true>(row, gRow, xtab, nx, yy, m00, m01, m10, m11, K1, Axx, Axy, Ayy, K2, K5, K3, scale);
+				}
+			}
+			else
+			{
+				for (int y1 = 0; y1 < result.ydim; y1++)
+				for (int x1 = 0; x1 < result.xdim; x1++)
+				{
+					RFLOAT x = x1 / xs;
+					RFLOAT y = y1 <= result.ydim/2? y1 / ys : (y1 - result.ydim) / ys;
 
-				const int x0 = x1;
-				const int y0 = y1 <= result.ydim/2? y1 : gammaOffset.ydim + y1 - result.ydim;
+					const int x0 = x1;
+					const int y0 = y1 <= result.ydim/2? y1 : gammaOffset.ydim + y1 - result.ydim;
 
-				DIRECT_A2D_ELEM(result, y1, x1) = getCTF(
-					x, y, do_abs, do_only_flip_phases,
-					do_intact_until_first_peak, do_damping,
-					gammaOffset(x0,y0), do_intact_after_first_peak);
+					DIRECT_A2D_ELEM(result, y1, x1) = getCTF(
+						x, y, do_abs, do_only_flip_phases,
+						do_intact_until_first_peak, do_damping,
+						gammaOffset(x0,y0), do_intact_after_first_peak);
+				}
+			}
+		}
+		else if (fast_path && XSIZE(result) > 0)
+		{
+			const long int nx = XSIZE(result);
+			const long int ny = YSIZE(result);
+			RFLOAT xbuf[512];
+			std::vector<RFLOAT> xvec;
+			RFLOAT* xtab = xbuf;
+			if (nx > 512)
+			{
+				xvec.resize(nx);
+				xtab = xvec.data();
+			}
+			for (long int j = 0; j < nx; j++)
+				xtab[j] = (RFLOAT)j / xs;
+			for (long int i = 0; i < ny; i++)
+			{
+				const long int ip = (i < nx) ? i : i - ny;
+				const RFLOAT yy = (RFLOAT)ip / ys;
+				RFLOAT* __restrict row = &DIRECT_A2D_ELEM(result, i, 0);
+				if (hasMag)
+					fillFastCtfRow<true, false>(row, 0, xtab, nx, yy, m00, m01, m10, m11, K1, Axx, Axy, Ayy, K2, K5, K3, scale);
+				else
+					fillFastCtfRow<false, false>(row, 0, xtab, nx, yy, m00, m01, m10, m11, K1, Axx, Axy, Ayy, K2, K5, K3, scale);
 			}
 		}
 		else

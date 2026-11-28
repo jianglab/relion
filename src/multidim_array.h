@@ -2694,11 +2694,10 @@ public:
         double avg = 0;
         double stddev = 0;
 
-        double minval = std::numeric_limits<double>::max();
-        double maxval = std::numeric_limits<double>::lowest();
-
         T* ptr = NULL;
         long int n;
+        double minval = static_cast< double >(*MULTIDIM_ARRAY(*this));
+        double maxval = minval;
 
         FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY_ptr(*this, n, ptr)
         {
@@ -2709,7 +2708,7 @@ public:
 
             if (Tval > maxval)
                 maxval = Tval;
-            else if (Tval < minval)
+            if (Tval < minval)
                 minval = Tval;
         }
 

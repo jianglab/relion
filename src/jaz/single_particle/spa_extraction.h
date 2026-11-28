@@ -46,7 +46,7 @@ class SpaExtraction
 				double outPs, double coordsPs, double moviePs, double dataPs,
 				const std::vector<std::vector<gravis::d2Vector>>* offsets_in,
 				std::vector<std::vector<gravis::d2Vector>>* offsets_out,
-				ParFourierTransformer& ft, Image<RFLOAT>& aux0, Image<Complex>& aux1, Image<Complex>& out);
+				ParFourierTransformer& ft, Image<RFLOAT>& aux0, Image<Complex>& out);
 };
 
 template <typename T>
@@ -79,16 +79,10 @@ std::vector<std::vector<Image<Complex>>> SpaExtraction::extractMovieStackFS(
 	std::vector<ParFourierTransformer> fts(num_threads);
 
 	std::vector<Image<RFLOAT>> aux0(num_threads);
-	std::vector<Image<Complex>> aux1(num_threads);
 
 	for (int th = 0; th < num_threads; th++)
 	{
 		aux0[th] = Image<RFLOAT>(sqMg, sqMg);
-
-		if (outPs != moviePs)
-		{
-			aux1[th] = Image<Complex>(sqMg/2 + 1, sqMg);
-		}
 	}
 
 	// Frames and particles together, so that a single frame (Polish's frame combination) also uses every thread
@@ -99,7 +93,7 @@ std::vector<std::vector<Image<Complex>>> SpaExtraction::extractMovieStackFS(
 		const int t = omp_get_thread_num();
 
 		extractFrame(mdt, movie, p, f, boxSize, outPs, coordsPs, moviePs, dataPs,
-			offsets_in, offsets_out, fts[t], aux0[t], aux1[t], out[p][f]);
+			offsets_in, offsets_out, fts[t], aux0[t], out[p][f]);
 	}
 
 	return out;
@@ -112,7 +106,7 @@ void SpaExtraction::extractFrame(
 		double outPs, double coordsPs, double moviePs, double dataPs,
 		const std::vector<std::vector<gravis::d2Vector>>* offsets_in,
 		std::vector<std::vector<gravis::d2Vector>>* offsets_out,
-		ParFourierTransformer& ft, Image<RFLOAT>& aux0, Image<Complex>& aux1, Image<Complex>& out)
+		ParFourierTransformer& ft, Image<RFLOAT>& aux0, Image<Complex>& out)
 {
 	const int w0 = movie.xdim;
 	const int h0 = movie.ydim;
@@ -147,19 +141,34 @@ void SpaExtraction::extractFrame(
 		(*offsets_out)[p][f] = gravis::d2Vector(dxR, dyR);
 	}
 
-	for (long int y = 0; y < sqMg; y++)
-	for (long int x = 0; x < sqMg; x++)
+	if (x0 >= 0 && x0 + sqMg <= w0 && y0 >= 0 && y0 + sqMg <= h0)
 	{
-		int xx = x0 + x;
-		int yy = y0 + y;
+		for (long int y = 0; y < sqMg; y++)
+		{
+			const T* __restrict src = &movie(x0, y0 + y, f);
+			RFLOAT* __restrict dst = &DIRECT_NZYX_ELEM(aux0.data, 0, 0, y, 0);
+			for (long int x = 0; x < sqMg; x++)
+			{
+				dst[x] = (RFLOAT)src[x];
+			}
+		}
+	}
+	else
+	{
+		for (long int y = 0; y < sqMg; y++)
+		for (long int x = 0; x < sqMg; x++)
+		{
+			int xx = x0 + x;
+			int yy = y0 + y;
 
-		if (xx < 0) xx = 0;
-		else if (xx >= w0) xx = w0 - 1;
+			if (xx < 0) xx = 0;
+			else if (xx >= w0) xx = w0 - 1;
 
-		if (yy < 0) yy = 0;
-		else if (yy >= h0) yy = h0 - 1;
+			if (yy < 0) yy = 0;
+			else if (yy >= h0) yy = h0 - 1;
 
-		DIRECT_NZYX_ELEM(aux0.data, 0, 0, y, x) = movie(xx,yy,f);
+			DIRECT_NZYX_ELEM(aux0.data, 0, 0, y, x) = movie(xx,yy,f);
+		}
 	}
 
 	if (outPs == moviePs)
@@ -168,8 +177,31 @@ void SpaExtraction::extractFrame(
 	}
 	else
 	{
-		ft.FourierTransform(aux0(), aux1());
-		out = FilterHelper::cropCorner2D(aux1, boxSize/2+1, boxSize);
+		ft.setReal(aux0());
+		ft.Transform(FFTW_FORWARD);
+		const int w1 = XSIZE(ft.fFourier);
+		const int h1 = YSIZE(ft.fFourier);
+		const int w = boxSize / 2 + 1;
+		const int h = boxSize;
+		const int cx = std::min(w1, w);
+		const int py = std::min(h1 / 2, h / 2);
+		const int ny = std::min(h1 - h1 / 2, h / 2);
+		if (XSIZE(out()) != w || YSIZE(out()) != h)
+			out().initZeros(h, w);
+		else if (w > w1 || py + ny < h)
+			out().initZeros();
+		for (int y = 0; y < py; y++)
+		{
+			const Complex* __restrict src = &DIRECT_A2D_ELEM(ft.fFourier, y, 0);
+			Complex* __restrict dst = &DIRECT_A2D_ELEM(out(), y, 0);
+			for (int x = 0; x < cx; x++) dst[x] = src[x];
+		}
+		for (int k = 0; k < ny; k++)
+		{
+			const Complex* __restrict src = &DIRECT_A2D_ELEM(ft.fFourier, h1 - ny + k, 0);
+			Complex* __restrict dst = &DIRECT_A2D_ELEM(out(), h - ny + k, 0);
+			for (int x = 0; x < cx; x++) dst[x] = src[x];
+		}
 	}
 
 	out(0,0) = Complex(0.0,0.0);
@@ -199,16 +231,11 @@ void SpaExtraction::consumeMovieStackFS(
 	std::vector<ParFourierTransformer> fts(num_threads);
 
 	std::vector<Image<RFLOAT>> aux0(num_threads);
-	std::vector<Image<Complex>> aux1(num_threads), frame(num_threads);
+	std::vector<Image<Complex>> frame(num_threads);
 
 	for (int th = 0; th < num_threads; th++)
 	{
 		aux0[th] = Image<RFLOAT>(sqMg, sqMg);
-
-		if (outPs != moviePs)
-		{
-			aux1[th] = Image<Complex>(sqMg/2 + 1, sqMg);
-		}
 	}
 
 	#pragma omp parallel for num_threads(num_threads)
@@ -219,7 +246,7 @@ void SpaExtraction::consumeMovieStackFS(
 		for (long int f = 0; f < fc; f++)
 		{
 			extractFrame(mdt, movie, p, f, boxSize, outPs, coordsPs, moviePs, dataPs,
-				offsets_in, offsets_out, fts[t], aux0[t], aux1[t], frame[t]);
+				offsets_in, offsets_out, fts[t], aux0[t], frame[t]);
 
 			consume(p, f, frame[t]);
 		}

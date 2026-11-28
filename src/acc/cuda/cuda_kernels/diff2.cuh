@@ -438,7 +438,9 @@ __global__ void cuda_kernel_diff2_fine(
 		const int *g_class_start = NULL,      // job (see cuda_kernel_diff2_coarse)
 		int n_classes = 0,
 		int n_chunks = 1, // pixel chunks (2D references): blockIdx.y takes one of n_chunks ranges of the passes
-		XFLOAT *g_partial = NULL // with chunks: each chunk's partial sums, [chunk][block][chunk_sz], added in a fixed order by cuda_kernel_diff2_fine_sum_chunks
+		XFLOAT *g_partial = NULL, // with chunks: each chunk's partial sums, [chunk][block][chunk_sz], added in a fixed order by cuda_kernel_diff2_fine_sum_chunks
+		const float2 *g_shx = NULL,
+		const float2 *g_shy = NULL
 		)
 {
 	unsigned long bid = blockIdx.x;
@@ -478,23 +480,39 @@ __global__ void cuda_kernel_diff2_fine(
 	// inside the padded 2D orientation gri
 //	if( bid < todo_blocks ) // we only need to make
 	{
-		unsigned trans_num  = (unsigned)d_job_num[bid]; //how many transes we have for this rot
-		for (int itrans=0; itrans<trans_num; itrans++)
+		const unsigned trans_num  = (unsigned)d_job_num[bid]; //how many transes we have for this rot
+		const unsigned long jt0 = d_trans_idx[d_job_idx[bid]];
+		const bool use_sep = !DATA3D && g_shx != NULL;
+		if (!use_sep)
 		{
-			s[itrans*block_sz+tid] = (XFLOAT)0.0;
+			// the translations of this job are the same for every pixel: read them once per block
+			if (tid < trans_num)
+			{
+				const unsigned long jt = jt0 + tid;
+				s_tx[tid] = trans_x[jt];
+				s_ty[tid] = trans_y[jt];
+				if (DATA3D) s_tz[tid] = trans_z[jt];
+			}
+			__syncthreads();
 		}
-		// the translations of this job are the same for every pixel: read them once per block
-		if (tid < trans_num)
-		{
-			const unsigned long jt = d_trans_idx[d_job_idx[bid]] + tid;
-			s_tx[tid] = trans_x[jt];
-			s_ty[tid] = trans_y[jt];
-			if (DATA3D) s_tz[tid] = trans_z[jt];
-		}
-		__syncthreads();
-		// index of comparison
+		// index of comparison and its Euler matrix (invariant across all pixels of the block)
 		unsigned long int ix = d_rot_idx[d_job_idx[bid]];
 		unsigned long int iy;
+		const XFLOAT e0 = __ldg(&g_eulers[ix*9  ]);
+		const XFLOAT e1 = __ldg(&g_eulers[ix*9+1]);
+		const XFLOAT e2 = DATA3D ? __ldg(&g_eulers[ix*9+2]) : (XFLOAT)0.0;
+		const XFLOAT e3 = __ldg(&g_eulers[ix*9+3]);
+		const XFLOAT e4 = __ldg(&g_eulers[ix*9+4]);
+		const XFLOAT e5 = DATA3D ? __ldg(&g_eulers[ix*9+5]) : (XFLOAT)0.0;
+		const XFLOAT e6 = (REF3D || DATA3D) ? __ldg(&g_eulers[ix*9+6]) : (XFLOAT)0.0;
+		const XFLOAT e7 = (REF3D || DATA3D) ? __ldg(&g_eulers[ix*9+7]) : (XFLOAT)0.0;
+		const XFLOAT e8 = DATA3D ? __ldg(&g_eulers[ix*9+8]) : (XFLOAT)0.0;
+
+		XFLOAT acc[chunk_sz];
+		#pragma unroll
+		for (int itrans = 0; itrans < chunk_sz; itrans++)
+			acc[itrans] = (XFLOAT)0.0;
+
 		unsigned pass_num(ceilfracf(image_size,block_sz));
 
 		const unsigned pass_begin = (unsigned) (((unsigned long) blockIdx.y * pass_num) / n_chunks);
@@ -505,7 +523,7 @@ __global__ void cuda_kernel_diff2_fine(
 
 			if(pixel < image_size)
 			{
-				int x,y,z,xy;
+				int x,y,z,xy,row=0;
 				if(DATA3D)
 				{
 					z =  floorfracf(pixel, projector.imgX*projector.imgY);
@@ -524,6 +542,7 @@ __global__ void cuda_kernel_diff2_fine(
 				{
 					x =             pixel % projector.imgX;
 					y = floorfracf( pixel , projector.imgX);
+					row = y;
 				}
 				if (y > projector.maxR)
 				{
@@ -534,42 +553,63 @@ __global__ void cuda_kernel_diff2_fine(
 				}
 
 				if(DATA3D)
-					projector.project3Dmodel(
-						x,y,z,
-						__ldg(&g_eulers[ix*9  ]), __ldg(&g_eulers[ix*9+1]), __ldg(&g_eulers[ix*9+2]),
-						__ldg(&g_eulers[ix*9+3]), __ldg(&g_eulers[ix*9+4]), __ldg(&g_eulers[ix*9+5]),
-						__ldg(&g_eulers[ix*9+6]), __ldg(&g_eulers[ix*9+7]), __ldg(&g_eulers[ix*9+8]),
-						ref_real, ref_imag);
+					projector.project3Dmodel(x,y,z, e0, e1, e2, e3, e4, e5, e6, e7, e8, ref_real, ref_imag);
 				else if(REF3D)
-					projector.project3Dmodel(
-						x,y,
-						__ldg(&g_eulers[ix*9  ]), __ldg(&g_eulers[ix*9+1]),
-						__ldg(&g_eulers[ix*9+3]), __ldg(&g_eulers[ix*9+4]),
-						__ldg(&g_eulers[ix*9+6]), __ldg(&g_eulers[ix*9+7]),
-						ref_real, ref_imag);
+					projector.project3Dmodel(x,y, e0, e1, e3, e4, e6, e7, ref_real, ref_imag);
 				else
-					projector.project2Dmodel(
-						x,y,
-						__ldg(&g_eulers[ix*9  ]), __ldg(&g_eulers[ix*9+1]),
-						__ldg(&g_eulers[ix*9+3]), __ldg(&g_eulers[ix*9+4]),
-						ref_real, ref_imag);
+					projector.project2Dmodel(x,y, e0, e1, e3, e4, ref_real, ref_imag);
 
 				// the pixel's data are read once, not once per translation
-				XFLOAT img_real = g_imgs_real[pixel], img_imag = g_imgs_imag[pixel], corr = __ldg(&g_corr_img[pixel]);
-				for (int itrans=0; itrans<trans_num; itrans++) // finish all translations in each partial pass
+				XFLOAT img_real = g_imgs_real[pixel], img_imag = g_imgs_imag[pixel];
+				const XFLOAT corr = __ldg(&g_corr_img[pixel]);
+				const XFLOAT half_corr = (XFLOAT)0.5 * corr;
+#ifndef ACC_DOUBLE_PRECISION
+				if (!DATA3D && g_shx != NULL)
 				{
-					if(DATA3D)
-						translatePixel(x, y, z, s_tx[itrans], s_ty[itrans], s_tz[DATA3D ? itrans : 0], img_real, img_imag, shifted_real, shifted_imag);
-					else
-						translatePixel(x, y, s_tx[itrans], s_ty[itrans], img_real, img_imag, shifted_real, shifted_imag);
+					#pragma unroll
+					for (int itrans = 0; itrans < chunk_sz; itrans++)
+					{
+						if (itrans < trans_num)
+						{
+							const float2 a = __ldg(&g_shx[(size_t)(jt0 + itrans) * projector.imgX + x]);
+							const float2 b = __ldg(&g_shy[(size_t)(jt0 + itrans) * projector.imgY + row]);
+							const XFLOAT cs_x = a.x * b.x - a.y * b.y;
+							const XFLOAT cs_y = a.y * b.x + a.x * b.y;
+							shifted_real = cs_x * img_real - cs_y * img_imag;
+							shifted_imag = cs_x * img_imag + cs_y * img_real;
+							diff_real =  ref_real - shifted_real;
+							diff_imag =  ref_imag - shifted_imag;
+							acc[itrans] += (diff_real * diff_real + diff_imag * diff_imag) * half_corr;
+						}
+					}
+				}
+				else
+#endif
+				{
+					#pragma unroll
+					for (int itrans = 0; itrans < chunk_sz; itrans++)
+					{
+						if (itrans < trans_num)
+						{
+							if(DATA3D)
+								translatePixel(x, y, z, s_tx[itrans], s_ty[itrans], s_tz[DATA3D ? itrans : 0], img_real, img_imag, shifted_real, shifted_imag);
+							else
+								translatePixel(x, y, s_tx[itrans], s_ty[itrans], img_real, img_imag, shifted_real, shifted_imag);
 
-					diff_real =  ref_real - shifted_real;
-					diff_imag =  ref_imag - shifted_imag;
-					s[itrans*block_sz + tid] += (diff_real * diff_real + diff_imag * diff_imag) * (XFLOAT)0.5 * corr;
+							diff_real =  ref_real - shifted_real;
+							diff_imag =  ref_imag - shifted_imag;
+							acc[itrans] += (diff_real * diff_real + diff_imag * diff_imag) * half_corr;
+						}
+					}
 				}
 			}
-			__syncthreads();
 		}
+		#pragma unroll
+		for (int itrans = 0; itrans < chunk_sz; itrans++)
+		{
+			s[itrans*block_sz + tid] = (itrans < trans_num) ? acc[itrans] : (XFLOAT)0.0;
+		}
+		__syncthreads();
 		for(int j=(block_sz/2); j>0; j/=2)
 		{
 			if(tid<j)
@@ -1067,7 +1107,7 @@ static __global__ void cuda_kernel_coarse_xt_prepare(
 // NT translation tiles per block (blockIdx.z covers tiles NT * z .. NT * z + NT - 1): the projections of a block are
 // made once for all of them. Every output keeps its own accumulator and the same order of additions, so the values are
 // the same for every NT; only the number of reference fetches (the texture and L2 traffic) falls with NT.
-template <int NT, int PIPE>
+template <int NT, int PIPE, bool PIXFAST = false>
 static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 		const CoarseClassJob *g_classes,
 		const int *g_class_start,
@@ -1110,9 +1150,9 @@ static __global__ void XT_BOUNDS cuda_kernel_diff2_coarse_xt(
 	__shared__ __align__(16) float2 s_buf[XT_PIXELS * XT_ORIENT + NT * XT_PIXELS * XT_TRANS];
 	float2 *const s_ref = s_buf;
 	float2 *const s_A = s_buf + XT_PIXELS * XT_ORIENT;
-	__shared__ float2 s_refp[XT_ORIENT * (XT_PIXELS + 1)];
-	__shared__ float s_rn2[XT_ORIENT];
-	const bool pixfast = (ablate & 8) != 0;
+	__shared__ float2 s_refp[PIXFAST ? XT_ORIENT * (XT_PIXELS + 1) : 1];
+	__shared__ float s_rn2[PIXFAST ? XT_ORIENT : 1];
+	const bool pixfast = PIXFAST && ((ablate & 8) != 0);
 	// pixfast: lane = pixel, warp w projects orientations 4w .. 4w+3
 	float pe[4][6];
 	float prn[4] = {0.f, 0.f, 0.f, 0.f};

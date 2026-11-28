@@ -194,23 +194,22 @@ void calculateBackgroundAvgStddev(Image<RFLOAT> &I,
 #endif
 
 		// Calculate avg in the background pixels
+		const RFLOAT a00 = MAT_ELEM(A, 0, 0), a01 = MAT_ELEM(A, 0, 1), a02 = MAT_ELEM(A, 0, 2);
+		const RFLOAT a10 = MAT_ELEM(A, 1, 0), a11 = MAT_ELEM(A, 1, 1), a12 = MAT_ELEM(A, 1, 2);
 		FOR_ALL_ELEMENTS_IN_ARRAY3D(I())
 		{
-			// X, Y, Z coordinates
-			if (dim == 3)
-				ZZ(coords) = ((RFLOAT)(k));
-			else
-				ZZ(coords) = 0.;
-			YY(coords) = ((RFLOAT)(i));
-			XX(coords) = ((RFLOAT)(j));
-			// Rotate
-			coords = A * coords;
-
 			// Distance from the point to helical axis (perpendicular to X axis)
 			if (dim == 3)
-				d = sqrt(YY(coords) * YY(coords) + XX(coords) * XX(coords));
+			{
+				const RFLOAT rx = a00 * (RFLOAT)j + a01 * (RFLOAT)i + a02 * (RFLOAT)k;
+				const RFLOAT ry = a10 * (RFLOAT)j + a11 * (RFLOAT)i + a12 * (RFLOAT)k;
+				d = sqrt(ry * ry + rx * rx);
+			}
 			else
-				d = ABS(YY(coords));
+			{
+				const RFLOAT ry = a10 * (RFLOAT)j + a11 * (RFLOAT)i;
+				d = ABS(ry);
+			}
 
 			if (d > helical_mask_tube_outer_radius_pix)
 			{
@@ -277,24 +276,17 @@ void subtractBackgroundRamp(
 {
 
 	int bg_radius2 = bg_radius * bg_radius;
-	fit_point3D point;
-	std::vector<fit_point3D> allpoints;
-	RFLOAT pA, pB, pC, avgbg, stddevbg, minbg, maxbg;
+	RFLOAT D = 0, E = 0, F = 0, G = 0, H = 0, I_cnt = 0, J = 0, K = 0, L = 0;
+	long npoints = 0;
 
 	if (I().getDim() == 3)
 		REPORT_ERROR("ERROR %% calculateBackgroundRamp is not implemented for 3D data!");
 
 	if (is_helical_segment)  // not implemented for 3D data
 	{
-		Matrix1D<RFLOAT> coords;
 		Matrix2D<RFLOAT> A;
 		if (I().getDim() == 2)
 			tilt_deg = 0.;
-
-		// Init coords
-		coords.clear();
-		coords.resize(3);
-		coords.initZeros();
 
 		// Init rotational matrix A
 		A.clear();
@@ -305,24 +297,26 @@ void subtractBackgroundRamp(
 		Euler_angles2matrix(0., tilt_deg, psi_deg, A, false);
 		// Don't put negative signs before tilt and psi values, use 'transpose' instead
 		A = A.transpose();
+		const RFLOAT a10 = MAT_ELEM(A, 1, 0), a11 = MAT_ELEM(A, 1, 1);
 
 		FOR_ALL_ELEMENTS_IN_ARRAY2D(I()) // not implemented for 3D data
 		{
-			ZZ(coords) = 0.;
-			YY(coords) = ((RFLOAT)(i));
-			XX(coords) = ((RFLOAT)(j));
-			// Rotate
-			coords = A * coords;
-			if (ABS(YY(coords)) > helical_mask_tube_outer_radius_pix) // not implemented for 3D data
+			if (ABS(a10 * (RFLOAT)j + a11 * (RFLOAT)i) > helical_mask_tube_outer_radius_pix) // not implemented for 3D data
 			{
-				point.x = j;
-				point.y = i;
-				point.z = A2D_ELEM(I(), i, j);
-				point.w = 1.;
-				allpoints.push_back(point);
+				const RFLOAT x = (RFLOAT)j, y = (RFLOAT)i, z = A2D_ELEM(I(), i, j);
+				D += x * x;
+				E += x * y;
+				F += x;
+				G += y * y;
+				H += y;
+				I_cnt += 1.;
+				J += x * z;
+				K += y * z;
+				L += z;
+				npoints++;
 			}
 		}
-		if (allpoints.size() < 5)
+		if (npoints < 5)
 			REPORT_ERROR("image.cpp::subtractBackgroundRamp(): Less than 5 pixels in background are found. Radius of helical mask is too large.");
 	}
 	else
@@ -334,16 +328,24 @@ void subtractBackgroundRamp(
 		{
 			if (ellipse ? ((RFLOAT)j * j / (ax * ax) + (RFLOAT)i * i / (ay * ay) > 1.) : (i*i + j*j > bg_radius2))
 			{
-				point.x = j;
-				point.y = i;
-				point.z = A2D_ELEM(I(), i, j);
-				point.w = 1.;
-				allpoints.push_back(point);
+				const RFLOAT x = (RFLOAT)j, y = (RFLOAT)i, z = A2D_ELEM(I(), i, j);
+				D += x * x;
+				E += x * y;
+				F += x;
+				G += y * y;
+				H += y;
+				I_cnt += 1.;
+				J += x * z;
+				K += y * z;
+				L += z;
 			}
 		}
 	}
 
-	fitLeastSquaresPlane(allpoints, pA, pB, pC);
+	const RFLOAT denom = F * F * G - 2 * E * F * H + D * H * H + E * E * I_cnt - D * G * I_cnt;
+	const RFLOAT pA = (H * H * J - G * I_cnt * J + E * I_cnt * K + F * G * L - H * (F * K + E * L)) / denom;
+	const RFLOAT pB = (E * I_cnt * J + F * F * K - D * I_cnt * K + D * H * L - F * (H * J + E * L)) / denom;
+	const RFLOAT pC = (F * G * J - E * H * J - E * F * K + D * H * K + E * E * L - D * G * L) / denom;
 
 	// Substract the plane from the image
 	FOR_ALL_ELEMENTS_IN_ARRAY2D(I())

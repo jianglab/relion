@@ -6198,37 +6198,21 @@ void MlOptimiser::expectation()
             for (int j = 0; j < b->projectors.size(); j++)
                 b->projectors[j].clear();
 
-            // Classes are independent (own stream, own wsum_model.BPref[j]): download and add them
-            // in parallel, as many at a time as the host buffers (3 arrays per class) fit in 2 GB
+            // Classes are independent (own stream, own wsum_model.BPref[j]): stream through pooled pinned staging buffers
             const int nbp = b->backprojectors.size();
-            int nt_post = nbp;
-            if (nbp > 0)
-            {
-                const size_t per_class = 3 * (size_t)wsum_model.BPref[0].data.nzyxdim * sizeof(XFLOAT);
-                nt_post = std::max(1, std::min(std::min(nr_threads, nbp), (int)((size_t(2) << 30) / std::max<size_t>(per_class, 1))));
-            }
+            size_t total_vox = 0;
+            for (int j = 0; j < nbp; j++)
+                total_vox += b->backprojectors[j].mdlXYZ;
+            const int nt_post = (nbp > 1 && total_vox >= 262144) ? std::max(1, std::min(nr_threads, nbp)) : 1;
+            const int nt_inner = (nt_post == 1) ? std::max(1, nr_threads) : 1;
             #pragma omp parallel for schedule(dynamic, 1) num_threads(nt_post) if(nt_post > 1)
             for (int j = 0; j < nbp; j++)
             {
                 if (nt_post > 1) b->bindThreadToDevice();
-                unsigned long s = wsum_model.BPref[j].data.nzyxdim;
-                XFLOAT *reals = new XFLOAT[s];
-                XFLOAT *imags = new XFLOAT[s];
-                XFLOAT *weights = new XFLOAT[s];
-
-                b->backprojectors[j].getMdlData(reals, imags, weights);
-
-                for (unsigned long n = 0; n < s; n++)
-                {
-                    wsum_model.BPref[j].data.data[n].real += (RFLOAT) reals[n];
-                    wsum_model.BPref[j].data.data[n].imag += (RFLOAT) imags[n];
-                    wsum_model.BPref[j].weight.data[n] += (RFLOAT) weights[n];
-                }
-
-                delete [] reals;
-                delete [] imags;
-                delete [] weights;
-
+                b->backprojectors[j].addMdlDataToHost(
+                        wsum_model.BPref[j].data.data,
+                        wsum_model.BPref[j].weight.data,
+                        nt_inner);
                 b->backprojectors[j].clear();
             }
 
@@ -6448,6 +6432,33 @@ void MlOptimiser::expectationSetup()
     {
         filctx_loglik.assign((size_t)mydata.numberOfParticles() * mymodel.nr_classes, 0.f);
         filctx_visited.assign((size_t)mydata.numberOfParticles(), 0);
+    }
+
+    // Precompute per-image logsigma2 per optics_group for storeWeightedSums
+    const size_t n_og = Mresol_fine.size();
+    exp_logsigma2_cache_.resize(n_og);
+    for (size_t og = 0; og < n_og; og++)
+    {
+        RFLOAT remap_image_sizes = 0.;
+        RFLOAT logsigma2 = 0.;
+        if (og < (size_t)mydata.obsModel.numberOfOpticsGroups() && og < mymodel.sigma2_noise.size())
+        {
+            int my_image_size = mydata.obsModel.hasBoxSizes ? mydata.getOpticsNominalImageSize((int)og) : mymodel.ori_size;
+            RFLOAT my_pixel_size = mydata.getOpticsPixelSize((int)og);
+            if (my_image_size > 0 && my_pixel_size > 0.)
+            {
+                remap_image_sizes = (mymodel.ori_size * mymodel.pixel_size) / (my_image_size * my_pixel_size);
+                const long int n_sigma = XSIZE(mymodel.sigma2_noise[og]);
+                FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Mresol_fine[og])
+                {
+                    int ires = DIRECT_MULTIDIM_ELEM(Mresol_fine[og], n);
+                    int ires_remapped = ROUND(remap_image_sizes * ires);
+                    if (ires > 0 && ires_remapped < n_sigma)
+                        logsigma2 += log(2. * PI * DIRECT_A1D_ELEM(mymodel.sigma2_noise[og], ires_remapped));
+                }
+            }
+        }
+        exp_logsigma2_cache_[og] = std::make_pair(remap_image_sizes, logsigma2);
     }
 }
 
@@ -7669,6 +7680,7 @@ void MlOptimiser::makeGoodHelixForEachRef()
     if ( (!do_helical_refine) || (ignore_helical_symmetry) || (mymodel.ref_dim == 2) )
         return;
 
+    gpurec::ScopedHelixRealSpaceCache gpu_helix_cache(gpurec::gpuRequested() && mymodel.nr_classes * mymodel.nr_bodies > 1);
     for (int ibody = 0; ibody < mymodel.nr_bodies; ibody++)
     {
         if (mymodel.nr_bodies > 1 && mymodel.keep_fixed_bodies[ibody] > 0)
@@ -7826,6 +7838,7 @@ void MlOptimiser::maximization()
     long int nr_classes_done = 0;
     if (nr_class_threads > 1)
         relionFftwPlanThreads(1);
+    gpurec::ScopedReconstructCache gpu_rec_cache(gpurec::requested() && gpurec::gpuRequested() && mymodel.ref_dim == 3 && nr_class_threads == 1);
     #pragma omp parallel for schedule(dynamic, 1) num_threads(nr_class_threads) if(nr_class_threads > 1)
     for (int iclass = 0; iclass < mymodel.nr_classes * mymodel.nr_bodies; iclass++)
     {
@@ -8213,6 +8226,9 @@ void MlOptimiser::alignClasses()
               << " DOF ..." << std::endl;
 
     RFLOAT maxres = mymodel.current_resolution;
+    gpurec::ScopedDownsampleCache gpu_ds_cache(gpurec::requested() && gpurec::gpuRequested());
+    const AlignMapReference prepared_ref = prepareAlignReference(
+        mymodel.Iref[iclass_ref], mymodel.pixel_size, maxres, nr_threads, false);
     // For each other class, align to the largest class
     for (int iclass = 0; iclass < mymodel.nr_classes; iclass++)
     {
@@ -8234,7 +8250,10 @@ void MlOptimiser::alignClasses()
             1.,                          // search_step_trans (Angstrom)
             best_rot, best_tilt, best_psi,
             best_dx, best_dy, best_dz,
-            nr_threads);
+            nr_threads,
+            true,
+            false,
+            &prepared_ref);
 
         std::cout << "   Best: rot=" << best_rot << " tilt=" << best_tilt
                   << " psi=" << best_psi << " dx=" << best_dx
@@ -8677,11 +8696,9 @@ void MlOptimiser::solventFlatten()
     if (mymodel.nr_bodies > 1)
         return;
 
-    // First read solvent mask from disc, or pre-calculate it
+    // First read solvent mask from disc (or reuse cached static mask), or pre-calculate it
     Image<RFLOAT> Isolvent, Isolvent2, Ilowpass;
-    Isolvent().resize(mymodel.Iref[0]);
-    Isolvent().setXmippOrigin();
-    Isolvent().initZeros();
+    const MultidimArray<RFLOAT> *p_solvent = nullptr;
     if (fn_mask == "None")
     {
         // Jun09,2015 - Shaoda, Helical refinement
@@ -8701,43 +8718,52 @@ void MlOptimiser::solventFlatten()
                 if (helical_cylindrical_mask)
                 {
                     const RFLOAT half_length = particle_diameter / (2. * mymodel.pixel_size);
-                    FOR_ALL_ELEMENTS_IN_ARRAY3D(Isolvent())
-                        A3D_ELEM(Isolvent(), k, i, j) *= softStep(ABS(k), half_length, width_mask_edge);
+                    #pragma omp parallel for collapse(2) schedule(static) num_threads(nr_threads) if(nr_threads > 1 && MULTIDIM_SIZE(Isolvent()) >= 65536)
+                    for (long int k = STARTINGZ(Isolvent()); k <= FINISHINGZ(Isolvent()); k++)
+                        for (long int i = STARTINGY(Isolvent()); i <= FINISHINGY(Isolvent()); i++)
+                            for (long int j = STARTINGX(Isolvent()); j <= FINISHINGX(Isolvent()); j++)
+                                A3D_ELEM(Isolvent(), k, i, j) *= softStep(ABS(k), half_length, width_mask_edge);
                 }
+                p_solvent = &Isolvent();
             }
-            else
-            {
-                FOR_ALL_ELEMENTS_IN_ARRAY3D(Isolvent())
-                {
-                    A3D_ELEM(Isolvent(), k, i, j) = 1.;
-                }
-            }
+            // else: uniform all-ones mask — skip allocating or multiplying by 1.0
         }
         else if (helical_cylindrical_mask && mymodel.ref_dim == 2 && helical_tube_outer_diameter > 0.)
         {
             // 2D classes of helical segments (helical axis along X): as wide as the tube and as long
             // as the mask diameter, as the particles. With --helical_auto_diameter, let class references
             // span up to particle_diameter while per-class tubes in class_masks bound each class's width.
+            Isolvent().resizeNoCp(1, ZSIZE(mymodel.Iref[0]), YSIZE(mymodel.Iref[0]), XSIZE(mymodel.Iref[0]));
+            Isolvent().setXmippOrigin();
             const RFLOAT ref_outer_w = helical_auto_diameter ? std::max(helical_tube_outer_diameter, particle_diameter) : helical_tube_outer_diameter;
             const RFLOAT half_length = particle_diameter / (2. * mymodel.pixel_size);
             const RFLOAT half_width = ref_outer_w / (2. * mymodel.pixel_size);
-            FOR_ALL_ELEMENTS_IN_ARRAY3D(Isolvent())
-                A3D_ELEM(Isolvent(), k, i, j) = std::min(softStep(ABS(j), half_length, width_mask_edge),
-                                                         softStep(ABS(i), half_width, width_mask_edge));
+            #pragma omp parallel for collapse(2) schedule(static) num_threads(nr_threads) if(nr_threads > 1 && MULTIDIM_SIZE(Isolvent()) >= 65536)
+            for (long int k = STARTINGZ(Isolvent()); k <= FINISHINGZ(Isolvent()); k++)
+                for (long int i = STARTINGY(Isolvent()); i <= FINISHINGY(Isolvent()); i++)
+                    for (long int j = STARTINGX(Isolvent()); j <= FINISHINGX(Isolvent()); j++)
+                        A3D_ELEM(Isolvent(), k, i, j) = std::min(softStep(ABS(j), half_length, width_mask_edge),
+                                                                 softStep(ABS(i), half_width, width_mask_edge));
+            p_solvent = &Isolvent();
         }
         else
         {
+            Isolvent().resizeNoCp(1, ZSIZE(mymodel.Iref[0]), YSIZE(mymodel.Iref[0]), XSIZE(mymodel.Iref[0]));
+            Isolvent().setXmippOrigin();
             RFLOAT radius = (particle_diameter / (2. * mymodel.pixel_size));
             RFLOAT radius_p = radius + width_mask_edge;
             if (rectMaskAlongLength())
             {
                 // Rectangular images (cuboid references): an ellipse (ellipsoid) whose long axis is the mask diameter
                 const BoxEllipse ellipse(Isolvent(), radius, width_mask_edge);
-                FOR_ALL_ELEMENTS_IN_ARRAY3D(Isolvent())
-                {
-                    const RFLOAT t = ellipse.edge(j, i, k);
-                    A3D_ELEM(Isolvent(), k, i, j) = (t <= 0.) ? 1. : ((t >= 1.) ? 0. : 0.5 + 0.5 * cos(PI * t));
-                }
+                #pragma omp parallel for collapse(2) schedule(static) num_threads(nr_threads) if(nr_threads > 1 && MULTIDIM_SIZE(Isolvent()) >= 65536)
+                for (long int k = STARTINGZ(Isolvent()); k <= FINISHINGZ(Isolvent()); k++)
+                    for (long int i = STARTINGY(Isolvent()); i <= FINISHINGY(Isolvent()); i++)
+                        for (long int j = STARTINGX(Isolvent()); j <= FINISHINGX(Isolvent()); j++)
+                        {
+                            const RFLOAT t = ellipse.edge(j, i, k);
+                            A3D_ELEM(Isolvent(), k, i, j) = (t <= 0.) ? 1. : ((t >= 1.) ? 0. : 0.5 + 0.5 * cos(PI * t));
+                        }
             }
             else
             {
@@ -8745,26 +8771,70 @@ void MlOptimiser::solventFlatten()
                 RFLOAT sx = 1., sy = 1., sz = 1.;
                 if (mymodel.isRect())
                     boxShapeScales(Isolvent(), sx, sy, sz);
-                FOR_ALL_ELEMENTS_IN_ARRAY3D(Isolvent())
-                {
-                    RFLOAT r = sqrt((RFLOAT)((k*sz) * (k*sz) + (i*sy) * (i*sy) + (j*sx) * (j*sx)));
-                    if (r < radius)
-                        A3D_ELEM(Isolvent(), k, i, j) = 1.;
-                    else if (r > radius_p)
-                        A3D_ELEM(Isolvent(), k, i, j) = 0.;
-                    else
-                        A3D_ELEM(Isolvent(), k, i, j) = 0.5 - 0.5 * cos(PI * (radius_p - r) / width_mask_edge );
-                }
+                #pragma omp parallel for collapse(2) schedule(static) num_threads(nr_threads) if(nr_threads > 1 && MULTIDIM_SIZE(Isolvent()) >= 65536)
+                for (long int k = STARTINGZ(Isolvent()); k <= FINISHINGZ(Isolvent()); k++)
+                    for (long int i = STARTINGY(Isolvent()); i <= FINISHINGY(Isolvent()); i++)
+                        for (long int j = STARTINGX(Isolvent()); j <= FINISHINGX(Isolvent()); j++)
+                        {
+                            RFLOAT r = sqrt((RFLOAT)((k*sz) * (k*sz) + (i*sy) * (i*sy) + (j*sx) * (j*sx)));
+                            if (r < radius)
+                                A3D_ELEM(Isolvent(), k, i, j) = 1.;
+                            else if (r > radius_p)
+                                A3D_ELEM(Isolvent(), k, i, j) = 0.;
+                            else
+                                A3D_ELEM(Isolvent(), k, i, j) = 0.5 - 0.5 * cos(PI * (radius_p - r) / width_mask_edge );
+                        }
             }
+            p_solvent = &Isolvent();
         }
     }
     else
     {
-        Isolvent.read(fn_mask);
-        Isolvent().setXmippOrigin();
+        struct stat st;
+        const bool have_stat = (stat(fn_mask.c_str(), &st) == 0);
+        const bool cache_hit = have_stat &&
+                               cached_solvent_mask_fn_ == fn_mask &&
+                               cached_solvent_mask_mtime_ == st.st_mtime &&
+                               cached_solvent_mask_size_ == st.st_size &&
+                               cached_solvent_mask_.sameShape(mymodel.Iref[0]);
+        if (!cache_hit)
+        {
+            Isolvent.read(fn_mask);
+            Isolvent().setXmippOrigin();
 
-        if (Isolvent().computeMin() < 0. || Isolvent().computeMax() > 1.)
-            REPORT_ERROR("MlOptimiser::solventFlatten: ERROR solvent mask should contain values between 0 and 1 only...");
+            const long int nsolv = MULTIDIM_SIZE(Isolvent());
+            if (nsolv > 0)
+            {
+                RFLOAT vmin = Isolvent().data[0], vmax = Isolvent().data[0];
+                const int nt_s = relionBulkThreads((size_t)nsolv);
+                #pragma omp parallel for reduction(min:vmin) reduction(max:vmax) num_threads(nt_s) if(nt_s > 1)
+                for (long int n = 0; n < nsolv; n++)
+                {
+                    const RFLOAT val = Isolvent().data[n];
+                    if (val < vmin) vmin = val;
+                    if (val > vmax) vmax = val;
+                }
+                if (vmin < 0. || vmax > 1.)
+                    REPORT_ERROR("MlOptimiser::solventFlatten: ERROR solvent mask should contain values between 0 and 1 only...");
+            }
+
+            if (have_stat && Isolvent().sameShape(mymodel.Iref[0]))
+            {
+                cached_solvent_mask_fn_ = fn_mask;
+                cached_solvent_mask_mtime_ = st.st_mtime;
+                cached_solvent_mask_size_ = st.st_size;
+                cached_solvent_mask_ = Isolvent();
+                p_solvent = &cached_solvent_mask_;
+            }
+            else
+            {
+                p_solvent = &Isolvent();
+            }
+        }
+        else
+        {
+            p_solvent = &cached_solvent_mask_;
+        }
     }
 
     // Each class's own mask from --ref, inside the one above: a mask file (rlnSolventMaskName), or a tube with its
@@ -8784,7 +8854,7 @@ void MlOptimiser::solventFlatten()
                 Image<RFLOAT> Imask;
                 Imask.read(cs.mask[k]);
                 Imask().setXmippOrigin();
-                if (!Imask().sameShape(Isolvent()))
+                if (!Imask().sameShape(mymodel.Iref[0]))
                     REPORT_ERROR("ERROR: the mask of class " + integerToString(k + 1) + " (" + cs.mask[k] + ") is not of the size of the references");
                 if (Imask().computeMin() < 0. || Imask().computeMax() > 1.)
                     REPORT_ERROR("ERROR: the mask of class " + integerToString(k + 1) + " (" + cs.mask[k] + ") must have values between 0 and 1");
@@ -8794,7 +8864,7 @@ void MlOptimiser::solventFlatten()
             else if (do_helical_refine && (has_in || has_out))
             {
                 const RFLOAT din = classTubeDiameter(k, false), dout = classTubeDiameter(k, true);
-                class_masks[k].resize(Isolvent());
+                class_masks[k].resize(mymodel.Iref[0]);
                 class_masks[k].setXmippOrigin();
                 createCylindricalReference(class_masks[k], XSIZE(mymodel.Iref[0]), din / mymodel.pixel_size,
                                            dout / mymodel.pixel_size, width_mask_edge, ZSIZE(mymodel.Iref[0]));
@@ -8814,7 +8884,7 @@ void MlOptimiser::solventFlatten()
     {
         Isolvent2.read(fn_mask2);
         Isolvent2().setXmippOrigin();
-        if (!Isolvent2().sameShape(Isolvent()))
+        if (!Isolvent2().sameShape(mymodel.Iref[0]))
             REPORT_ERROR("MlOptimiser::solventFlatten ERROR: second solvent mask is of incorrect size.");
     }
 
@@ -8825,7 +8895,7 @@ void MlOptimiser::solventFlatten()
     {
         Ilowpass.read(fn_lowpass_mask);
         Ilowpass().setXmippOrigin();
-        if (!Ilowpass().sameShape(Isolvent()))
+        if (!Ilowpass().sameShape(mymodel.Iref[0]))
             REPORT_ERROR("MlOptimiser::solventFlatten ERROR: second solvent mask is of incorrect size.");
     }
 
@@ -8839,15 +8909,44 @@ void MlOptimiser::solventFlatten()
             lowPassFilterMap(Itmp, lowpass, mymodel.pixel_size);
         }
 
-        // Then apply the expanded solvent mask to the map
-        mymodel.Iref[iclass] *= Isolvent(); // this is the tight mask
-
-        // And the automatic mask, inside the spherical one
-        if (iclass < (int)auto_masks.size() && auto_masks[iclass].sameShape(mymodel.Iref[iclass], true))
-            mymodel.Iref[iclass] *= auto_masks[iclass];
-        // And the class's own mask from --ref (a file or its own tube diameters)
-        if (iclass < (int)class_masks.size() && class_masks[iclass].sameShape(mymodel.Iref[iclass], true))
-            mymodel.Iref[iclass] *= class_masks[iclass];
+        const bool use_solv = (p_solvent != nullptr && p_solvent->sameShape(mymodel.Iref[iclass], true));
+        if (p_solvent != nullptr && !use_solv)
+            mymodel.Iref[iclass] *= (*p_solvent); // fallback if shape differs (same check as before)
+        const bool has_auto = (iclass < (int)auto_masks.size() && auto_masks[iclass].sameShape(mymodel.Iref[iclass], true));
+        const bool has_cls  = (iclass < (int)class_masks.size() && class_masks[iclass].sameShape(mymodel.Iref[iclass], true));
+        const long int nvox = MULTIDIM_SIZE(mymodel.Iref[iclass]);
+        if (nvox > 0 && (use_solv || has_auto || has_cls))
+        {
+            RFLOAT * __restrict__ iref_d = MULTIDIM_ARRAY(mymodel.Iref[iclass]);
+            const RFLOAT * __restrict__ solv_d = use_solv ? MULTIDIM_ARRAY(*p_solvent) : nullptr;
+            const RFLOAT * __restrict__ auto_d = has_auto ? MULTIDIM_ARRAY(auto_masks[iclass]) : nullptr;
+            const RFLOAT * __restrict__ cls_d  = has_cls  ? MULTIDIM_ARRAY(class_masks[iclass]) : nullptr;
+            const int nt_m = relionBulkThreads((size_t)nvox);
+            if (solv_d && !auto_d && !cls_d)
+            {
+                #pragma omp parallel for schedule(static) num_threads(nt_m) if(nt_m > 1)
+                for (long int n = 0; n < nvox; n++)
+                    iref_d[n] *= solv_d[n];
+            }
+            else if (solv_d && !auto_d && cls_d)
+            {
+                #pragma omp parallel for schedule(static) num_threads(nt_m) if(nt_m > 1)
+                for (long int n = 0; n < nvox; n++)
+                    iref_d[n] = (iref_d[n] * solv_d[n]) * cls_d[n];
+            }
+            else
+            {
+                #pragma omp parallel for schedule(static) num_threads(nt_m) if(nt_m > 1)
+                for (long int n = 0; n < nvox; n++)
+                {
+                    RFLOAT v = iref_d[n];
+                    if (solv_d) v *= solv_d[n];
+                    if (auto_d) v *= auto_d[n];
+                    if (cls_d)  v *= cls_d[n];
+                    iref_d[n] = v;
+                }
+            }
+        }
 
         if (fn_lowpass_mask != "None")
             mymodel.Iref[iclass] += Itmp;
@@ -13317,7 +13416,8 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
         if (accProj->interpolator == FINUFFT)
         {
             accTrilinear.reset(new Projector(mymodel.ori_size, mymodel.interpolator, mymodel.padding_factor, mymodel.r_min_nn, mymodel.data_dim));
-            MultidimArray<RFLOAT> map = mymodel.projectorMap(iclass), dummy;
+            MultidimArray<RFLOAT> map_storage, dummy;
+            MultidimArray<RFLOAT> &map = (mymodel.nr_bodies == 1) ? mymodel.Iref[iclass] : (map_storage = mymodel.projectorMap(iclass));
             const int min_ires = (strict_lowres_exp > 0) ? ROUND(mymodel.pixel_size * mymodel.ori_size / strict_lowres_exp) : -1;
             accTrilinear->computeFourierTransformMap(map, dummy, mymodel.current_size, nr_threads, true, true, min_ires,
                     (XSIZE(helical_fourier_mask) > 0) ? &helical_fourier_mask : NULL, mymodel.do_gpu);
@@ -13454,12 +13554,107 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                 } // end for img_id
             } // end if do_ctf
 
-            // The unperturbed projection F1 depends only on (iclass, part_id, img_id):
-            // its angles come from the particle metadata, not from the search below.
-            // Re-projecting it on every step of the while loops is pure waste, and
-            // with the NUFFT projector it is what makes this routine expensive.
-            // Cached here and copied out, because the CTF is applied to F1 in place.
-            std::vector<MultidimArray<Complex > > F1_cache(mydata.numberOfImagesInParticle(part_id));
+            // The unperturbed projection F1 and active Fourier pixels depend only on (iclass, part_id, img_id):
+            // precompute F1_cache, CTF-multiplied active samples, and grouped 1D shift powers once per particle.
+            const int n_imgs = mydata.numberOfImagesInParticle(part_id);
+            struct ActivePix
+            {
+                long int n;
+                int ires_remapped;
+                RFLOAT inv_2s2;
+                int jp;
+                int abs_ip;
+            };
+            std::vector<ActivePix> active_pix;
+            const long int total_mresol = NZYXSIZE(*myMresol);
+            active_pix.reserve((size_t)total_mresol);
+            const int sigma2_sz = XSIZE(mymodel.sigma2_noise[optics_group]);
+            const RFLOAT * __restrict s2p = MULTIDIM_ARRAY(mymodel.sigma2_noise[optics_group]);
+            const int * __restrict mrp = MULTIDIM_ARRAY(*myMresol);
+            const int img_nx = imgSizeX / 2 + 1;
+            for (long int n = 0; n < total_mresol; n++)
+            {
+                const int ires = mrp[n];
+                if (ires > 0)
+                {
+                    const int ires_remapped = ROUND(remap_image_sizes * ires);
+                    if (ires_remapped < sigma2_sz)
+                    {
+                        const int jp = (int)(n % img_nx);
+                        const int iy = (int)((n / img_nx) % imgSizeY);
+                        const int abs_ip = (iy < img_nx) ? iy : (imgSizeY - iy);
+                        active_pix.push_back({n, ires_remapped, (RFLOAT)1. / (2. * sigma2_fudge * s2p[ires_remapped]), jp, abs_ip});
+                    }
+                }
+            }
+            const size_t n_act = active_pix.size();
+            const bool fast_2d_shift = (mymodel.data_dim == 2 && !mydata.is_tomo && !mymodel.isRect());
+
+            std::vector<MultidimArray<Complex> > F1_cache(n_imgs);
+            std::vector<std::vector<Complex> > F1_ctf_act(n_imgs);
+            std::vector<std::vector<RFLOAT> > f1_by_x, f1_by_y;
+            if (fast_2d_shift)
+            {
+                f1_by_x.resize(n_imgs);
+                f1_by_y.resize(n_imgs);
+            }
+
+            RFLOAT rot1 = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_ROT);
+            RFLOAT tilt1 = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_TILT);
+            RFLOAT psi1 = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_PSI);
+            RFLOAT xoff1 = 0., yoff1 = 0., zoff1 = 0.;
+
+            for (int img_id = 0; img_id < n_imgs; img_id++)
+            {
+                MultidimArray<Complex> &F1c = F1_cache[img_id];
+                if (mymodel.data_dim == 2)
+                    F1c.initZeros(imgSizeY, img_nx);
+                else
+                    F1c.initZeros(current_image_size, current_image_size, current_image_size / 2 + 1);
+
+                Matrix2D<RFLOAT> A1;
+                Euler_angles2matrix(rot1, tilt1, psi1, A1, false);
+                if (mydata.is_tomo) A1 = mydata.getRotationMatrix(part_id, img_id) * A1;
+                A1 = mydata.obsModel.applyAnisoMag(A1, optics_group);
+                A1 = mydata.obsModel.applyScaleDifference(A1, optics_group, mymodel.ori_size, mymodel.pixel_size);
+                accProj->get2DFourierTransform(F1c, A1);
+
+                const Complex * __restrict f1p = MULTIDIM_ARRAY(F1c);
+                const RFLOAT * __restrict ctfp = do_ctf_correction ? MULTIDIM_ARRAY(Fctfs[img_id]) : nullptr;
+                auto &act = F1_ctf_act[img_id];
+                act.resize(n_act);
+                if (fast_2d_shift)
+                {
+                    f1_by_x[img_id].assign(img_nx, 0.);
+                    f1_by_y[img_id].assign(imgSizeY / 2 + 1, 0.);
+                    RFLOAT * __restrict bx = f1_by_x[img_id].data();
+                    RFLOAT * __restrict by = f1_by_y[img_id].data();
+                    for (size_t a = 0; a < n_act; a++)
+                    {
+                        const ActivePix &p = active_pix[a];
+                        const Complex v = do_ctf_correction ? (f1p[p.n] * ctfp[p.n]) : f1p[p.n];
+                        act[a] = v;
+                        const RFLOAT w = norm(v) * p.inv_2s2;
+                        bx[p.jp] += w;
+                        by[p.abs_ip] += w;
+                    }
+                }
+                else
+                {
+                    for (size_t a = 0; a < n_act; a++)
+                    {
+                        const long int n = active_pix[a].n;
+                        act[a] = do_ctf_correction ? (f1p[n] * ctfp[n]) : f1p[n];
+                    }
+                }
+            }
+
+            MultidimArray<Complex> F2;
+            if (mymodel.data_dim == 2)
+                F2.initZeros(imgSizeY, img_nx);
+            else
+                F2.initZeros(current_image_size, current_image_size, current_image_size / 2 + 1);
+            const size_t f2_bytes = (size_t)NZYXSIZE(F2) * sizeof(Complex);
 
             // Search 2 times: ang and off
             // Don't estimate rotational accuracies if we're doing do_skip_rotate
@@ -13513,39 +13708,12 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                     // part_id to keep exactly the same as in relion-3.0....
                     rng.seed(random_seed + part_id);
 
-                    MultidimArray<Complex > F1, F2;
-                    Matrix2D<RFLOAT> A1, A2;
-
-                    RFLOAT rot1 = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_ROT);
-                    RFLOAT tilt1 = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_TILT);
-                    RFLOAT psi1 = DIRECT_A2D_ELEM(exp_metadata, metadata_offset, METADATA_PSI);
-                    RFLOAT xoff1 = 0.;
-                    RFLOAT yoff1 = 0.;
-                    RFLOAT zoff1 = 0.;
+                    Matrix2D<RFLOAT> A2;
 
                     // sum my_snr over all img_id
                     my_snr = 0.;
-                    for (int img_id = 0; img_id < mydata.numberOfImagesInParticle(part_id); img_id++)
+                    for (int img_id = 0; img_id < n_imgs; img_id++)
                     {
-
-                        // Get the FT of the first image (once per img_id; see F1_cache)
-                        if (NZYXSIZE(F1_cache[img_id]) == 0)
-                        {
-                            MultidimArray<Complex > &F1c = F1_cache[img_id];
-                            if (mymodel.data_dim == 2)
-                                F1c.initZeros(imgSizeY, imgSizeX / 2 + 1);
-                            else
-                                F1c.initZeros(current_image_size, current_image_size, current_image_size/ 2 + 1);
-
-                            Euler_angles2matrix(rot1, tilt1, psi1, A1, false);
-
-                            if (mydata.is_tomo) A1 = mydata.getRotationMatrix(part_id, img_id) * A1;
-                            A1 = mydata.obsModel.applyAnisoMag(A1, optics_group);
-                            A1 = mydata.obsModel.applyScaleDifference(A1, optics_group, mymodel.ori_size, mymodel.pixel_size);
-                            accProj->get2DFourierTransform(F1c, A1);
-                        }
-                        F1 = F1_cache[img_id];
-
                         // Apply the angular or shift error
                         RFLOAT rot2 = rot1;
                         RFLOAT tilt2 = tilt1;
@@ -13572,88 +13740,97 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
                             {
                                 psi2  = psi1 + ang_error;
                             }
+
+                            Euler_angles2matrix(rot2, tilt2, psi2, A2, false);
+                            if (mydata.is_tomo) A2 = mydata.getRotationMatrix(part_id, img_id) * A2;
+                            A2 = mydata.obsModel.applyAnisoMag(A2, optics_group);
+                            A2 = mydata.obsModel.applyScaleDifference(A2, optics_group, mymodel.ori_size, mymodel.pixel_size);
+                            memset(MULTIDIM_ARRAY(F2), 0, f2_bytes);
+                            accProj->get2DFourierTransform(F2, A2);
+
+                            const Complex * __restrict f1act = F1_ctf_act[img_id].data();
+                            const Complex * __restrict f2p = MULTIDIM_ARRAY(F2);
+                            const RFLOAT * __restrict ctfp = do_ctf_correction ? MULTIDIM_ARRAY(Fctfs[img_id]) : nullptr;
+                            for (size_t a = 0; a < n_act; a++)
+                            {
+                                const ActivePix &p = active_pix[a];
+                                const Complex f2c = do_ctf_correction ? (f2p[p.n] * ctfp[p.n]) : f2p[p.n];
+                                const Complex d = f1act[a] - f2c;
+                                my_snr += (d.real * d.real + d.imag * d.imag) * p.inv_2s2;
+                            }
                         }
                         else
                         {
                             // Randomly change xoff or yoff
                             RFLOAT ran = rng.unif();
-                            if (mymodel.data_dim == 3 || mydata.is_tomo)
+                            if (fast_2d_shift)
                             {
-                                if (ran < 0.3333)
-                                    xshift = xoff1 + sh_error;
-                                else if (ran < 0.6667)
-                                    yshift = yoff1 + sh_error;
+                                const RFLOAT w = 2. * PI * sh_error / (RFLOAT)image_full_size[optics_group];
+                                if (ran < 0.5)
+                                {
+                                    const RFLOAT * __restrict bx = f1_by_x[img_id].data();
+                                    for (int jp = 0; jp < img_nx; jp++)
+                                        my_snr += bx[jp] * (2. * (1. - cos(w * (RFLOAT)jp)));
+                                }
                                 else
-                                    zshift = zoff1 + sh_error;
+                                {
+                                    const RFLOAT * __restrict by = f1_by_y[img_id].data();
+                                    const int ny_half = imgSizeY / 2;
+                                    for (int ay = 0; ay <= ny_half; ay++)
+                                        my_snr += by[ay] * (2. * (1. - cos(w * (RFLOAT)ay)));
+                                }
                             }
                             else
                             {
-                                if (ran < 0.5)
-                                    xshift = xoff1 + sh_error;
+                                if (mymodel.data_dim == 3 || mydata.is_tomo)
+                                {
+                                    if (ran < 0.3333)
+                                        xshift = xoff1 + sh_error;
+                                    else if (ran < 0.6667)
+                                        yshift = yoff1 + sh_error;
+                                    else
+                                        zshift = zoff1 + sh_error;
+                                }
                                 else
-                                    yshift = yoff1 + sh_error;
-                            }
-                        }
-                        // Get the FT of the second image
-                        if (mymodel.data_dim == 2)
-                            F2.initZeros(imgSizeY, imgSizeX / 2 + 1);
-                        else
-                            F2.initZeros(current_image_size, current_image_size, current_image_size/ 2 + 1);
+                                {
+                                    if (ran < 0.5)
+                                        xshift = xoff1 + sh_error;
+                                    else
+                                        yshift = yoff1 + sh_error;
+                                }
+                                if (mydata.is_tomo)
+                                    mydata.getTranslationInTiltSeries(part_id, img_id, xshift, yshift, zshift, xshift, yshift, zshift);
 
-                        if (imode == 0)
-                        {
-                            // Get new rotated version of reference
-                            Euler_angles2matrix(rot2, tilt2, psi2, A2, false);
-                            if (mydata.is_tomo) A2 = mydata.getRotationMatrix(part_id, img_id) * A2;
-                            A2 = mydata.obsModel.applyAnisoMag(A2, optics_group);
-                            A2 = mydata.obsModel.applyScaleDifference(A2, optics_group, mymodel.ori_size, mymodel.pixel_size);
-                            accProj->get2DFourierTransform(F2, A2);
-                        }
-                        else
-                        {
-                            if (mydata.is_tomo)
-                            {
-                                mydata.getTranslationInTiltSeries(part_id, img_id, xshift, yshift, zshift, xshift, yshift, zshift);
-                            }
+                                shiftFT(F1_cache[img_id], F2, (RFLOAT)image_full_size[optics_group], -xshift, -yshift, -zshift);
 
-                            // Get shifted version
-                            shiftFT(F1, F2, (RFLOAT)image_full_size[optics_group], -xshift, -yshift, -zshift);
-                        }
-
-                        // Apply CTF to F1 and F2 if necessary
-                        if (do_ctf_correction)
-                        {
-                            // JO 5Mar2020: For both 2D and 3D data, CTF^2 will be provided if ctf_premultiplied!
-                            // JO 5Mar2020: For both 2D and 3D data, CTF^2 will be provided if ctf_premultiplied!
-                            FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F1)
-                            {
-                                DIRECT_MULTIDIM_ELEM(F1, n) *= DIRECT_MULTIDIM_ELEM(Fctfs[img_id], n);
-                                DIRECT_MULTIDIM_ELEM(F2, n) *= DIRECT_MULTIDIM_ELEM(Fctfs[img_id], n);
-                            }
-                        }
-
-                        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F1)
-                        {
-                            int ires = DIRECT_MULTIDIM_ELEM(*myMresol, n);
-                            int ires_remapped = ROUND(remap_image_sizes * ires);
-                            if (ires > 0 && ires_remapped < XSIZE(mymodel.sigma2_noise[optics_group]))
-                            {
-                                my_snr += norm(DIRECT_MULTIDIM_ELEM(F1, n) - DIRECT_MULTIDIM_ELEM(F2, n)) / (2 * sigma2_fudge * mymodel.sigma2_noise[optics_group](ires_remapped) );
+                                const Complex * __restrict f1act = F1_ctf_act[img_id].data();
+                                const Complex * __restrict f2p = MULTIDIM_ARRAY(F2);
+                                const RFLOAT * __restrict ctfp = do_ctf_correction ? MULTIDIM_ARRAY(Fctfs[img_id]) : nullptr;
+                                for (size_t a = 0; a < n_act; a++)
+                                {
+                                    const ActivePix &p = active_pix[a];
+                                    const Complex f2c = do_ctf_correction ? (f2p[p.n] * ctfp[p.n]) : f2p[p.n];
+                                    const Complex d = f1act[a] - f2c;
+                                    my_snr += (d.real * d.real + d.imag * d.imag) * p.inv_2s2;
+                                }
                             }
                         }
 
                     } // end for img_id
 
                     // Only for the psi-angle and the translations, and only when my_prob < 0.01 calculate a histogram of the contributions at each resolution shell
-                    if (my_snr > pvalue && imode == 0)
+                    if (my_snr > pvalue && imode == 0 && n_imgs > 0)
                     {
-                        FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(F1)
+                        const int last_img = n_imgs - 1;
+                        const Complex * __restrict f1act = F1_ctf_act[last_img].data();
+                        const Complex * __restrict f2p = MULTIDIM_ARRAY(F2);
+                        const RFLOAT * __restrict ctfp = do_ctf_correction ? MULTIDIM_ARRAY(Fctfs[last_img]) : nullptr;
+                        for (size_t a = 0; a < n_act; a++)
                         {
-                            int ires = DIRECT_MULTIDIM_ELEM(*myMresol, n);
-                            int ires_remapped = ROUND(remap_image_sizes * ires);
-                            if (ires > 0 && ires_remapped < XSIZE(mymodel.sigma2_noise[optics_group]))
-                                res.contrib.emplace_back(ires_remapped,
-                                        norm(DIRECT_MULTIDIM_ELEM(F1, n) - DIRECT_MULTIDIM_ELEM(F2, n)) / ( (2 * sigma2_fudge * mymodel.sigma2_noise[optics_group](ires_remapped) ) ));
+                            const ActivePix &p = active_pix[a];
+                            const Complex f2c = do_ctf_correction ? (f2p[p.n] * ctfp[p.n]) : f2p[p.n];
+                            const Complex d = f1act[a] - f2c;
+                            res.contrib.emplace_back(p.ires_remapped, (d.real * d.real + d.imag * d.imag) * p.inv_2s2);
                         }
                     }
 

@@ -82,16 +82,14 @@ class EERRenderer {
 	// 1-indexed
 	void setFramesOfInterest(int start, int end)
 	{
-		if (is_legacy)
+		if (is_legacy || read_data)
 			return;
 
-		if (read_data)
-			REPORT_ERROR("Logic error in EERRenderer::setFramesOfInterest(). This must be set before rendering.");
 		preread_start = start - 1;
 		preread_end = end - 1;
 	}
 
-	void read(FileName _fn_movie, int eer_upsampling=1);
+	void read(FileName _fn_movie, int eer_upsampling=1, bool header_only=false);
 
 	// Due to a limitation in libtiff (not TIFF specification!),
 	// the maximum number of frames is 65535.
@@ -99,6 +97,8 @@ class EERRenderer {
 	int getNFrames();
 	int getWidth();
 	int getHeight();
+	int getDetectorWidth() const { return width; }
+	int getDetectorHeight() const { return height; }
 
 	// Frame indices are 1-indexed.
 	// image is cleared.
@@ -111,11 +111,8 @@ class EERRenderer {
 	// 0 means defect.
 	// This reads the gain reference into the `gain` array but does NOT apply it to movies.
 	template <typename T>
-	void loadEERGain(FileName fn_gain, MultidimArray<T> &gain)
+	static void loadEERGainStatic(FileName fn_gain, int detector_width, int detector_height, int eer_upsampling, MultidimArray<T> &gain)
 	{
-		if (!ready)
-			REPORT_ERROR("EERRenderer::loadEERGain called before ready.");
-
 		const bool is_multiplicative = (fn_gain.getExtension() == "gain");
 		if (is_multiplicative)
 		{
@@ -123,14 +120,11 @@ class EERRenderer {
 			fn_gain += ":tif";
 		}
 
-		const int detector_width = width;
-		const int detector_height = height;
-
 		Image<T> original;
 		original.read(fn_gain, true, 0, false, true); // explicitly use the first page
 		const int nx_in = XSIZE(original());
 		const int ny_in = YSIZE(original());
-		long long size_out = getWidth();
+		const long long size_out = (eer_upsampling == -1) ? (detector_width >> 1) : ((long long)detector_width << (eer_upsampling - 1));
 
 		// Revert Y flip in TIFF reader
 		if (is_multiplicative)
@@ -186,6 +180,14 @@ class EERRenderer {
 				}
 			}
 		}
+	}
+
+	template <typename T>
+	void loadEERGain(FileName fn_gain, MultidimArray<T> &gain)
+	{
+		if (!ready)
+			REPORT_ERROR("EERRenderer::loadEERGain called before ready.");
+		loadEERGainStatic(fn_gain, width, height, eer_upsampling, gain);
 	}
 
 	static bool isEER(FileName fn_movie)

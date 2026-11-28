@@ -24,6 +24,56 @@
 #include "src/multidim_array.h"
 #include "src/projector.h"
 #include "src/euler.h"
+#include <utility>
+#include <vector>
+
+/// Preprocessed reference volume for alignMapToMap / alignCuboidMapToMap when comparing
+/// multiple classes against the same reference map.
+struct AlignMapReference
+{
+    struct ActiveVoxel
+    {
+        long int idx;
+        int r;
+        int jp, ip, kp;
+        double ref_re, ref_im;
+    };
+    struct PowerVoxel
+    {
+        long int idx;
+        int r;
+    };
+
+    long int orig_x = 0, orig_y = 0, orig_z = 0;
+    int cube_side = 0;
+    int work_size = 0;
+    RFLOAT angpix = 0.;
+    RFLOAT work_angpix = 0.;
+    RFLOAT maxres = 0.;
+    bool full_size = false;
+    int r_max = 0;
+    int fsc_rmax = 0;
+    Matrix2D<RFLOAT> A0;
+    MultidimArray<Complex> ref_ft;
+    std::vector<double> ref_power;
+    std::vector<ActiveVoxel> active_voxels;
+    std::vector<PowerVoxel> power_voxels;
+
+    bool valid() const { return work_size > 0 && NZYXSIZE(ref_ft) > 0; }
+    bool matches(long int nx, long int ny, long int nz, RFLOAT a, RFLOAT mr, bool fs) const
+    {
+        return valid() && orig_x == nx && orig_y == ny && orig_z == nz &&
+               angpix == a && maxres == mr && full_size == fs;
+    }
+};
+
+/// Prepare the downsampled, rotated reference Fourier transform and active-shell tables once.
+AlignMapReference prepareAlignReference(
+    const MultidimArray<RFLOAT> &vol_ref,
+    RFLOAT angpix,
+    RFLOAT maxres,
+    int nr_threads = 1,
+    bool full_size = false);
 
 /// Align vol_align (source) to vol_ref (target) by searching over
 /// orientation and translation parameters. Modifies vol_align in-place and
@@ -65,7 +115,8 @@ void alignMapToMap(
     RFLOAT &best_dz,
     int nr_threads = 1,
     bool apply_result = true,
-    bool full_size = false);
+    bool full_size = false,
+    const AlignMapReference *prepared_ref = nullptr);
 
 /// Side of the cube alignMapToMap searches in for a map of side orig_size (64, or orig_size if
 /// smaller; always even).
@@ -96,7 +147,8 @@ void alignCuboidMapToMap(
     RFLOAT &best_dx, RFLOAT &best_dy, RFLOAT &best_dz,
     int nr_threads = 1,
     bool apply_result = true,
-    bool full_size = false);
+    bool full_size = false,
+    const AlignMapReference *prepared_ref = nullptr);
 
 /// Apply the inverse of a found transformation to a per-particle orientation.
 /// For C1 (nr_freedom==6): composes the inverse rotation into the old one,

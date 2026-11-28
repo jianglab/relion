@@ -176,6 +176,47 @@ int readTIFF(TIFF* ftiff, long int img_select, bool readdata=false, bool isStack
 	{
 		if (img_select == -1) img_select = 0; // img_select starts from 0
 
+#ifdef _OPENMP
+		if (_nDim > 1 && img_select == 0 && omp_get_max_threads() > 1 &&
+		    !name.empty() && name != "in-memory-tiff" && memtiff::TiffMovieBuffer::isTiffFilename(name))
+		{
+			memtiff::TiffMovieBuffer tiffBuf;
+			if (tiffBuf.load(name) && tiffBuf.nFrames == _nDim && tiffBuf.xDim == _xDim && tiffBuf.yDim == _yDim)
+			{
+				const size_t planePix = (size_t)_xDim * (size_t)_yDim;
+				T *basePtr = MULTIDIM_ARRAY(data);
+				bool err_flag = false;
+				std::string err_msg;
+				const int nt = std::min((int)_nDim, omp_get_max_threads());
+				#pragma omp parallel num_threads(nt)
+				{
+					memtiff::TiffMovieBuffer::ThreadHandle th(tiffBuf);
+					#pragma omp for schedule(dynamic, 1)
+					for (long int n = 0; n < _nDim; n++)
+					{
+						bool skip = false;
+						#pragma omp flush(err_flag)
+						skip = err_flag;
+						if (skip) continue;
+						try
+						{
+							tiffBuf.decodeFrameToPtr(th, n, basePtr + (size_t)n * planePix);
+						}
+						catch (RelionError &e)
+						{
+							#pragma omp critical(rwTIFF_mem_err)
+							{
+								if (!err_flag) { err_flag = true; err_msg = e.msg; }
+							}
+						}
+					}
+				}
+				if (err_flag) REPORT_ERROR(err_msg);
+				return 0;
+			}
+		}
+#endif
+
 		size_t haveread_n = 0;
 		for (int i = 0; i < _nDim; i++)
 		{
@@ -240,22 +281,21 @@ int readTIFF(TIFF* ftiff, long int img_select, bool readdata=false, bool isStack
 		   We follow this.
 		*/
 
-		T tmp;
-		const int ylim = _yDim / 2, z = 0;
+		const long int ylim = _yDim / 2;
+		const size_t planePix = (size_t)_xDim * (size_t)_yDim;
+		T *basePtr = MULTIDIM_ARRAY(data);
+		#pragma omp parallel for if(_nDim > 1)
 		for (int n = 0; n < _nDim; n++)
+		{
+			T *plane = basePtr + (size_t)n * planePix;
+			for (long int y1 = 0; y1 < ylim; y1++)
 			{
-			for (int y1 = 0; y1 < ylim; y1++)
-			{
-				const int y2 = _yDim - 1 - y1;
-				for (int x = 0; x < _xDim; x++)
-				{
-					 // TODO: memcpy or pointer arithmetic is probably faster
-					tmp = DIRECT_NZYX_ELEM(data, n, z, y1, x);
-					DIRECT_NZYX_ELEM(data, n, z, y1, x) = DIRECT_NZYX_ELEM(data, n, z, y2, x);
-					DIRECT_NZYX_ELEM(data, n, z, y2, x) = tmp;
-				}
+				const long int y2 = _yDim - 1 - y1;
+				T *r1 = plane + (size_t)y1 * (size_t)_xDim;
+				T *r2 = plane + (size_t)y2 * (size_t)_xDim;
+				std::swap_ranges(r1, r1 + _xDim, r2);
 			}
-		} 
+		}
 	}
 
 	return 0;

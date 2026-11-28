@@ -37,9 +37,28 @@
 
 #include <src/jaz/optimization/lbfgs.h>
 #include <src/jaz/util/zio.h>
+#include <src/async_file_writer.h>
+#include <memory>
 
 
 using namespace gravis;
+
+static void sumFccTables(
+		const std::vector<Image<RFLOAT>>& fccData,
+		const std::vector<Image<RFLOAT>>& fccWeight0,
+		const std::vector<Image<RFLOAT>>& fccWeight1,
+		int sh_ref, int fc,
+		Image<RFLOAT>& fccDataSum,
+		Image<RFLOAT>& fccWeight0Sum,
+		Image<RFLOAT>& fccWeight1Sum);
+
+static void writeTracksToDisk(
+		const std::vector<std::vector<d2Vector>>& tracks,
+		double angpix_mg,
+		const std::vector<d2Vector>& positions,
+		std::string fn_root, double visScale,
+		RFLOAT mgAngpix, RFLOAT coordAngpix,
+		RFLOAT mgSizeX, RFLOAT mgSizeY, bool doDiag);
 
 MotionEstimator::MotionEstimator()
 	:   paramsRead(false), ready(false)
@@ -185,6 +204,21 @@ void MotionEstimator::init(
 		}
 	}
 
+	fccBins_.resize(obsModel->numberOfOpticsGroups());
+	for (size_t og = 0; og < fccBins_.size(); og++)
+	{
+		const double scale = (s_ref * angpix_ref) / (s[og] * angpix[og]);
+		const long int wh = s[og] / 2 + 1, h = s[og];
+		fccBins_[og].resize((size_t)wh * h);
+		for (long int i = 0; i < h; i++)
+		for (long int j = 0; j < wh; j++)
+		{
+			const long int ip = i < wh ? i : i - h;
+			const int idx = ROUND(scale * sqrt((double)ip * ip + (double)j * j));
+			fccBins_[og][(size_t)i * wh + j] = (idx >= wh) ? -1 : idx;
+		}
+	}
+
 	ready = true;
 }
 
@@ -272,6 +306,7 @@ void MotionEstimator::process(
 		if (newdir != prevdir)
 		{
 			ZIO::makeDir(newdir);
+			prevdir = newdir;
 		}
 
 		std::vector<std::vector<Image<Complex>>> movie;
@@ -389,20 +424,44 @@ void MotionEstimator::process(
 		if (do_update_FCC)
 		{
 			polishtiming::Scope t("est: update FCC");
-			updateFCC(movie, tracks, mdts[g], tables, weights0, weights1);	
-			writeFCC(tables, weights0, weights1, fn_root);
-	
+			updateFCC(movie, tracks, mdts[g], tables, weights0, weights1);
+			std::shared_ptr<Image<RFLOAT>> fccDataSum(new Image<RFLOAT>(sh_ref, fc));
+			std::shared_ptr<Image<RFLOAT>> fccWeight0Sum(new Image<RFLOAT>(sh_ref, fc));
+			std::shared_ptr<Image<RFLOAT>> fccWeight1Sum(new Image<RFLOAT>(sh_ref, fc));
+			sumFccTables(tables, weights0, weights1, sh_ref, fc, *fccDataSum, *fccWeight0Sum, *fccWeight1Sum);
+
 			for (int i = 0; i < nr_omp_threads; i++)
 			{
 				tables[i].data.initZeros();
 				weights0[i].data.initZeros();
 				weights1[i].data.initZeros();
 			}
+
+			AsyncFileWriter::instance().submit([fccDataSum, fccWeight0Sum, fccWeight1Sum, fn_root]() {
+				fccDataSum->write(fn_root + "_FCC_cc.mrc");
+				fccWeight0Sum->write(fn_root + "_FCC_w0.mrc");
+				fccWeight1Sum->write(fn_root + "_FCC_w1.mrc");
+			});
 		}
-		
+
 		{
 			polishtiming::Scope t("est: write tracks");
-			writeTracks(tracks, angpix[ogmg], positions, fn_root, 30.0);
+			std::shared_ptr<std::vector<std::vector<d2Vector>>> tracksPtr(
+				new std::vector<std::vector<d2Vector>>(std::move(tracks)));
+			std::shared_ptr<std::vector<d2Vector>> posPtr(new std::vector<d2Vector>(positions));
+			const double angpix_mg = angpix[ogmg];
+			const RFLOAT mgAngpix = micrographHandler->movie_angpix;
+			const RFLOAT coordAngpix = micrographHandler->coords_angpix;
+			const RFLOAT mgSizeX = micrographHandler->micrograph_size.x;
+			const RFLOAT mgSizeY = micrographHandler->micrograph_size.y;
+			const bool doDiag = diag;
+
+			AsyncFileWriter::instance().submit(
+				[tracksPtr, angpix_mg, posPtr, fn_root, mgAngpix, coordAngpix, mgSizeX, mgSizeY, doDiag]() {
+					writeTracksToDisk(
+						*tracksPtr, angpix_mg, *posPtr, fn_root, 30.0,
+						mgAngpix, coordAngpix, mgSizeX, mgSizeY, doDiag);
+				});
 		}
 
 		nr_done++;
@@ -412,6 +471,8 @@ void MotionEstimator::process(
 			progress_bar(nr_done);
 		}
 	}
+
+	AsyncFileWriter::instance().waitOrThrow();
 
 	if (!debug && verb > 0)
 	{
@@ -619,29 +680,25 @@ void MotionEstimator::prepMicrograph(
 	}
 }
 
-std::vector<std::vector<d2Vector>> MotionEstimator::optimize(
-		const std::vector<std::vector<Image<double>>>& movieCC,
+template<typename CC_T>
+static std::vector<std::vector<d2Vector>> optimizeTyped(
+		const std::vector<std::vector<Image<CC_T>>>& movieCC,
 		const std::vector<std::vector<gravis::d2Vector>>& inTracks,
 		double sig_vel_px, double sig_acc_px, double sig_div_px,
 		const std::vector<gravis::d2Vector>& positions,
 		const std::vector<gravis::d2Vector>& globComp,
+		double cc_pad, int maxEDs, int maxIters, double optEps,
+		int debugOpt, int threads, bool expKer,
 		const std::vector<std::vector<gravis::i2Vector>>* ccCentres, int ccWindow,
-		bool* leftWindow) const
+		bool* leftWindow, const GaussianProcess::Basis* unitBasis)
 {
 	if (leftWindow) *leftWindow = false;
 	if (maxIters == 0) return inTracks;
 
 	const double eps = 1e-20;
 
-	if (sig_vel_px < eps)
-	{
-		sig_vel_px = eps;
-	}
-
-	if (sig_div_px < eps)
-	{
-		sig_div_px = eps;
-	}
+	if (sig_vel_px < eps) sig_vel_px = eps;
+	if (sig_div_px < eps) sig_div_px = eps;
 
 	const int pc = inTracks.size();
 
@@ -651,7 +708,7 @@ std::vector<std::vector<d2Vector>> MotionEstimator::optimize(
 
 	const std::chrono::steady_clock::time_point tb = std::chrono::steady_clock::now();
 	GpMotionFit gpmf(movieCC, cc_pad, sig_vel_px, sig_div_px, sig_acc_px,
-					 maxEDs, positions, globComp, nr_omp_threads, expKer);
+					 maxEDs, positions, globComp, threads, expKer, unitBasis);
 	polishtiming::add("est:   fit: GP basis", std::chrono::duration<double>(std::chrono::steady_clock::now() - tb).count());
 
 	if (ccCentres) gpmf.setWindow(ccCentres, ccWindow);
@@ -696,38 +753,39 @@ std::vector<std::vector<d2Vector>> MotionEstimator::optimize(
 	return out;
 }
 
+void MotionEstimator::expectNext(const MetaDataTable* mdt, const MetaDataTable* afterIt)
+{
+	if (micrographHandler)
+		micrographHandler->expectNext(mdt, afterIt);
+}
+
+std::vector<std::vector<d2Vector>> MotionEstimator::optimize(
+		const std::vector<std::vector<Image<double>>>& movieCC,
+		const std::vector<std::vector<gravis::d2Vector>>& inTracks,
+		double sig_vel_px, double sig_acc_px, double sig_div_px,
+		const std::vector<gravis::d2Vector>& positions,
+		const std::vector<gravis::d2Vector>& globComp,
+		const std::vector<std::vector<gravis::i2Vector>>* ccCentres, int ccWindow,
+		bool* leftWindow, int threads_override, const GaussianProcess::Basis* unitBasis) const
+{
+	const int thr = (threads_override > 0) ? threads_override : nr_omp_threads;
+	return optimizeTyped(movieCC, inTracks, sig_vel_px, sig_acc_px, sig_div_px,
+			positions, globComp, cc_pad, maxEDs, maxIters, optEps, debugOpt, thr, expKer,
+			ccCentres, ccWindow, leftWindow, unitBasis);
+}
+
 std::vector<std::vector<d2Vector>> MotionEstimator::optimize(
 		const std::vector<std::vector<Image<float>>>& movieCC,
 		const std::vector<std::vector<gravis::d2Vector>>& inTracks,
 		double sig_vel_px, double sig_acc_px, double sig_div_px,
 		const std::vector<gravis::d2Vector>& positions,
-		const std::vector<gravis::d2Vector>& globComp) const
+		const std::vector<gravis::d2Vector>& globComp,
+		int threads_override, const GaussianProcess::Basis* unitBasis) const
 {
-	const int pc = movieCC.size();
-	const int fc = movieCC[0].size();
-	const int w = movieCC[0][0].data.xdim;
-	const int h = movieCC[0][0].data.ydim;
-
-	std::vector<std::vector<Image<double>>> CCd(pc);
-
-	#pragma omp parallel for num_threads(nr_omp_threads)
-	for (int p = 0; p < pc; p++)
-	{
-		CCd[p].resize(fc);
-
-		for (int f = 0; f < fc; f++)
-		{
-			CCd[p][f] = Image<double>(w,h);
-
-			for (int y = 0; y < h; y++)
-			for (int x = 0; x < w; x++)
-			{
-				CCd[p][f](y,x) = movieCC[p][f](y,x);
-			}
-		}
-	}
-
-	return optimize(CCd, inTracks, sig_vel_px, sig_acc_px, sig_div_px, positions, globComp);
+	const int thr = (threads_override > 0) ? threads_override : nr_omp_threads;
+	return optimizeTyped(movieCC, inTracks, sig_vel_px, sig_acc_px, sig_div_px,
+			positions, globComp, cc_pad, maxEDs, maxIters, optEps, debugOpt, thr, expKer,
+			0, 0, 0, unitBasis);
 }
 
 std::vector<Image<RFLOAT>> MotionEstimator::computeDamageWeights(int opticsGroup)
@@ -806,26 +864,6 @@ void MotionEstimator::updateFCC(
 	// One table per particle, added in particle order: the same FCC at any thread count
 	std::vector<Image<RFLOAT>> tab_p(pc), w0_p(pc), w1_p(pc);
 
-	// Table column of each pixel per optics group, as FscHelper::updateFscTable computes it (-1: outside the table)
-	std::vector<std::vector<int>> bin(s.size());
-
-	for (int og = 0; og < s.size(); og++)
-	{
-		const double scale = (s_ref * angpix_ref)/(s[og] * angpix[og]);
-		const long int wh = s[og]/2 + 1, h = s[og];
-
-		bin[og].resize(wh * h);
-
-		for (long int i = 0; i < h; i++)
-		for (long int j = 0; j < wh; j++)
-		{
-			const long int ip = i < wh? i : i - h;
-			const int idx = ROUND(scale * sqrt(ip*ip + j*j));
-
-			bin[og][i*wh + j] = idx >= wh? -1 : idx;
-		}
-	}
-
 	#pragma omp parallel for num_threads(nr_omp_threads)
 	for (int p = 0; p < pc; p++)
 	{
@@ -849,7 +887,7 @@ void MotionEstimator::updateFCC(
 		for (int f = 0; f < fc; f++)
 		{
 			addShiftedToFscTable(movie[p][f](), f, pred(), s[og], -tracks[p][f].x, -tracks[p][f].y,
-				bin[og], tab_p[p](), w0_p[p](), w1_p[p]());
+				fccBins_[og], tab_p[p](), w0_p[p](), w1_p[p]());
 		}
 	}
 
@@ -861,19 +899,20 @@ void MotionEstimator::updateFCC(
 	}
 }
 
-void MotionEstimator::writeFCC(
+static void sumFccTables(
 		const std::vector<Image<RFLOAT>>& fccData,
 		const std::vector<Image<RFLOAT>>& fccWeight0,
 		const std::vector<Image<RFLOAT>>& fccWeight1,
-		std::string fn_root)
+		int sh_ref, int fc,
+		Image<RFLOAT>& fccDataSum,
+		Image<RFLOAT>& fccWeight0Sum,
+		Image<RFLOAT>& fccWeight1Sum)
 {
-	
-	Image<RFLOAT> fccDataSum(sh_ref,fc), fccWeight0Sum(sh_ref,fc), fccWeight1Sum(sh_ref,fc);
 	fccDataSum.data.initZeros();
 	fccWeight0Sum.data.initZeros();
 	fccWeight1Sum.data.initZeros();
 
-	for (int i = 0; i < fccData.size(); i++)
+	for (size_t i = 0; i < fccData.size(); i++)
 	{
 		for (int y = 0; y < fc; y++)
 		for (int x = 0; x < sh_ref; x++)
@@ -883,17 +922,15 @@ void MotionEstimator::writeFCC(
 			fccWeight1Sum(y,x) += fccWeight1[i](y,x);
 		}
 	}
-
-	fccDataSum.write(fn_root + "_FCC_cc.mrc");
-	fccWeight0Sum.write(fn_root + "_FCC_w0.mrc");
-	fccWeight1Sum.write(fn_root + "_FCC_w1.mrc");
 }
 
-void MotionEstimator::writeTracks(
+static void writeTracksToDisk(
 		const std::vector<std::vector<d2Vector>>& tracks,
 		double angpix_mg,
 		const std::vector<d2Vector>& positions,
-		std::string fn_root, double visScale)
+		std::string fn_root, double visScale,
+		RFLOAT mgAngpix, RFLOAT coordAngpix,
+		RFLOAT mgSizeX, RFLOAT mgSizeY, bool doDiag)
 {
 	const int pc = tracks.size();
 
@@ -912,9 +949,6 @@ void MotionEstimator::writeTracks(
 	}
 
 	std::vector<gravis::d2Vector> globalTrack(fc);
-
-	const RFLOAT mgAngpix = micrographHandler->movie_angpix;
-	const RFLOAT coordAngpix = micrographHandler->coords_angpix;
 
 	for (int f = 0; f < fc; f++)
 	{
@@ -947,8 +981,8 @@ void MotionEstimator::writeTracks(
 	dataSet.SetDatasetColor(0.0,0.0,1.0);
 	dataSet.SetLineWidth(1.);
 
-	const RFLOAT xcenterAngstrom = mgAngpix * micrographHandler->micrograph_size.x / 2.0;
-	const RFLOAT ycenterAngstrom = mgAngpix * micrographHandler->micrograph_size.y / 2.0;
+	const RFLOAT xcenterAngstrom = mgAngpix * mgSizeX / 2.0;
+	const RFLOAT ycenterAngstrom = mgAngpix * mgSizeY / 2.0;
 
 	for (int f = 0; f < fc; f++)
 	{
@@ -1009,13 +1043,7 @@ void MotionEstimator::writeTracks(
 
 	delete plot2D;
 
-	// Compatibility with Jasenko's diagnostic .dat files
-	// TONOTDO: remove this
-	// Don't! It's the only way to plot tracks on top of each other.
-	// We'll probably need this in the future.
-	// (e.g. each time there is something wrong with the polynomial tracks)
-
-	if (!diag) return;
+	if (!doDiag) return;
 
 	std::ofstream rawOut(fn_root + "_tracks.dat");
 	std::ofstream visOut(fn_root + "_visTracks.dat");
@@ -1046,6 +1074,33 @@ void MotionEstimator::writeTracks(
 	{
 		glbOut << globalTrack[f].x << " " << globalTrack[f].y << std::endl;
 	}
+}
+
+void MotionEstimator::writeFCC(
+		const std::vector<Image<RFLOAT>>& fccData,
+		const std::vector<Image<RFLOAT>>& fccWeight0,
+		const std::vector<Image<RFLOAT>>& fccWeight1,
+		std::string fn_root)
+{
+	Image<RFLOAT> fccDataSum(sh_ref,fc), fccWeight0Sum(sh_ref,fc), fccWeight1Sum(sh_ref,fc);
+	sumFccTables(fccData, fccWeight0, fccWeight1, sh_ref, fc, fccDataSum, fccWeight0Sum, fccWeight1Sum);
+
+	fccDataSum.write(fn_root + "_FCC_cc.mrc");
+	fccWeight0Sum.write(fn_root + "_FCC_w0.mrc");
+	fccWeight1Sum.write(fn_root + "_FCC_w1.mrc");
+}
+
+void MotionEstimator::writeTracks(
+		const std::vector<std::vector<d2Vector>>& tracks,
+		double angpix_mg,
+		const std::vector<d2Vector>& positions,
+		std::string fn_root, double visScale)
+{
+	writeTracksToDisk(
+		tracks, angpix_mg, positions, fn_root, visScale,
+		micrographHandler->movie_angpix, micrographHandler->coords_angpix,
+		micrographHandler->micrograph_size.x, micrographHandler->micrograph_size.y,
+		diag);
 }
 
 bool MotionEstimator::isReady()

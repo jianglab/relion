@@ -27,7 +27,11 @@
 #include "src/backprojector.h"
 #include "src/gpu_reconstruct.h"
 
+#include <atomic>
 #include <chrono>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #ifdef TIMING
 	#define RCTIC(timer,label) (timer.tic(label))
@@ -102,26 +106,48 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
 		m11 = 1.0;
 	}
 
-	// Use the inverse matrix
-	Matrix2D<RFLOAT> Ainv;
-	Ainv = A.inv();
-
-	// Go from the 2D slice coordinates to the 3D coordinates
-	Ainv *= (RFLOAT)padding_factor;  // take scaling into account directly
+	// Use the inverse matrix (inline 3x3 cofactors matching Matrix2D::inv() * padding_factor)
+	RFLOAT ai00 = 0, ai01 = 0, ai02 = 0;
+	RFLOAT ai10 = 0, ai11 = 0, ai12 = 0;
+	RFLOAT ai20 = 0, ai21 = 0, ai22 = 0;
+	if (A.mdimx == 3 && A.mdimy == 3)
+	{
+		const RFLOAT a00 = A(0,0), a01 = A(0,1), a02 = A(0,2);
+		const RFLOAT a10 = A(1,0), a11 = A(1,1), a12 = A(1,2);
+		const RFLOAT a20 = A(2,0), a21 = A(2,1), a22 = A(2,2);
+		const RFLOAT c00 =   a22 * a11 - a21 * a12;
+		const RFLOAT c01 = -(a22 * a01 - a21 * a02);
+		const RFLOAT c02 =   a12 * a01 - a11 * a02;
+		const RFLOAT c10 = -(a22 * a10 - a20 * a12);
+		const RFLOAT c11 =   a22 * a00 - a20 * a02;
+		const RFLOAT c12 = -(a12 * a00 - a10 * a02);
+		const RFLOAT c20 =   a21 * a10 - a20 * a11;
+		const RFLOAT c21 = -(a21 * a00 - a20 * a01);
+		const RFLOAT c22 =   a11 * a00 - a10 * a01;
+		const RFLOAT det = a00 * c00 + a10 * c01 + a20 * c02;
+		const RFLOAT pf = (RFLOAT)padding_factor;
+		ai00 = (c00 / det) * pf; ai01 = (c01 / det) * pf; ai02 = (c02 / det) * pf;
+		ai10 = (c10 / det) * pf; ai11 = (c11 / det) * pf; ai12 = (c12 / det) * pf;
+		ai20 = (c20 / det) * pf; ai21 = (c21 / det) * pf; ai22 = (c22 / det) * pf;
+	}
+	else
+	{
+		Matrix2D<RFLOAT> Ainv = A.inv();
+		Ainv *= (RFLOAT)padding_factor;
+		ai00 = Ainv(0,0); ai01 = Ainv(0,1); ai02 = Ainv(0,2);
+		ai10 = Ainv(1,0); ai11 = Ainv(1,1); ai12 = Ainv(1,2);
+		ai20 = Ainv(2,0); ai21 = Ainv(2,1); ai22 = Ainv(2,2);
+	}
+	const RFLOAT Am_Xx = ai00 * m00 + ai01 * m10;
+	const RFLOAT Am_Xy = ai00 * m01 + ai01 * m11;
+	const RFLOAT Am_Yx = ai10 * m00 + ai11 * m10;
+	const RFLOAT Am_Yy = ai10 * m01 + ai11 * m11;
+	const RFLOAT Am_Zx = ai20 * m00 + ai21 * m10;
+	const RFLOAT Am_Zy = ai20 * m01 + ai21 * m11;
 
 	// max_r2 and min_r2_nn are defined in 3D-space
 	const int max_r2 = ROUND(r_max * padding_factor) * ROUND(r_max * padding_factor);
 	const int min_r2_nn = ROUND(r_min_nn * padding_factor) * ROUND(r_min_nn * padding_factor);
-
-	// precalculated coefficients for ellipse determination (see further down)
-
-	// first, make sure A contains 2D distortion (lowercase 2D, uppercase 3D):
-	const RFLOAT Am_Xx = Ainv(0,0) * m00 + Ainv(0,1) * m10;
-	const RFLOAT Am_Xy = Ainv(0,0) * m01 + Ainv(0,1) * m11;
-	const RFLOAT Am_Yx = Ainv(1,0) * m00 + Ainv(1,1) * m10;
-	const RFLOAT Am_Yy = Ainv(1,0) * m01 + Ainv(1,1) * m11;
-	const RFLOAT Am_Zx = Ainv(2,0) * m00 + Ainv(2,1) * m10;
-	const RFLOAT Am_Zy = Ainv(2,0) * m01 + Ainv(2,1) * m11;
 
 	// next, precompute (Am)^t Am into AtA:
 	const RFLOAT AtA_xx = Am_Xx * Am_Xx + Am_Yx * Am_Yx + Am_Zx * Am_Zx;
@@ -139,7 +165,6 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
 	std::cerr << " STARTINGY(data)= "<< STARTINGY(data) << std::endl;
 	std::cerr << " STARTINGZ(data)= "<< STARTINGZ(data) << std::endl;
 	std::cerr << " r_max= "<< r_max << std::endl;
-	std::cerr << " Ainv= " << Ainv << std::endl;
 #endif
 
 	// precalculate inverse of Ewald sphere diameter
@@ -291,9 +316,9 @@ void BackProjector::backproject2Dto3D(const MultidimArray<Complex > &f2d,
 
 			RFLOAT z_on_ewaldp = inv_diam_ewald * (xu * xu + yu * yu);
 
-			RFLOAT xp = Ainv(0,0) * xu + Ainv(0,1) * yu + Ainv(0,2) * z_on_ewaldp;
-			RFLOAT yp = Ainv(1,0) * xu + Ainv(1,1) * yu + Ainv(1,2) * z_on_ewaldp;
-			RFLOAT zp = Ainv(2,0) * xu + Ainv(2,1) * yu + Ainv(2,2) * z_on_ewaldp;
+			RFLOAT xp = ai00 * xu + ai01 * yu + ai02 * z_on_ewaldp;
+			RFLOAT yp = ai10 * xu + ai11 * yu + ai12 * z_on_ewaldp;
+			RFLOAT zp = ai20 * xu + ai21 * yu + ai22 * z_on_ewaldp;
 
 			double r2_3D = xp*xp + yp*yp + zp*zp;
 
@@ -1403,17 +1428,68 @@ void BackProjector::updateSSNRarrays(RFLOAT tau2_fudge,
 	// This is the left-hand side term in the nominator of the Wiener-filter-like update formula
 	// and it is stored inside the weight vector
 	// Then, if (do_map) add the inverse of tau2-spectrum values to the weight
-	sigma2.initZeros(ori_size/2 + 1);
-	counter.initZeros(ori_size/2 + 1);
-	FOR_ALL_ELEMENTS_IN_ARRAY3D(weight)
+	const int nshell = ori_size/2 + 1;
+	sigma2.initZeros(nshell);
+	counter.initZeros(nshell);
+	const long int wz0 = STARTINGZ(weight), wz1 = FINISHINGZ(weight);
+	const long int wy0 = STARTINGY(weight), wy1 = FINISHINGY(weight);
+	const long int wx0 = STARTINGX(weight), wx1 = FINISHINGX(weight);
+	const int nt = relionBulkThreads(MULTIDIM_SIZE(weight));
+	if (nt > 1)
 	{
-		const int r2 = k * k + i * i + j * j;
-		if (r2 < max_r2)
+		std::vector<RFLOAT> tl_sigma2((size_t)nt * nshell, 0.), tl_counter((size_t)nt * nshell, 0.);
+		#pragma omp parallel num_threads(nt)
 		{
-			int ires = ROUND(sqrt((RFLOAT)r2) / padding_factor);
-			RFLOAT invw = oversampling_correction * A3D_ELEM(weight, k, i, j);
-			DIRECT_A1D_ELEM(sigma2, ires) += invw;
-			DIRECT_A1D_ELEM(counter, ires) += 1.;
+#ifdef _OPENMP
+			const int tid = omp_get_thread_num();
+#else
+			const int tid = 0;
+#endif
+			RFLOAT * __restrict ms = &tl_sigma2[(size_t)tid * nshell];
+			RFLOAT * __restrict mc = &tl_counter[(size_t)tid * nshell];
+			#pragma omp for schedule(static)
+			for (long int k = wz0; k <= wz1; k++)
+			{
+				const long int k2 = k * k;
+				for (long int i = wy0; i <= wy1; i++)
+				{
+					const long int k2i2 = k2 + i * i;
+					for (long int j = wx0; j <= wx1; j++)
+					{
+						const int r2 = (int)(k2i2 + j * j);
+						if (r2 < max_r2)
+						{
+							const int ires = ROUND(sqrt((RFLOAT)r2) / padding_factor);
+							ms[ires] += oversampling_correction * A3D_ELEM(weight, k, i, j);
+							mc[ires] += 1.;
+						}
+					}
+				}
+			}
+		}
+		for (int t = 0; t < nt; t++)
+		{
+			const RFLOAT *ms = &tl_sigma2[(size_t)t * nshell];
+			const RFLOAT *mc = &tl_counter[(size_t)t * nshell];
+			for (int ir = 0; ir < nshell; ir++)
+			{
+				DIRECT_A1D_ELEM(sigma2, ir) += ms[ir];
+				DIRECT_A1D_ELEM(counter, ir) += mc[ir];
+			}
+		}
+	}
+	else
+	{
+		FOR_ALL_ELEMENTS_IN_ARRAY3D(weight)
+		{
+			const int r2 = k * k + i * i + j * j;
+			if (r2 < max_r2)
+			{
+				int ires = ROUND(sqrt((RFLOAT)r2) / padding_factor);
+				RFLOAT invw = oversampling_correction * A3D_ELEM(weight, k, i, j);
+				DIRECT_A1D_ELEM(sigma2, ires) += invw;
+				DIRECT_A1D_ELEM(counter, ires) += 1.;
+			}
 		}
 	}
 
@@ -1431,10 +1507,10 @@ void BackProjector::updateSSNRarrays(RFLOAT tau2_fudge,
 		}
 	}
 
-	tau2.reshape(ori_size/2 + 1);
-	data_vs_prior.initZeros(ori_size/2 + 1);
-	fourier_coverage.initZeros(ori_size/2 + 1);
-	counter.initZeros(ori_size/2 + 1);
+	tau2.reshape(nshell);
+	data_vs_prior.initZeros(nshell);
+	fourier_coverage.initZeros(nshell);
+	counter.initZeros(nshell);
 	if (update_tau2_with_fsc)
 	{
 		// Then calculate new tau2 values, based on the FSC
@@ -1468,52 +1544,138 @@ void BackProjector::updateSSNRarrays(RFLOAT tau2_fudge,
 
 	// Now accumulate data_vs_prior if (!update_tau2_with_fsc)
 	// Also accumulate fourier_coverage
-	FOR_ALL_ELEMENTS_IN_ARRAY3D(weight)
+	if (nt > 1)
 	{
-		int r2 = k * k + i * i + j * j;
-		if (r2 < max_r2)
+		std::vector<RFLOAT> invtau2_shell(nshell, 0.);
+		std::vector<signed char> tau2_state(nshell, 0);
+		for (int ir = 0; ir < nshell; ir++)
 		{
-			int ires = ROUND( sqrt((RFLOAT)r2) / padding_factor );
-			RFLOAT invw = A3D_ELEM(weight, k, i, j);
-
-			RFLOAT invtau2;
-			if (DIRECT_A1D_ELEM(tau2, ires) > 0.)
+			const RFLOAT t = DIRECT_A1D_ELEM(tau2, ir);
+			if (t > 0.)
 			{
-				// Calculate inverse of tau2
-				invtau2 = 1. / (oversampling_correction * tau2_fudge * DIRECT_A1D_ELEM(tau2, ires));
+				RFLOAT inv = 1. / (oversampling_correction * tau2_fudge * t);
+				if (correct_tau2_by_avgctf2 && ir < XSIZE(avgctf2) && DIRECT_A1D_ELEM(avgctf2, ir) > 0.)
+					inv *= 1. / DIRECT_A1D_ELEM(avgctf2, ir);
+				invtau2_shell[ir] = inv;
+				tau2_state[ir] = 1;
+			}
+			else if (t < 0.)
+				tau2_state[ir] = -1;
+		}
+		std::vector<RFLOAT> tl_dvp((size_t)nt * nshell, 0.), tl_fcov((size_t)nt * nshell, 0.), tl_cnt((size_t)nt * nshell, 0.);
+		int bad_tau = 0;
+		#pragma omp parallel num_threads(nt) reduction(+:bad_tau)
+		{
+#ifdef _OPENMP
+			const int tid = omp_get_thread_num();
+#else
+			const int tid = 0;
+#endif
+			RFLOAT * __restrict mdvp = update_tau2_with_fsc ? nullptr : &tl_dvp[(size_t)tid * nshell];
+			RFLOAT * __restrict mfc  = &tl_fcov[(size_t)tid * nshell];
+			RFLOAT * __restrict mcnt = &tl_cnt[(size_t)tid * nshell];
+			#pragma omp for schedule(static)
+			for (long int k = wz0; k <= wz1; k++)
+			{
+				const long int k2 = k * k;
+				for (long int i = wy0; i <= wy1; i++)
+				{
+					const long int k2i2 = k2 + i * i;
+					for (long int j = wx0; j <= wx1; j++)
+					{
+						const int r2 = (int)(k2i2 + j * j);
+						if (r2 < max_r2)
+						{
+							const int ires = ROUND(sqrt((RFLOAT)r2) / padding_factor);
+							const RFLOAT invw = A3D_ELEM(weight, k, i, j);
+							const signed char st = tau2_state[ires];
+							if (st < 0)
+							{
+								bad_tau = 1;
+								continue;
+							}
+							const RFLOAT invtau2 = (st > 0) ? invtau2_shell[ires] : (1. / (0.001 * invw));
+							const RFLOAT ratio = invw / invtau2;
+							if (!update_tau2_with_fsc)
+								mdvp[ires] += ratio;
+							if (ratio >= 1.)
+								mfc[ires] += 1.;
+							mcnt[ires] += 1.;
+						}
+					}
+				}
+			}
+		}
+		if (bad_tau)
+		{
+			std::cerr << " sigma2= " << sigma2 << std::endl;
+			std::cerr << " fsc= " << fsc << std::endl;
+			std::cerr << " tau2= " << tau2 << std::endl;
+			REPORT_ERROR("ERROR BackProjector::reconstruct: Negative or zero values encountered for tau2 spectrum!");
+		}
+		for (int t = 0; t < nt; t++)
+		{
+			const RFLOAT *mdvp = &tl_dvp[(size_t)t * nshell];
+			const RFLOAT *mfc  = &tl_fcov[(size_t)t * nshell];
+			const RFLOAT *mcnt = &tl_cnt[(size_t)t * nshell];
+			for (int ir = 0; ir < nshell; ir++)
+			{
+				if (!update_tau2_with_fsc)
+					DIRECT_A1D_ELEM(data_vs_prior, ir) += mdvp[ir];
+				DIRECT_A1D_ELEM(fourier_coverage, ir) += mfc[ir];
+				DIRECT_A1D_ELEM(counter, ir) += mcnt[ir];
+			}
+		}
+	}
+	else
+	{
+		FOR_ALL_ELEMENTS_IN_ARRAY3D(weight)
+		{
+			int r2 = k * k + i * i + j * j;
+			if (r2 < max_r2)
+			{
+				int ires = ROUND( sqrt((RFLOAT)r2) / padding_factor );
+				RFLOAT invw = A3D_ELEM(weight, k, i, j);
 
-				// Correct tau2 estimate by avgctf2 (for ctf_premultiplied images)
-				if (correct_tau2_by_avgctf2 && DIRECT_A1D_ELEM(avgctf2, ires) > 0.)
-					invtau2 *= 1. / DIRECT_A1D_ELEM(avgctf2, ires);
+				RFLOAT invtau2;
+				if (DIRECT_A1D_ELEM(tau2, ires) > 0.)
+				{
+					// Calculate inverse of tau2
+					invtau2 = 1. / (oversampling_correction * tau2_fudge * DIRECT_A1D_ELEM(tau2, ires));
+
+					// Correct tau2 estimate by avgctf2 (for ctf_premultiplied images)
+					if (correct_tau2_by_avgctf2 && DIRECT_A1D_ELEM(avgctf2, ires) > 0.)
+						invtau2 *= 1. / DIRECT_A1D_ELEM(avgctf2, ires);
+
+				}
+				else if (DIRECT_A1D_ELEM(tau2, ires) == 0.)
+				{
+					// If tau2 is zero, use small value instead
+					invtau2 = 1./ ( 0.001 * invw);
+				}
+				else
+				{
+					std::cerr << " sigma2= " << sigma2 << std::endl;
+					std::cerr << " fsc= " << fsc << std::endl;
+					std::cerr << " tau2= " << tau2 << std::endl;
+					REPORT_ERROR("ERROR BackProjector::reconstruct: Negative or zero values encountered for tau2 spectrum!");
+				}
+
+				// Keep track of spectral evidence-to-prior ratio and remaining noise in the reconstruction
+				if (!update_tau2_with_fsc)
+				{
+					DIRECT_A1D_ELEM(data_vs_prior, ires) += invw / invtau2;
+				}
+
+				// Keep track of the coverage in Fourier space
+				if (invw / invtau2 >= 1.)
+				{
+					DIRECT_A1D_ELEM(fourier_coverage, ires) += 1.;
+				}
+
+				DIRECT_A1D_ELEM(counter, ires) += 1.;
 
 			}
-			else if (DIRECT_A1D_ELEM(tau2, ires) == 0.)
-			{
-				// If tau2 is zero, use small value instead
-				invtau2 = 1./ ( 0.001 * invw);
-			}
-			else
-			{
-				std::cerr << " sigma2= " << sigma2 << std::endl;
-				std::cerr << " fsc= " << fsc << std::endl;
-				std::cerr << " tau2= " << tau2 << std::endl;
-				REPORT_ERROR("ERROR BackProjector::reconstruct: Negative or zero values encountered for tau2 spectrum!");
-			}
-
-			// Keep track of spectral evidence-to-prior ratio and remaining noise in the reconstruction
-			if (!update_tau2_with_fsc)
-			{
-				DIRECT_A1D_ELEM(data_vs_prior, ires) += invw / invtau2;
-			}
-
-			// Keep track of the coverage in Fourier space
-			if (invw / invtau2 >= 1.)
-			{
-				DIRECT_A1D_ELEM(fourier_coverage, ires) += 1.;
-			}
-
-			DIRECT_A1D_ELEM(counter, ires) += 1.;
-
 		}
 	}
 
@@ -1797,6 +1959,16 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 		g.padoridim = padoridim;
 		g.normfft = (data_dim == 3) ? (RFLOAT)(padding_factor * padding_factor * padding_factor)
 		                            : (RFLOAT)(padding_factor * padding_factor * padding_factor * ori_size);
+		g.do_soft_mask = true;
+		g.gridding_rrval = (RFLOAT)(ori_size * padding_factor);
+		if (interpolator == FINUFFT)
+			g.gridding_mode = 0;
+		else if (interpolator == NEAREST_NEIGHBOUR && r_min_nn == 0)
+			g.gridding_mode = 1;
+		else if (interpolator == TRILINEAR || (interpolator == NEAREST_NEIGHBOUR && r_min_nn > 0))
+			g.gridding_mode = 2;
+		else
+			REPORT_ERROR("BUG BackProjector::reconstruct: unrecognised interpolator scheme.");
 		vol_out.resize(ori_size, ori_size, ori_size);
 		std::string reason;
 		bool zero_weight = false;
@@ -1816,9 +1988,6 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 			if (zero_weight)
 				std::cerr << " WARNING: ignoring divide by zero in skip_gridding (GPU reconstruction)" << std::endl;
 			vol_out.setXmippOrigin();
-			// as at the end of windowToOridimRealSpace() and below
-			softMaskOutsideMap(vol_out);
-			griddingCorrect(vol_out);
 			vol_out.shrinkToFit();
 			return;
 		}
@@ -1871,44 +2040,52 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 
 	RCTOC(ReconTimer,ReconS_2);
 	RCTIC(ReconTimer,ReconS_2_5);
+	const int nt = relionBulkThreads(MULTIDIM_SIZE(Fconv));
+	const long int fzdim = ZSIZE(Fconv), fydim = YSIZE(Fconv), fxdim = XSIZE(Fconv);
+
 	// Apply MAP-additional term to the Fweight array
 	// This will regularise the actual reconstruction
 	if (do_map)
 	{
-		// Then, add the inverse of tau2-spectrum values to the weight
-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Fconv)
- 		{
-			int r2 = kp * kp + ip * ip + jp * jp;
-			if (r2 < max_r2)
+		for (long int i = 0; i < XSIZE(tau2); i++)
+		{
+			const RFLOAT t = DIRECT_A1D_ELEM(tau2, i);
+			if (!(t > 0.) && !(t < 1e-20))
 			{
-				int ires = ROUND(sqrt((RFLOAT)r2) / padding_factor);
-				RFLOAT invw = DIRECT_A3D_ELEM(Fweight, k, i, j);
+				std::cerr << " tau2= " << tau2 << std::endl;
+				REPORT_ERROR("ERROR BackProjector::reconstruct: Negative or zero values encountered for tau2 spectrum!");
+			}
+		}
 
-				RFLOAT invtau2;
-				if (DIRECT_A1D_ELEM(tau2, ires) > 0.)
+		// Then, add the inverse of tau2-spectrum values to the weight
+		#pragma omp parallel for num_threads(nt) schedule(dynamic, 1) if(nt > 1)
+		for (long int k = 0; k < fzdim; k++)
+		{
+			const long int kp = (k < fxdim) ? k : k - fzdim;
+			const int kp2 = (int)(kp * kp);
+			for (long int i = 0; i < fydim; i++)
+			{
+				const long int ip = (i < fxdim) ? i : i - fydim;
+				const int kpip2 = kp2 + (int)(ip * ip);
+				for (long int j = 0; j < fxdim; j++)
 				{
-					// Calculate inverse of tau2
-					invtau2 = 1. / (oversampling_correction * tau2_fudge * DIRECT_A1D_ELEM(tau2, ires));
-				}
-				else if (DIRECT_A1D_ELEM(tau2, ires) < 1e-20)
-				{
-					// If tau2 is zero, use small value instead
-					if (invw > 1e-20) invtau2 = 1./ ( 0.001 * invw);
-					else invtau2 = 0.;
-				}
-				else
-				{
-					std::cerr << " tau2= " << tau2 << std::endl;
-					REPORT_ERROR("ERROR BackProjector::reconstruct: Negative or zero values encountered for tau2 spectrum!");
-				}
-
-				// Only for (ires >= minres_map) add Wiener-filter like term
-				if (ires >= minres_map)
-				{
-					// Now add the inverse-of-tau2_class term
-					invw += invtau2;
-					// Store the new weight again in Fweight
-					DIRECT_A3D_ELEM(Fweight, k, i, j) = invw;
+					const int r2 = kpip2 + (int)(j * j);
+					if (r2 < max_r2)
+					{
+						const int ires = ROUND(sqrt((RFLOAT)r2) / padding_factor);
+						RFLOAT invw = DIRECT_A3D_ELEM(Fweight, k, i, j);
+						const RFLOAT tval = DIRECT_A1D_ELEM(tau2, ires);
+						RFLOAT invtau2;
+						if (tval > 0.)
+							invtau2 = 1. / (oversampling_correction * tau2_fudge * tval);
+						else
+							invtau2 = (invw > 1e-20) ? (1. / (0.001 * invw)) : 0.;
+						if (ires >= minres_map)
+						{
+							invw += invtau2;
+							DIRECT_A3D_ELEM(Fweight, k, i, j) = invw;
+						}
+					}
 				}
 			}
 		}
@@ -1925,23 +2102,64 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 		// beyond r_max, set Fweight to at least 1/1000th of the radially averaged weight at r_max;
 		MultidimArray<RFLOAT> radavg_weight(r_max), counter(r_max);
 		const int round_max_r2 = ROUND(r_max * padding_factor * r_max * padding_factor);
-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Fweight)
+		const int nt_shell = (nt > 1) ? nt : 1;
+		std::vector<RFLOAT> tl_radavg((size_t)nt_shell * (size_t)r_max, 0.);
+		std::vector<RFLOAT> tl_counter((size_t)nt_shell * (size_t)r_max, 0.);
+		long int bad_k = 0, bad_i = 0, bad_j = 0;
+		int bad_ires = -1;
+		#pragma omp parallel num_threads(nt_shell) if(nt > 1)
 		{
-			const int r2 = kp * kp + ip * ip + jp * jp;
-			// Note that (r < ires) != (r2 < max_r2), because max_r2 = ROUND(r_max * padding_factor)^2.
-			// We have to use round_max_r2 = ROUND((r_max * padding_factor)^2).
-			// e.g. k = 0, i = 7, j = 28, max_r2 = 841, r_max = 16, padding_factor = 18.
-			if (r2 < round_max_r2)
+#ifdef _OPENMP
+			const int tid = omp_get_thread_num();
+#else
+			const int tid = 0;
+#endif
+			RFLOAT *my_rad = tl_radavg.data() + (size_t)tid * (size_t)r_max;
+			RFLOAT *my_cnt = tl_counter.data() + (size_t)tid * (size_t)r_max;
+			#pragma omp for schedule(static)
+			for (long int k = 0; k < fzdim; k++)
 			{
-				const int ires = FLOOR(sqrt((RFLOAT)r2) / padding_factor);
-				if (ires >= XSIZE(radavg_weight))
+				const long int kp = (k < fxdim) ? k : k - fzdim;
+				const int kp2 = (int)(kp * kp);
+				for (long int i = 0; i < fydim; i++)
 				{
-					std::cerr << " k= " << k << " i= " << i << " j= " << j << std::endl;
-					std::cerr << " ires= " << ires << " XSIZE(radavg_weight)= " << XSIZE(radavg_weight) << std::endl;
-					REPORT_ERROR("BUG: ires >=XSIZE(radavg_weight) ");
+					const long int ip = (i < fxdim) ? i : i - fydim;
+					const int kpip2 = kp2 + (int)(ip * ip);
+					for (long int j = 0; j < fxdim; j++)
+					{
+						const int r2 = kpip2 + (int)(j * j);
+						if (r2 < round_max_r2)
+						{
+							const int ires = FLOOR(sqrt((RFLOAT)r2) / padding_factor);
+							if (ires >= r_max)
+							{
+#pragma omp critical
+								if (bad_ires < 0) { bad_ires = ires; bad_k = k; bad_i = i; bad_j = j; }
+							}
+							else
+							{
+								my_rad[ires] += DIRECT_A3D_ELEM(Fweight, k, i, j);
+								my_cnt[ires] += 1.;
+							}
+						}
+					}
 				}
-				DIRECT_A1D_ELEM(radavg_weight, ires) += DIRECT_A3D_ELEM(Fweight, k, i, j);
-				DIRECT_A1D_ELEM(counter, ires) += 1.;
+			}
+		}
+		if (bad_ires >= 0)
+		{
+			std::cerr << " k= " << bad_k << " i= " << bad_i << " j= " << bad_j << std::endl;
+			std::cerr << " ires= " << bad_ires << " XSIZE(radavg_weight)= " << XSIZE(radavg_weight) << std::endl;
+			REPORT_ERROR("BUG: ires >=XSIZE(radavg_weight) ");
+		}
+		for (int t = 0; t < nt_shell; t++)
+		{
+			const RFLOAT *my_rad = tl_radavg.data() + (size_t)t * (size_t)r_max;
+			const RFLOAT *my_cnt = tl_counter.data() + (size_t)t * (size_t)r_max;
+			for (int ir = 0; ir < r_max; ir++)
+			{
+				DIRECT_A1D_ELEM(radavg_weight, ir) += my_rad[ir];
+				DIRECT_A1D_ELEM(counter, ir) += my_cnt[ir];
 			}
 		}
 
@@ -1960,27 +2178,39 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 			}
 		}
 
-		bool have_warned = false;
+		std::atomic<bool> have_warned(false);
 		// perform XMIPP_MAX on all weight elements, and do division of data/weight
-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Fweight)
+		#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)
+		for (long int k = 0; k < fzdim; k++)
 		{
-			const int r2 = kp * kp + ip * ip + jp * jp;
-			const int ires = FLOOR(sqrt((RFLOAT)r2) / padding_factor);
-			const RFLOAT weight =  XMIPP_MAX(DIRECT_A3D_ELEM(Fweight, k, i, j), DIRECT_A1D_ELEM(radavg_weight, (ires < r_max) ? ires : (r_max - 1)));
-			if (weight == 0.)
+			const long int kp = (k < fxdim) ? k : k - fzdim;
+			const int kp2 = (int)(kp * kp);
+			for (long int i = 0; i < fydim; i++)
 			{
-				if (!have_warned && abs(DIRECT_A3D_ELEM(Fconv, k, i, j)) > 0.)
+				const long int ip = (i < fxdim) ? i : i - fydim;
+				const int kpip2 = kp2 + (int)(ip * ip);
+				for (long int j = 0; j < fxdim; j++)
 				{
-					std::cerr << " WARNING: ignoring divide by zero in skip_gridding: ires = " << ires << " kp = " << kp << " ip = " << ip << " jp = " << jp << std::endl;
-                    std::cerr << " Fconv= " << DIRECT_A3D_ELEM(Fconv, k, i, j) << " Fweight= " << DIRECT_A3D_ELEM(Fweight, k, i, j) << " radavg_weight=" <<DIRECT_A1D_ELEM(radavg_weight, (ires < r_max) ? ires : (r_max - 1)) << std::endl;
-					std::cerr << " max_r2 = " << max_r2 << " r_max = " << r_max << " padding_factor = " << padding_factor
-					           << " ROUND(sqrt(max_r2)) = " << ROUND(sqrt(max_r2)) << " ROUND(r_max * padding_factor) = " << ROUND(r_max * padding_factor) << std::endl;
-					have_warned = true;
+					const int r2 = kpip2 + (int)(j * j);
+					const int ires = FLOOR(sqrt((RFLOAT)r2) / padding_factor);
+					const RFLOAT minw = DIRECT_A1D_ELEM(radavg_weight, (ires < r_max) ? ires : (r_max - 1));
+					const RFLOAT curw = DIRECT_A3D_ELEM(Fweight, k, i, j);
+					const RFLOAT w = XMIPP_MAX(curw, minw);
+					if (w == 0.)
+					{
+						if (abs(DIRECT_A3D_ELEM(Fconv, k, i, j)) > 0. && !have_warned.exchange(true))
+						{
+							std::cerr << " WARNING: ignoring divide by zero in skip_gridding: ires = " << ires << " kp = " << kp << " ip = " << ip << " jp = " << j << std::endl;
+							std::cerr << " Fconv= " << DIRECT_A3D_ELEM(Fconv, k, i, j) << " Fweight= " << curw << " radavg_weight=" << minw << std::endl;
+							std::cerr << " max_r2 = " << max_r2 << " r_max = " << r_max << " padding_factor = " << padding_factor
+							           << " ROUND(sqrt(max_r2)) = " << ROUND(sqrt(max_r2)) << " ROUND(r_max * padding_factor) = " << ROUND(r_max * padding_factor) << std::endl;
+						}
+					}
+					else
+					{
+						DIRECT_A3D_ELEM(Fconv, k, i, j) /= w;
+					}
 				}
-			}
-			else
-			{
-				DIRECT_A3D_ELEM(Fconv, k, i, j) /= weight;
 			}
 		}
 	}
@@ -1992,25 +2222,40 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 #ifdef DEBUG_RECONSTRUCT
 		std::cerr << " normalise= " << normalise << std::endl;
 #endif
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Fweight)
+		const RFLOAT inv_normalise = (RFLOAT)1.0 / normalise;
 		{
-			DIRECT_MULTIDIM_ELEM(Fweight, n) /= normalise;
-		}
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(data)
-		{
-			DIRECT_MULTIDIM_ELEM(data, n) /= normalise;
+			const long int fw_elems = MULTIDIM_SIZE(Fweight);
+			RFLOAT *fw_ptr = MULTIDIM_ARRAY(Fweight);
+			#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)
+			for (long int n = 0; n < fw_elems; n++)
+				fw_ptr[n] *= inv_normalise;
+
+			const long int data_elems = MULTIDIM_SIZE(data);
+			Complex *data_ptr = MULTIDIM_ARRAY(data);
+			#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)
+			for (long int n = 0; n < data_elems; n++)
+				data_ptr[n] *= inv_normalise;
 		}
 
 		RCTOC(ReconTimer,ReconS_4);
 		RCTIC(ReconTimer,ReconS_5);
 
-		// Initialise Fnewweight with 1's and 0's. (also see comments below)
-		FOR_ALL_ELEMENTS_IN_ARRAY3D(weight)
+		// Initialise weight with 1's and 0's cleanly in parallel
 		{
-			if (k * k + i * i + j * j < max_r2)
-				A3D_ELEM(weight, k, i, j) = 1.;
-			else
-				A3D_ELEM(weight, k, i, j) = 0.;
+			const long int wz0 = STARTINGZ(weight), wz1 = FINISHINGZ(weight);
+			const long int wy0 = STARTINGY(weight), wy1 = FINISHINGY(weight);
+			const long int wx0 = STARTINGX(weight), wx1 = FINISHINGX(weight);
+			#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)
+			for (long int k = wz0; k <= wz1; k++)
+			{
+				const long int k2 = k * k;
+				for (long int i = wy0; i <= wy1; i++)
+				{
+					const long int k2i2 = k2 + i * i;
+					for (long int j = wx0; j <= wx1; j++)
+						A3D_ELEM(weight, k, i, j) = (k2i2 + j * j < max_r2) ? (RFLOAT)1. : (RFLOAT)0.;
+				}
+			}
 		}
 		// Fnewweight can become too large for a float: always keep this one in double-precision
 		MultidimArray<double> Fnewweight;
@@ -2018,6 +2263,8 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 		decenter(weight, Fnewweight, max_r2);
 
 		RCTOC(ReconTimer,ReconS_5);
+		MultidimArray<RFLOAT> Mconv_buf;
+		const long int fconv_elems = MULTIDIM_SIZE(Fconv);
 		// Iterative algorithm as in  Eq. [14] in Pipe & Menon (1999)
 		// or Eq. (4) in Matej (2001)
 		for (int iter = 0; iter < max_iter_preweight; iter++)
@@ -2025,39 +2272,64 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 			//std::cout << "    iteration " << (iter+1) << "/" << max_iter_preweight << "\n";
 			RCTIC(ReconTimer,ReconS_6);
 			// Set Fnewweight * Fweight in the transformer
-			// In Matej et al (2001), weights w_P^i are convoluted with the kernel,
-			// and the initial w_P^0 are 1 at each sampling point
-			// Here the initial weights are also 1 (see initialisation Fnewweight above),
-			// but each "sampling point" counts "Fweight" times!
-			// That is why Fnewweight is multiplied by Fweight prior to the convolution
-
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Fconv)
 			{
-				DIRECT_MULTIDIM_ELEM(Fconv, n) = DIRECT_MULTIDIM_ELEM(Fnewweight, n) * DIRECT_MULTIDIM_ELEM(Fweight, n);
+				Complex *fc_ptr = MULTIDIM_ARRAY(Fconv);
+				const double *fnw_ptr = MULTIDIM_ARRAY(Fnewweight);
+				const RFLOAT *fw_ptr = MULTIDIM_ARRAY(Fweight);
+				#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)
+				for (long int n = 0; n < fconv_elems; n++)
+					fc_ptr[n] = fnw_ptr[n] * fw_ptr[n];
 			}
 
 			// convolute through Fourier-transform (as both grids are rectangular)
-			// Note that convoluteRealSpace acts on the complex array inside the transformer
-			convoluteBlobRealSpace(transformer, false);
+			convoluteBlobRealSpace(transformer, false, Mconv_buf);
 
-			RFLOAT w, corr_min = LARGE_NUMBER, corr_max = -LARGE_NUMBER, corr_avg=0., corr_nn=0.;
-
-			FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Fconv)
+#ifdef DEBUG_RECONSTRUCT
+			RFLOAT corr_min = LARGE_NUMBER, corr_max = -LARGE_NUMBER, corr_avg=0., corr_nn=0.;
+			#pragma omp parallel for num_threads(nt) schedule(dynamic, 1) reduction(min:corr_min) reduction(max:corr_max) reduction(+:corr_avg,corr_nn) if(nt > 1)
+			for (long int k = 0; k < fzdim; k++)
 			{
-				if (kp * kp + ip * ip + jp * jp < max_r2)
+				const long int kp = (k < fxdim) ? k : k - fzdim;
+				const long int kp2 = kp * kp;
+				for (long int i = 0; i < fydim; i++)
 				{
-
-					// Make sure no division by zero can occur....
-					w = XMIPP_MAX(1e-6, abs(DIRECT_A3D_ELEM(Fconv, k, i, j)));
-					// Monitor min, max and avg conv_weight
-					corr_min = XMIPP_MIN(corr_min, w);
-					corr_max = XMIPP_MAX(corr_max, w);
-					corr_avg += w;
-					corr_nn += 1.;
-					// Apply division of Eq. [14] in Pipe & Menon (1999)
-					DIRECT_A3D_ELEM(Fnewweight, k, i, j) /= w;
+					const long int ip = (i < fxdim) ? i : i - fydim;
+					const long int kpip2 = kp2 + ip * ip;
+					for (long int j = 0; j < fxdim; j++)
+					{
+						if (kpip2 + j * j < max_r2)
+						{
+							const RFLOAT w = XMIPP_MAX(1e-6, abs(DIRECT_A3D_ELEM(Fconv, k, i, j)));
+							corr_min = XMIPP_MIN(corr_min, w);
+							corr_max = XMIPP_MAX(corr_max, w);
+							corr_avg += w;
+							corr_nn += 1.;
+							DIRECT_A3D_ELEM(Fnewweight, k, i, j) /= w;
+						}
+					}
 				}
 			}
+#else
+			#pragma omp parallel for num_threads(nt) schedule(dynamic, 1) if(nt > 1)
+			for (long int k = 0; k < fzdim; k++)
+			{
+				const long int kp = (k < fxdim) ? k : k - fzdim;
+				const long int kp2 = kp * kp;
+				for (long int i = 0; i < fydim; i++)
+				{
+					const long int ip = (i < fxdim) ? i : i - fydim;
+					const long int kpip2 = kp2 + ip * ip;
+					for (long int j = 0; j < fxdim; j++)
+					{
+						if (kpip2 + j * j < max_r2)
+						{
+							const RFLOAT w = XMIPP_MAX(1e-6, abs(DIRECT_A3D_ELEM(Fconv, k, i, j)));
+							DIRECT_A3D_ELEM(Fnewweight, k, i, j) /= w;
+						}
+					}
+				}
+			}
+#endif
 
             RCTOC(ReconTimer,ReconS_6);
 
@@ -2069,6 +2341,7 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 			std::cerr << " corr_max= " << corr_max << std::endl;
 #endif
 		}
+		Mconv_buf.clear();
 
 		RCTIC(ReconTimer,ReconS_7);
 
@@ -2093,14 +2366,18 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
 		// Apply the iteratively determined weight
 		Fconv.initZeros(); // to remove any stuff from the input volume
 		Projector::decenter(data, Fconv, max_r2);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Fconv)
 		{
+			Complex *fc_ptr = MULTIDIM_ARRAY(Fconv);
+			double *fnw_ptr = MULTIDIM_ARRAY(Fnewweight);
+			#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)
+			for (long int n = 0; n < fconv_elems; n++)
+			{
 #ifdef  RELION_SINGLE_PRECISION
-			// Prevent numerical instabilities in single-precision reconstruction with very unevenly sampled orientations
-			if (DIRECT_MULTIDIM_ELEM(Fnewweight, n) > 1e20)
-				DIRECT_MULTIDIM_ELEM(Fnewweight, n) = 1e20;
+				if (fnw_ptr[n] > 1e20)
+					fnw_ptr[n] = 1e20;
 #endif
-			DIRECT_MULTIDIM_ELEM(Fconv, n) *= DIRECT_MULTIDIM_ELEM(Fnewweight, n);
+				fc_ptr[n] *= fnw_ptr[n];
+			}
 		}
 
 		// Clear memory
@@ -2889,7 +3166,7 @@ void BackProjector::applyPointGroupSymmetry(int threads)
 #endif
 			// Loop over all points in the output (i.e. rotated, or summed) array
 
-			#pragma omp parallel for num_threads(threads)
+			#pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
 			for (long int k=STARTINGZ(sum_weight); k<=FINISHINGZ(sum_weight); k++)
 			for (long int i=STARTINGY(sum_weight); i<=FINISHINGY(sum_weight); i++)
 			for (long int j=STARTINGX(sum_weight); j<=FINISHINGX(sum_weight); j++)
@@ -3022,13 +3299,18 @@ void BackProjector::applyPointGroupSymmetry(int threads)
 
 void BackProjector::convoluteBlobRealSpace(FourierTransformer &transformer, bool do_mask)
 {
+	MultidimArray<RFLOAT> Mconv;
+	convoluteBlobRealSpace(transformer, do_mask, Mconv);
+}
+
+void BackProjector::convoluteBlobRealSpace(FourierTransformer &transformer, bool do_mask, MultidimArray<RFLOAT> &Mconv)
+{
 	if (rect)
 	{
 		convoluteBlobRealSpaceRect(transformer, do_mask);
 		return;
 	}
 
-	MultidimArray<RFLOAT> Mconv;
 	int padhdim = pad_size / 2;
 
 	// Set up right dimension of real-space array
@@ -3043,33 +3325,38 @@ void BackProjector::convoluteBlobRealSpace(FourierTransformer &transformer, bool
 	transformer.inverseFourierTransform();
 
 	// Blob normalisation in Fourier space
-	RFLOAT normftblob = tab_ftblob(0.);
+	const RFLOAT normftblob = tab_ftblob(0.);
+	const RFLOAT inv_normftblob = (RFLOAT)1.0 / normftblob;
+	const RFLOAT pad_ori = (RFLOAT)(ori_size * padding_factor);
+	const RFLOAT max_rval = (RFLOAT)1.0 / (2. * padding_factor);
+	const long int zdim = ZSIZE(Mconv), ydim = YSIZE(Mconv), xdim = XSIZE(Mconv);
+	const int nt = relionBulkThreads(MULTIDIM_SIZE(Mconv));
 
-	// TMP DEBUGGING
-	//struct blobtype blob;
-	//blob.order = 0;
-	//blob.radius = 1.9 * padding_factor;
-	//blob.alpha = 15;
+	// Multiply with FT of the blob kernel
+	#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)
+	for (long int k = 0; k < zdim; k++)
+	{
+		const int kp = (k < padhdim) ? (int)k : (int)(k - pad_size);
+		const RFLOAT kp2 = (RFLOAT)kp * kp;
+		for (long int i = 0; i < ydim; i++)
+		{
+			const int ip = (i < padhdim) ? (int)i : (int)(i - pad_size);
+			const RFLOAT kpip2 = kp2 + (RFLOAT)ip * ip;
+			RFLOAT *row = &DIRECT_A3D_ELEM(Mconv, k, i, 0);
+			for (long int j = 0; j < xdim; j++)
+			{
+				const int jp = (j < padhdim) ? (int)j : (int)(j - pad_size);
+				const RFLOAT rval = sqrt(kpip2 + (RFLOAT)jp * jp) / pad_ori;
+				if (do_mask && rval > max_rval)
+					row[j] = 0.;
+				else
+					row[j] *= tab_ftblob(rval) * inv_normftblob;
+			}
+		}
+	}
 
-    // Multiply with FT of the blob kernel
-	FOR_ALL_DIRECT_ELEMENTS_IN_ARRAY3D(Mconv)
-    {
-		int kp = (k < padhdim) ? k : k - pad_size;
-		int ip = (i < padhdim) ? i : i - pad_size;
-		int jp = (j < padhdim) ? j : j - pad_size;
-    	RFLOAT rval = sqrt ( (RFLOAT)(kp * kp + ip * ip + jp * jp) ) / (ori_size * padding_factor);
-    	//if (kp==0 && ip==0 && jp > 0)
-		//	std::cerr << " jp= " << jp << " rval= " << rval << " tab_ftblob(rval) / normftblob= " << tab_ftblob(rval) / normftblob << " ori_size/2= " << ori_size/2 << std::endl;
-    	// In the final reconstruction: mask the real-space map beyond its original size to prevent aliasing ghosts
-    	// Note that rval goes until 1/2 in the oversampled map
-    	if (do_mask && rval > 1./(2. * padding_factor))
-    		DIRECT_A3D_ELEM(Mconv, k, i, j) = 0.;
-    	else
-    		DIRECT_A3D_ELEM(Mconv, k, i, j) *= (tab_ftblob(rval) / normftblob);
-    }
-
-    // forward FFT to go back to Fourier-space
-    transformer.FourierTransform();
+	// forward FFT to go back to Fourier-space
+	transformer.FourierTransform();
 }
 
 void BackProjector::windowToOridimRealSpace(FourierTransformer &transformer, MultidimArray<RFLOAT> &Mout, bool printTimes)

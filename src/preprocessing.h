@@ -25,6 +25,11 @@
 #include  <glob.h>
 #include  <vector>
 #include  <string>
+#include  <unordered_map>
+#include  <memory>
+#include  <mutex>
+#include  <condition_variable>
+#include  <thread>
 #include  <stdlib.h>
 #include  <stdio.h>
 #include "src/image.h"
@@ -34,11 +39,124 @@
 #include "src/ctffind_runner.h"
 #include "src/helix.h"
 #include "src/resample_rotate.h"
+#include "src/virtual_movie_averages.h"
 #include <src/jaz/single_particle/obs_model.h>
 #include <src/fftw.h>
 #include <src/time.h>
 
 class AsyncMrcStack;
+
+// Single-entry background micrograph reader for sequential/MPI particle extraction.
+// Skips virtual movie average descriptors (which use vmovies::ReadAhead and FFTW) so
+// plain MRC reads overlap CPU extraction on the previous micrograph.
+class MicReadAhead
+{
+public:
+	explicit MicReadAhead(bool enabled) : enabled_(enabled)
+	{
+		if (const char *e = getenv("RELION_MIC_READAHEAD"))
+		{
+			if (!strcmp(e, "0") || !strcmp(e, "off"))
+				enabled_ = false;
+		}
+		if (enabled_)
+			worker_ = std::thread(&MicReadAhead::run, this);
+	}
+
+	~MicReadAhead()
+	{
+		{
+			std::lock_guard<std::mutex> lk(mtx_);
+			stop_ = true;
+			next_fn_.clear();
+		}
+		cv_.notify_all();
+		if (worker_.joinable())
+			worker_.join();
+	}
+
+	MicReadAhead(const MicReadAhead&) = delete;
+	MicReadAhead& operator=(const MicReadAhead&) = delete;
+
+	void request(const std::string &fn)
+	{
+		if (!enabled_ || fn.empty()) return;
+		{
+			std::lock_guard<std::mutex> lk(mtx_);
+			if (fn == ready_fn_ || fn == loading_fn_ || fn == next_fn_)
+				return;
+			next_fn_ = fn;
+		}
+		cv_.notify_one();
+	}
+
+	bool take(const std::string &fn, std::shared_ptr<Image<RFLOAT> > &out)
+	{
+		if (!enabled_ || fn.empty()) return false;
+		std::unique_lock<std::mutex> lk(mtx_);
+		if (loading_fn_ == fn)
+			done_cv_.wait(lk, [&] { return loading_fn_ != fn; });
+		if (ready_fn_ == fn && ready_img_)
+		{
+			out.swap(ready_img_);
+			ready_fn_.clear();
+			return true;
+		}
+		return false;
+	}
+
+private:
+	void run()
+	{
+		for (;;)
+		{
+			std::string fn;
+			{
+				std::unique_lock<std::mutex> lk(mtx_);
+				cv_.wait(lk, [&] { return stop_ || !next_fn_.empty(); });
+				if (stop_) return;
+				fn.swap(next_fn_);
+				loading_fn_ = fn;
+			}
+			std::shared_ptr<Image<RFLOAT> > img;
+			try
+			{
+				if (!vmovies::isVirtualMovieAverageFile(fn))
+				{
+					img.reset(new Image<RFLOAT>());
+					img->read(fn, true);
+				}
+			}
+			catch (...)
+			{
+				img.reset();
+			}
+			{
+				std::lock_guard<std::mutex> lk(mtx_);
+				loading_fn_.clear();
+				if (img)
+				{
+					ready_fn_ = fn;
+					ready_img_.swap(img);
+				}
+				else if (ready_fn_ == fn)
+				{
+					ready_fn_.clear();
+					ready_img_.reset();
+				}
+			}
+			done_cv_.notify_all();
+		}
+	}
+
+	bool enabled_ = false;
+	bool stop_ = false;
+	std::mutex mtx_;
+	std::condition_variable cv_, done_cv_;
+	std::thread worker_;
+	std::string next_fn_, loading_fn_, ready_fn_;
+	std::shared_ptr<Image<RFLOAT> > ready_img_;
+};
 
 class Preprocessing
 {
@@ -60,6 +178,20 @@ public:
 	// particles are then read from the micrographs on demand.
 	// See documentation/virtual_particles.md
 	bool do_virtual;
+
+	// Threads for parallel particle extraction per micrograph (-1 = automatic)
+	int nr_threads = -1;
+	int mpi_local_size = 1;
+
+	// Fast index over MDimg grouped by rlnMicrographName for re-extraction lookups
+	struct MicIndexGroup
+	{
+		std::string fn_mic;
+		std::vector<long> rows;
+	};
+	std::vector<MicIndexGroup> mdimg_mic_groups_;
+	long mdimg_indexed_count_ = -1;
+	MicReadAhead *active_mic_prefetch_ = NULL;
 
 	/// Radius (output pixels) of the helical tube left out of the normalisation
 	/// background. One definition for real and virtual extraction alike.
@@ -304,6 +436,14 @@ public:
 
 	// Get the coordinate metadatatable from fn_data
 	MetaDataTable getCoordinateMetaDataTable(FileName fn_mic);
+	void buildMdImgMicIndex();
+	bool hasCoordinatesForMic(const FileName &fn_mic);
+	void writeExtractedParticleMetadata(
+			MetaDataTable &MD,
+			FileName fn_mic, int imic, FileName fn_output_img_root,
+			long int image_nr, int img_dim,
+			bool MDin_has_optics_group, bool MDin_has_ctf, bool MDin_has_beamtilt, bool MDin_has_tiltgroup,
+			CTF &ctf, double box_angle);
 
 	// Move every coordinate to the whole pixel its box is cut around, and the difference into the offsets
 	void wholePixelCentres(MetaDataTable &MD);

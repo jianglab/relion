@@ -26,6 +26,7 @@
 #include <sstream>
 
 void relionReleaseRetainedGpuMemory(); // cuda_ml_optimiser.cu
+bool relionHasRetainedGpuMemory();     // cuda_ml_optimiser.cu
 
 namespace gpurec
 {
@@ -177,7 +178,9 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 		reason = "the volume is not symmetric in z or has no margin beyond the radius";
 		return false;
 	}
-	relionReleaseRetainedGpuMemory(); // the chunk kept for the next expectation step
+	const bool keep_pool = keepPoolActive();
+	if (!keep_pool)
+		relionReleaseRetainedGpuMemory(); // the chunk kept for the next expectation step
 	int ndev = 0;
 	if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0) { cudaGetLastError(); reason = "no GPU"; return false; }
 
@@ -185,57 +188,73 @@ bool helicalSymmetryFourier(const HelixFourierInput &in, RFLOAT *data, RFLOAT *w
 	const size_t plane_vox = (size_t)in.ydim * in.xdim;
 	const size_t plane_bytes = plane_vox * 3 * sizeof(RFLOAT); // data (2) + weight (1)
 	const long int nm = kmax + 1;                              // values of |z|: 0 .. kmax
-
-	size_t free_b = 0, total_b = 0;
-	cudaMemGetInfo(&free_b, &total_b);
-	const size_t reserve = (size_t)384 << 20;
-	// a group of c values of |z| has 2c + 2 input planes and 2c output planes
-	long int c = free_b > reserve ? (long int)(((free_b - reserve) / plane_bytes - 2) / 4) : 0;
-	c = std::min(c, nm);
-	// RELION_GPU_LEAN_MEMORY: do not fill the card. The groups only cut the work into pieces (the result
-	// does not depend on them), and a piece of a quarter to one GB moves the data just as fast as a piece
-	// that takes everything that is free, which would be the whole volume, twice, on a large model.
-	long int c_free = c;
-	if (gpupool::leanMemoryMode() > 0)
-	{
-		const size_t budget = std::max((size_t)256 << 20, std::min((size_t)1 << 30, (size_t)(free_b / 8)));
-		c = std::min(c, std::max(1L, (long int)(((budget / plane_bytes) - 2) / 4)));
-	}
-	// Manual override for experts and for the tests: the most values of |z| in a group
-	if (const char *ep = getenv("RELION_GPU_SYMMETRISE_PLANES"))
-		if (atoi(ep) > 0) c = std::min(c, (long int)atoi(ep));
-
 	const size_t nsc = in.shift_cos.size() * sizeof(RFLOAT);
+
 	RFLOAT *dR = nullptr, *dcos = nullptr, *dsin = nullptr, *din_d = nullptr, *din_w = nullptr, *dout_d = nullptr, *dout_w = nullptr;
 	auto cleanup = [&]() { cudaFree(dR); cudaFree(dcos); cudaFree(dsin); cudaFree(din_d); cudaFree(din_w); cudaFree(dout_d); cudaFree(dout_w);
 	                       dR = dcos = dsin = din_d = din_w = dout_d = dout_w = nullptr; };
+
+	long int c = 0;
+	long int c_free = 0;
+	size_t free_b = 0, total_b = 0;
 	cudaError_t e = cudaSuccess;
-	// back off to smaller groups when an allocation fails (another process may have taken the memory)
-	for (; c >= 1; c = c / 2)
+	auto allocBufs = [&]() -> bool
 	{
-		cleanup();
-		if ((e = cudaMalloc(&din_d, (size_t)(2 * c + 2) * plane_vox * 2 * sizeof(RFLOAT))) == cudaSuccess &&
-		    (e = cudaMalloc(&din_w, (size_t)(2 * c + 2) * plane_vox * sizeof(RFLOAT))) == cudaSuccess &&
-		    (e = cudaMalloc(&dout_d, (size_t)(2 * c) * plane_vox * 2 * sizeof(RFLOAT))) == cudaSuccess &&
-		    (e = cudaMalloc(&dout_w, (size_t)(2 * c) * plane_vox * sizeof(RFLOAT))) == cudaSuccess)
-			break;
-		cudaGetLastError();
-	}
-	if (c < 1)
+		free_b = 0; total_b = 0;
+		cudaMemGetInfo(&free_b, &total_b);
+		const size_t reserve = (size_t)384 << 20;
+		c = free_b > reserve ? (long int)(((free_b - reserve) / plane_bytes - 2) / 4) : 0;
+		c = std::min(c, nm);
+		c_free = c;
+		if (gpupool::leanMemoryMode() > 0)
+		{
+			const size_t budget = std::max((size_t)256 << 20, std::min((size_t)1 << 30, (size_t)(free_b / 8)));
+			c = std::min(c, std::max(1L, (long int)(((budget / plane_bytes) - 2) / 4)));
+		}
+		if (const char *ep = getenv("RELION_GPU_SYMMETRISE_PLANES"))
+			if (atoi(ep) > 0) c = std::min(c, (long int)atoi(ep));
+
+		e = cudaSuccess;
+		for (; c >= 1; c = c / 2)
+		{
+			cleanup();
+			if ((e = cudaMalloc(&din_d, (size_t)(2 * c + 2) * plane_vox * 2 * sizeof(RFLOAT))) == cudaSuccess &&
+			    (e = cudaMalloc(&din_w, (size_t)(2 * c + 2) * plane_vox * sizeof(RFLOAT))) == cudaSuccess &&
+			    (e = cudaMalloc(&dout_d, (size_t)(2 * c) * plane_vox * 2 * sizeof(RFLOAT))) == cudaSuccess &&
+			    (e = cudaMalloc(&dout_w, (size_t)(2 * c) * plane_vox * sizeof(RFLOAT))) == cudaSuccess)
+				break;
+			cudaGetLastError();
+		}
+		if (c < 1)
+		{
+			cleanup();
+			std::ostringstream o;
+			o << "the GPU has " << (free_b >> 20) << " MB free and a pair of z planes needs " << ((6 * plane_bytes) >> 20) << " MB";
+			reason = o.str();
+			return false;
+		}
+		if ((e = cudaMalloc(&dR, in.R.size() * sizeof(RFLOAT))) != cudaSuccess ||
+		    (in.has_rise && ((e = cudaMalloc(&dcos, nsc)) != cudaSuccess || (e = cudaMalloc(&dsin, nsc)) != cudaSuccess)))
+		{
+			cleanup();
+			reason = std::string("GPU memory: ") + cudaGetErrorString(e);
+			cudaGetLastError();
+			return false;
+		}
+		return true;
+	};
+	if (!allocBufs())
 	{
-		cleanup();
-		std::ostringstream o;
-		o << "the GPU has " << (free_b >> 20) << " MB free and a pair of z planes needs " << ((6 * plane_bytes) >> 20) << " MB";
-		reason = o.str();
-		return false;
-	}
-	if ((e = cudaMalloc(&dR, in.R.size() * sizeof(RFLOAT))) != cudaSuccess ||
-	    (in.has_rise && ((e = cudaMalloc(&dcos, nsc)) != cudaSuccess || (e = cudaMalloc(&dsin, nsc)) != cudaSuccess)))
-	{
-		cleanup();
-		reason = std::string("GPU memory: ") + cudaGetErrorString(e);
-		cudaGetLastError();
-		return false;
+		if (keep_pool && relionHasRetainedGpuMemory())
+		{
+			cudaGetLastError();
+			relionReleaseRetainedGpuMemory();
+			reason.clear();
+			if (!allocBufs())
+				return false;
+		}
+		else
+			return false;
 	}
 	gpuMemTrace("helical symmetrisation in Fourier space: planes in the card", (double) ((size_t)(8 * c + 2) * plane_vox * 3 * sizeof(RFLOAT) / 2));
 	cudaMemcpy(dR, in.R.data(), in.R.size() * sizeof(RFLOAT), cudaMemcpyHostToDevice);

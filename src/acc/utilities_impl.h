@@ -379,6 +379,55 @@ static void TranslateAndNormCorrect(MultidimArray<RFLOAT > &img_in,
 		RFLOAT zOff,
 		bool DATA3D)
 {
+#ifdef _CUDA_ENABLED
+	const int dx = (int) xOff;
+	const int dy = (int) yOff;
+	const int dz = DATA3D ? (int) zOff : 0;
+	const size_t n = img_in.nzyxdim;
+	const bool do_norm = (normcorr != (XFLOAT) 1);
+	if (dx == 0 && dy == 0 && dz == 0)
+	{
+		if (!do_norm && sizeof(RFLOAT) == sizeof(XFLOAT))
+		{
+			CudaShortcuts::cpyHostToDevice<XFLOAT>(
+				(XFLOAT *) img_in.data, ~img_out, n, img_out.getStream());
+			return;
+		}
+		AccPtr<XFLOAT> tmp = img_out.make<XFLOAT>(n);
+		tmp.hostAlloc();
+		if (do_norm)
+		{
+			for (size_t i = 0; i < n; i++)
+				tmp[i] = ((XFLOAT) img_in.data[i]) * normcorr;
+		}
+		else
+		{
+			for (size_t i = 0; i < n; i++)
+				tmp[i] = (XFLOAT) img_in.data[i];
+		}
+		CudaShortcuts::cpyHostToDevice<XFLOAT>(&tmp[0], ~img_out, n, img_out.getStream());
+		return;
+	}
+
+	AccPtr<XFLOAT> temp = img_out.make<XFLOAT>(n);
+	temp.allAlloc();
+	for (size_t i = 0; i < n; i++)
+		temp[i] = (XFLOAT) img_in.data[i];
+	temp.cpToDevice();
+
+	if (temp.getAccPtr() == img_out.getAccPtr())
+		CRITICAL(ERRUNSAFEOBJECTREUSE);
+
+	int BSZ = (int) ceilf((float) n / (float) BLOCK_SIZE);
+	if (DATA3D)
+		CudaKernels::cuda_kernel_translateNorm3D<XFLOAT><<<BSZ, BLOCK_SIZE, 0, temp.getStream()>>>(
+			temp(), img_out(), (int) img_in.zyxdim, img_in.xdim, img_in.ydim, img_in.zdim,
+			dx, dy, dz, normcorr, do_norm);
+	else
+		CudaKernels::cuda_kernel_translateNorm2D<XFLOAT><<<BSZ, BLOCK_SIZE, 0, temp.getStream()>>>(
+			temp(), img_out(), (int) img_in.zyxdim, img_in.xdim, img_in.ydim,
+			dx, dy, normcorr, do_norm);
+#else
 	//Temporary array because translate is out-of-place
 	AccPtr<XFLOAT> temp = img_out.make<XFLOAT>(img_in.nzyxdim);
 	temp.allAlloc();
@@ -387,19 +436,12 @@ static void TranslateAndNormCorrect(MultidimArray<RFLOAT > &img_in,
 		temp[i] = (XFLOAT) img_in.data[i];
 
 	temp.cpToDevice();
-#ifndef _CUDA_ENABLED
 	temp.streamSync();
-#endif
-	// (CUDA: the kernels below follow the copy on temp's stream, and a copy from pageable
-	// host memory has taken the data when it returns, so no wait is needed)
 
 	// Apply the norm_correction term
 	if (normcorr!=1)
 	{
-#ifdef _CUDA_ENABLED
-		int BSZ = ( (int) ceilf(( float)temp.getSize() /(float)BLOCK_SIZE));
-		CudaKernels::cuda_kernel_multi<XFLOAT><<<BSZ,BLOCK_SIZE,0,temp.getStream()>>>(temp(),normcorr,temp.getSize());
-#elif _HIP_ENABLED
+#ifdef _HIP_ENABLED
 		int BSZ = ( (int) ceilf(( float)temp.getSize() /(float)BLOCK_SIZE));
 		hipLaunchKernelGGL(HIP_KERNEL_NAME(HipKernels::hip_kernel_multi<XFLOAT>), dim3(BSZ), dim3(BLOCK_SIZE), 0, temp.getStream(), temp(), normcorr, temp.getSize());
 #elif _SYCL_ENABLED
@@ -412,14 +454,7 @@ static void TranslateAndNormCorrect(MultidimArray<RFLOAT > &img_in,
 
 	if(temp.getAccPtr()==img_out.getAccPtr())
 		CRITICAL(ERRUNSAFEOBJECTREUSE);
-#ifdef _CUDA_ENABLED
-	int BSZ = ( (int) ceilf(( float)temp.getSize() /(float)BLOCK_SIZE));
-	if (DATA3D)
-		CudaKernels::cuda_kernel_translate3D<XFLOAT><<<BSZ,BLOCK_SIZE,0,temp.getStream()>>>(temp(),img_out(),img_in.zyxdim,img_in.xdim,img_in.ydim,img_in.zdim,xOff,yOff,zOff);
-	else
-		CudaKernels::cuda_kernel_translate2D<XFLOAT><<<BSZ,BLOCK_SIZE,0,temp.getStream()>>>(temp(),img_out(),img_in.zyxdim,img_in.xdim,img_in.ydim,xOff,yOff);
-	//LAUNCH_PRIVATE_ERROR(cudaGetLastError(),accMLO->errorStatus);
-#elif _HIP_ENABLED
+#ifdef _HIP_ENABLED
 	int BSZ = ( (int) ceilf(( float)temp.getSize() /(float)BLOCK_SIZE));
 	if (DATA3D)
 		hipLaunchKernelGGL(HIP_KERNEL_NAME(HipKernels::hip_kernel_translate3D<XFLOAT>), dim3(BSZ), dim3(BLOCK_SIZE), 0, temp.getStream(), temp(), img_out(), img_in.zyxdim, img_in.xdim, img_in.ydim, img_in.zdim, xOff, yOff, zOff);
@@ -437,6 +472,40 @@ static void TranslateAndNormCorrect(MultidimArray<RFLOAT > &img_in,
 	else
 		CpuKernels::cpu_translate2D<XFLOAT>(temp(),img_out(),img_in.zyxdim,img_in.xdim,img_in.ydim,xOff,yOff);
 #endif
+#endif
+}
+
+template <class MlClass>
+void normalizeAndTransformImageOnDevice(
+		AccPtr<XFLOAT> &img_in,
+		AccPtr<ACCCOMPLEX> &d_Fimg_out,
+		MlClass *accMLO,
+		size_t xSize,
+		size_t ySize,
+		size_t zSize)
+{
+	img_in.cpOnAcc(accMLO->transformer1.reals);
+	runCenterFFT(
+			accMLO->transformer1.reals,
+			(int)accMLO->transformer1.xSize,
+			(int)accMLO->transformer1.ySize,
+			(int)accMLO->transformer1.zSize,
+			false
+			);
+	accMLO->transformer1.forward();
+
+	size_t FMultiBsize = ( (int) ceilf(( float)accMLO->transformer1.fouriers.getSize()*2/(float)BLOCK_SIZE));
+	AccUtilities::multiply<XFLOAT>(FMultiBsize, BLOCK_SIZE, accMLO->transformer1.fouriers.getStream(),
+					(XFLOAT*)~accMLO->transformer1.fouriers,
+					(XFLOAT)1/((XFLOAT)(accMLO->transformer1.reals.getSize())),
+					accMLO->transformer1.fouriers.getSize()*2);
+
+	windowFourierTransform2(
+			accMLO->transformer1.fouriers,
+			d_Fimg_out,
+			accMLO->transformer1.xFSize, accMLO->transformer1.yFSize, accMLO->transformer1.zFSize,
+			xSize, ySize, zSize
+			);
 }
 template <class MlClass>
 void normalizeAndTransformImage(	AccPtr<XFLOAT> &img_in,

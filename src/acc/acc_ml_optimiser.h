@@ -152,6 +152,8 @@ public:
 	// The fine pass left its minimum difference to be made on the device (RELION_GPU_ASYNC_FINE);
 	// min_diff2 is only valid once the weight conversion has resolved it
 	bool min_diff2_deferred = false;
+	bool coarse_min_diff2_deferred = false;
+	void *coarse_min_diff2_ptr = NULL;
 	MultidimArray<bool> Mcoarse_significant;
 	// And from storeWeightedSums
 	RFLOAT sum_weight, significant_weight, max_weight;

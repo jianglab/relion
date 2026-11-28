@@ -30,6 +30,7 @@
 static inline int omp_get_max_threads() { return 1; }
 #endif
 #include "src/fftw_rect.h"
+#include "src/fftw.h"
 
 #define MOM2_INIT_CONSTANT 1
 
@@ -595,10 +596,41 @@ void MlModel::write(FileName fn_out, HealpixSampling &sampling, bool do_write_bi
 		// Set correct voxel size in the header
 		for (int iclass = 0; iclass < nr_classes_bodies; iclass++)
 		{
-			std::shared_ptr<Image<RFLOAT> > pimg = std::make_shared<Image<RFLOAT> >();
-			Image<RFLOAT> &img = *pimg;
-			img() = Iref[iclass];
-			img.setSamplingRateInHeader(pixel_size);
+			const MultidimArray<RFLOAT> &src = Iref[iclass];
+			const long int nvox = MULTIDIM_SIZE(src);
+			std::shared_ptr<Image<float> > pimg = std::make_shared<Image<float> >();
+			pimg->data.resizeNoCp(1, ZSIZE(src), YSIZE(src), XSIZE(src));
+			if (nvox > 0)
+			{
+				const RFLOAT * __restrict__ sptr = MULTIDIM_ARRAY(src);
+				float * __restrict__ dptr = MULTIDIM_ARRAY(pimg->data);
+				double sum = 0., sum2 = 0.;
+				double dmin = (double)sptr[0], dmax = (double)sptr[0];
+				const int nt = relionBulkThreads((size_t)nvox);
+				#pragma omp parallel for reduction(+:sum,sum2) reduction(min:dmin) reduction(max:dmax) schedule(static) num_threads(nt) if(nt > 1)
+				for (long int n = 0; n < nvox; n++)
+				{
+					const double val = static_cast<double>(sptr[n]);
+					dptr[n] = static_cast<float>(val);
+					sum += val;
+					sum2 += val * val;
+					if (val < dmin) dmin = val;
+					if (val > dmax) dmax = val;
+				}
+				const double avg = sum / (double)nvox;
+				double stddev = 0.;
+				if (nvox > 1)
+				{
+					stddev = sum2 / (double)nvox - avg * avg;
+					stddev *= (double)(nvox / (nvox - 1));
+					stddev = sqrt(fabs(stddev));
+				}
+				pimg->MDMainHeader.setValue(EMDL_IMAGE_STATS_AVG, (RFLOAT)avg);
+				pimg->MDMainHeader.setValue(EMDL_IMAGE_STATS_STDDEV, (RFLOAT)stddev);
+				pimg->MDMainHeader.setValue(EMDL_IMAGE_STATS_MIN, (RFLOAT)dmin);
+				pimg->MDMainHeader.setValue(EMDL_IMAGE_STATS_MAX, (RFLOAT)dmax);
+			}
+			pimg->setSamplingRateInHeader(pixel_size);
 			if (nr_bodies > 1)
 			{
 				fn_tmp.compose(fn_out+"_body", iclass+1, "mrc", 3);
@@ -1868,26 +1900,29 @@ void MlModel::setFourierTransformMaps(bool update_tau2_spectra, int nr_threads, 
 		#pragma omp parallel for num_threads(nr_threads) schedule(dynamic)
 		for (int iclass = 0; iclass < (int) PPref.size(); iclass++)
 		{
-			MultidimArray<RFLOAT> Irefp = Iref[iclass];
 			PPref[iclass].interpolator = projector_interpolator;
 			if (update_tau2_spectra && iclass < nr_classes * nr_bodies)
-				PPref[iclass].computeFourierTransformMap(Irefp, tau2_class[iclass], current_size, 1, true, true, min_ires, fourier_mask, do_gpu);
+				PPref[iclass].computeFourierTransformMap(Iref[iclass], tau2_class[iclass], current_size, 1, true, true, min_ires, fourier_mask, do_gpu);
 			else
 			{
 				MultidimArray<RFLOAT> dummy;
-				PPref[iclass].computeFourierTransformMap(Irefp, dummy, current_size, 1, true, true, min_ires, fourier_mask, do_gpu);
+				PPref[iclass].computeFourierTransformMap(Iref[iclass], dummy, current_size, 1, true, true, min_ires, fourier_mask, do_gpu);
 			}
 		}
 		relionFftwPlanThreads(nr_threads);
 		return;
 	}
 
+	// Keep the GPU scratch allocator, cuFFT plan, and device semaphore across classes
+	// so multi-class 3D setup does not allocate/destroy GB-scale scratch buffers per class.
+	Projector::ScopedGpuTransformCache gpu_ft_cache(do_gpu && ref_dim == 3 && PPref.size() > 1);
+
 	// Note that PPref.size() can be bigger than nr_bodies in multi-body refinement, due to extra PPrefs needed for overlapping bodies
 	// These only exist in PPref form, they are not needed for reconstructions, only for subtractions in getFourierTransformsAndCtfs
 	for (int iclass = 0; iclass < PPref.size(); iclass++)
 	{
-
-		MultidimArray<RFLOAT> Irefp = projectorMap(iclass);
+		MultidimArray<RFLOAT> Irefp_storage;
+		MultidimArray<RFLOAT> &Irefp = (nr_bodies == 1) ? Iref[iclass] : (Irefp_storage = projectorMap(iclass));
 
 		if(PPrefRank.size() > 1)
 			do_heavy = PPrefRank[iclass];

@@ -343,6 +343,19 @@ public:
                                         int current_size = -1, int nr_threads = 1, bool do_gridding = true, bool do_heavy = true,
 	                                int min_ires = -1, const MultidimArray<RFLOAT> *fourier_mask = NULL, bool do_gpu = false);
 
+	/* RAII scope caching the GPU semaphore lock, scratch allocator, and cuFFT plan
+	 * across consecutive computeFourierTransformMap(..., do_gpu = true) calls on the same thread. */
+	class ScopedGpuTransformCache
+	{
+	public:
+		explicit ScopedGpuTransformCache(bool enable = true);
+		~ScopedGpuTransformCache();
+		ScopedGpuTransformCache(const ScopedGpuTransformCache &) = delete;
+		ScopedGpuTransformCache &operator=(const ScopedGpuTransformCache &) = delete;
+	private:
+		bool active_;
+	};
+
 	/* Because we interpolate in Fourier space to make projections and/or reconstructions, we have to correct
 	 * the real-space maps by dividing them by the Fourier Transform of the interpolator
 	 * Note these corrections are made on the not-oversampled, i.e. originally sized real-space map

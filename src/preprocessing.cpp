@@ -24,6 +24,14 @@
 #include "src/fftw_rect.h"
 #include "src/virtual_particles.h"
 #include "src/virtual_movie_averages.h"
+#include "src/resource_report.h"
+#include <algorithm>
+#include <exception>
+#include <sstream>
+#include <unordered_map>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // Move the in-plane metadata of the current particle of MD (psi, its prior, the defocus angle and the
 // origin offsets) into the frame of a box turned by box_angle; minus the angle the box was turned by
@@ -107,6 +115,7 @@ void Preprocessing::read(int argc, char **argv, int rank)
 	fn_part_star = parser.getOption("--part_star", "Output STAR file with all particles metadata", "");
 	fn_pick_star = parser.getOption("--pick_star", "Output STAR file with 2 columns for micrographs and coordinate files", "");
 	fn_data = parser.getOption("--reextract_data_star", "A _data.star file from a refinement to re-extract, e.g. with different binning or re-centered (instead of --coord_suffix)", "");
+	nr_threads = textToInteger(parser.getOption("--j", "Number of threads to extract particles per micrograph in parallel (-1 = automatic)", "-1"));
 	write_float16  = parser.checkOption("--float16", "Write in half-precision 16 bit floating point numbers (MRC mode 12), instead of 32 bit (MRC mode 0).");
 	{
 		// Opt-in; RELION_VIRTUAL_PARTICLES makes it the default, --no_virtual overrides that
@@ -280,6 +289,7 @@ void Preprocessing::initialise()
 				std::cout << " + " << fn_data << std::endl;
 			}
 			ObservationModel::loadSafely(fn_data, obsModelPart, MDimg, "particles", verb);
+			buildMdImgMicIndex();
 			data_star_has_ctf = MDimg.containsLabel(EMDL_CTF_DEFOCUSU);
 
 			// Re-extraction cuts the boxes from the micrographs along the psi priors: check that these follow the tubes.
@@ -739,6 +749,13 @@ void Preprocessing::runExtractParticles()
 	// (not for virtual particles, which need no pixels now)
 	vmovies::ReadAhead read_ahead(do_virtual ? 0 : -1);
 	read_ahead.expectMicrographs(MDmics.numberOfObjects());
+	MicReadAhead mic_ahead(!do_virtual);
+	struct MicPrefetchScope
+	{
+		Preprocessing *p;
+		MicPrefetchScope(Preprocessing *p, MicReadAhead *m) : p(p) { p->active_mic_prefetch_ = m; }
+		~MicPrefetchScope() { p->active_mic_prefetch_ = NULL; }
+	} mic_prefetch_scope(this, &mic_ahead);
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDmics)
 	{
 		// Abort through the pipeline_control system
@@ -759,6 +776,25 @@ void Preprocessing::runExtractParticles()
 				next.push_back(fn_next);
 			}
 			read_ahead.upcoming(next);
+		}
+		if (!do_virtual)
+		{
+			for (long int k = imic + 1; k < MDmics.numberOfObjects(); k++)
+			{
+				FileName fn_next;
+				MDmics.getValue(EMDL_MICROGRAPH_NAME, fn_next, k);
+				if (only_extract_unfinished && exists(getOutputFileNameRoot(fn_next) + "_extract.star"))
+					continue;
+				if (fn_data == "")
+				{
+					if (!exists(micname2coordname[fn_next]))
+						continue;
+				}
+				else if (!hasCoordinatesForMic(fn_next))
+					continue;
+				mic_ahead.request(fn_next);
+				break;
+			}
 		}
 		int optics_group = obsModelMic.getOpticsGroup(MDmics);
 
@@ -1220,7 +1256,18 @@ bool Preprocessing::extractParticlesFromFieldOfView(FileName fn_mic, long int im
 		TIMING_TOC(TIMING_EXTCT_FROM_FRAME);
 
 		MDout.setName("images");
-		MDout.write(fn_star);
+		if (AsyncFileWriter::enabled())
+		{
+			std::shared_ptr<std::string> text(new std::string());
+			std::ostringstream oss;
+			MDout.write(oss);
+			*text = oss.str();
+			AsyncFileWriter::putText(fn_star, [text]() { return text; }, true);
+		}
+		else
+		{
+			MDout.write(fn_star);
+		}
 		return(true);
 	}
 	else
@@ -1259,13 +1306,86 @@ void Preprocessing::wholePixelCentres(MetaDataTable &MD)
 	}
 }
 
+void Preprocessing::writeExtractedParticleMetadata(
+		MetaDataTable &MD,
+		FileName fn_mic, int imic, FileName fn_output_img_root,
+		long int image_nr, int img_dim,
+		bool MDin_has_optics_group, bool MDin_has_ctf, bool MDin_has_beamtilt, bool MDin_has_tiltgroup,
+		CTF &ctf, double box_angle)
+{
+	FileName fn_img;
+	if (img_dim == 3)
+		fn_img.compose(fn_output_img_root, image_nr + 1, "mrc");
+	else
+		fn_img.compose(image_nr + 1, fn_output_img_root + (do_virtual ? ".vstack" : ".mrcs")); // start image counting in stacks at 1!
+	MD.setValue(EMDL_IMAGE_NAME, fn_img);
+	MD.setValue(EMDL_MICROGRAPH_NAME, fn_mic);
+
+	if (!MDin_has_optics_group)
+	{
+		int og;
+		MDmics.getValue(EMDL_IMAGE_OPTICS_GROUP, og, imic);
+		MD.setValue(EMDL_IMAGE_OPTICS_GROUP, og);
+	}
+
+	if (mic_star_has_ctf)
+	{
+		if (!MDin_has_ctf || keep_ctf_from_micrographs)
+		{
+			RFLOAT maxres, fom;
+			if (MDmics.containsLabel(EMDL_CTF_MAXRES))
+			{
+				MDmics.getValue(EMDL_CTF_MAXRES, maxres, imic);
+				MD.setValue(EMDL_CTF_MAXRES, maxres);
+			}
+			if (MDmics.containsLabel(EMDL_CTF_FOM))
+			{
+				MDmics.getValue(EMDL_CTF_FOM, fom, imic);
+				MD.setValue(EMDL_CTF_FOM, fom);
+			}
+
+			ctf.write(MD);
+		}
+
+		if (!MDin_has_beamtilt || keep_ctf_from_micrographs)
+		{
+			RFLOAT tilt_x, tilt_y;
+			if (MDmics.containsLabel(EMDL_IMAGE_BEAMTILT_X))
+			{
+				MDmics.getValue(EMDL_IMAGE_BEAMTILT_X, tilt_x, imic);
+				MD.setValue(EMDL_IMAGE_BEAMTILT_X, tilt_x);
+			}
+			if (MDmics.containsLabel(EMDL_IMAGE_BEAMTILT_Y))
+			{
+				MDmics.getValue(EMDL_IMAGE_BEAMTILT_Y, tilt_y, imic);
+				MD.setValue(EMDL_IMAGE_BEAMTILT_Y, tilt_y);
+			}
+		}
+
+		if (!MDin_has_tiltgroup && MDmics.containsLabel(EMDL_PARTICLE_BEAM_TILT_CLASS))
+		{
+			int tilt_class;
+			MDmics.getValue(EMDL_PARTICLE_BEAM_TILT_CLASS, tilt_class, imic);
+			MD.setValue(EMDL_PARTICLE_BEAM_TILT_CLASS, tilt_class);
+		}
+	}
+
+	if (do_rotate_to_horizontal)
+	{
+		MD.setValue(EMDL_PARTICLE_EXTRACTION_ANGLE, box_angle);
+		turnInPlaneMetadata(MD, box_angle);
+		MD.setValue(EMDL_ORIENT_PSI_PRIOR, (RFLOAT)0.);
+	}
+}
+
 // Actually extract particles. This can be from one micrograph
 void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		FileName fn_mic, int imic,
 		FileName fn_output_img_root, FileName fn_oristack, long int &my_current_nr_images, long int my_total_nr_images,
 		RFLOAT &all_avg, RFLOAT &all_stddev, RFLOAT &all_minval, RFLOAT &all_maxval)
 {
-	Image<RFLOAT> Ipart, Imic, Itmp;
+	Image<RFLOAT> Imic_local;
+	std::shared_ptr<Image<RFLOAT> > Imic_prefetched;
 
 	bool MDin_has_optics_group = MD.containsLabel(EMDL_IMAGE_OPTICS_GROUP); // i.e. re-extracting
 	bool MDin_has_beamtilt = (MD.containsLabel(EMDL_IMAGE_BEAMTILT_X) || MD.containsLabel(EMDL_IMAGE_BEAMTILT_Y));
@@ -1283,10 +1403,10 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 	TIMING_TIC(TIMING_READ_IMG);
 
 	// Virtual particles need only the micrograph's dimensions, not its pixels
-	Imic.read(fn_mic, !do_virtual);
-
-	// Calculate average value in the micrograph, for filling empty region around large-box extraction for premultiplication with CTF
-	RFLOAT mic_avg = do_virtual ? 0. : Imic().computeAvg();
+	const bool got_prefetched = (!do_virtual && active_mic_prefetch_ != NULL && active_mic_prefetch_->take(fn_mic, Imic_prefetched));
+	if (!got_prefetched)
+		Imic_local.read(fn_mic, !do_virtual);
+	Image<RFLOAT> &Imic = got_prefetched ? *Imic_prefetched : Imic_local;
 
 	TIMING_TOC(TIMING_READ_IMG);
 
@@ -1302,15 +1422,11 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		obsModelMic.opticsMdt.getValue(EMDL_MICROGRAPH_PIXEL_SIZE, my_angpix, optics_group);
 	}
 
-	// Now window all particles from the micrograph
-	// Now do the actual phase flipping or CTF-multiplication
-	MultidimArray<Complex> FT;
-	FourierTransformer transformer;
-	int ipos = 0;
-	std::vector<std::pair<long, long> > virtual_centres;
-	std::vector<double> virtual_psi;   // helical segments only: orients the tube mask
-	std::vector<double> virtual_cx, virtual_cy, virtual_angle;   // turned boxes only
-	std::vector<vparticles::ParticleCtf> virtual_ctf;   // CTF-premultiplied only
+	const long int npos = MD.numberOfObjects();
+	const bool need_ctf_mul = (do_phase_flip || do_premultiply_ctf);
+	const bool shared_mic_ctf = (!MDin_has_ctf || keep_ctf_from_micrographs);
+	const RFLOAT helical_bg_radius = do_extract_helix ? helicalBackgroundRadius() : 0.;
+
 	// The particles of this micrograph go to its stack through the background writer (the stack is complete, or absent, under its name)
 	std::unique_ptr<AsyncMrcStack> stack;
 	if (!do_virtual)
@@ -1321,6 +1437,364 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		StackScope(Preprocessing *p, AsyncMrcStack *s) : p(p) { p->stack_out = s; }
 		~StackScope() { p->stack_out = NULL; }
 	} stack_scope(this, stack.get());
+
+	const bool can_parallel_2d = (!do_virtual && dimensionality == 2 &&
+	                              white_dust_stddev <= 0. && black_dust_stddev <= 0. &&
+	                              npos >= 4 &&
+	                              !(do_rotate_to_horizontal && interpolation_name == "nufft"));
+
+	if (can_parallel_2d)
+	{
+		struct PartTask
+		{
+			CTF ctf;
+			int optics_group = 0;
+			RFLOAT my_angpix = 0.;
+			int my_extract_size = 0;
+			int box_x = 0, box_y = 0;
+			RFLOAT dxpos = 0., dypos = 0.;
+			long int xpos = 0, ypos = 0, x0 = 0, xF = 0, y0 = 0, yF = 0;
+			double box_angle = 0.;
+			RFLOAT tilt_deg = 0., psi_deg = 0.;
+			Image<RFLOAT> Ipart;
+			RFLOAT avg = 0., stddev = 0., minval = 0., maxval = 0.;
+		};
+		std::vector<PartTask> tasks(npos);
+		std::unordered_map<int, MultidimArray<RFLOAT> > shared_fctf;
+		bool any_oob = false;
+		const long int mic_x = XSIZE(Imic()), mic_y = YSIZE(Imic()), mic_n = NSIZE(Imic()), mic_z = ZSIZE(Imic());
+
+		int ipos = 0;
+		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
+		{
+			PartTask &t = tasks[ipos];
+			if (MDin_has_ctf && !keep_ctf_from_micrographs)
+			{
+				ctf.readByGroup(MD, &obsModelPart);
+				optics_group = obsModelPart.getOpticsGroup(MD);
+				if (!obsModelPart.hasBoxSizes || obsModelPart.isRectBox(optics_group) || obsModelPart.getNominalBoxSize(optics_group) != my_extract_size)
+					obsModelPart.setBoxSize(optics_group, my_extract_size);
+				obsModelPart.opticsMdt.getValue(EMDL_MICROGRAPH_PIXEL_SIZE, my_angpix, optics_group);
+			}
+			t.ctf = ctf;
+			t.optics_group = optics_group;
+			t.my_angpix = my_angpix;
+
+			if (premultiply_auto && need_ctf_mul)
+			{
+				my_extract_size = vparticles::autoPremultiplySize(vparticles::ParticleCtf{ctf.DeltafU, ctf.DeltafV, ctf.azimuthal_angle,
+				                  ctf.kV, ctf.Cs, ctf.Q0, ctf.Bfac, ctf.scale, ctf.phase_shift}, my_angpix, extract_size, do_rescale ? scale : extract_size);
+				premultiply_size_min = std::min(premultiply_size_min, my_extract_size);
+				premultiply_size_max = std::max(premultiply_size_max, my_extract_size);
+			}
+			t.my_extract_size = my_extract_size;
+			t.box_x = do_rect ? extract_size_x : my_extract_size;
+			t.box_y = do_rect ? extract_size_y : my_extract_size;
+
+			if (need_ctf_mul && shared_mic_ctf)
+				shared_fctf.emplace(t.my_extract_size, MultidimArray<RFLOAT>());
+
+			MD.getValue(EMDL_IMAGE_COORD_X, t.dxpos);
+			MD.getValue(EMDL_IMAGE_COORD_Y, t.dypos);
+			t.xpos = (long int)std::floor(t.dxpos + 0.5);
+			t.ypos = (long int)std::floor(t.dypos + 0.5);
+			t.x0 = t.xpos + FIRST_XMIPP_INDEX(t.box_x);
+			t.xF = t.xpos + LAST_XMIPP_INDEX(t.box_x);
+			t.y0 = t.ypos + FIRST_XMIPP_INDEX(t.box_y);
+			t.yF = t.ypos + LAST_XMIPP_INDEX(t.box_y);
+
+			if (!do_recenter && (t.yF < 0 || t.y0 >= mic_y || t.xF < 0 || t.x0 >= mic_x))
+			{
+				std::cerr << " micrograph x,y,z,n-size= " << mic_x << " , " << mic_y << " , " << mic_z << " , " << mic_n << std::endl;
+				std::cerr << " particle position= " << t.xpos << " , " << t.ypos << std::endl;
+				REPORT_ERROR("Preprocessing::extractParticlesFromOneFrame ERROR: particle" + integerToString(ipos+1) + " lies completely outside micrograph " + fn_mic);
+			}
+
+			if (!geom && (t.x0 < 0 || t.xF >= mic_x || t.y0 < 0 || t.yF >= mic_y))
+				any_oob = true;
+
+			if (do_rotate_to_horizontal)
+			{
+				RFLOAT psi_prior = 0.;
+				MD.getValue(EMDL_ORIENT_PSI_PRIOR, psi_prior);
+				t.box_angle = -(double)psi_prior;
+			}
+			if (do_extract_helix)
+			{
+				MD.getValue(EMDL_ORIENT_TILT_PRIOR, t.tilt_deg);
+				MD.getValue(EMDL_ORIENT_PSI_PRIOR, t.psi_deg);
+				if (do_rotate_to_horizontal)
+					t.psi_deg = 0.;
+			}
+			ipos++;
+		}
+
+		// Calculate average value in the micrograph only when a 2D non-geom box extends outside
+		const RFLOAT mic_avg = (!geom && any_oob) ? Imic().computeAvg() : 0.;
+
+		if (need_ctf_mul && shared_mic_ctf)
+		{
+			std::vector<int> fctf_sizes;
+			fctf_sizes.reserve(shared_fctf.size());
+			for (auto &kv : shared_fctf) fctf_sizes.push_back(kv.first);
+			for (size_t k = 0; k < fctf_sizes.size(); k++)
+			{
+				const int sz = fctf_sizes[k];
+				MultidimArray<RFLOAT> &Fctf = shared_fctf[sz];
+				Fctf.resize(sz, sz / 2 + 1);
+				ctf.getFftwImage(Fctf, sz, sz, my_angpix, false, do_phase_flip, do_ctf_intact_first_peak, true, false);
+			}
+		}
+
+		int nthreads = nr_threads;
+		if (nthreads <= 0)
+		{
+			if (const char *omp_env = getenv("OMP_NUM_THREADS"))
+			{
+				if (atoi(omp_env) > 0) nthreads = atoi(omp_env);
+			}
+			if (nthreads <= 0)
+			{
+				const int n_cores = std::max<int>(1, (int)resrep::allowedCores().size());
+				nthreads = std::min(16, std::max(1, n_cores / std::max(1, mpi_local_size)));
+			}
+		}
+		nthreads = std::max(1, std::min<int>(nthreads, (int)npos));
+#ifdef _OPENMP
+		if (omp_in_parallel()) nthreads = 1;
+#endif
+		if (nthreads > 1)
+			relionFftwInitThreads();
+
+		const MultidimArray<RFLOAT> &mic = Imic();
+		const bool mic_zero_origin = (STARTINGX(mic) == 0 && STARTINGY(mic) == 0);
+		const auto resample_method = do_rotate_to_horizontal ? parseResampleMethod(interpolation_name) : parseResampleMethod("linear");
+		const int rect_rescaled_h = (do_rescale && do_rect) ? extractrect::rescaledHeight(extract_size_x, extract_size_y, scale) : 0;
+		std::exception_ptr first_err;
+
+		auto updateRescaleHeader = [](Image<RFLOAT> &img, int olddim, int mysize)
+		{
+			RFLOAT oldscale;
+			if (img.MDMainHeader.getValue(EMDL_IMAGE_SAMPLINGRATE_X, oldscale))
+				img.MDMainHeader.setValue(EMDL_IMAGE_SAMPLINGRATE_X, oldscale * (RFLOAT)olddim / (RFLOAT)mysize);
+			if (img.MDMainHeader.getValue(EMDL_IMAGE_SAMPLINGRATE_Y, oldscale))
+				img.MDMainHeader.setValue(EMDL_IMAGE_SAMPLINGRATE_Y, oldscale * (RFLOAT)olddim / (RFLOAT)mysize);
+			if (img().getDim() == 3 && img.MDMainHeader.getValue(EMDL_IMAGE_SAMPLINGRATE_Z, oldscale))
+				img.MDMainHeader.setValue(EMDL_IMAGE_SAMPLINGRATE_Z, oldscale * (RFLOAT)olddim / (RFLOAT)mysize);
+		};
+
+		auto processOne = [&](long int idx,
+		                      FourierTransformer &tf_ctf, FourierTransformer &tf_fwd, FourierTransformer &tf_inv,
+		                      MultidimArray<Complex> &FT, MultidimArray<Complex> &FT2,
+		                      bool &local_ctf_valid, int &cached_sz, RFLOAT &cached_angpix, CTF &cached_ctf, MultidimArray<RFLOAT> &local_fctf)
+		{
+			PartTask &t = tasks[idx];
+			Image<RFLOAT> &Ipart = t.Ipart;
+			if (geom)
+			{
+				auto at = [&mic](long y, long x) { return DIRECT_A2D_ELEM(mic, y, x); };
+				if (do_rotate_to_horizontal)
+					extractrect::cutRotatedBox(at, mic_x, mic_y, (double)t.dxpos, (double)t.dypos,
+					                           t.box_x, t.box_y, t.box_angle, resample_method, Ipart());
+				else
+					extractrect::cutBox(at, mic_x, mic_y, t.xpos, t.ypos, t.box_x, t.box_y, Ipart());
+			}
+			else if (mic_zero_origin && t.x0 >= 0 && t.xF < mic_x && t.y0 >= 0 && t.yF < mic_y)
+			{
+				Ipart().resizeNoCp(1, 1, t.box_y, t.box_x);
+				for (long iy = 0; iy < t.box_y; iy++)
+					memcpy(&DIRECT_A2D_ELEM(Ipart(), iy, 0), &DIRECT_A2D_ELEM(mic, t.y0 + iy, t.x0), (size_t)t.box_x * sizeof(RFLOAT));
+			}
+			else
+			{
+				Imic().window(Ipart(), t.y0, t.x0, t.yF, t.xF, mic_avg);
+			}
+			Ipart().setXmippOrigin();
+
+			if (need_ctf_mul)
+			{
+				tf_ctf.FourierTransform(Ipart(), FT, false);
+				const MultidimArray<RFLOAT> *Fctf_ptr = nullptr;
+				if (shared_mic_ctf)
+				{
+					Fctf_ptr = &shared_fctf.find(t.my_extract_size)->second;
+				}
+				else
+				{
+					if (!local_ctf_valid || cached_sz != t.my_extract_size || cached_angpix != t.my_angpix ||
+					    cached_ctf.DeltafU != t.ctf.DeltafU || cached_ctf.DeltafV != t.ctf.DeltafV ||
+					    cached_ctf.azimuthal_angle != t.ctf.azimuthal_angle || cached_ctf.phase_shift != t.ctf.phase_shift ||
+					    cached_ctf.Cs != t.ctf.Cs || cached_ctf.kV != t.ctf.kV || cached_ctf.Q0 != t.ctf.Q0 ||
+					    cached_ctf.Bfac != t.ctf.Bfac || cached_ctf.scale != t.ctf.scale)
+					{
+						local_fctf.resize(YSIZE(FT), XSIZE(FT));
+						t.ctf.getFftwImage(local_fctf, t.my_extract_size, t.my_extract_size, t.my_angpix, false, do_phase_flip, do_ctf_intact_first_peak, true, false);
+						cached_sz = t.my_extract_size;
+						cached_angpix = t.my_angpix;
+						cached_ctf = t.ctf;
+						local_ctf_valid = true;
+					}
+					Fctf_ptr = &local_fctf;
+				}
+				const long int nelem = MULTIDIM_SIZE(FT);
+				const MultidimArray<RFLOAT> &Fctf = *Fctf_ptr;
+				for (long int n = 0; n < nelem; n++)
+					DIRECT_MULTIDIM_ELEM(FT, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
+
+				tf_ctf.inverseFourierTransform(FT, Ipart());
+
+				if (extract_size != t.my_extract_size)
+				{
+					Ipart().window(FIRST_XMIPP_INDEX(extract_size), FIRST_XMIPP_INDEX(extract_size),
+					               LAST_XMIPP_INDEX(extract_size),  LAST_XMIPP_INDEX(extract_size));
+				}
+			}
+
+			Ipart().setXmippOrigin();
+
+			if (!geom && (t.x0 < 0 || t.xF >= mic_x))
+			{
+				FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
+				{
+					if (j + t.xpos < 0)
+						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, i, -t.xpos);
+					else if (j + t.xpos >= mic_x)
+						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, i, mic_x - t.xpos - 1);
+				}
+			}
+			if (!geom && (t.y0 < 0 || t.yF >= mic_y))
+			{
+				FOR_ALL_ELEMENTS_IN_ARRAY3D(Ipart())
+				{
+					if (i + t.ypos < 0)
+						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, -t.ypos, j);
+					else if (i + t.ypos >= mic_y)
+						A3D_ELEM(Ipart(), k, i, j) = A3D_ELEM(Ipart(), k, mic_y - t.ypos - 1, j);
+				}
+			}
+
+			Ipart().setXmippOrigin();
+
+			if (do_rescale)
+			{
+				if (do_rect)
+					resizeMapRect(Ipart(), scale, rect_rescaled_h);
+				else
+				{
+					const int olddim = XSIZE(Ipart());
+					resizeMap(Ipart(), scale, tf_fwd, tf_inv, FT, FT2);
+					updateRescaleHeader(Ipart, olddim, scale);
+				}
+			}
+			if (do_rewindow)
+				rewindow(Ipart, window);
+
+			Ipart().setXmippOrigin();
+
+			if (do_normalise)
+			{
+				normalise(Ipart, bg_radius, -1., -1., do_ramp,
+				          do_extract_helix, helical_bg_radius, t.tilt_deg, t.psi_deg);
+			}
+			if (do_invert_contrast)
+				invert_contrast(Ipart);
+
+			Ipart().computeStats(t.avg, t.stddev, t.minval, t.maxval);
+		};
+
+		if (nthreads > 1)
+		{
+#pragma omp parallel num_threads(nthreads)
+			{
+				relionFftwSetThreadPlanThreads(1);
+				{
+					FourierTransformer tf_ctf, tf_fwd, tf_inv;
+					MultidimArray<Complex> FT, FT2;
+					bool local_ctf_valid = false;
+					int cached_sz = -1;
+					RFLOAT cached_angpix = 0.;
+					CTF cached_ctf;
+					MultidimArray<RFLOAT> local_fctf;
+#pragma omp for schedule(dynamic, 1)
+					for (long int idx = 0; idx < npos; idx++)
+					{
+						try
+						{
+							processOne(idx, tf_ctf, tf_fwd, tf_inv, FT, FT2,
+							           local_ctf_valid, cached_sz, cached_angpix, cached_ctf, local_fctf);
+						}
+						catch (...)
+						{
+#pragma omp critical
+							if (!first_err) first_err = std::current_exception();
+						}
+					}
+				}
+				relionFftwSetThreadPlanThreads(0);
+			}
+			if (first_err)
+				std::rethrow_exception(first_err);
+		}
+		else
+		{
+			FourierTransformer tf_ctf, tf_fwd, tf_inv;
+			MultidimArray<Complex> FT, FT2;
+			bool local_ctf_valid = false;
+			int cached_sz = -1;
+			RFLOAT cached_angpix = 0.;
+			CTF cached_ctf;
+			MultidimArray<RFLOAT> local_fctf;
+			for (long int idx = 0; idx < npos; idx++)
+				processOne(idx, tf_ctf, tf_fwd, tf_inv, FT, FT2,
+				           local_ctf_valid, cached_sz, cached_angpix, cached_ctf, local_fctf);
+		}
+
+		// Accumulate stack stats and emit particles in deterministic sequential order
+		ipos = 0;
+		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
+		{
+			PartTask &t = tasks[ipos];
+			all_minval = XMIPP_MIN(t.minval, all_minval);
+			all_maxval = XMIPP_MAX(t.maxval, all_maxval);
+			all_avg += t.avg;
+			all_stddev += t.stddev * t.stddev;
+
+			if (my_current_nr_images + ipos == (my_total_nr_images - 1))
+			{
+				all_avg /= my_total_nr_images;
+				all_stddev = sqrt(all_stddev / my_total_nr_images);
+				t.Ipart.MDMainHeader.setValue(EMDL_IMAGE_STATS_MIN, all_minval);
+				t.Ipart.MDMainHeader.setValue(EMDL_IMAGE_STATS_MAX, all_maxval);
+				t.Ipart.MDMainHeader.setValue(EMDL_IMAGE_STATS_AVG, all_avg);
+				t.Ipart.MDMainHeader.setValue(EMDL_IMAGE_STATS_STDDEV, all_stddev);
+				t.Ipart.setSamplingRateInHeader(output_angpix);
+			}
+
+			stack->add(t.Ipart);
+			writeExtractedParticleMetadata(
+				MD, fn_mic, imic, fn_output_img_root, my_current_nr_images + ipos, 2,
+				MDin_has_optics_group, MDin_has_ctf, MDin_has_beamtilt, MDin_has_tiltgroup,
+				t.ctf, t.box_angle);
+			ipos++;
+		}
+
+		if (stack) stack->finish();
+		return;
+	}
+
+	// Sequential fallback (3D subtomograms, --virtual, dust removal, very small stacks, or nufft rotation)
+	Image<RFLOAT> Ipart, Itmp;
+	RFLOAT mic_avg = 0.;
+	bool mic_avg_ready = false;
+	std::unordered_map<int, MultidimArray<RFLOAT> > shared_fctf;
+	MultidimArray<RFLOAT> local_fctf;
+	MultidimArray<Complex> FT;
+	FourierTransformer transformer;
+	int ipos = 0;
+	std::vector<std::pair<long, long> > virtual_centres;
+	std::vector<double> virtual_psi;   // helical segments only: orients the tube mask
+	std::vector<double> virtual_cx, virtual_cy, virtual_angle;   // turned boxes only
+	std::vector<vparticles::ParticleCtf> virtual_ctf;   // CTF-premultiplied only
 	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MD)
 	{
 		// Read per-particle CTF
@@ -1328,13 +1802,13 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		{
 			ctf.readByGroup(MD, &obsModelPart);
 			optics_group = obsModelPart.getOpticsGroup(MD);
-			if (!obsModelPart.hasBoxSizes || obsModelPart.getBoxSize(optics_group) != my_extract_size)
+			if (!obsModelPart.hasBoxSizes || obsModelPart.isRectBox(optics_group) || obsModelPart.getNominalBoxSize(optics_group) != my_extract_size)
 				obsModelPart.setBoxSize(optics_group, my_extract_size);
 			obsModelPart.opticsMdt.getValue(EMDL_MICROGRAPH_PIXEL_SIZE, my_angpix, optics_group);
 		}
 
 		// --premultiply_extract_size auto: each particle's box follows its own CTF
-		if (premultiply_auto && (do_phase_flip || do_premultiply_ctf))
+		if (premultiply_auto && need_ctf_mul)
 		{
 			my_extract_size = vparticles::autoPremultiplySize(vparticles::ParticleCtf{ctf.DeltafU, ctf.DeltafV, ctf.azimuthal_angle,
 			                  ctf.kV, ctf.Cs, ctf.Q0, ctf.Bfac, ctf.scale, ctf.phase_shift}, my_angpix, extract_size, do_rescale ? scale : extract_size);
@@ -1432,25 +1906,53 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 				else
 					extractrect::cutBox(at, XSIZE(mic), YSIZE(mic), xpos, ypos, box_x, box_y, Ipart());
 			}
+			else if (STARTINGX(Imic()) == 0 && STARTINGY(Imic()) == 0 &&
+			         x0 >= 0 && xF < XSIZE(Imic()) && y0 >= 0 && yF < YSIZE(Imic()))
+			{
+				const MultidimArray<RFLOAT> &mic = Imic();
+				Ipart().resizeNoCp(1, 1, box_y, box_x);
+				for (long iy = 0; iy < box_y; iy++)
+					memcpy(&DIRECT_A2D_ELEM(Ipart(), iy, 0), &DIRECT_A2D_ELEM(mic, y0 + iy, x0), (size_t)box_x * sizeof(RFLOAT));
+			}
 			else
+			{
+				if (!mic_avg_ready)
+				{
+					mic_avg = Imic().computeAvg();
+					mic_avg_ready = true;
+				}
 				Imic().window(Ipart(), y0, x0, yF, xF, mic_avg);
+			}
 			Ipart().setXmippOrigin();
 			TIMING_TOC(TIMING_WINDOW);
 
 			// Premultiply the CTF of each particle, possibly in a bigger box (premultiply_ctf_extract_size)
-			if (do_phase_flip || do_premultiply_ctf)
+			if (need_ctf_mul)
 			{
 				transformer.FourierTransform(Ipart(), FT, false);
 
-				MultidimArray<RFLOAT> Fctf;
-				Fctf.resize(YSIZE(FT), XSIZE(FT));
-				// do_abs, phase_flip, intact_first_peak, damping, padding
-				// 190802 TAKANORI: The original code using getCTF was do_damping=false, but for consistency with Polishing, I changed it.
-				// The boxsize in ObsModel has been updated above.
-				// In contrast to Polish, we premultiply particle BEFORE down-sampling, so PixelSize in ObsModel is OK.
-				// But we are doing this after extraction, so there is not much merit...
-				ctf.getFftwImage(Fctf, my_extract_size, my_extract_size, my_angpix, false, do_phase_flip, do_ctf_intact_first_peak, true, false);
+				const MultidimArray<RFLOAT> *Fctf_ptr = nullptr;
+				if (shared_mic_ctf)
+				{
+					auto it = shared_fctf.find(my_extract_size);
+					if (it == shared_fctf.end())
+					{
+						MultidimArray<RFLOAT> &entry = shared_fctf[my_extract_size];
+						entry.resize(YSIZE(FT), XSIZE(FT));
+						ctf.getFftwImage(entry, my_extract_size, my_extract_size, my_angpix, false, do_phase_flip, do_ctf_intact_first_peak, true, false);
+						Fctf_ptr = &entry;
+					}
+					else
+						Fctf_ptr = &it->second;
+				}
+				else
+				{
+					local_fctf.resize(YSIZE(FT), XSIZE(FT));
+					ctf.getFftwImage(local_fctf, my_extract_size, my_extract_size, my_angpix, false, do_phase_flip, do_ctf_intact_first_peak, true, false);
+					Fctf_ptr = &local_fctf;
+				}
 
+				const MultidimArray<RFLOAT> &Fctf = *Fctf_ptr;
 				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(FT)
 				{
 					DIRECT_MULTIDIM_ELEM(FT, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
@@ -1542,79 +2044,11 @@ void Preprocessing::extractParticlesFromOneMicrograph(MetaDataTable &MD,
 		}
 
 		TIMING_TIC(TIMING_REST);
-		// Also store all the particles information in the STAR file
-		FileName fn_img;
-		if (Ipart().getDim() == 3)
-			fn_img.compose(fn_output_img_root, my_current_nr_images + ipos + 1, "mrc");
-		else
-			fn_img.compose(my_current_nr_images + ipos + 1, fn_output_img_root + (do_virtual ? ".vstack" : ".mrcs")); // start image counting in stacks at 1!
-		MD.setValue(EMDL_IMAGE_NAME, fn_img);
-		MD.setValue(EMDL_MICROGRAPH_NAME, fn_mic);
-
-		// Set the optics group for this particle to the one from the micrograph
-		if (!MDin_has_optics_group)
-		{
-			int optics_group;
-			MDmics.getValue(EMDL_IMAGE_OPTICS_GROUP, optics_group, imic);
-			MD.setValue(EMDL_IMAGE_OPTICS_GROUP, optics_group);
-		}
-
-		// Also fill in the per-particle CTF parameters
-		if (mic_star_has_ctf)
-		{
-			// Only set CTF parameters from the micrographs STAR file if the input STAR file did not contain it!
-			if (!MDin_has_ctf || keep_ctf_from_micrographs)
-			{
-				RFLOAT maxres, fom;
-				if (MDmics.containsLabel(EMDL_CTF_MAXRES))
-				{
-					MDmics.getValue(EMDL_CTF_MAXRES, maxres, imic);
-					MD.setValue(EMDL_CTF_MAXRES, maxres);
-				}
-				if (MDmics.containsLabel(EMDL_CTF_FOM))
-				{
-					MDmics.getValue(EMDL_CTF_FOM, fom, imic);
-					MD.setValue(EMDL_CTF_FOM, fom);
-				}
-
-				ctf.write(MD);
-			}
-
-			// Only set beamtilt from the micrographs STAR file if the input STAR file did not contain it!
-			if (!MDin_has_beamtilt || keep_ctf_from_micrographs)
-			{
-				RFLOAT tilt_x, tilt_y;
-				if (MDmics.containsLabel(EMDL_IMAGE_BEAMTILT_X))
-				{
-					MDmics.getValue(EMDL_IMAGE_BEAMTILT_X, tilt_x, imic);
-					MD.setValue(EMDL_IMAGE_BEAMTILT_X, tilt_x);
-				}
-				if (MDmics.containsLabel(EMDL_IMAGE_BEAMTILT_Y))
-				{
-					MDmics.getValue(EMDL_IMAGE_BEAMTILT_Y, tilt_y, imic);
-					MD.setValue(EMDL_IMAGE_BEAMTILT_Y, tilt_y);
-				}
-			}
-
-			// Copy rlnBeamTiltGroupName from the micrograph STAR file only when absent in the particle STAR file
-			// for backwards compatibility with release 3.0
-			if (!MDin_has_tiltgroup && MDmics.containsLabel(EMDL_PARTICLE_BEAM_TILT_CLASS))
-			{
-				int tilt_class;
-				MDmics.getValue(EMDL_PARTICLE_BEAM_TILT_CLASS, tilt_class, imic);
-				MD.setValue(EMDL_PARTICLE_BEAM_TILT_CLASS, tilt_class);
-			}
-		}
-
-		if (do_rotate_to_horizontal)
-		{
-			// The particle image is the micrograph turned by box_angle: directions turn by -box_angle
-			// (psi and the offsets too, when re-extracting refined particles)
-			MD.setValue(EMDL_PARTICLE_EXTRACTION_ANGLE, box_angle);
-			turnInPlaneMetadata(MD, box_angle);
-			MD.setValue(EMDL_ORIENT_PSI_PRIOR, (RFLOAT)0.);
-		}
-
+		const int img_dim = do_virtual ? 0 : Ipart().getDim();
+		writeExtractedParticleMetadata(
+			MD, fn_mic, imic, fn_output_img_root, my_current_nr_images + ipos, img_dim,
+			MDin_has_optics_group, MDin_has_ctf, MDin_has_beamtilt, MDin_has_tiltgroup,
+			ctf, box_angle);
 		TIMING_TOC(TIMING_REST);
 
 		ipos++;
@@ -1811,6 +2245,47 @@ void Preprocessing::performPerImageOperations(
 	}
 }
 
+void Preprocessing::buildMdImgMicIndex()
+{
+	mdimg_mic_groups_.clear();
+	std::unordered_map<std::string, size_t> name_to_group;
+	const long int n = (long int)MDimg.numberOfObjects();
+	for (long int idx = 0; idx < n; idx++)
+	{
+		FileName fn_mic_in_particle_star;
+		MDimg.getValue(EMDL_MICROGRAPH_NAME, fn_mic_in_particle_star, idx);
+		auto it = name_to_group.find(fn_mic_in_particle_star);
+		if (it == name_to_group.end())
+		{
+			const size_t gid = mdimg_mic_groups_.size();
+			name_to_group.emplace(fn_mic_in_particle_star, gid);
+			MicIndexGroup grp;
+			grp.fn_mic = fn_mic_in_particle_star;
+			grp.rows.push_back(idx);
+			mdimg_mic_groups_.push_back(std::move(grp));
+		}
+		else
+		{
+			mdimg_mic_groups_[it->second].rows.push_back(idx);
+		}
+	}
+	mdimg_indexed_count_ = n;
+}
+
+bool Preprocessing::hasCoordinatesForMic(const FileName &fn_mic)
+{
+	if (mdimg_indexed_count_ != (long)MDimg.numberOfObjects())
+		buildMdImgMicIndex();
+	FileName fn_pre, fn_jobnr, fn_post;
+	decomposePipelineFileName(fn_mic, fn_pre, fn_jobnr, fn_post);
+	for (const auto &grp : mdimg_mic_groups_)
+	{
+		if (grp.fn_mic.find(fn_post) != std::string::npos)
+			return true;
+	}
+	return false;
+}
+
 // Get the coordinate file from a given micrograph filename from MDdata
 MetaDataTable Preprocessing::getCoordinateMetaDataTable(FileName fn_mic)
 {
@@ -1819,15 +2294,28 @@ MetaDataTable Preprocessing::getCoordinateMetaDataTable(FileName fn_mic)
 	decomposePipelineFileName(fn_mic, fn_pre, fn_jobnr, fn_post);
 
 	MetaDataTable MDresult;
+	if (mdimg_indexed_count_ != (long)MDimg.numberOfObjects())
+		buildMdImgMicIndex();
 
-	// To upgrade to ObsModel, the following no longer works.
-	// MDresult.read(fn_data, "particles", NULL, fn_post);
-	FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDimg)
+	std::vector<const std::vector<long>*> matched_groups;
+	for (const auto &grp : mdimg_mic_groups_)
 	{
-		FileName fn_mic_in_particle_star;
-		MDimg.getValue(EMDL_MICROGRAPH_NAME, fn_mic_in_particle_star);
-		if (fn_mic_in_particle_star.contains(fn_post))
-			MDresult.addObject(MDimg.getObject(current_object));
+		if (grp.fn_mic.find(fn_post) != std::string::npos)
+			matched_groups.push_back(&grp.rows);
+	}
+	if (matched_groups.size() == 1)
+	{
+		for (long idx : *matched_groups[0])
+			MDresult.addObject(MDimg.getObject(idx));
+	}
+	else if (matched_groups.size() > 1)
+	{
+		std::vector<long> rows;
+		for (const auto *g : matched_groups)
+			rows.insert(rows.end(), g->begin(), g->end());
+		std::sort(rows.begin(), rows.end());
+		for (long idx : rows)
+			MDresult.addObject(MDimg.getObject(idx));
 	}
 
 	// Particles from a turned extraction (rlnParticleExtractionAngle) have psi, its prior, the defocus

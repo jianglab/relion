@@ -174,4 +174,16 @@ inline float half2float(float16 f16)
 	return f.f;
 }
 
+inline const float* half2floatLut()
+{
+	static float lut[65536];
+	static const bool initialized = []() {
+		for (unsigned int i = 0; i < 65536; ++i)
+			lut[i] = half2float((float16)i);
+		return true;
+	}();
+	(void)initialized;
+	return lut;
+}
+
 #endif

@@ -90,7 +90,10 @@ public:
 
 
 	bool skip_gridding, do_reconstruct_ctf2, do_reconstruct_meas, is_reverse, read_weights, do_external_reconstruct;
-	bool do_half1, do_half2, do_alldata, do_prefetch, do_invert_contrast;
+	bool do_half1, do_half2, do_alldata, do_prefetch, do_invert_contrast, do_gpu;
+	bool dont_gpu = false;
+	std::string gpu_ids;
+	bool initGpuForRun(int box_sz, int rank);
 	long int random_subset_size;
 	int random_subset_seed;
 	SpatialFrequencyMode spatial_frequency_mode;

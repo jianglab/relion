@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/reconstructor_mpi.h"
+#include "src/gpu_reconstruct.h"
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
@@ -63,10 +64,12 @@ static void reduceToLeader(double *p, long int n, bool is_leader)
 
 void ReconstructorMpi::run()
 {
-
 	if (fn_debug != "")
 	{
 		Reconstructor::readDebugArrays();
+		const bool gpu_active = node->isLeader() ? initGpuForRun(debug_ori_size, node->rank)
+		                                         : (gpurec::setGpuRequested(false), false);
+		gpurec::ScopedReconstructCache gpu_rec_cache(gpu_active);
 		if (node->isLeader())
 			reconstruct();
 		return;
@@ -84,6 +87,10 @@ void ReconstructorMpi::run()
 
     Reconstructor::initialise();
 	lap("initialise");
+
+	const bool gpu_active = node->isLeader() ? initGpuForRun(output_boxsize, node->rank)
+	                                         : (gpurec::setGpuRequested(false), false);
+	gpurec::ScopedReconstructCache gpu_rec_cache(gpu_active);
 
     // MPI-guarded cache init: leader copies + registers, barrier, then followers register
     if (fn_cache != "")

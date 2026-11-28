@@ -628,6 +628,7 @@ bool AsyncReconstructPrefetcher::shouldRead(long int ipart) const
 
 void AsyncReconstructPrefetcher::workerThread()
 {
+	OpenStacks open_stacks;
 	for (long int ipart : my_parts_)
 	{
 		if (stop_requested_)
@@ -639,7 +640,20 @@ void AsyncReconstructPrefetcher::workerThread()
 		FileName fn_img;
 		df_->getValue(EMDL_IMAGE_NAME, fn_img, ipart);
 		Image<RFLOAT> img_tmp;
-		img_tmp.read(fn_img);
+		if (fn_img.contains("@"))
+		{
+			long int img_no;
+			FileName fn_stack;
+			fn_img.decompose(img_no, fn_stack);
+			if (img_no > 0 && fn_stack.getExtension() != "vstack")
+				img_tmp.readFromOpenFile(fn_img, open_stacks.get(fn_stack), -1, false);
+			else
+				img_tmp.read(fn_img);
+		}
+		else
+		{
+			img_tmp.read(fn_img);
+		}
 		img_tmp().setXmippOrigin();
 
 		std::unique_lock<std::mutex> lock(mtx_);

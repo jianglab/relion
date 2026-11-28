@@ -254,11 +254,15 @@ void AutoPicker::initialise(int rank)
 	{
 		ObservationModel::loadSafely(fn_in, obsModel, MDmic, "micrographs", verb);
 		fn_micrographs.clear();
+		mic_to_md_idx.clear();
+		mic_to_md_idx.reserve(MDmic.numberOfObjects());
+		long int md_idx = 0;
 		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDmic)
 		{
 			FileName fn_mic;
 			MDmic.getValue(EMDL_MICROGRAPH_NAME, fn_mic);
 			fn_micrographs.push_back(fn_mic);
+			mic_to_md_idx[fn_mic] = md_idx++;
 		}
 
 		// Check all optics groups have the same pixel size (check for same micrograph size is performed while running through all of them)
@@ -832,6 +836,19 @@ void AutoPicker::initialise(int rank)
 		timer.tic(TIMING_A4);
 	#endif
 
+		int ranks_here = 1;
+		if (mpi_size > 1)
+		{
+			MPI_Comm node_comm;
+			MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, rank, MPI_INFO_NULL, &node_comm);
+			MPI_Comm_size(node_comm, &ranks_here);
+			MPI_Comm_free(&node_comm);
+		}
+		if (getenv("OMP_NUM_THREADS") != NULL)
+			nr_cpu_threads = std::max(1, omp_get_max_threads());
+		else
+			nr_cpu_threads = std::max(1, omp_get_num_procs() / ranks_here);
+
 		// Pre-calculate and store Projectors for all references at the right size
 		if (!do_read_fom_maps && !do_LoG)
 		{
@@ -944,14 +961,6 @@ void AutoPicker::initialise(int rank)
 			// MPI each process makes every mpi_size-th one and receives the rest; within a process they are
 			// spread over threads, each with its own buffer. Every transform is made as before, so the
 			// projectors are the same whatever the numbers of processes and threads.
-			int ranks_here = 1;
-			if (mpi_size > 1)
-			{
-				MPI_Comm node_comm;
-				MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, rank, MPI_INFO_NULL, &node_comm);
-				MPI_Comm_size(node_comm, &ranks_here);
-				MPI_Comm_free(&node_comm);
-			}
 			// (with fewer references than processes, or the FINUFFT interpolator, whose projectors keep more
 			// than `data` and whose planning is not known to be thread-safe, every process makes all of them on
 			// one thread, as before)
@@ -1042,6 +1051,12 @@ void AutoPicker::deviceInitialise()
 
 void AutoPicker::run()
 {
+	if (!do_topaz_extract)
+	{
+		relionFftwInitThreads();
+		relionFftwPlanThreads(std::min(nr_cpu_threads, 8));
+	}
+
 	int barstep;
 	if (verb > 0)
 	{
@@ -1096,6 +1111,8 @@ void AutoPicker::run()
 		timer.toc(TIMING_A5);
 #endif
 	}
+
+	AsyncFileWriter::instance().waitOrThrow();
 
 	if (verb > 0)
 		progress_bar(fn_micrographs.size());
@@ -3145,11 +3162,57 @@ void AutoPicker::autoPickTopazOneMicrograph(FileName &fn_mic, int rank)
 
 }
 
+namespace {
+
+static void fillOutsideWindowWithGaus(RFLOAT *dst, int xsize, int ysize, int mic_size)
+{
+	const long int y0 = FIRST_XMIPP_INDEX(mic_size);
+	const long int y1 = LAST_XMIPP_INDEX(mic_size);
+	const long int x0 = FIRST_XMIPP_INDEX(mic_size);
+	const long int x1 = LAST_XMIPP_INDEX(mic_size);
+	const long int vy0 = FIRST_XMIPP_INDEX(ysize);
+	const long int vy1 = LAST_XMIPP_INDEX(ysize);
+	const long int vx0 = FIRST_XMIPP_INDEX(xsize);
+	const long int vx1 = LAST_XMIPP_INDEX(xsize);
+
+	for (long int i = y0; i < vy0; i++)
+	{
+		RFLOAT *row = dst + (i - y0) * (long int)mic_size;
+		for (long int j = x0; j <= x1; j++)
+			row[j - x0] = rnd_gaus(0., 1.);
+	}
+	for (long int i = vy0; i <= vy1; i++)
+	{
+		RFLOAT *row = dst + (i - y0) * (long int)mic_size;
+		for (long int j = x0; j < vx0; j++)
+			row[j - x0] = rnd_gaus(0., 1.);
+		for (long int j = vx1 + 1; j <= x1; j++)
+			row[j - x0] = rnd_gaus(0., 1.);
+	}
+	for (long int i = vy1 + 1; i <= y1; i++)
+	{
+		RFLOAT *row = dst + (i - y0) * (long int)mic_size;
+		for (long int j = x0; j <= x1; j++)
+			row[j - x0] = rnd_gaus(0., 1.);
+	}
+}
+
+static void writeAutoPickStar(const FileName &fn_star, std::shared_ptr<MetaDataTable> md_ptr)
+{
+	const bool allow_async = AsyncFileWriter::starMode() > 0;
+	AsyncFileWriter::putText(fn_star, [md_ptr]() -> std::shared_ptr<std::string> {
+		std::ostringstream oss;
+		md_ptr->write(oss);
+		return std::make_shared<std::string>(oss.str());
+	}, allow_async);
+}
+
+} // anonymous namespace
+
 void AutoPicker::autoPickLoGOneMicrograph(FileName &fn_mic, long int imic)
 {
 	Image<RFLOAT> Imic;
 	MultidimArray<Complex > Fmic, Faux;
-	FourierTransformer transformer;
 	MultidimArray<float> Mbest_size, Mbest_fom;
 	float scale = (float)workSize / (float)micrograph_size;
 
@@ -3182,40 +3245,43 @@ void AutoPicker::autoPickLoGOneMicrograph(FileName &fn_mic, long int imic)
 			REPORT_ERROR("AutoPicker::autoPickOneMicrograph ERROR: No differently sized micrographs are allowed in one run, sorry you will have to run separately for each size...");
 		}
 
-		// Set mean to zero and stddev to 1 to prevent numerical problems with one-sweep stddev calculations....
+		// Set mean to zero and stddev to 1, and flip sign if !LoG_invert
 		RFLOAT avg0, stddev0, minval0, maxval0;
 		Imic().computeStats(avg0, stddev0, minval0, maxval0);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Imic())
+		const RFLOAT loG_sign = LoG_invert ? 1. : -1.;
+		const long int mic_nzyx = Imic().nzyxdim;
+		RFLOAT *mic_data = Imic().data;
+		const int nt_mic = (mic_nzyx >= 65536) ? nr_cpu_threads : 1;
+		#pragma omp parallel for schedule(static) num_threads(nt_mic) if(nt_mic > 1)
+		for (long int n = 0; n < mic_nzyx; n++)
 		{
-			// Remove pixel values that are too far away from the mean
-			if ( ABS(DIRECT_MULTIDIM_ELEM(Imic(), n) - avg0) / stddev0 > outlier_removal_zscore)
-				DIRECT_MULTIDIM_ELEM(Imic(), n) = avg0;
-
-			DIRECT_MULTIDIM_ELEM(Imic(), n) = (DIRECT_MULTIDIM_ELEM(Imic(), n) - avg0) / stddev0;
+			RFLOAT v = mic_data[n];
+			if (ABS(v - avg0) / stddev0 > outlier_removal_zscore)
+				v = avg0;
+			mic_data[n] = ((v - avg0) / stddev0) * loG_sign;
 		}
 
-		// Have positive LoG maps
-		if (!LoG_invert)
-			Imic() *= -1.;
-
+		MultidimArray<RFLOAT> *fft_in = &Imic();
 		if (micrograph_xsize != micrograph_size || micrograph_ysize != micrograph_size)
 		{
-			// Window non-square micrographs to be a square with the largest side
-			rewindow(Imic, micrograph_size);
-
-			// Fill region outside the original window with white Gaussian noise to prevent all-zeros in Mstddev
-			FOR_ALL_ELEMENTS_IN_ARRAY2D(Imic())
+			persistent_Mfull_.resizeNoCp(1, micrograph_size, micrograph_size);
+			persistent_Mfull_.setXmippOrigin();
+			const long int off_x = FIRST_XMIPP_INDEX(micrograph_xsize) - FIRST_XMIPP_INDEX(micrograph_size);
+			const long int off_y = FIRST_XMIPP_INDEX(micrograph_ysize) - FIRST_XMIPP_INDEX(micrograph_size);
+			RFLOAT *dst = MULTIDIM_ARRAY(persistent_Mfull_);
+			const RFLOAT *src = MULTIDIM_ARRAY(Imic());
+			for (int sy = 0; sy < micrograph_ysize; sy++)
 			{
-				if (i < FIRST_XMIPP_INDEX(micrograph_ysize)
-						|| i > LAST_XMIPP_INDEX(micrograph_ysize)
-						|| j < FIRST_XMIPP_INDEX(micrograph_xsize)
-						|| j > LAST_XMIPP_INDEX(micrograph_xsize) )
-					A2D_ELEM(Imic(), i, j) = rnd_gaus(0.,1.);
+				memcpy(dst + (size_t)(sy + off_y) * (size_t)micrograph_size + (size_t)off_x,
+				       src + (size_t)sy * (size_t)micrograph_xsize,
+				       (size_t)micrograph_xsize * sizeof(RFLOAT));
 			}
+			fillOutsideWindowWithGaus(dst, micrograph_xsize, micrograph_ysize, micrograph_size);
+			fft_in = &persistent_Mfull_;
 		}
 
-		// Fourier Transform (and downscale) Imic()
-		transformer.FourierTransform(Imic(), Faux);
+		// Fourier Transform (and downscale)
+		mic_fwd_transformer_.FourierTransform(*fft_in, Faux, false);
 
 		// Use downsized FFTs
 		windowFourierTransform(Faux, Fmic, workSize);
@@ -3225,60 +3291,167 @@ void AutoPicker::autoPickLoGOneMicrograph(FileName &fn_mic, long int imic)
 			MultidimArray<RFLOAT> Fctf(YSIZE(Fmic), XSIZE(Fmic));
 			CTF ctf;
 
-			// Search for this micrograph in the metadata table
-			bool found = false;
-			FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDmic)
-			{
-				FileName fn_tmp;
-				MDmic.getValue(EMDL_MICROGRAPH_NAME, fn_tmp);
-				if (fn_tmp == fn_mic)
-				{
-					ctf.readByGroup(MDmic, &obsModel);
-					found = true;
-					break;
-				}
-			}
-			if (!found) REPORT_ERROR("Logic error: failed to find CTF information for " + fn_mic);
+			auto it = mic_to_md_idx.find(fn_mic);
+			if (it == mic_to_md_idx.end())
+				REPORT_ERROR("Logic error: failed to find CTF information for " + fn_mic);
+			ctf.readByGroup(MDmic, &obsModel, it->second);
 
 			ctf.getFftwImage(Fctf, micrograph_size, micrograph_size, angpix, false, false, false, false, false, true);
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Fmic)
-			{
-				// this is safe because getCTF does not return 0.
-				DIRECT_MULTIDIM_ELEM(Fmic, n) /= DIRECT_MULTIDIM_ELEM(Fctf, n);
-			}
+			const long int fmic_sz = MULTIDIM_SIZE(Fmic);
+			Complex *fmic_p = MULTIDIM_ARRAY(Fmic);
+			const RFLOAT *fctf_p = MULTIDIM_ARRAY(Fctf);
+			const int nt_f = (fmic_sz >= 65536) ? nr_cpu_threads : 1;
+			#pragma omp parallel for schedule(static) num_threads(nt_f) if(nt_f > 1)
+			for (long int n = 0; n < fmic_sz; n++)
+				fmic_p[n] /= fctf_p[n];
 		}
 
-		Image<RFLOAT> Maux(workSize, workSize);
-
-//		transformer.inverseFourierTransform(Fmic, Maux());
-//		Maux.write("LoG-ctf-filtered.mrc");
-//		REPORT_ERROR("stop");
-
-		// Make the diameter of the LoG filter larger in steps of LoG_incr_search (=1.5)
-		// Search sizes from LoG_min_diameter to LoG_max_search (=5) * LoG_max_diameter
-		for (int i = 0; i < diams_LoG.size(); i++)
+		// Precompute separable 1D LoG radial exponential tables once for the run
+		const int n_scales = (int)diams_LoG.size();
+		const int fx = XSIZE(Fmic);
+		if (cached_log_workSize_ != workSize || cached_log_micSize_ != micrograph_size ||
+		    cached_log_angpix_ != angpix || (int)log_ey_.size() != n_scales)
 		{
-			RFLOAT myd = diams_LoG[i];
-
-			Faux = Fmic;
-			LoGFilterMap(Faux, micrograph_size, myd, angpix);
-			transformer.inverseFourierTransform(Faux, Maux());
-
-			if (do_write_fom_maps)
+			log_ey_.assign(n_scales, std::vector<RFLOAT>(workSize));
+			log_ex_.assign(n_scales, std::vector<RFLOAT>(fx));
+			for (int s = 0; s < n_scales; s++)
 			{
-				FileName fn_tmp=getOutputRootName(fn_mic)+"_"+fn_out+"_LoG"+integerToString(ROUND(myd))+".spi";
-				Maux.write(fn_tmp);
-			}
-
-			FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Maux())
-			{
-				if (DIRECT_MULTIDIM_ELEM(Maux(), n) > DIRECT_MULTIDIM_ELEM(Mbest_fom, n))
+				RFLOAT isigma2 = (0.5 * micrograph_size * angpix) / diams_LoG[s];
+				isigma2 *= isigma2;
+				for (int i = 0; i < workSize; i++)
 				{
-					DIRECT_MULTIDIM_ELEM(Mbest_fom, n) = DIRECT_MULTIDIM_ELEM(Maux(), n);
-					DIRECT_MULTIDIM_ELEM(Mbest_size, n) = myd;
+					int ip = (i < fx) ? i : (i - workSize);
+					log_ey_[s][i] = exp(-0.5 * (RFLOAT)(ip * ip) / isigma2) / isigma2;
+				}
+				for (int j = 0; j < fx; j++)
+					log_ex_[s][j] = exp(-0.5 * (RFLOAT)(j * j) / isigma2);
+			}
+			cached_log_workSize_ = workSize;
+			cached_log_micSize_ = micrograph_size;
+			cached_log_angpix_ = angpix;
+		}
+
+		const long int work_nzyx = (long int)workSize * (long int)workSize;
+		const int n_thr = do_write_fom_maps ? 1 : std::min(nr_cpu_threads, std::max(1, n_scales));
+		if ((int)thr_work_transformers_.size() < n_thr)
+			thr_work_transformers_.resize(n_thr);
+
+		if (n_thr <= 1)
+		{
+			Image<RFLOAT> Maux(workSize, workSize);
+			Faux.resize(Fmic);
+			const Complex *fmic_p = MULTIDIM_ARRAY(Fmic);
+			Complex *faux_p = MULTIDIM_ARRAY(Faux);
+			float *best_fom_p = MULTIDIM_ARRAY(Mbest_fom);
+			float *best_sz_p = MULTIDIM_ARRAY(Mbest_size);
+
+			for (int s = 0; s < n_scales; s++)
+			{
+				const RFLOAT myd = diams_LoG[s];
+				const RFLOAT *ey = log_ey_[s].data();
+				const RFLOAT *ex = log_ex_[s].data();
+				for (int i = 0; i < workSize; i++)
+				{
+					const int ip = (i < fx) ? i : (i - workSize);
+					const RFLOAT ip2 = (RFLOAT)(ip * ip);
+					const RFLOAT eyi = ey[i];
+					const Complex *src_row = fmic_p + (size_t)i * (size_t)fx;
+					Complex *dst_row = faux_p + (size_t)i * (size_t)fx;
+					for (int j = 0; j < fx; j++)
+						dst_row[j] = src_row[j] * ((ip2 + (RFLOAT)(j * j)) * (eyi * ex[j]));
+				}
+				thr_work_transformers_[0].inverseFourierTransform(Faux, Maux());
+
+				if (do_write_fom_maps)
+				{
+					FileName fn_tmp = getOutputRootName(fn_mic) + "_" + fn_out + "_LoG" + integerToString(ROUND(myd)) + ".spi";
+					Maux.write(fn_tmp);
+				}
+
+				const RFLOAT *maux_p = MULTIDIM_ARRAY(Maux());
+				for (long int n = 0; n < work_nzyx; n++)
+				{
+					if (maux_p[n] > best_fom_p[n])
+					{
+						best_fom_p[n] = maux_p[n];
+						best_sz_p[n] = myd;
+					}
 				}
 			}
+		}
+		else
+		{
+			std::vector< std::vector<float> > thr_fom(n_thr, std::vector<float>(work_nzyx, -999.f));
+			std::vector< std::vector<float> > thr_size(n_thr, std::vector<float>(work_nzyx, -999.f));
+			std::vector< std::vector<int> > thr_scale(n_thr, std::vector<int>(work_nzyx, n_scales));
+			const Complex *fmic_p = MULTIDIM_ARRAY(Fmic);
 
+			#pragma omp parallel num_threads(n_thr)
+			{
+				const int tid = omp_get_thread_num();
+				relionFftwSetThreadPlanThreads(1);
+				MultidimArray<Complex> Faux_t(workSize, fx);
+				MultidimArray<RFLOAT> Maux_t(workSize, workSize);
+				Complex *faux_p = MULTIDIM_ARRAY(Faux_t);
+				float *tfom = thr_fom[tid].data();
+				float *tsize = thr_size[tid].data();
+				int *tscale = thr_scale[tid].data();
+
+				#pragma omp for schedule(dynamic, 1)
+				for (int s = 0; s < n_scales; s++)
+				{
+					const float myd_f = (float)diams_LoG[s];
+					const RFLOAT *ey = log_ey_[s].data();
+					const RFLOAT *ex = log_ex_[s].data();
+					for (int i = 0; i < workSize; i++)
+					{
+						const int ip = (i < fx) ? i : (i - workSize);
+						const RFLOAT ip2 = (RFLOAT)(ip * ip);
+						const RFLOAT eyi = ey[i];
+						const Complex *src_row = fmic_p + (size_t)i * (size_t)fx;
+						Complex *dst_row = faux_p + (size_t)i * (size_t)fx;
+						for (int j = 0; j < fx; j++)
+							dst_row[j] = src_row[j] * ((ip2 + (RFLOAT)(j * j)) * (eyi * ex[j]));
+					}
+					thr_work_transformers_[tid].inverseFourierTransform(Faux_t, Maux_t);
+
+					const RFLOAT *maux_p = MULTIDIM_ARRAY(Maux_t);
+					for (long int n = 0; n < work_nzyx; n++)
+					{
+						const RFLOAT v = maux_p[n];
+						if (v > tfom[n] || (v == tfom[n] && s < tscale[n]))
+						{
+							tfom[n] = (float)v;
+							tsize[n] = myd_f;
+							tscale[n] = s;
+						}
+					}
+				}
+				relionFftwSetThreadPlanThreads(0);
+			}
+
+			float *best_fom_p = MULTIDIM_ARRAY(Mbest_fom);
+			float *best_sz_p = MULTIDIM_ARRAY(Mbest_size);
+			#pragma omp parallel for schedule(static) num_threads(n_thr)
+			for (long int n = 0; n < work_nzyx; n++)
+			{
+				float bf = thr_fom[0][n];
+				float bs = thr_size[0][n];
+				int bi = thr_scale[0][n];
+				for (int t = 1; t < n_thr; t++)
+				{
+					const float vf = thr_fom[t][n];
+					const int vi = thr_scale[t][n];
+					if (vf > bf || (vf == bf && vi < bi))
+					{
+						bf = vf;
+						bs = thr_size[t][n];
+						bi = vi;
+					}
+				}
+				best_fom_p[n] = bf;
+				best_sz_p[n] = bs;
+			}
 		}
 
 	} // end if !do_read_fom_maps
@@ -3317,24 +3490,35 @@ void AutoPicker::autoPickLoGOneMicrograph(FileName &fn_mic, long int imic)
 		Maux2.write(fn_tmp);
 	}
 
-	// Skip the sides if necessary
-	int my_skip_side = (int)((float)autopick_skip_side*scale);
+	// Zero pixels outside skip_side border in place (without allocating 2 extra copies)
+	int my_skip_side = (int)((float)autopick_skip_side * scale);
 	if (my_skip_side > 0)
 	{
-		MultidimArray<float> Mbest_fom_new(Mbest_fom);
-		Mbest_fom_new.initZeros();
-		for (int i = FIRST_XMIPP_INDEX((int)((float)micrograph_ysize*scale)) + my_skip_side; i <= LAST_XMIPP_INDEX((int)((float)micrograph_ysize*scale)) - my_skip_side; i++)
+		const long int y0 = STARTINGY(Mbest_fom), y1 = FINISHINGY(Mbest_fom);
+		const long int x0 = STARTINGX(Mbest_fom), x1 = FINISHINGX(Mbest_fom);
+		const long int ky0 = FIRST_XMIPP_INDEX((int)((float)micrograph_ysize * scale)) + my_skip_side;
+		const long int ky1 = LAST_XMIPP_INDEX((int)((float)micrograph_ysize * scale)) - my_skip_side;
+		const long int kx0 = FIRST_XMIPP_INDEX((int)((float)micrograph_xsize * scale)) + my_skip_side;
+		const long int kx1 = LAST_XMIPP_INDEX((int)((float)micrograph_xsize * scale)) - my_skip_side;
+
+		for (long int i = y0; i <= y1; i++)
 		{
-			for (int j = FIRST_XMIPP_INDEX((int)((float)micrograph_xsize*scale)) + my_skip_side; j <= LAST_XMIPP_INDEX((int)((float)micrograph_xsize*scale)) - my_skip_side; j++)
+			if (i < ky0 || i > ky1)
 			{
-				A2D_ELEM(Mbest_fom_new, i, j) = A2D_ELEM(Mbest_fom, i, j);
+				for (long int j = x0; j <= x1; j++)
+					A2D_ELEM(Mbest_fom, i, j) = 0.f;
+			}
+			else
+			{
+				for (long int j = x0; j < kx0; j++)
+					A2D_ELEM(Mbest_fom, i, j) = 0.f;
+				for (long int j = kx1 + 1; j <= x1; j++)
+					A2D_ELEM(Mbest_fom, i, j) = 0.f;
 			}
 		}
-		Mbest_fom = Mbest_fom_new;
 	}
 
-	// See which pixels have the best diameters within the desired diameter range
-	// Also store average and stddev of FOMs outside that range, in order to idea of the noise in the FOMs
+	// Statistics for threshold computation + mask outside diameter range
 	RFLOAT sum_fom_low = 0.;
 	RFLOAT sum_fom_high = 0.;
 	RFLOAT sum_fom_ok = 0.;
@@ -3344,26 +3528,37 @@ void AutoPicker::autoPickLoGOneMicrograph(FileName &fn_mic, long int imic)
 	RFLOAT count_low = 0.;
 	RFLOAT count_high = 0.;
 	RFLOAT count_ok = 0.;
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Mbest_size)
+	const long int total_pix = MULTIDIM_SIZE(Mbest_fom);
+	float *fom_ptr = MULTIDIM_ARRAY(Mbest_fom);
+	const float *size_ptr = MULTIDIM_ARRAY(Mbest_size);
+	const float max_diam_f = (float)LoG_max_diameter;
+	const float min_diam_f = (float)LoG_min_diameter;
+	const int nt_stats = (total_pix >= 65536) ? nr_cpu_threads : 1;
+
+	#pragma omp parallel for schedule(static) num_threads(nt_stats) if(nt_stats > 1) \
+		reduction(+:sum_fom_low,sum_fom_high,sum_fom_ok,sum2_fom_low,sum2_fom_high,sum2_fom_ok,count_low,count_high,count_ok)
+	for (long int n = 0; n < total_pix; n++)
 	{
-		if (DIRECT_MULTIDIM_ELEM(Mbest_size, n) > LoG_max_diameter)
+		const float sz = size_ptr[n];
+		const float f = fom_ptr[n];
+		if (sz > max_diam_f)
 		{
-			sum_fom_high += DIRECT_MULTIDIM_ELEM(Mbest_fom, n);
-			sum2_fom_high += DIRECT_MULTIDIM_ELEM(Mbest_fom, n) * DIRECT_MULTIDIM_ELEM(Mbest_fom, n);
+			sum_fom_high += f;
+			sum2_fom_high += (RFLOAT)f * (RFLOAT)f;
 			count_high += 1.;
-			DIRECT_MULTIDIM_ELEM(Mbest_fom, n) = 0.;
+			fom_ptr[n] = 0.f;
 		}
-		else if (DIRECT_MULTIDIM_ELEM(Mbest_size, n) < LoG_min_diameter)
+		else if (sz < min_diam_f)
 		{
-			sum_fom_low += DIRECT_MULTIDIM_ELEM(Mbest_fom, n);
-			sum2_fom_low += DIRECT_MULTIDIM_ELEM(Mbest_fom, n) * DIRECT_MULTIDIM_ELEM(Mbest_fom, n);
+			sum_fom_low += f;
+			sum2_fom_low += (RFLOAT)f * (RFLOAT)f;
 			count_low += 1.;
-			DIRECT_MULTIDIM_ELEM(Mbest_fom, n) = 0.;
+			fom_ptr[n] = 0.f;
 		}
 		else
 		{
-			sum_fom_ok += DIRECT_MULTIDIM_ELEM(Mbest_fom, n);
-			sum2_fom_ok += DIRECT_MULTIDIM_ELEM(Mbest_fom, n) * DIRECT_MULTIDIM_ELEM(Mbest_fom, n);
+			sum_fom_ok += f;
+			sum2_fom_ok += (RFLOAT)f * (RFLOAT)f;
 			count_ok += 1.;
 		}
 	}
@@ -3375,17 +3570,15 @@ void AutoPicker::autoPickLoGOneMicrograph(FileName &fn_mic, long int imic)
 		Maux2.write(fn_tmp);
 	}
 
-	// Average of FOMs outside desired diameter range
-	RFLOAT sum_fom_outside = (sum_fom_low + sum_fom_high) / (count_low +  count_high);
+	sum_fom_ok /= count_ok;
+	sum2_fom_ok = sum2_fom_ok/count_ok - sum_fom_ok*sum_fom_ok;
+#ifdef DEBUG_LOG
+	RFLOAT sum_fom_outside = (sum_fom_low + sum_fom_high) / (count_low + count_high);
 	sum_fom_low /= count_low;
 	sum_fom_high /= count_high;
-	sum_fom_ok /= count_ok;
-	// Variance of FOMs outside desired diameter range
 	sum2_fom_low = sum2_fom_low/count_low - sum_fom_low*sum_fom_low;
 	sum2_fom_high = sum2_fom_high/count_high - sum_fom_high*sum_fom_high;
-	sum2_fom_ok = sum2_fom_ok/count_ok - sum_fom_ok*sum_fom_ok;
-	//float my_threshold =  sum_fom_low + LoG_adjust_threshold * sqrt(sum2_fom_low);
-	//Sjors 25May2018: better have threshold only depend on fom_ok, as in some cases fom_low/high are on very different scale...
+#endif
 	float my_threshold =  sum_fom_ok + LoG_adjust_threshold * sqrt(sum2_fom_ok);
 	float my_upper_limit = sum_fom_ok + LoG_upper_limit * sqrt(sum2_fom_ok);
 
@@ -3397,13 +3590,16 @@ void AutoPicker::autoPickLoGOneMicrograph(FileName &fn_mic, long int imic)
 		std::cerr << " my_threshold= " << my_threshold << " LoG_adjust_threshold= "<< LoG_adjust_threshold << std::endl;
 #endif
 
-	// Threshold the best_fom map
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Mbest_fom)
+	// Threshold best_fom and collect positive candidates in a single pass instead of O(K * W^2) maxIndex loops
+	struct LoGCand { float val; long int idx; };
+	std::vector<LoGCand> cands;
+	for (long int n = 0; n < total_pix; n++)
 	{
-		if (DIRECT_MULTIDIM_ELEM(Mbest_fom, n) < my_threshold)
-		{
-			DIRECT_MULTIDIM_ELEM(Mbest_fom, n) = 0.;
-		}
+		float v = fom_ptr[n];
+		if (v < my_threshold)
+			fom_ptr[n] = 0.f;
+		else if (v > 0.f)
+			cands.push_back({v, n});
 	}
 
 	if (do_write_fom_maps)
@@ -3413,54 +3609,73 @@ void AutoPicker::autoPickLoGOneMicrograph(FileName &fn_mic, long int imic)
 		Maux2.write(fn_tmp);
 	}
 
-	// Now just start from the biggest peak: put a particle coordinate there, remove all neighbouring pixels within corresponding Mbest_size and loop
-	MetaDataTable MDout;
-	long int imax, jmax;
-	while (Mbest_fom.maxIndex(imax, jmax) > 0.)
+	std::sort(cands.begin(), cands.end(), [](const LoGCand &a, const LoGCand &b) {
+		return (a.val > b.val) || (a.val == b.val && a.idx < b.idx);
+	});
+
+	auto md_ptr = std::make_shared<MetaDataTable>();
+	const long int xdim = XSIZE(Mbest_fom);
+	const long int sx = STARTINGX(Mbest_fom), fx_max = FINISHINGX(Mbest_fom);
+	const long int sy = STARTINGY(Mbest_fom), fy_max = FINISHINGY(Mbest_fom);
+	const long int x_origin = FIRST_XMIPP_INDEX((int)((float)micrograph_xsize * scale));
+	const long int y_origin = FIRST_XMIPP_INDEX((int)((float)micrograph_ysize * scale));
+
+	for (size_t ic = 0; ic < cands.size(); ic++)
 	{
-		RFLOAT fom_here = A2D_ELEM(Mbest_fom, imax, jmax);
+		const long int idx = cands[ic].idx;
+		const float fom_here = fom_ptr[idx];
+		if (fom_here <= 0.f)
+			continue;
+
+		const long int imax = (idx / xdim) + sy;
+		const long int jmax = (idx % xdim) + sx;
+
 		if (fom_here < my_upper_limit)
 		{
-			MDout.addObject();
-			long int xx = jmax - FIRST_XMIPP_INDEX((int)((float)micrograph_xsize*scale));
-			long int yy = imax - FIRST_XMIPP_INDEX((int)((float)micrograph_ysize*scale));
-			MDout.setValue(EMDL_IMAGE_COORD_X, (RFLOAT)(xx) / scale);
-			MDout.setValue(EMDL_IMAGE_COORD_Y, (RFLOAT)(yy) / scale);
-			MDout.setValue(EMDL_PARTICLE_AUTOPICK_FOM, A2D_ELEM(Mbest_fom, imax, jmax));
-			MDout.setValue(EMDL_PARTICLE_CLASS, 0); // Dummy values to avoid problems in JoinStar
-			MDout.setValue(EMDL_ORIENT_PSI, 0.0);
+			md_ptr->addObject();
+			long int xx = jmax - x_origin;
+			long int yy = imax - y_origin;
+			md_ptr->setValue(EMDL_IMAGE_COORD_X, (RFLOAT)(xx) / scale);
+			md_ptr->setValue(EMDL_IMAGE_COORD_Y, (RFLOAT)(yy) / scale);
+			md_ptr->setValue(EMDL_PARTICLE_AUTOPICK_FOM, (RFLOAT)fom_here);
+			md_ptr->setValue(EMDL_PARTICLE_CLASS, 0);
+			md_ptr->setValue(EMDL_ORIENT_PSI, 0.0);
 		}
 
-		// Now set all pixels of Mbest_fom within a distance of 0.5* the corresponding Mbest_size to zero
-		// Exclude a bit more radius, such that no very close neighbours are allowed
-		long int myrad = ROUND(scale * (A2D_ELEM(Mbest_size, imax, jmax) + LoG_min_diameter) * LoG_neighbour_fudge / 2 / angpix);
+		long int myrad = ROUND(scale * (size_ptr[idx] + LoG_min_diameter) * LoG_neighbour_fudge / 2 / angpix);
 		long int myrad2 = myrad * myrad;
-//		std::cout << "scale = " << scale << " Mbest_size = " << A2D_ELEM(Mbest_size, imax, jmax) << " myrad " << myrad << std::endl;
-		for (long int ii = imax - myrad; ii <= imax + myrad; ii++)
+		const long int ii_lo = std::max(sy, imax - myrad);
+		const long int ii_hi = std::min(fy_max, imax + myrad);
+		const long int jj_lo = std::max(sx, jmax - myrad);
+		const long int jj_hi = std::min(fx_max, jmax + myrad);
+		for (long int ii = ii_lo; ii <= ii_hi; ii++)
 		{
-			for (long int jj = jmax - myrad; jj <= jmax + myrad; jj++)
+			const long int dy = imax - ii;
+			const long int rem = myrad2 - dy * dy;
+			if (rem <= 0)
+				continue;
+			float *row = fom_ptr + (ii - sy) * xdim;
+			for (long int jj = jj_lo; jj <= jj_hi; jj++)
 			{
-				long int r2 = (imax - ii) * (imax - ii) + (jmax - jj) * (jmax - jj);
-				if (r2 < myrad2 && ii >= STARTINGY(Mbest_fom) && jj >= STARTINGX(Mbest_fom) &&
-				    ii <= FINISHINGY(Mbest_fom) && jj <= FINISHINGX(Mbest_fom))
-					A2D_ELEM(Mbest_fom, ii, jj) = 0.;
+				const long int dx = jmax - jj;
+				if (dx * dx < rem)
+					row[jj - sx] = 0.f;
 			}
 		}
 	}
 
 	if (verb > 1)
-		std::cerr << "Picked " << MDout.numberOfObjects() << " of particles " << std::endl;
+		std::cerr << "Picked " << md_ptr->numberOfObjects() << " of particles " << std::endl;
 	fn_tmp = getOutputRootName(fn_mic) + "_" + fn_out + ".star";
-	MDout.write(fn_tmp);
+	writeAutoPickStar(fn_tmp, md_ptr);
 }
 
 void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 {
 	Image<RFLOAT> Imic;
 	MultidimArray<Complex > Faux, Faux2, Fmic;
-	MultidimArray<RFLOAT> Maux, Mfull, Mstddev, Mmean, Mstddev2, Mavg, Mdiff2, MsumX2, Mccf_best, Mpsi_best, Fctf, Mccf_best_combined, Mpsi_best_combined;
+	MultidimArray<RFLOAT> Maux, Mstddev, Mmean, Mstddev2, Mavg, Mccf_best, Mpsi_best, Fctf, Mccf_best_combined, Mpsi_best_combined;
 	MultidimArray<int> Mclass_best_combined;
-	FourierTransformer transformer, transformer_full;
 	RFLOAT sum_ref_under_circ_mask, sum_ref2_under_circ_mask;
 	int my_skip_side = autopick_skip_side + particle_size/2;
 	CTF ctf;
@@ -3491,7 +3706,7 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 	my_ysize = YSIZE(Imic());
 	my_size = (my_xsize != my_ysize) ? XMIPP_MAX(my_xsize, my_ysize) : my_xsize;
 	if (extra_padding > 0)
-	my_size += 2 * extra_padding;
+		my_size += 2 * extra_padding;
 
 	if (my_size != micrograph_size || my_xsize != micrograph_xsize || my_ysize != micrograph_ysize)
 	{
@@ -3505,29 +3720,35 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 	// Set mean to zero and stddev to 1 to prevent numerical problems with one-sweep stddev calculations....
 	RFLOAT avg0, stddev0, minval0, maxval0;
 	Imic().computeStats(avg0, stddev0, minval0, maxval0);
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Imic())
+	const long int mic_nzyx = Imic().nzyxdim;
+	RFLOAT *mic_data = Imic().data;
+	const int nt_mic = (mic_nzyx >= 65536) ? nr_cpu_threads : 1;
+	#pragma omp parallel for schedule(static) num_threads(nt_mic) if(nt_mic > 1)
+	for (long int n = 0; n < mic_nzyx; n++)
 	{
-		// Remove pixel values that are too far away from the mean
-		if ( ABS(DIRECT_MULTIDIM_ELEM(Imic(), n) - avg0) / stddev0 > outlier_removal_zscore)
-			DIRECT_MULTIDIM_ELEM(Imic(), n) = avg0;
-
-		DIRECT_MULTIDIM_ELEM(Imic(), n) = (DIRECT_MULTIDIM_ELEM(Imic(), n) - avg0) / stddev0;
+		RFLOAT v = mic_data[n];
+		if (ABS(v - avg0) / stddev0 > outlier_removal_zscore)
+			v = avg0;
+		mic_data[n] = (v - avg0) / stddev0;
 	}
 
+	MultidimArray<RFLOAT> *mic_in = &Imic();
 	if (micrograph_xsize != micrograph_size || micrograph_ysize != micrograph_size)
 	{
-		// Window non-square micrographs to be a square with the largest side
-		rewindow(Imic, micrograph_size);
-
-		// Fill region outside the original window with white Gaussian noise to prevent all-zeros in Mstddev
-		FOR_ALL_ELEMENTS_IN_ARRAY2D(Imic())
+		persistent_Mfull_.resizeNoCp(1, micrograph_size, micrograph_size);
+		persistent_Mfull_.setXmippOrigin();
+		const long int off_x = FIRST_XMIPP_INDEX(micrograph_xsize) - FIRST_XMIPP_INDEX(micrograph_size);
+		const long int off_y = FIRST_XMIPP_INDEX(micrograph_ysize) - FIRST_XMIPP_INDEX(micrograph_size);
+		RFLOAT *dst = MULTIDIM_ARRAY(persistent_Mfull_);
+		const RFLOAT *src = MULTIDIM_ARRAY(Imic());
+		for (int sy = 0; sy < micrograph_ysize; sy++)
 		{
-			if (i < FIRST_XMIPP_INDEX(micrograph_ysize)
-					|| i > LAST_XMIPP_INDEX(micrograph_ysize)
-					|| j < FIRST_XMIPP_INDEX(micrograph_xsize)
-					|| j > LAST_XMIPP_INDEX(micrograph_xsize) )
-				A2D_ELEM(Imic(), i, j) = rnd_gaus(0.,1.);
+			memcpy(dst + (size_t)(sy + off_y) * (size_t)micrograph_size + (size_t)off_x,
+			       src + (size_t)sy * (size_t)micrograph_xsize,
+			       (size_t)micrograph_xsize * sizeof(RFLOAT));
 		}
+		fillOutsideWindowWithGaus(dst, micrograph_xsize, micrograph_ysize, micrograph_size);
+		mic_in = &persistent_Mfull_;
 	}
 #ifdef TIMING
 	timer.toc(TIMING_A7);
@@ -3538,22 +3759,12 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 	// Read in the CTF information if needed
 	if (do_ctf)
 	{
-		// Search for this micrograph in the metadata table
-		bool found = false;
-		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDmic)
-		{
-			FileName fn_tmp;
-			MDmic.getValue(EMDL_MICROGRAPH_NAME, fn_tmp);
-			if (fn_tmp==fn_mic)
-			{
-				ctf.readByGroup(MDmic, &obsModel);
-				Fctf.resize(downsize_mic, downsize_mic/2 + 1);
-				ctf.getFftwImage(Fctf, micrograph_size, micrograph_size, angpix, false, false, intact_ctf_first_peak, true);
-				found = true;
-				break;
-			}
-		}
-		if (!found) REPORT_ERROR("Logic error: failed to find CTF information for " + fn_mic);
+		auto it = mic_to_md_idx.find(fn_mic);
+		if (it == mic_to_md_idx.end())
+			REPORT_ERROR("Logic error: failed to find CTF information for " + fn_mic);
+		ctf.readByGroup(MDmic, &obsModel, it->second);
+		Fctf.resize(downsize_mic, downsize_mic/2 + 1);
+		ctf.getFftwImage(Fctf, micrograph_size, micrograph_size, angpix, false, false, intact_ctf_first_peak, true);
 
 #ifdef DEBUG
 		std::cerr << " Read CTF info from" << fn_mic.withoutExtension()<<"_ctf.star" << std::endl;
@@ -3576,7 +3787,6 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 #ifdef TIMING
 	timer.tic(TIMING_B1);
 #endif
-	//Sjors 18apr2016
 	RFLOAT normfft = (RFLOAT)(micrograph_size * micrograph_size) / (RFLOAT)nr_pixels_circular_mask;
 	if (do_read_fom_maps)
 	{
@@ -3596,63 +3806,65 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 	}
 	else
 	{
-		/*
-		 * Squared difference FOM:
-		 * Sum ( (X-mu)/sig  - A )^2 =
-		 *  = Sum((X-mu)/sig)^2 - 2 Sum (A*(X-mu)/sig) + Sum(A)^2
-		 *  = (1/sig^2)*Sum(X^2) - (2*mu/sig^2)*Sum(X) + (mu^2/sig^2)*Sum(1) - (2/sig)*Sum(AX) + (2*mu/sig)*Sum(A) + Sum(A^2)
-		 *
-		 * However, the squared difference with an "empty" ie all-zero reference is:
-		 * Sum ( (X-mu)/sig)^2
-		 *
-		 * The ratio of the probabilities thereby becomes:
-		 * P(ref) = 1/sqrt(2pi) * exp (( (X-mu)/sig  - A )^2 / -2 )   // assuming sigma = 1!
-		 * P(zero) = 1/sqrt(2pi) * exp (( (X-mu)/sig )^2 / -2 )
-		 *
-		 * P(ref)/P(zero) = exp(( (X-mu)/sig  - A )^2 / -2) / exp ( ( (X-mu)/sig )^2 / -2)
-		 *                = exp( (- (2/sig)*Sum(AX) + (2*mu/sig)*Sum(A) + Sum(A^2)) / - 2 )
-		 *
-		 *                Therefore, I do not need to calculate (X-mu)/sig beforehand!!!
-		 *
-		 */
-
-        // Fourier Transform (and downscale) Imic()
-		transformer.FourierTransform(Imic(), Fmic);
-
+		// Fourier Transform *mic_in (keep separate Fmic when highpass runs so Fmic2 doesn't overwrite alias)
 		if (highpass > 0.)
 		{
-			lowPassFilterMap(Fmic, micrograph_size, highpass, angpix, 2, true); // true means highpass instead of lowpass!
-			transformer.inverseFourierTransform(Fmic, Imic()); // also calculate inverse transform again for squared calculation below
+			mic_fwd_transformer_.FourierTransform(*mic_in, Fmic, true);
+			lowPassFilterMap(Fmic, micrograph_size, highpass, angpix, 2, true);
+			persistent_Mfull_.resizeNoCp(1, micrograph_size, micrograph_size);
+			persistent_Mfull_.setXmippOrigin();
+			mic_in = &persistent_Mfull_;
+			Faux = Fmic;
+			mic_fwd_transformer_.inverseFourierTransform(Faux, *mic_in);
+			CenterFFTbySign(Fmic);
+
+			// Reuse same array cleanly after inverse for squared mic
+			const long int full_sz = (long int)micrograph_size * (long int)micrograph_size;
+			RFLOAT *mdata = MULTIDIM_ARRAY(*mic_in);
+			const int nt_sq = (full_sz >= 65536) ? nr_cpu_threads : 1;
+			#pragma omp parallel for schedule(static) num_threads(nt_sq) if(nt_sq > 1)
+			for (long int n = 0; n < full_sz; n++)
+				mdata[n] *= mdata[n];
+			MultidimArray<Complex> Fmic2;
+			mic_fwd_transformer_.FourierTransform(*mic_in, Fmic2, false);
+			CenterFFTbySign(Fmic2);
+
+			if (autopick_helical_segments)
+				calculateStddevAndMeanUnderMask(Fmic, Fmic2, Favgmsk, nr_pixels_avg_mask, Mstddev2, Mavg);
+			calculateStddevAndMeanUnderMask(Fmic, Fmic2, Finvmsk, nr_pixels_circular_invmask, Mstddev, Mmean);
 		}
-
-		CenterFFTbySign(Fmic);
-
-
-		// Also calculate the FFT of the squared micrograph
-		Maux.resize(micrograph_size,micrograph_size);
-		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Maux)
+		else
 		{
-			DIRECT_MULTIDIM_ELEM(Maux, n) = DIRECT_MULTIDIM_ELEM(Imic(), n) * DIRECT_MULTIDIM_ELEM(Imic(), n);
+			mic_fwd_transformer_.FourierTransform(*mic_in, Fmic, true);
+			CenterFFTbySign(Fmic);
+
+			const long int full_sz = (long int)micrograph_size * (long int)micrograph_size;
+			const RFLOAT *src = MULTIDIM_ARRAY(*mic_in);
+			MultidimArray<RFLOAT> Msq_local;
+			RFLOAT *dst = NULL;
+			if (mic_in != &persistent_Mfull_)
+			{
+				persistent_Mfull_.resizeNoCp(1, micrograph_size, micrograph_size);
+				dst = MULTIDIM_ARRAY(persistent_Mfull_);
+			}
+			else
+			{
+				Msq_local.resizeNoCp(1, micrograph_size, micrograph_size);
+				dst = MULTIDIM_ARRAY(Msq_local);
+			}
+			const int nt_sq = (full_sz >= 65536) ? nr_cpu_threads : 1;
+			#pragma omp parallel for schedule(static) num_threads(nt_sq) if(nt_sq > 1)
+			for (long int n = 0; n < full_sz; n++)
+				dst[n] = src[n] * src[n];
+
+			MultidimArray<Complex> Fmic2;
+			mic_fwd_transformer_.FourierTransform((mic_in != &persistent_Mfull_) ? persistent_Mfull_ : Msq_local, Fmic2, false);
+			CenterFFTbySign(Fmic2);
+
+			if (autopick_helical_segments)
+				calculateStddevAndMeanUnderMask(Fmic, Fmic2, Favgmsk, nr_pixels_avg_mask, Mstddev2, Mavg);
+			calculateStddevAndMeanUnderMask(Fmic, Fmic2, Finvmsk, nr_pixels_circular_invmask, Mstddev, Mmean);
 		}
-		MultidimArray<Complex> Fmic2;
-		transformer.FourierTransform(Maux, Fmic2);
-		CenterFFTbySign(Fmic2);
-
-		Maux.resize(workSize,workSize);
-
-#ifdef DEBUG
-		std::cerr << " nr_pixels_circular_invmask= " << nr_pixels_circular_invmask << std::endl;
-		std::cerr << " nr_pixels_circular_mask= " << nr_pixels_circular_mask << std::endl;
-		windowFourierTransform(Finvmsk, Faux2, micrograph_size);
-		CenterFFTbySign(Faux2);
-		transformer.inverseFourierTransform(Faux2, tt());
-		tt.write("Minvmask.spi");
-#endif
-
-		// The following calculate mu and sig under the solvent area at every position in the micrograph
-		if (autopick_helical_segments)
-			calculateStddevAndMeanUnderMask(Fmic, Fmic2, Favgmsk, nr_pixels_avg_mask, Mstddev2, Mavg);
-		calculateStddevAndMeanUnderMask(Fmic, Fmic2, Finvmsk, nr_pixels_circular_invmask, Mstddev, Mmean);
 
 		if (do_write_fom_maps)
 		{
@@ -3675,8 +3887,6 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 	timer.toc(TIMING_B1);
 #endif
 
-	// Now start looking for the peaks of all references
-	// Clear the output vector with all peaks
 	std::vector<Peak> peaks;
 	peaks.clear();
 
@@ -3719,9 +3929,18 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 		}
 	}
 
-	for (int iref = 0; iref < Mrefs.size(); iref++)
+	std::vector<RFLOAT> psis;
+	for (RFLOAT psi = 0.; psi < 360.; psi += psi_sampling)
+		psis.push_back(psi);
+	const int n_psis = (int)psis.size();
+	const long int work_nzyx = (long int)workSize * (long int)workSize;
+	const long int down_f_sz = (long int)downsize_mic * (long int)(downsize_mic / 2 + 1);
+	const Complex *fmic_p = MULTIDIM_ARRAY(Fmic);
+	const RFLOAT *fctf_p = do_ctf ? MULTIDIM_ARRAY(Fctf) : NULL;
+
+	for (int iref = 0; iref < (int)Mrefs.size(); iref++)
 	{
-		RFLOAT expected_Pratio; // the expectedFOM for this (ctf-corrected) reference
+		RFLOAT expected_Pratio;
 		if (do_read_fom_maps)
 		{
 #ifdef TIMING
@@ -3735,7 +3954,7 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 				fn_tmp.compose(getOutputRootName(fn_mic)+"_"+fn_out+"_ref", iref,"_bestCCF.spi");
 				It.read(fn_tmp);
 				Mccf_best = It();
-				It.MDMainHeader.getValue(EMDL_IMAGE_STATS_MAX, expected_Pratio);  // Retrieve expected_Pratio from the header of the image
+				It.MDMainHeader.getValue(EMDL_IMAGE_STATS_MAX, expected_Pratio);
 
 				fn_tmp.compose(getOutputRootName(fn_mic)+"_"+fn_out+"_ref", iref,"_bestPSI.spi");
 				It.read(fn_tmp);
@@ -3744,183 +3963,326 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 #ifdef TIMING
 			timer.toc(TIMING_B2);
 #endif
-		} //end else if do_read_fom_maps
+		}
 		else
 		{
 #ifdef TIMING
 			timer.tic(TIMING_B3);
 #endif
 			Mccf_best.initConstant(-LARGE_NUMBER);
-			bool is_first_psi = true;
-			for (RFLOAT psi = 0. ; psi < 360.; psi+=psi_sampling)
-			{
-				// Get the Euler matrix
-				Matrix2D<RFLOAT> A(3,3);
-				Euler_angles2matrix(0., 0., psi, A);
+			MultidimArray<RFLOAT> Maux_best(workSize, workSize);
+			MultidimArray<int> Midx_best(workSize, workSize);
 
-				// Now get the FT of the rotated (non-ctf-corrected) template
-				Faux.initZeros(downsize_mic, downsize_mic/2 + 1);
+			// First orientation runs sequentially for deterministic PREP_CALCS rnd_gaus order
+			{
+				Matrix2D<RFLOAT> A(3, 3);
+				Euler_angles2matrix(0., 0., psis[0], A);
+				Faux.initZeros(downsize_mic, downsize_mic / 2 + 1);
 				PPref[iref].get2DFourierTransform(Faux, A);
 
-#ifdef DEBUG
-				std::cerr << " psi= " << psi << std::endl;
-				windowFourierTransform(Faux, Faux2, micrograph_size);
-				CenterFFTbySign(Faux2);
-				tt().resize(micrograph_size, micrograph_size);
-				transformer.inverseFourierTransform(Faux2, tt());
-				tt.write("Mref_rot.spi");
-
-				windowFourierTransform(Fmic, Faux2, micrograph_size);
-				CenterFFTbySign(Faux2);
-				transformer.inverseFourierTransform(Faux2, tt());
-				tt.write("Mmic.spi");
-
-#endif
-#ifdef TIMING
-	timer.tic(TIMING_B4);
-#endif
-				// Apply the CTF on-the-fly (so same PPref can be used for many different micrographs)
 				if (do_ctf)
 				{
-					FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Faux)
-					{
-						DIRECT_MULTIDIM_ELEM(Faux, n) *= DIRECT_MULTIDIM_ELEM(Fctf, n);
-					}
-#ifdef TIMING
-	timer.toc(TIMING_B4);
-#endif
-#ifdef DEBUG
-				MultidimArray<RFLOAT> ttt(micrograph_size, micrograph_size);
+					Complex *fp = MULTIDIM_ARRAY(Faux);
+					const int nt_f = (down_f_sz >= 65536) ? nr_cpu_threads : 1;
+					#pragma omp parallel for schedule(static) num_threads(nt_f) if(nt_f > 1)
+					for (long int n = 0; n < down_f_sz; n++)
+						fp[n] *= fctf_p[n];
+				}
+
 				windowFourierTransform(Faux, Faux2, micrograph_size);
 				CenterFFTbySign(Faux2);
-				transformer.inverseFourierTransform(Faux2, ttt);
-				ttt.setXmippOrigin();
-				tt().resize(particle_size, particle_size);
-				tt().setXmippOrigin();
-				FOR_ALL_ELEMENTS_IN_ARRAY2D(tt())
-				{
-					A2D_ELEM(tt(), i, j) = A2D_ELEM(ttt, i, j);
-				}
-				tt.write("Mref_rot_ctf.spi");
-#endif
-				}
+				persistent_Mfull_.resizeNoCp(1, micrograph_size, micrograph_size);
+				mic_full_bwd_transformer_.inverseFourierTransform(Faux2, persistent_Mfull_);
+				persistent_Mfull_.setXmippOrigin();
 
-				if (is_first_psi)
+				sum_ref_under_circ_mask = 0.;
+				sum_ref2_under_circ_mask = 0.;
+				RFLOAT suma2 = 0.;
+				RFLOAT sumn = 1.;
+				const int p_first = FIRST_XMIPP_INDEX(particle_size);
+				const int p_last = LAST_XMIPP_INDEX(particle_size);
+				for (int i = p_first; i <= p_last; i++)
 				{
-#ifdef TIMING
-	timer.tic(TIMING_B5);
-#endif
-					// Calculate the expected ratio of probabilities for this CTF-corrected reference
-					// and the sum_ref_under_circ_mask and sum_ref_under_circ_mask2
-					// Do this also if we're not recalculating the fom maps...
-					// This calculation needs to be done on an "non-shrinked" micrograph, in order to get the correct I^2 statistics
-					// (in its own array and transformer: resizing Maux and re-planning for every reference cost
-					// a reallocation and a new FFT plan each time)
-					windowFourierTransform(Faux, Faux2, micrograph_size);
-					CenterFFTbySign(Faux2);
-					Mfull.resize(micrograph_size, micrograph_size);
-					transformer_full.inverseFourierTransform(Faux2, Mfull);
-					Mfull.setXmippOrigin();
-#ifdef DEBUG
-					Image<RFLOAT> ttt;
-					ttt()=Mfull;
-					ttt.write("Maux.spi");
-#endif
-					sum_ref_under_circ_mask = 0.;
-					sum_ref2_under_circ_mask = 0.;
-					RFLOAT suma2 = 0.;
-					RFLOAT sumn = 1.;
-					MultidimArray<RFLOAT> Mctfref(particle_size, particle_size);
-					Mctfref.setXmippOrigin();
-					FOR_ALL_ELEMENTS_IN_ARRAY2D(Mctfref) // only loop over smaller Mctfref, but take values from large Maux!
+					const int i2 = i * i;
+					for (int j = p_first; j <= p_last; j++)
 					{
-						if (i*i + j*j < particle_radius2)
+						if (i2 + j * j < particle_radius2)
 						{
-							suma2 += A2D_ELEM(Mfull, i, j) * A2D_ELEM(Mfull, i, j);
-							suma2 += 2. * A2D_ELEM(Mfull, i, j) * rnd_gaus(0., 1.);
-							sum_ref_under_circ_mask += A2D_ELEM(Mfull, i, j);
-							sum_ref2_under_circ_mask += A2D_ELEM(Mfull, i, j) * A2D_ELEM(Mfull, i, j);
+							const RFLOAT val = A2D_ELEM(persistent_Mfull_, i, j);
+							suma2 += val * val;
+							suma2 += 2. * val * rnd_gaus(0., 1.);
+							sum_ref_under_circ_mask += val;
+							sum_ref2_under_circ_mask += val * val;
 							sumn += 1.;
 						}
-#ifdef DEBUG
-						A2D_ELEM(Mctfref, i, j) = A2D_ELEM(Mfull, i, j);
-#endif
 					}
-					sum_ref_under_circ_mask /= sumn;
-					sum_ref2_under_circ_mask /= sumn;
-					expected_Pratio = exp(suma2 / (2. * sumn));
-#ifdef DEBUG
-					std::cerr << " expected_Pratio["<<iref<<"]= " << expected_Pratio << std::endl;
-					tt()=Mctfref;
-					tt.write("Mctfref.spi");
-					std::cerr << "suma2 " << suma2<< " sumn " << sumn << " suma2/2sumn="<< suma2 / (2. * sumn) << std::endl;
-					std::cerr << " nr_pixels_under_mask= " << nr_pixels_circular_mask << " nr_pixels_under_invmask= " << nr_pixels_circular_invmask << std::endl;
-					std::cerr << "sum_ref_under_circ_mask " << sum_ref_under_circ_mask << std::endl;
-					std::cerr << "sum_ref2_under_circ_mask " << sum_ref2_under_circ_mask << std::endl;
-					std::cerr << "expected_Pratio " << expected_Pratio << std::endl;
-#endif
-
-#ifdef TIMING
-					timer.toc(TIMING_B5);
-#endif
 				}
+				sum_ref_under_circ_mask /= sumn;
+				sum_ref2_under_circ_mask /= sumn;
+				expected_Pratio = exp(suma2 / (2. * sumn));
 
-#ifdef TIMING
-				timer.tic(TIMING_B6);
-#endif
-				// Now multiply template and micrograph to calculate the cross-correlation
-				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Faux)
+				Complex *fp = MULTIDIM_ARRAY(Faux);
+				for (long int n = 0; n < down_f_sz; n++)
+					fp[n] = conj(fp[n]) * fmic_p[n];
+				if (workSize == downsize_mic)
 				{
-					DIRECT_MULTIDIM_ELEM(Faux, n) = conj(DIRECT_MULTIDIM_ELEM(Faux, n)) * DIRECT_MULTIDIM_ELEM(Fmic, n);
+					CenterFFTbySign(Faux);
+					work_bwd_transformer_.inverseFourierTransform(Faux, Maux_best);
 				}
-
-				// If we're not doing shrink, then Faux is bigger than Faux2!
-				windowFourierTransform(Faux, Faux2, workSize);
-				CenterFFTbySign(Faux2);
-				transformer.inverseFourierTransform(Faux2, Maux);
-#ifdef DEBUG
-				tt()=Maux*normfft;
-				tt.write("Mcc.spi");
-#endif
-
-				// Calculate ratio of prabilities P(ref)/P(zero)
-				// Keep track of the best values and their corresponding iref and psi
-
-				// So now we already had precalculated: Mdiff2 = 1/sig*Sum(X^2) - 2/sig*Sum(X) + mu^2/sig*Sum(1)
-				// Still to do (per reference): - 2/sig*Sum(AX) + 2*mu/sig*Sum(A) + Sum(A^2)
-				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Maux)
+				else
 				{
-					RFLOAT diff2 = - 2. * normfft * DIRECT_MULTIDIM_ELEM(Maux, n);
-					diff2 += 2. * DIRECT_MULTIDIM_ELEM(Mmean, n) * sum_ref_under_circ_mask;
-					if (DIRECT_MULTIDIM_ELEM(Mstddev, n) > 1E-10)
-						diff2 /= DIRECT_MULTIDIM_ELEM(Mstddev, n);
-					diff2 += sum_ref2_under_circ_mask;
-					diff2 = exp(- diff2 / 2.); // exponentiate to reflect the Gaussian error model. sigma=1 after normalization, 0.4=1/sqrt(2pi)
+					windowFourierTransform(Faux, Faux2, workSize);
+					CenterFFTbySign(Faux2);
+					work_bwd_transformer_.inverseFourierTransform(Faux2, Maux_best);
+				}
+				Midx_best.initZeros();
+			}
 
-					// Store fraction of (1 - probability-ratio) wrt  (1 - expected Pratio)
-					diff2 = (diff2 - 1.) / (expected_Pratio - 1.);
-#ifdef DEBUG
-					DIRECT_MULTIDIM_ELEM(Maux, n) = diff2;
-#endif
-					if (diff2 > DIRECT_MULTIDIM_ELEM(Mccf_best, n))
+			if (n_psis > 1 && expected_Pratio != 1.0)
+			{
+				const bool find_max = (expected_Pratio > 1.0);
+				const int n_thr = std::min(nr_cpu_threads, std::max(1, n_psis - 1));
+				if ((int)thr_work_transformers_.size() < n_thr)
+					thr_work_transformers_.resize(n_thr);
+
+				if (projector_interpolator == FINUFFT)
+				{
+					const size_t slice_bytes = (size_t)down_f_sz * sizeof(Complex);
+					const int max_chunk = std::max(1, std::min(n_psis - 1, (int)((256ULL << 20) / std::max<size_t>(1, slice_bytes))));
+					std::vector<MultidimArray<Complex> > Faux_batch(max_chunk);
+					std::vector< std::vector<RFLOAT> > thr_val(n_thr, std::vector<RFLOAT>(work_nzyx, 0.));
+					std::vector< std::vector<int> > thr_idx(n_thr, std::vector<int>(work_nzyx, -1));
+
+					for (int p0 = 1; p0 < n_psis; p0 += max_chunk)
 					{
-						DIRECT_MULTIDIM_ELEM(Mccf_best, n) = diff2;
-						DIRECT_MULTIDIM_ELEM(Mpsi_best, n) = psi;
+						const int cnt = std::min(max_chunk, n_psis - p0);
+						std::vector<MultidimArray<Complex>*> ptrs(cnt);
+						std::vector<Matrix2D<RFLOAT> > As(cnt, Matrix2D<RFLOAT>(3, 3));
+						for (int b = 0; b < cnt; b++)
+						{
+							Faux_batch[b].initZeros(downsize_mic, downsize_mic / 2 + 1);
+							ptrs[b] = &Faux_batch[b];
+							Euler_angles2matrix(0., 0., psis[p0 + b], As[b]);
+						}
+						PPref[iref].get2DFourierTransformMany(ptrs, As);
+
+						#pragma omp parallel num_threads(n_thr)
+						{
+							const int tid = omp_get_thread_num();
+							relionFftwSetThreadPlanThreads(1);
+							MultidimArray<Complex> Faux2_t;
+							MultidimArray<RFLOAT> Maux_t(workSize, workSize);
+							RFLOAT *tv = thr_val[tid].data();
+							int *ti = thr_idx[tid].data();
+
+							#pragma omp for schedule(dynamic, 1)
+							for (int b = 0; b < cnt; b++)
+							{
+								const int ipsi = p0 + b;
+								Complex *fp = MULTIDIM_ARRAY(Faux_batch[b]);
+								if (do_ctf)
+								{
+									for (long int n = 0; n < down_f_sz; n++)
+										fp[n] = conj(fp[n] * fctf_p[n]) * fmic_p[n];
+								}
+								else
+								{
+									for (long int n = 0; n < down_f_sz; n++)
+										fp[n] = conj(fp[n]) * fmic_p[n];
+								}
+								if (workSize == downsize_mic)
+								{
+									CenterFFTbySign(Faux_batch[b]);
+									thr_work_transformers_[tid].inverseFourierTransform(Faux_batch[b], Maux_t);
+								}
+								else
+								{
+									windowFourierTransform(Faux_batch[b], Faux2_t, workSize);
+									CenterFFTbySign(Faux2_t);
+									thr_work_transformers_[tid].inverseFourierTransform(Faux2_t, Maux_t);
+								}
+								const RFLOAT *ma = MULTIDIM_ARRAY(Maux_t);
+								if (find_max)
+								{
+									for (long int n = 0; n < work_nzyx; n++)
+									{
+										const RFLOAT v = ma[n];
+										if (ti[n] < 0 || v > tv[n] || (v == tv[n] && ipsi < ti[n]))
+										{
+											tv[n] = v;
+											ti[n] = ipsi;
+										}
+									}
+								}
+								else
+								{
+									for (long int n = 0; n < work_nzyx; n++)
+									{
+										const RFLOAT v = ma[n];
+										if (ti[n] < 0 || v < tv[n] || (v == tv[n] && ipsi < ti[n]))
+										{
+											tv[n] = v;
+											ti[n] = ipsi;
+										}
+									}
+								}
+							}
+							relionFftwSetThreadPlanThreads(0);
+						}
+					}
+
+					RFLOAT *mb = MULTIDIM_ARRAY(Maux_best);
+					int *mi = MULTIDIM_ARRAY(Midx_best);
+					#pragma omp parallel for schedule(static) num_threads(n_thr)
+					for (long int n = 0; n < work_nzyx; n++)
+					{
+						RFLOAT bv = mb[n];
+						int bi = mi[n];
+						for (int t = 0; t < n_thr; t++)
+						{
+							const int it_idx = thr_idx[t][n];
+							if (it_idx < 0) continue;
+							const RFLOAT v = thr_val[t][n];
+							const bool better = find_max ? (v > bv) : (v < bv);
+							if (better || (v == bv && it_idx < bi))
+							{
+								bv = v;
+								bi = it_idx;
+							}
+						}
+						mb[n] = bv;
+						mi[n] = bi;
 					}
 				}
-#ifdef DEBUG
-				std::cerr << " Maux.computeMax()= " << Maux.computeMax() << std::endl;
-				tt()=Maux;
-				tt.write("Mccf.spi");
-			    std::cerr << " Press any key to continue... "  << std::endl;
-			    char c;
-			    std::cin >> c;
-#endif
-			    is_first_psi = false;
-#ifdef TIMING
-	timer.toc(TIMING_B6);
-#endif
-			} // end for psi
+				else
+				{
+					std::vector< std::vector<RFLOAT> > thr_val(n_thr, std::vector<RFLOAT>(work_nzyx, 0.));
+					std::vector< std::vector<int> > thr_idx(n_thr, std::vector<int>(work_nzyx, -1));
+
+					#pragma omp parallel num_threads(n_thr)
+					{
+						const int tid = omp_get_thread_num();
+						relionFftwSetThreadPlanThreads(1);
+						MultidimArray<Complex> Faux_t(downsize_mic, downsize_mic / 2 + 1), Faux2_t;
+						MultidimArray<RFLOAT> Maux_t(workSize, workSize);
+						Matrix2D<RFLOAT> A_t(3, 3);
+						RFLOAT *tv = thr_val[tid].data();
+						int *ti = thr_idx[tid].data();
+
+						#pragma omp for schedule(dynamic, 1)
+						for (int ipsi = 1; ipsi < n_psis; ipsi++)
+						{
+							Euler_angles2matrix(0., 0., psis[ipsi], A_t);
+							Faux_t.initZeros();
+							PPref[iref].get2DFourierTransform(Faux_t, A_t);
+							Complex *fp = MULTIDIM_ARRAY(Faux_t);
+							if (do_ctf)
+							{
+								for (long int n = 0; n < down_f_sz; n++)
+									fp[n] = conj(fp[n] * fctf_p[n]) * fmic_p[n];
+							}
+							else
+							{
+								for (long int n = 0; n < down_f_sz; n++)
+									fp[n] = conj(fp[n]) * fmic_p[n];
+							}
+
+							if (workSize == downsize_mic)
+							{
+								CenterFFTbySign(Faux_t);
+								thr_work_transformers_[tid].inverseFourierTransform(Faux_t, Maux_t);
+							}
+							else
+							{
+								windowFourierTransform(Faux_t, Faux2_t, workSize);
+								CenterFFTbySign(Faux2_t);
+								thr_work_transformers_[tid].inverseFourierTransform(Faux2_t, Maux_t);
+							}
+
+							const RFLOAT *ma = MULTIDIM_ARRAY(Maux_t);
+							if (find_max)
+							{
+								for (long int n = 0; n < work_nzyx; n++)
+								{
+									const RFLOAT v = ma[n];
+									if (ti[n] < 0 || v > tv[n] || (v == tv[n] && ipsi < ti[n]))
+									{
+										tv[n] = v;
+										ti[n] = ipsi;
+									}
+								}
+							}
+							else
+							{
+								for (long int n = 0; n < work_nzyx; n++)
+								{
+									const RFLOAT v = ma[n];
+									if (ti[n] < 0 || v < tv[n] || (v == tv[n] && ipsi < ti[n]))
+									{
+										tv[n] = v;
+										ti[n] = ipsi;
+									}
+								}
+							}
+						}
+						relionFftwSetThreadPlanThreads(0);
+					}
+
+					RFLOAT *mb = MULTIDIM_ARRAY(Maux_best);
+					int *mi = MULTIDIM_ARRAY(Midx_best);
+					#pragma omp parallel for schedule(static) num_threads(n_thr)
+					for (long int n = 0; n < work_nzyx; n++)
+					{
+						RFLOAT bv = mb[n];
+						int bi = mi[n];
+						for (int t = 0; t < n_thr; t++)
+						{
+							const int it_idx = thr_idx[t][n];
+							if (it_idx < 0) continue;
+							const RFLOAT v = thr_val[t][n];
+							const bool better = find_max ? (v > bv) : (v < bv);
+							if (better || (v == bv && it_idx < bi))
+							{
+								bv = v;
+								bi = it_idx;
+							}
+						}
+						mb[n] = bv;
+						mi[n] = bi;
+					}
+				}
+			}
+
+			// Evaluate exp() and division ONCE per pixel for the winning psi
+			const RFLOAT *mb = MULTIDIM_ARRAY(Maux_best);
+			const int *mi = MULTIDIM_ARRAY(Midx_best);
+			const RFLOAT *mmean_p = MULTIDIM_ARRAY(Mmean);
+			const RFLOAT *mstd_p = MULTIDIM_ARRAY(Mstddev);
+			RFLOAT *mccf_p = MULTIDIM_ARRAY(Mccf_best);
+			RFLOAT *mpsi_p = MULTIDIM_ARRAY(Mpsi_best);
+			const int nt_pr = (work_nzyx >= 65536) ? nr_cpu_threads : 1;
+			const RFLOAT inv_exp_minus_1 = 1. / (expected_Pratio - 1.);
+			const RFLOAT neg2_norm = -2. * normfft;
+			const RFLOAT two_sum_ref = 2. * sum_ref_under_circ_mask;
+
+			#pragma omp parallel for schedule(static) num_threads(nt_pr) if(nt_pr > 1)
+			for (long int n = 0; n < work_nzyx; n++)
+			{
+				RFLOAT diff2 = neg2_norm * mb[n] + two_sum_ref * mmean_p[n];
+				if (mstd_p[n] > 1E-10)
+					diff2 /= mstd_p[n];
+				diff2 += sum_ref2_under_circ_mask;
+				diff2 = (exp(-diff2 / 2.) - 1.) * inv_exp_minus_1;
+				if (diff2 > -LARGE_NUMBER)
+				{
+					mccf_p[n] = diff2;
+					mpsi_p[n] = psis[mi[n]];
+				}
+				else
+				{
+					mccf_p[n] = -LARGE_NUMBER;
+				}
+			}
 #ifdef TIMING
 	timer.toc(TIMING_B3);
 #endif
@@ -3933,20 +4295,14 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 				Image<RFLOAT> It;
 
 				It() = Mccf_best;
-				It.MDMainHeader.setValue(EMDL_IMAGE_STATS_MAX, expected_Pratio);  // Store expected_Pratio in the header of the image
+				It.MDMainHeader.setValue(EMDL_IMAGE_STATS_MAX, expected_Pratio);
 				fn_tmp.compose(getOutputRootName(fn_mic)+"_"+fn_out+"_ref", iref,"_bestCCF.spi");
 				It.write(fn_tmp);
 
 				It() = Mpsi_best;
 				fn_tmp.compose(getOutputRootName(fn_mic)+"_"+fn_out+"_ref", iref,"_bestPSI.spi");
 				It.write(fn_tmp);
-
-//				for (long int n=0; n<((Mccf_best).nzyxdim/10); n+=1)
-//				{
-//					std::cerr << DIRECT_MULTIDIM_ELEM(Mccf_best, n) << std::endl;
-//				}
-//				exit(0);
-			} // end if do_write_fom_maps
+			}
 #ifdef TIMING
 			timer.toc(TIMING_B7);
 #endif
@@ -3958,25 +4314,28 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 		{
 			if (!do_read_fom_maps)
 			{
-				// Combine Mccf_best and Mpsi_best from all refs
-				FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Mccf_best)
+				const RFLOAT *nc = MULTIDIM_ARRAY(Mccf_best);
+				const RFLOAT *np = MULTIDIM_ARRAY(Mpsi_best);
+				RFLOAT *cc = MULTIDIM_ARRAY(Mccf_best_combined);
+				RFLOAT *cp = MULTIDIM_ARRAY(Mpsi_best_combined);
+				int *cl = MULTIDIM_ARRAY(Mclass_best_combined);
+				const int nt_c = (work_nzyx >= 65536) ? nr_cpu_threads : 1;
+				#pragma omp parallel for schedule(static) num_threads(nt_c) if(nt_c > 1)
+				for (long int n = 0; n < work_nzyx; n++)
 				{
-					RFLOAT new_ccf = DIRECT_MULTIDIM_ELEM(Mccf_best, n);
-					RFLOAT old_ccf = DIRECT_MULTIDIM_ELEM(Mccf_best_combined, n);
-					if (new_ccf > old_ccf)
+					if (nc[n] > cc[n])
 					{
-						DIRECT_MULTIDIM_ELEM(Mccf_best_combined, n) = new_ccf;
+						cc[n] = nc[n];
 						if (do_amyloid)
-							DIRECT_MULTIDIM_ELEM(Mpsi_best_combined, n) = DIRECT_MULTIDIM_ELEM(Mpsi_best, n);
+							cp[n] = np[n];
 						else
-							DIRECT_MULTIDIM_ELEM(Mclass_best_combined, n) = iref;
+							cl[n] = iref;
 					}
 				}
 			}
 		}
 		else
 		{
-			// Now that we have Mccf_best and Mpsi_best, get the peaks
 			std::vector<Peak> my_ref_peaks;
 
 			Mstddev.setXmippOrigin();
@@ -3986,7 +4345,7 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 
 			peakSearch(Mccf_best, Mpsi_best, Mstddev, Mmean, iref, my_skip_side, my_ref_peaks, scale);
 			prunePeakClusters(my_ref_peaks, min_distance_pix, scale);
-			peaks.insert(peaks.end(), my_ref_peaks.begin(), my_ref_peaks.end());  // append the peaks of this reference to all the other peaks
+			peaks.insert(peaks.end(), my_ref_peaks.begin(), my_ref_peaks.end());
 		}
 #ifdef TIMING
 	timer.toc(TIMING_B8);
@@ -4069,23 +4428,20 @@ void AutoPicker::autoPickOneMicrograph(FileName &fn_mic, long int imic)
 #ifdef TIMING
 	timer.tic(TIMING_B9);
 #endif
-		//Now that we have done all references, prune the list again...
 		prunePeakClusters(peaks, min_distance_pix, scale);
-		// And remove all too close neighbours
 		removeTooCloselyNeighbouringPeaks(peaks, min_distance_pix, scale);
-		// Write out a STAR file with the coordinates
-		MetaDataTable MDout;
-		for (int ipeak =0; ipeak < peaks.size(); ipeak++)
+		auto md_ptr = std::make_shared<MetaDataTable>();
+		for (int ipeak = 0; ipeak < (int)peaks.size(); ipeak++)
 		{
-			MDout.addObject();
-			MDout.setValue(EMDL_IMAGE_COORD_X, (RFLOAT)(peaks[ipeak].x) / scale);
-			MDout.setValue(EMDL_IMAGE_COORD_Y, (RFLOAT)(peaks[ipeak].y) / scale);
-			MDout.setValue(EMDL_PARTICLE_CLASS, peaks[ipeak].ref + 1); // start counting at 1
-			MDout.setValue(EMDL_PARTICLE_AUTOPICK_FOM, peaks[ipeak].fom);
-			MDout.setValue(EMDL_ORIENT_PSI, peaks[ipeak].psi);
+			md_ptr->addObject();
+			md_ptr->setValue(EMDL_IMAGE_COORD_X, (RFLOAT)(peaks[ipeak].x) / scale);
+			md_ptr->setValue(EMDL_IMAGE_COORD_Y, (RFLOAT)(peaks[ipeak].y) / scale);
+			md_ptr->setValue(EMDL_PARTICLE_CLASS, peaks[ipeak].ref + 1);
+			md_ptr->setValue(EMDL_PARTICLE_AUTOPICK_FOM, peaks[ipeak].fom);
+			md_ptr->setValue(EMDL_ORIENT_PSI, peaks[ipeak].psi);
 		}
 		FileName fn_tmp = getOutputRootName(fn_mic) + "_" + fn_out + ".star";
-		MDout.write(fn_tmp);
+		writeAutoPickStar(fn_tmp, md_ptr);
 #ifdef TIMING
 	timer.toc(TIMING_B9);
 #endif
@@ -4105,61 +4461,73 @@ void AutoPicker::calculateStddevAndMeanUnderMask(const MultidimArray<Complex > &
 
 	MultidimArray<Complex > Faux, Faux2;
 	MultidimArray<RFLOAT> Maux(workSize, workSize);
-	FourierTransformer transformer;
 
-	_Mstddev.initZeros(workSize, workSize);
+	_Mstddev.resizeNoCp(1, workSize, workSize);
+	_Mmean.resizeNoCp(1, workSize, workSize);
 	RFLOAT normfft = (RFLOAT)(micrograph_size * micrograph_size) / (RFLOAT)nr_nonzero_pixels_mask;
 
 	// Calculate convolution of micrograph and mask, to get average under mask at all points
-	Faux.resize(_Fmic);
-#ifdef DEBUG
-	Image<RFLOAT> tt;
-#endif
+	Faux.resize(YSIZE(_Fmic), XSIZE(_Fmic));
+	const long int f_sz = MULTIDIM_SIZE(Faux);
+	Complex *faux_p = MULTIDIM_ARRAY(Faux);
+	const Complex *fmic_p = MULTIDIM_ARRAY(_Fmic);
+	const Complex *fmic2_p = MULTIDIM_ARRAY(_Fmic2);
+	const Complex *fmsk_p = MULTIDIM_ARRAY(_Fmsk);
+	const int nt_f = (f_sz >= 65536) ? nr_cpu_threads : 1;
 
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Faux)
+	#pragma omp parallel for schedule(static) num_threads(nt_f) if(nt_f > 1)
+	for (long int n = 0; n < f_sz; n++)
+		faux_p[n] = fmic_p[n] * conj(fmsk_p[n]);
+
+	if (workSize == micrograph_size)
 	{
-		DIRECT_MULTIDIM_ELEM(Faux, n) = DIRECT_MULTIDIM_ELEM(_Fmic, n) * conj(DIRECT_MULTIDIM_ELEM(_Fmsk, n));
+		CenterFFTbySign(Faux);
+		work_bwd_transformer_.inverseFourierTransform(Faux, Maux);
 	}
-	windowFourierTransform(Faux, Faux2, workSize);
-	CenterFFTbySign(Faux2);
-	transformer.inverseFourierTransform(Faux2, Maux);
-	Maux *= normfft;
-	_Mmean = Maux;
-
-#ifdef DEBUG
-	tt()=Maux;
-	tt.write("Mavg_mic.spi");
-#endif
-
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(_Mstddev)
+	else
 	{
-		// store minus average-squared already in _Mstddev
-		DIRECT_MULTIDIM_ELEM(_Mstddev, n) = -DIRECT_MULTIDIM_ELEM(Maux, n) * DIRECT_MULTIDIM_ELEM(Maux, n);
+		windowFourierTransform(Faux, Faux2, workSize);
+		CenterFFTbySign(Faux2);
+		work_bwd_transformer_.inverseFourierTransform(Faux2, Maux);
+	}
+
+	const long int w_sz = MULTIDIM_SIZE(Maux);
+	const RFLOAT *maux_p = MULTIDIM_ARRAY(Maux);
+	RFLOAT *mmean_p = MULTIDIM_ARRAY(_Mmean);
+	RFLOAT *mstd_p = MULTIDIM_ARRAY(_Mstddev);
+	const int nt_w = (w_sz >= 65536) ? nr_cpu_threads : 1;
+
+	#pragma omp parallel for schedule(static) num_threads(nt_w) if(nt_w > 1)
+	for (long int n = 0; n < w_sz; n++)
+	{
+		const RFLOAT mean_v = maux_p[n] * normfft;
+		mmean_p[n] = mean_v;
+		mstd_p[n] = -(mean_v * mean_v);
 	}
 
 	// Calculate convolution of micrograph-squared and mask
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(Faux)
-	{
-		DIRECT_MULTIDIM_ELEM(Faux, n) = DIRECT_MULTIDIM_ELEM(_Fmic2, n) * conj(DIRECT_MULTIDIM_ELEM(_Fmsk, n));
-	}
-	windowFourierTransform(Faux, Faux2, workSize);
-	CenterFFTbySign(Faux2);
-	transformer.inverseFourierTransform(Faux2, Maux);
+	#pragma omp parallel for schedule(static) num_threads(nt_f) if(nt_f > 1)
+	for (long int n = 0; n < f_sz; n++)
+		faux_p[n] = fmic2_p[n] * conj(fmsk_p[n]);
 
-	FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(_Mstddev)
+	if (workSize == micrograph_size)
 	{
-		// we already stored minus average-squared in _Mstddev
-		DIRECT_MULTIDIM_ELEM(_Mstddev, n) += normfft * DIRECT_MULTIDIM_ELEM(Maux, n);
-		if (DIRECT_MULTIDIM_ELEM(_Mstddev, n) > (RFLOAT)1E-10)
-			DIRECT_MULTIDIM_ELEM(_Mstddev, n) = sqrt(DIRECT_MULTIDIM_ELEM(_Mstddev, n) );
-		else
-			DIRECT_MULTIDIM_ELEM(_Mstddev, n) = 1.;
+		CenterFFTbySign(Faux);
+		work_bwd_transformer_.inverseFourierTransform(Faux, Maux);
+	}
+	else
+	{
+		windowFourierTransform(Faux, Faux2, workSize);
+		CenterFFTbySign(Faux2);
+		work_bwd_transformer_.inverseFourierTransform(Faux2, Maux);
 	}
 
-#ifdef DEBUG
-	tt()=_Mstddev;
-	tt.write("Msig_mic.spi");
-#endif
+	#pragma omp parallel for schedule(static) num_threads(nt_w) if(nt_w > 1)
+	for (long int n = 0; n < w_sz; n++)
+	{
+		const RFLOAT v = mstd_p[n] + normfft * maux_p[n];
+		mstd_p[n] = (v > (RFLOAT)1E-10) ? sqrt(v) : (RFLOAT)1.;
+	}
 }
 
 void AutoPicker::peakSearch(const MultidimArray<RFLOAT> &Mfom, const MultidimArray<RFLOAT> &Mpsi, const MultidimArray<RFLOAT> &Mstddev, const MultidimArray<RFLOAT> &Mmean, int iref,
@@ -4229,102 +4597,240 @@ void AutoPicker::peakSearch(const MultidimArray<RFLOAT> &Mfom, const MultidimArr
 
 void AutoPicker::prunePeakClusters(std::vector<Peak> &peaks, int min_distance, float scale)
 {
-	float mind2 = ((float)min_distance*(float)min_distance)*scale*scale;
-	int nclus = 0;
+	const int N = (int)peaks.size();
+	if (N == 0)
+		return;
 
+	const float mind2 = ((float)min_distance * (float)min_distance) * scale * scale;
+	const float clusd2 = (float)(particle_radius2) * scale * scale;
+
+	std::vector<uint8_t> alive(N, 1);
 	std::vector<Peak> pruned_peaks;
-	while (peaks.size() > 0)
+
+	// Use 2D spatial cell binning when large to replace O(N^2) BFS & erase() shifts
+	int min_x = peaks[0].x, max_x = peaks[0].x;
+	int min_y = peaks[0].y, max_y = peaks[0].y;
+	for (int i = 1; i < N; i++)
 	{
-		nclus++;
-		std::vector<Peak> cluster;
-		cluster.push_back(peaks[0]);
-		peaks.erase(peaks.begin());
-		for (int iclus = 0; iclus < cluster.size(); iclus++)
+		if (peaks[i].x < min_x) min_x = peaks[i].x;
+		if (peaks[i].x > max_x) max_x = peaks[i].x;
+		if (peaks[i].y < min_y) min_y = peaks[i].y;
+		if (peaks[i].y > max_y) max_y = peaks[i].y;
+	}
+	const int cell = std::max(1, (int)std::ceil(std::sqrt((double)clusd2)));
+	const long long nx = (long long)(max_x - min_x) / cell + 1;
+	const long long ny = (long long)(max_y - min_y) / cell + 1;
+	const bool use_grid = (N > 128 && nx > 0 && ny > 0 && nx * ny <= 4000000LL);
+
+	std::vector<int> grid_head, grid_next;
+	if (use_grid)
+	{
+		grid_head.assign((size_t)(nx * ny), -1);
+		grid_next.assign(N, -1);
+		for (int i = N - 1; i >= 0; i--)
 		{
-			int my_x = cluster[iclus].x;
-			int my_y = cluster[iclus].y;
-			for (int ipeakp = 0; ipeakp < peaks.size(); ipeakp++)
+			const int gx = (peaks[i].x - min_x) / cell;
+			const int gy = (peaks[i].y - min_y) / cell;
+			const size_t cidx = (size_t)gy * (size_t)nx + (size_t)gx;
+			grid_next[i] = grid_head[cidx];
+			grid_head[cidx] = i;
+		}
+	}
+
+	std::vector<Peak> cluster;
+	std::vector<int> found_ids;
+	std::vector<int> order;
+	std::vector<uint8_t> c_alive;
+
+	for (int seed = 0; seed < N; seed++)
+	{
+		if (!alive[seed])
+			continue;
+
+		cluster.clear();
+		alive[seed] = 0;
+		cluster.push_back(peaks[seed]);
+
+		for (size_t iclus = 0; iclus < cluster.size(); iclus++)
+		{
+			const int my_x = cluster[iclus].x;
+			const int my_y = cluster[iclus].y;
+			if (use_grid)
 			{
-				float dx = (float)(my_x - peaks[ipeakp].x);
-				float dy = (float)(my_y - peaks[ipeakp].y);
-				if (dx*dx + dy*dy < ( (float)(particle_radius2)*scale*scale ))
+				found_ids.clear();
+				const int gx = (my_x - min_x) / cell;
+				const int gy = (my_y - min_y) / cell;
+				const int x0 = std::max(0, gx - 1), x1 = std::min((int)nx - 1, gx + 1);
+				const int y0 = std::max(0, gy - 1), y1 = std::min((int)ny - 1, gy + 1);
+				for (int cy = y0; cy <= y1; cy++)
 				{
-					// Put ipeakp in the cluster, and remove from the peaks list
-					cluster.push_back(peaks[ipeakp]);
-					peaks.erase(peaks.begin()+ipeakp);
-					ipeakp--;
+					for (int cx = x0; cx <= x1; cx++)
+					{
+						for (int idx = grid_head[(size_t)cy * (size_t)nx + (size_t)cx]; idx >= 0; idx = grid_next[idx])
+						{
+							if (!alive[idx])
+								continue;
+							float dx = (float)(my_x - peaks[idx].x);
+							float dy = (float)(my_y - peaks[idx].y);
+							if (dx * dx + dy * dy < clusd2)
+								found_ids.push_back(idx);
+						}
+					}
+				}
+				std::sort(found_ids.begin(), found_ids.end());
+				for (size_t f = 0; f < found_ids.size(); f++)
+				{
+					const int idx = found_ids[f];
+					alive[idx] = 0;
+					cluster.push_back(peaks[idx]);
+				}
+			}
+			else
+			{
+				for (int idx = seed + 1; idx < N; idx++)
+				{
+					if (!alive[idx])
+						continue;
+					float dx = (float)(my_x - peaks[idx].x);
+					float dy = (float)(my_y - peaks[idx].y);
+					if (dx * dx + dy * dy < clusd2)
+					{
+						alive[idx] = 0;
+						cluster.push_back(peaks[idx]);
+					}
 				}
 			}
 		}
 
-		// Now search for the peak from the cluster with the best ccf.
-		// Then search again if there are any other peaks in the cluster that are further than particle_diameter apart from the selected peak
-		// If so, again search for the maximum
-		int ipass = 0;
-		while (cluster.size() > 0)
+		// Select best peak iteratively (exact tie-break by earliest cluster position)
+		const int m = (int)cluster.size();
+		if (m == 1)
 		{
-			RFLOAT best_relative_fom=-1.;
-			Peak bestpeak;
-			for (int iclus = 0; iclus < cluster.size(); iclus++)
-			{
-				if ( cluster[iclus].relative_fom > best_relative_fom)
-				{
-					best_relative_fom = cluster[iclus].relative_fom;
-					bestpeak = cluster[iclus];
-				}
-			}
-
-			// Store this peak as pruned
-			pruned_peaks.push_back(bestpeak);
-
-			// Remove all peaks within mind2 from the clusters
-			for (int iclus = 0; iclus < cluster.size(); iclus++)
-			{
-				float dx = (float)(cluster[iclus].x - bestpeak.x);
-				float dy = (float)(cluster[iclus].y - bestpeak.y);
-				if (dx*dx + dy*dy < mind2)
-				{
-					cluster.erase(cluster.begin()+iclus);
-					iclus--;
-				}
-			}
-			ipass++;
+			pruned_peaks.push_back(cluster[0]);
+			continue;
 		}
-	} // end while peaks.size > 0
+		order.resize(m);
+		for (int k = 0; k < m; k++)
+			order[k] = k;
+		std::sort(order.begin(), order.end(), [&](int a, int b) {
+			if (cluster[a].relative_fom != cluster[b].relative_fom)
+				return cluster[a].relative_fom > cluster[b].relative_fom;
+			return a < b;
+		});
+		c_alive.assign(m, 1);
+		for (int o = 0; o < m; o++)
+		{
+			const int best_idx = order[o];
+			if (!c_alive[best_idx])
+				continue;
+			const Peak &bp = cluster[best_idx];
+			pruned_peaks.push_back(bp);
+			for (int k = 0; k < m; k++)
+			{
+				if (!c_alive[k])
+					continue;
+				float dx = (float)(cluster[k].x - bp.x);
+				float dy = (float)(cluster[k].y - bp.y);
+				if (dx * dx + dy * dy < mind2)
+					c_alive[k] = 0;
+			}
+		}
+	}
 
-	// Set the pruned peaks back into the input vector
-	peaks = pruned_peaks;
-
+	peaks.swap(pruned_peaks);
 }
 
 void AutoPicker::removeTooCloselyNeighbouringPeaks(std::vector<Peak> &peaks, int min_distance, float scale)
 {
-	// Now only keep those peaks that are at least min_particle_distance number of pixels from any other peak
+	const int N = (int)peaks.size();
+	if (N <= 1)
+		return;
+
 	std::vector<Peak> pruned_peaks;
-	float mind2 = ((float)min_distance*(float)min_distance)*scale*scale;
-	for (int ipeak = 0; ipeak < peaks.size(); ipeak++)
+	pruned_peaks.reserve(N);
+	const float mind2 = ((float)min_distance * (float)min_distance) * scale * scale;
+
+	int min_x = peaks[0].x, max_x = peaks[0].x;
+	int min_y = peaks[0].y, max_y = peaks[0].y;
+	for (int i = 1; i < N; i++)
 	{
-		int my_x = peaks[ipeak].x;
-		int my_y = peaks[ipeak].y;
-		float my_mind2 = 9999999999.;
-		for (int ipeakp = 0; ipeakp < peaks.size(); ipeakp++)
+		if (peaks[i].x < min_x) min_x = peaks[i].x;
+		if (peaks[i].x > max_x) max_x = peaks[i].x;
+		if (peaks[i].y < min_y) min_y = peaks[i].y;
+		if (peaks[i].y > max_y) max_y = peaks[i].y;
+	}
+	const int cell = std::max(1, (int)std::ceil(std::sqrt((double)mind2)));
+	const long long nx = (long long)(max_x - min_x) / cell + 1;
+	const long long ny = (long long)(max_y - min_y) / cell + 1;
+
+	if (N > 64 && nx > 0 && ny > 0 && nx * ny <= 4000000LL)
+	{
+		std::vector<int> grid_head((size_t)(nx * ny), -1);
+		std::vector<int> grid_next(N, -1);
+		for (int i = N - 1; i >= 0; i--)
 		{
-			if (ipeakp != ipeak)
+			const int gx = (peaks[i].x - min_x) / cell;
+			const int gy = (peaks[i].y - min_y) / cell;
+			const size_t cidx = (size_t)gy * (size_t)nx + (size_t)gx;
+			grid_next[i] = grid_head[cidx];
+			grid_head[cidx] = i;
+		}
+		for (int ipeak = 0; ipeak < N; ipeak++)
+		{
+			const int my_x = peaks[ipeak].x;
+			const int my_y = peaks[ipeak].y;
+			const int gx = (my_x - min_x) / cell;
+			const int gy = (my_y - min_y) / cell;
+			const int x0 = std::max(0, gx - 1), x1 = std::min((int)nx - 1, gx + 1);
+			const int y0 = std::max(0, gy - 1), y1 = std::min((int)ny - 1, gy + 1);
+			bool keep = true;
+			for (int cy = y0; cy <= y1 && keep; cy++)
 			{
+				for (int cx = x0; cx <= x1 && keep; cx++)
+				{
+					for (int k = grid_head[(size_t)cy * (size_t)nx + (size_t)cx]; k >= 0; k = grid_next[k])
+					{
+						if (k == ipeak) continue;
+						int dx = peaks[k].x - my_x;
+						int dy = peaks[k].y - my_y;
+						float d2 = (float)(dx * dx + dy * dy);
+						if (!(d2 > mind2))
+						{
+							keep = false;
+							break;
+						}
+					}
+				}
+			}
+			if (keep)
+				pruned_peaks.push_back(peaks[ipeak]);
+		}
+	}
+	else
+	{
+		for (int ipeak = 0; ipeak < N; ipeak++)
+		{
+			const int my_x = peaks[ipeak].x;
+			const int my_y = peaks[ipeak].y;
+			bool keep = true;
+			for (int ipeakp = 0; ipeakp < N; ipeakp++)
+			{
+				if (ipeakp == ipeak) continue;
 				int dx = peaks[ipeakp].x - my_x;
 				int dy = peaks[ipeakp].y - my_y;
-				int d2 = dx*dx + dy*dy;
-				if ( d2 < my_mind2 )
-					my_mind2 = d2;
+				float d2 = (float)(dx * dx + dy * dy);
+				if (!(d2 > mind2))
+				{
+					keep = false;
+					break;
+				}
 			}
+			if (keep)
+				pruned_peaks.push_back(peaks[ipeak]);
 		}
-		if (my_mind2 > mind2)
-			pruned_peaks.push_back(peaks[ipeak]);
 	}
 
-	// Set the pruned peaks back into the input vector
-	peaks = pruned_peaks;
-
+	peaks.swap(pruned_peaks);
 }
 
 int AutoPicker::largestPrime(int query)

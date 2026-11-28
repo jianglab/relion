@@ -19,6 +19,7 @@
  ***************************************************************************/
 #include "src/preprocessing_mpi.h"
 #include "src/async_file_writer.h"
+#include "src/virtual_movie_averages.h"
 
 void PreprocessingMpi::read(int argc, char **argv)
 {
@@ -42,6 +43,17 @@ void PreprocessingMpi::read(int argc, char **argv)
 
 void PreprocessingMpi::runExtractParticles()
 {
+	int shm_size = 1;
+	{
+		MPI_Comm shm_comm;
+		if (MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &shm_comm) == MPI_SUCCESS)
+		{
+			MPI_Comm_size(shm_comm, &shm_size);
+			MPI_Comm_free(&shm_comm);
+		}
+	}
+	mpi_local_size = XMIPP_MAX(1, shm_size);
+
 	// Total number of nodes is limited to max_mpi_nodes
 	long int my_nr_mics;
 	if (node->rank < max_mpi_nodes)
@@ -64,6 +76,16 @@ void PreprocessingMpi::runExtractParticles()
 
 		}
 
+		vmovies::ReadAhead read_ahead(do_virtual ? 0 : -1);
+		read_ahead.expectMicrographs(my_nr_mics);
+		MicReadAhead mic_ahead(!do_virtual);
+		struct MicPrefetchScope
+		{
+			Preprocessing *p;
+			MicPrefetchScope(Preprocessing *p, MicReadAhead *m) : p(p) { p->active_mic_prefetch_ = m; }
+			~MicPrefetchScope() { p->active_mic_prefetch_ = NULL; }
+		} mic_prefetch_scope(this, &mic_ahead);
+
 		FileName fn_mic, fn_olddir = "";
 		long int imic = 0;
 		FOR_ALL_OBJECTS_IN_METADATA_TABLE(MDmics)
@@ -76,6 +98,38 @@ void PreprocessingMpi::runExtractParticles()
 					MPI_Abort(MPI_COMM_WORLD, RELION_EXIT_ABORTED);
 
 				MDmics.getValue(EMDL_MICROGRAPH_NAME, fn_mic);
+				if (read_ahead.enabled())
+				{
+					std::vector<std::string> next;
+					for (long int k = imic + 1; k <= my_last_mic && (int) next.size() < vmovies::ReadAhead::WINDOW; k++)
+					{
+						FileName fn_next;
+						MDmics.getValue(EMDL_MICROGRAPH_NAME, fn_next, k);
+						if (fn_data == "" && !exists(micname2coordname[fn_next]))
+							continue;
+						next.push_back(fn_next);
+					}
+					read_ahead.upcoming(next);
+				}
+				if (!do_virtual)
+				{
+					for (long int k = imic + 1; k <= my_last_mic; k++)
+					{
+						FileName fn_next;
+						MDmics.getValue(EMDL_MICROGRAPH_NAME, fn_next, k);
+						if (only_extract_unfinished && exists(getOutputFileNameRoot(fn_next) + "_extract.star"))
+							continue;
+						if (fn_data == "")
+						{
+							if (!exists(micname2coordname[fn_next]))
+								continue;
+						}
+						else if (!hasCoordinatesForMic(fn_next))
+							continue;
+						mic_ahead.request(fn_next);
+						break;
+					}
+				}
 				int optics_group = obsModelMic.getOpticsGroup(MDmics);
 
 				// Set the pixel size for this micrograph

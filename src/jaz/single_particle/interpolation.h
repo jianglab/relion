@@ -149,165 +149,140 @@ class Interpolation
 
         static double cubic1D(double y0, double y1, double y2, double y3, double t);
 
-        template<typename T>
-        static T cubicXY(const Image<T>& img, double x, double y, int z = 0, int n = 0, bool wrap = false)
+        static inline void cubicPosWeights(double t, double w[4])
         {
-            int xi    = (int)std::floor(x);
-            int yi    = (int)std::floor(y);
-            int xi_n1 = xi-1;
-            int yi_n1 = yi-1;
-            int xi_p1 = xi+1;
-            int yi_p1 = yi+1;
-            int xi_p2 = xi+2;
-            int yi_p2 = yi+2;
+            const double t2 = t * t;
+            const double t3 = t2 * t;
+            w[0] = -0.5 * t3 + t2 - 0.5 * t;
+            w[1] =  1.5 * t3 - 2.5 * t2 + 1.0;
+            w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
+            w[3] =  0.5 * t3 - 0.5 * t2;
+        }
 
-            const double xf = x - xi;
-            const double yf = y - yi;
+        static inline void cubicWeights(double t, double w[4], double wd[4])
+        {
+            const double t2 = t * t;
+            const double t3 = t2 * t;
+            w[0] = -0.5 * t3 + t2 - 0.5 * t;
+            w[1] =  1.5 * t3 - 2.5 * t2 + 1.0;
+            w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
+            w[3] =  0.5 * t3 - 0.5 * t2;
+            wd[0] = -1.5 * t2 + 2.0 * t - 0.5;
+            wd[1] =  4.5 * t2 - 5.0 * t;
+            wd[2] = -4.5 * t2 + 4.0 * t + 0.5;
+            wd[3] =  1.5 * t2 - t;
+        }
 
+        static inline void cubicIndices(int xi, int yi, int w, int h, bool wrap, int ix[4], int iy[4])
+        {
             if (wrap)
             {
-				xi_n1 = INTERPOL_WRAP(xi_n1, img.data.xdim);
-                yi_n1 = INTERPOL_WRAP(yi_n1, img.data.ydim);
-				xi    = INTERPOL_WRAP(xi,    img.data.xdim);
-                yi    = INTERPOL_WRAP(yi,    img.data.ydim);
-                xi_p1 = INTERPOL_WRAP(xi_p1, img.data.xdim);
-                yi_p1 = INTERPOL_WRAP(yi_p1, img.data.ydim);
-                xi_p2 = INTERPOL_WRAP(xi_p2, img.data.xdim);
-                yi_p2 = INTERPOL_WRAP(yi_p2, img.data.ydim);
+                if (w >= 4)
+                {
+                    const int ix0 = INTERPOL_WRAP(xi - 1, w);
+                    ix[0] = ix0;
+                    ix[1] = (ix0 + 1 < w) ? ix0 + 1 : ix0 + 1 - w;
+                    ix[2] = (ix0 + 2 < w) ? ix0 + 2 : ix0 + 2 - w;
+                    ix[3] = (ix0 + 3 < w) ? ix0 + 3 : ix0 + 3 - w;
+                }
+                else
+                {
+                    for (int k = 0; k < 4; k++) ix[k] = INTERPOL_WRAP(xi - 1 + k, w);
+                }
+
+                if (h >= 4)
+                {
+                    const int iy0 = INTERPOL_WRAP(yi - 1, h);
+                    iy[0] = iy0;
+                    iy[1] = (iy0 + 1 < h) ? iy0 + 1 : iy0 + 1 - h;
+                    iy[2] = (iy0 + 2 < h) ? iy0 + 2 : iy0 + 2 - h;
+                    iy[3] = (iy0 + 3 < h) ? iy0 + 3 : iy0 + 3 - h;
+                }
+                else
+                {
+                    for (int k = 0; k < 4; k++) iy[k] = INTERPOL_WRAP(yi - 1 + k, h);
+                }
             }
             else
             {
-                xi    = XMIPP_MAX(0, XMIPP_MIN(img.data.xdim - 1, xi));
-                yi    = XMIPP_MAX(0, XMIPP_MIN(img.data.ydim - 1, yi));
-                xi_n1 = XMIPP_MAX(0, XMIPP_MIN(img.data.xdim - 1, xi_n1));
-                yi_n1 = XMIPP_MAX(0, XMIPP_MIN(img.data.ydim - 1, yi_n1));
-                xi_p1 = XMIPP_MAX(0, XMIPP_MIN(img.data.xdim - 1, xi_p1));
-                yi_p1 = XMIPP_MAX(0, XMIPP_MIN(img.data.ydim - 1, yi_p1));
-                xi_p2 = XMIPP_MAX(0, XMIPP_MIN(img.data.xdim - 1, xi_p2));
-                yi_p2 = XMIPP_MAX(0, XMIPP_MIN(img.data.ydim - 1, yi_p2));
+                const int wm1 = w - 1;
+                const int hm1 = h - 1;
+                for (int k = 0; k < 4; k++)
+                {
+                    const int xx = xi - 1 + k;
+                    const int yy = yi - 1 + k;
+                    ix[k] = xx < 0 ? 0 : (xx > wm1 ? wm1 : xx);
+                    iy[k] = yy < 0 ? 0 : (yy > hm1 ? hm1 : yy);
+                }
             }
+        }
 
+        template<typename T>
+        static void cubicXYValAndGrad(
+                const Image<T>& img, double x, double y,
+                double& val, gravis::d2Vector& grad,
+                int z = 0, int n = 0, bool wrap = false)
+        {
+            const int xi = (int)std::floor(x);
+            const int yi = (int)std::floor(y);
+            int ix[4], iy[4];
+            cubicIndices(xi, yi, img.data.xdim, img.data.ydim, wrap, ix, iy);
 
-            const T f00 = DIRECT_NZYX_ELEM(img.data, n, z, yi_n1,   xi_n1);
-            const T f01 = DIRECT_NZYX_ELEM(img.data, n, z, yi_n1,   xi);
-            const T f02 = DIRECT_NZYX_ELEM(img.data, n, z, yi_n1,   xi_p1);
-            const T f03 = DIRECT_NZYX_ELEM(img.data, n, z, yi_n1,   xi_p2);
+            double wx[4], wxd[4], wy[4], wyd[4];
+            cubicWeights(x - xi, wx, wxd);
+            cubicWeights(y - yi, wy, wyd);
 
-            const T f10 = DIRECT_NZYX_ELEM(img.data, n, z, yi,     xi_n1);
-            const T f11 = DIRECT_NZYX_ELEM(img.data, n, z, yi,     xi);
-            const T f12 = DIRECT_NZYX_ELEM(img.data, n, z, yi,     xi_p1);
-            const T f13 = DIRECT_NZYX_ELEM(img.data, n, z, yi,     xi_p2);
+            const int ix0 = ix[0], ix1 = ix[1], ix2 = ix[2], ix3 = ix[3];
+            double v = 0.0, gx = 0.0, gy = 0.0;
+            for (int c = 0; c < 4; c++)
+            {
+                const T* row = &DIRECT_NZYX_ELEM(img.data, n, z, iy[c], 0);
+                const double f0 = (double)row[ix0];
+                const double f1 = (double)row[ix1];
+                const double f2 = (double)row[ix2];
+                const double f3 = (double)row[ix3];
+                const double rc  = wx[0]*f0  + wx[1]*f1  + wx[2]*f2  + wx[3]*f3;
+                const double rdc = wxd[0]*f0 + wxd[1]*f1 + wxd[2]*f2 + wxd[3]*f3;
+                v  += wy[c]  * rc;
+                gx += wy[c]  * rdc;
+                gy += wyd[c] * rc;
+            }
+            val = v;
+            grad.x = gx;
+            grad.y = gy;
+        }
 
-            const T f20 = DIRECT_NZYX_ELEM(img.data, n, z, yi_p1,   xi_n1);
-            const T f21 = DIRECT_NZYX_ELEM(img.data, n, z, yi_p1,   xi);
-            const T f22 = DIRECT_NZYX_ELEM(img.data, n, z, yi_p1,   xi_p1);
-            const T f23 = DIRECT_NZYX_ELEM(img.data, n, z, yi_p1,   xi_p2);
+        template<typename T>
+        static T cubicXY(const Image<T>& img, double x, double y, int z = 0, int n = 0, bool wrap = false)
+        {
+            const int xi = (int)std::floor(x);
+            const int yi = (int)std::floor(y);
+            int ix[4], iy[4];
+            cubicIndices(xi, yi, img.data.xdim, img.data.ydim, wrap, ix, iy);
 
-            const T f30 = DIRECT_NZYX_ELEM(img.data, n, z, yi_p2,   xi_n1);
-            const T f31 = DIRECT_NZYX_ELEM(img.data, n, z, yi_p2,   xi);
-            const T f32 = DIRECT_NZYX_ELEM(img.data, n, z, yi_p2,   xi_p1);
-            const T f33 = DIRECT_NZYX_ELEM(img.data, n, z, yi_p2,   xi_p2);
+            double wx[4], wy[4];
+            cubicPosWeights(x - xi, wx);
+            cubicPosWeights(y - yi, wy);
 
-            const gravis::d4Matrix A(  -1.0/2.0,  3.0/2.0, -3.0/2.0,  1.0/2.0,
-                                1.0,     -5.0/2.0,  2.0,     -1.0/2.0,
-                               -1.0/2.0,  0.0,      1.0/2.0,  0.0,
-                                0.0,      1.0,      0.0,      0.0);
-
-            const gravis::d4Matrix V(  f00, f10, f20, f30,
-                               f01, f11, f21, f31,
-                               f02, f12, f22, f32,
-                               f03, f13, f23, f33);
-
-            gravis::d4Matrix At = A;
-            At.transpose();
-
-            gravis::d4Matrix AVA = A * V * At;
-
-            const gravis::d4Vector xx(xf*xf*xf, xf*xf, xf, 1.0);
-            const gravis::d4Vector yy(yf*yf*yf, yf*yf, yf, 1.0);
-
-            return (T)(xx.dot(AVA * yy));
+            const int ix0 = ix[0], ix1 = ix[1], ix2 = ix[2], ix3 = ix[3];
+            double v = 0.0;
+            for (int c = 0; c < 4; c++)
+            {
+                const T* row = &DIRECT_NZYX_ELEM(img.data, n, z, iy[c], 0);
+                const double rc = wx[0]*(double)row[ix0] + wx[1]*(double)row[ix1]
+                                + wx[2]*(double)row[ix2] + wx[3]*(double)row[ix3];
+                v += wy[c] * rc;
+            }
+            return (T)v;
         }
 
         template<typename T>
         static gravis::t2Vector<T> cubicXYgrad(const Image<T>& img, double x, double y, int z = 0, int n = 0, bool wrap = false)
         {
-			int xi    = (int)std::floor(x);
-            int yi    = (int)std::floor(y);
-            int xi_n1 = xi-1;
-            int yi_n1 = yi-1;
-            int xi_p1 = xi+1;
-            int yi_p1 = yi+1;
-            int xi_p2 = xi+2;
-            int yi_p2 = yi+2;
-
-            const double xf = x - xi;
-            const double yf = y - yi;
-
-            if (wrap)
-            {
-				xi_n1 = INTERPOL_WRAP(xi_n1, img.data.xdim);
-                yi_n1 = INTERPOL_WRAP(yi_n1, img.data.ydim);
-				xi    = INTERPOL_WRAP(xi,    img.data.xdim);
-                yi    = INTERPOL_WRAP(yi,    img.data.ydim);
-                xi_p1 = INTERPOL_WRAP(xi_p1, img.data.xdim);
-                yi_p1 = INTERPOL_WRAP(yi_p1, img.data.ydim);
-                xi_p2 = INTERPOL_WRAP(xi_p2, img.data.xdim);
-                yi_p2 = INTERPOL_WRAP(yi_p2, img.data.ydim);
-            }
-            else
-            {
-                xi    = XMIPP_MAX(0, XMIPP_MIN(img.data.xdim - 1, xi));
-                yi    = XMIPP_MAX(0, XMIPP_MIN(img.data.ydim - 1, yi));
-                xi_n1 = XMIPP_MAX(0, XMIPP_MIN(img.data.xdim - 1, xi_n1));
-                yi_n1 = XMIPP_MAX(0, XMIPP_MIN(img.data.ydim - 1, yi_n1));
-                xi_p1 = XMIPP_MAX(0, XMIPP_MIN(img.data.xdim - 1, xi_p1));
-                yi_p1 = XMIPP_MAX(0, XMIPP_MIN(img.data.ydim - 1, yi_p1));
-                xi_p2 = XMIPP_MAX(0, XMIPP_MIN(img.data.xdim - 1, xi_p2));
-                yi_p2 = XMIPP_MAX(0, XMIPP_MIN(img.data.ydim - 1, yi_p2));
-            }
-
-            const T f00 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_n1,   xi_n1);
-            const T f01 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_n1,   xi);
-            const T f02 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_n1,   xi_p1);
-            const T f03 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_n1,   xi_p2);
-
-            const T f10 = DIRECT_NZYX_ELEM(img.data, n, 0, yi,     xi_n1);
-            const T f11 = DIRECT_NZYX_ELEM(img.data, n, 0, yi,     xi);
-            const T f12 = DIRECT_NZYX_ELEM(img.data, n, 0, yi,     xi_p1);
-            const T f13 = DIRECT_NZYX_ELEM(img.data, n, 0, yi,     xi_p2);
-
-            const T f20 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_p1,   xi_n1);
-            const T f21 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_p1,   xi);
-            const T f22 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_p1,   xi_p1);
-            const T f23 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_p1,   xi_p2);
-
-            const T f30 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_p2,   xi_n1);
-            const T f31 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_p2,   xi);
-            const T f32 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_p2,   xi_p1);
-            const T f33 = DIRECT_NZYX_ELEM(img.data, n, 0, yi_p2,   xi_p2);
-
-            const gravis::d4Matrix A(  -1.0/2.0,  3.0/2.0, -3.0/2.0,  1.0/2.0,
-                                1.0,     -5.0/2.0,  2.0,     -1.0/2.0,
-                               -1.0/2.0,  0.0,      1.0/2.0,  0.0,
-                                0.0,      1.0,      0.0,      0.0);
-
-            const gravis::d4Matrix V(  f00, f10, f20, f30,
-                               f01, f11, f21, f31,
-                               f02, f12, f22, f32,
-                               f03, f13, f23, f33);
-
-            gravis::d4Matrix At = A;
-            At.transpose();
-
-            gravis::d4Matrix AVA = A * V * At;
-
-            const gravis::d4Vector xx(xf*xf*xf, xf*xf, xf, 1.0);
-            const gravis::d4Vector yy(yf*yf*yf, yf*yf, yf, 1.0);
-            const gravis::d4Vector xxd(3.0*xf*xf, 2.0*xf, 1.0, 0.0);
-            const gravis::d4Vector yyd(3.0*yf*yf, 2.0*yf, 1.0, 0.0);
-
-            return gravis::t2Vector<T>(xxd.dot(AVA * yy), xx.dot(AVA * yyd));
+            double dummy;
+            gravis::d2Vector g;
+            cubicXYValAndGrad(img, x, y, dummy, g, z, n, wrap);
+            return gravis::t2Vector<T>((T)g.x, (T)g.y);
         }
 
         static void test2D();

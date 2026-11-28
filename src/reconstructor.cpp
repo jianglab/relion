@@ -18,6 +18,7 @@
  * author citations must be preserved.
  ***************************************************************************/
 #include "src/reconstructor.h"
+#include "src/gpu_reconstruct.h"
 #include "src/extract_rect.h"
 #include "src/helix.h"
 #include "src/cache_manager.h"
@@ -30,14 +31,16 @@
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
+#include <memory>
 #include <random>
 #include <map>
 #include <unistd.h>
-#ifdef S2_PROFILE
-#include <chrono>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#ifdef S2_PROFILE
+#include <chrono>
 #endif
 
 namespace
@@ -236,6 +239,17 @@ s2_ctf_oversampling_min = textToInteger(parser.getOption("--s2_ctf_oversampling_
 	fn_cache = parser.getOption("--cache_dir", "Local SSD cache directory for persistent particle stack caching", "");
 	cache_copy_threads = textToInteger(parser.getOption("--cache_copy_threads", "Number of parallel threads for cache file copy (default 4)", "4"));
 	nr_threads = textToInteger(parser.getOption("--j", "Number of threads to run in parallel (only useful on multi-core machines)", "1"));
+	do_gpu = parser.checkOption("--gpu", "Use GPU acceleration for final reconstruction (default: auto for 3D maps >= 128 px when a CUDA GPU is available; optional device IDs)");
+	gpu_ids = parser.getOption("--gpu", "Device ids for --gpu, e.g. 0 or \"0:1\"", "default");
+	dont_gpu = parser.checkOption("--dont_gpu", "Disable automatic GPU acceleration for final reconstruction (force CPU)");
+#if !defined _CUDA_ENABLED
+	if (do_gpu)
+	{
+		if (verb > 0)
+			std::cerr << "+ WARNING : Relion was compiled without CUDA - --gpu is ignored in relion_reconstruct" << std::endl;
+		do_gpu = false;
+	}
+#endif
 	int ctf_section = parser.addSection("CTF options");
 	do_ctf = parser.checkOption("--ctf", "Apply CTF correction");
 	intact_ctf_first_peak = parser.checkOption("--ctf_intact_first_peak", "Leave CTFs intact until first peak");
@@ -327,8 +341,8 @@ void Reconstructor::usage()
 
 void Reconstructor::initialise()
 {
-	fftw_init_threads();
-	fftw_plan_with_nthreads(nr_threads);
+	relionFftwInitThreads();
+	relionFftwPlanThreads(nr_threads);
 
 	do_reconstruct_ctf = (ctf_dim > 0);
 	if (do_reconstruct_ctf)
@@ -634,16 +648,35 @@ void Reconstructor::initialise()
 
 }
 
+bool Reconstructor::initGpuForRun(int box_sz, int rank)
+{
+	const bool auto_eligible = (ref_dim == 3 && skip_gridding && !do_reconstruct_ctf &&
+	                            !do_external_reconstruct && !isRect() && box_sz >= 128);
+	const bool want_gpu = !dont_gpu && gpurec::requested() && (do_gpu || auto_eligible);
+	bool gpu_active = false;
+	if (want_gpu)
+	{
+		const int dev = gpurec::selectDevice(gpu_ids, rank, verb);
+		gpu_active = (dev >= 0);
+		if (!gpu_active && do_gpu && verb > 0)
+			std::cerr << " + Reconstruction GPU unavailable; running on CPU." << std::endl;
+	}
+	gpurec::setGpuRequested(gpu_active);
+	return gpu_active;
+}
+
 void Reconstructor::run()
 {
 	if (fn_debug != "")
 	{
 		readDebugArrays();
+		gpurec::ScopedReconstructCache gpu_rec_cache(initGpuForRun(debug_ori_size, 0));
 		reconstruct();
 		return;
 	}
 
 	initialise();
+	gpurec::ScopedReconstructCache gpu_rec_cache(initGpuForRun(output_boxsize, 0));
 	if (do_half1 || do_half2 || do_alldata)
 	{
 		FileName fn_out_orig = fn_out;
@@ -867,9 +900,38 @@ struct ReconstructBpSlot
 	MultidimArray<Complex> F2D;
 	MultidimArray<RFLOAT> Fctf;
 	Matrix2D<RFLOAT> A;
+	int z_lo = 0, z_hi = -1;
 	bool used = false;
 };
 static thread_local ReconstructBpSlot *tls_bp_slot = NULL;
+
+struct ReconstructWorkerWs
+{
+	OpenStacks stacks;
+	FourierTransformer transformer;
+	Image<RFLOAT> img;
+	MultidimArray<Complex> F2D, Fsub, F2DP, F2DQ;
+	MultidimArray<RFLOAT> Fctf, FstMulti;
+	std::vector<Complex> nonuniformSamples;
+	std::vector<RFLOAT> nonuniformSampleWeight;
+	std::vector<RFLOAT> gamma_offsets;
+	explicit ReconstructWorkerWs(size_t max_open) : stacks(max_open) {}
+};
+static thread_local ReconstructWorkerWs *tls_rec_ws = NULL;
+
+struct ReconstructWsScope
+{
+	explicit ReconstructWsScope(ReconstructWorkerWs *ws)
+	{
+		tls_rec_ws = ws;
+		relionFftwSetThreadPlanThreads(1);
+	}
+	~ReconstructWsScope()
+	{
+		tls_rec_ws = NULL;
+		relionFftwSetThreadPlanThreads(0);
+	}
+};
 
 void Reconstructor::backproject(int rank, int size)
 {
@@ -948,11 +1010,17 @@ void Reconstructor::backproject(int rank, int size)
 		prefetcher_->start(nr_parts);
 	}
 
+	const int n_ws = std::max(1, nr_threads);
+	const size_t max_open_per_ws = std::max<size_t>(8, 256 / (size_t)n_ws);
+	std::vector<std::unique_ptr<ReconstructWorkerWs> > worker_ws(n_ws);
+	for (int t = 0; t < n_ws; t++)
+		worker_ws[t].reset(new ReconstructWorkerWs(max_open_per_ws));
+
 	if (nr_threads > 1)
 	{
 		// Inside the OMP parallel loop, each thread uses single-threaded FFTW/FINUFFT.
 		// Parallelism comes from OMP at the particle level.
-		fftw_plan_with_nthreads(1);
+		relionFftwPlanThreads(1);
 		setFinufftThreadCount(1);
 	}
 
@@ -981,9 +1049,26 @@ void Reconstructor::backproject(int rank, int size)
 			tls_bp_slot = NULL;
 		};
 		long int first = 0, last = std::min(n_parts, batch);
-		#pragma omp parallel for num_threads(nr_threads) schedule(dynamic, 1)
-		for (long int idx = first; idx < last; idx++)
-			prepare(idx, slots[idx - first]);
+		std::exception_ptr err;
+		#pragma omp parallel num_threads(nr_threads)
+		{
+#ifdef _OPENMP
+			const int tid = omp_get_thread_num();
+#else
+			const int tid = 0;
+#endif
+			ReconstructWsScope ws_scope(worker_ws[tid].get());
+			#pragma omp for schedule(dynamic, 1)
+			for (long int idx = first; idx < last; idx++)
+			{
+				try { prepare(idx, slots[idx - first]); }
+				catch (...) {
+#pragma omp critical
+					if (!err) err = std::current_exception();
+				}
+			}
+		}
+		if (err) std::rethrow_exception(err);
 		for (int b = 0; first < n_parts; b++)
 		{
 			ReconstructBpSlot *cur = &slots[(b % 2) * batch], *next = &slots[((b + 1) % 2) * batch];
@@ -1001,6 +1086,11 @@ void Reconstructor::backproject(int rank, int size)
 					if (z >= 0 && z < zdim)
 						cum[z + 1] += (sz * R < 1.) ? PI * R * R : 2. * sqrt(std::max(0., R * R - (zz / sz) * (zz / sz))) / sz;
 				}
+				const double nx = A(2, 0), ny = A(2, 1), nz = A(2, 2);
+				const double n2 = nx * nx + ny * ny + nz * nz;
+				const double max_abs_z = (n2 > 0.) ? (R * sqrt((nx * nx + ny * ny) / n2)) : R;
+				cur[k].z_lo = (int)std::max<long>(0, (long)floor(-max_abs_z) - 2 - z0);
+				cur[k].z_hi = (int)std::min<long>(zdim - 1, (long)ceil(max_abs_z) + 2 - z0);
 			}
 			for (long int z = 0; z < zdim; z++)
 				cum[z + 1] += cum[z];
@@ -1016,38 +1106,75 @@ void Reconstructor::backproject(int rank, int size)
 
 			const long int next_first = last, next_last = std::min(n_parts, last + batch);
 			const long int n_items = n_chunks + (next_last - next_first);
-			#pragma omp parallel for num_threads(nr_threads) schedule(dynamic, 1)
-			for (long int item = 0; item < n_items; item++)
+			#pragma omp parallel num_threads(nr_threads)
 			{
-				if (item < n_chunks)
+#ifdef _OPENMP
+				const int tid = omp_get_thread_num();
+#else
+				const int tid = 0;
+#endif
+				ReconstructWsScope ws_scope(worker_ws[tid].get());
+				#pragma omp for schedule(dynamic, 1)
+				for (long int item = 0; item < n_items; item++)
 				{
-					const int c = item;
-					for (long int k = 0; k < last - first; k++)
-						if (cur[k].used && lo[c] <= hi[c])
-							backprojector.backproject2Dto3D(cur[k].F2D, cur[k].A, &cur[k].Fctf, -1., true, 0, lo[c], hi[c]);
-				}
-				else
-				{
-					const long int idx = next_first + item - n_chunks;
-					prepare(idx, next[idx - next_first]);
+					try
+					{
+						if (item < n_chunks)
+						{
+							const int c = item;
+							if (lo[c] <= hi[c])
+							{
+								for (long int k = 0; k < last - first; k++)
+									if (cur[k].used && hi[c] >= cur[k].z_lo && lo[c] <= cur[k].z_hi)
+										backprojector.backproject2Dto3D(cur[k].F2D, cur[k].A, &cur[k].Fctf, -1., true, 0, lo[c], hi[c]);
+							}
+						}
+						else
+						{
+							const long int idx = next_first + item - n_chunks;
+							prepare(idx, next[idx - next_first]);
+						}
+					}
+					catch (...)
+					{
+#pragma omp critical
+						if (!err) err = std::current_exception();
+					}
 				}
 			}
+			if (err) std::rethrow_exception(err);
 			first = next_first;
 			last = next_last;
 		}
 	}
 	else
 	{
-#pragma omp parallel for num_threads(nr_threads) schedule(dynamic, 1)
-	for (long int idx = 0; idx < (long int)my_parts.size(); idx++)
-	{
-		backprojectOneParticle(my_parts[idx]);
-	}
+		std::exception_ptr err;
+		#pragma omp parallel num_threads(nr_threads)
+		{
+#ifdef _OPENMP
+			const int tid = omp_get_thread_num();
+#else
+			const int tid = 0;
+#endif
+			ReconstructWsScope ws_scope(worker_ws[tid].get());
+			#pragma omp for schedule(dynamic, 1)
+			for (long int idx = 0; idx < (long int)my_parts.size(); idx++)
+			{
+				try { backprojectOneParticle(my_parts[idx]); }
+				catch (...) {
+#pragma omp critical
+					if (!err) err = std::current_exception();
+				}
+			}
+		}
+		if (err) std::rethrow_exception(err);
 	}
 
 	if (nr_threads > 1)
 	{
-		fftw_plan_with_nthreads(nr_threads);
+		relionFftwPlanThreads(nr_threads);
+		setFinufftThreadCount(nr_threads);
 	}
 
 	if (verb > 0)
@@ -1081,9 +1208,14 @@ void Reconstructor::backprojectOneParticle(long int p)
 {
 	RFLOAT rot, tilt, psi, fom, r_ewald_sphere;
 	Matrix2D<RFLOAT> A3D;
-	MultidimArray<RFLOAT> Fctf, FstMulti;
 	Matrix1D<RFLOAT> trans(3); // Always 3 elements so ZZ(trans) is valid for 2D data too
-	FourierTransformer transformer;
+
+	FourierTransformer local_transformer;
+	FourierTransformer &transformer = tls_rec_ws ? tls_rec_ws->transformer : local_transformer;
+	MultidimArray<RFLOAT> local_Fctf, local_FstMulti;
+	MultidimArray<RFLOAT> &Fctf = (tls_bp_slot != NULL && fn_sub == "" && !do_ewald) ? tls_bp_slot->Fctf
+	                             : (tls_rec_ws ? tls_rec_ws->Fctf : local_Fctf);
+	MultidimArray<RFLOAT> &FstMulti = tls_rec_ws ? tls_rec_ws->FstMulti : local_FstMulti;
 
 	bool do_subtomo_correction = false;
 
@@ -1178,15 +1310,24 @@ void Reconstructor::backprojectOneParticle(long int p)
 	// Use either selfTranslate OR shiftImageInFourierTransform!!
 	//selfTranslate(img(), trans, WRAP);
 
-MultidimArray<Complex> Fsub, F2D, F2DP, F2DQ;
+MultidimArray<Complex> local_Fsub, local_F2D, local_F2DP, local_F2DQ;
+MultidimArray<Complex> &Fsub = tls_rec_ws ? tls_rec_ws->Fsub : local_Fsub;
+MultidimArray<Complex> &F2D  = (tls_bp_slot != NULL && fn_sub == "" && !do_ewald) ? tls_bp_slot->F2D
+                             : (tls_rec_ws ? tls_rec_ws->F2D : local_F2D);
+MultidimArray<Complex> &F2DP = tls_rec_ws ? tls_rec_ws->F2DP : local_F2DP;
+MultidimArray<Complex> &F2DQ = tls_rec_ws ? tls_rec_ws->F2DQ : local_F2DQ;
 FileName fn_img;
-Image<RFLOAT> img;
-std::vector<Complex> nonuniformSamples;
-std::vector<RFLOAT> nonuniformSampleWeight;
-std::vector<Complex> nonuniformSamplesP, nonuniformSamplesQ;
-std::vector<RFLOAT> gamma_offsets;
-std::vector<RFLOAT> ctf_values;
+Image<RFLOAT> local_img;
+Image<RFLOAT> &img = tls_rec_ws ? tls_rec_ws->img : local_img;
+std::vector<Complex> local_nonuniformSamples;
+std::vector<RFLOAT> local_nonuniformSampleWeight;
+std::vector<Complex> &nonuniformSamples = tls_rec_ws ? tls_rec_ws->nonuniformSamples : local_nonuniformSamples;
+std::vector<RFLOAT> &nonuniformSampleWeight = tls_rec_ws ? tls_rec_ws->nonuniformSampleWeight : local_nonuniformSampleWeight;
+std::vector<RFLOAT> local_gamma_offsets;
+std::vector<RFLOAT> &gamma_offsets = tls_rec_ws ? tls_rec_ws->gamma_offsets : local_gamma_offsets;
 bool use_nonuniform_s2 = (spatial_frequency_mode == SPATIAL_FREQUENCY_MODE_S2);
+const bool skip_cartesian_for_s2 = (use_nonuniform_s2 && !do_ewald && !do_reconstruct_ctf &&
+                                    fn_noise == "" && !do_fused_extract && data_dim == 2);
 #ifdef S2_PROFILE
 	auto t_s2_read = Clock::now();
 	auto t_s2_fft = Clock::now();
@@ -1257,24 +1398,46 @@ DF.getValue(EMDL_IMAGE_NAME, fn_img, p);
 #ifdef S2_PROFILE
 			t_s2_read = Clock::now();
 #endif
-			img.read(fn_img);
+			if (tls_rec_ws && data_dim == 2 && fn_img.contains("@"))
+			{
+				long int img_no;
+				FileName fn_stack;
+				fn_img.decompose(img_no, fn_stack);
+				if (img_no > 0 && fn_stack.getExtension() != "vstack")
+					img.readFromOpenFile(fn_img, tls_rec_ws->stacks.get(fn_stack), -1, false);
+				else
+					img.read(fn_img);
+			}
+			else
+			{
+				img.read(fn_img);
+			}
 		}
 		img().setXmippOrigin();
 #ifdef S2_PROFILE
 		t_s2_fft = Clock::now();
 #endif
-		transformer.FourierTransform(img(), F2D);
-		CenterFFTbySign(F2D);
+		if (!skip_cartesian_for_s2)
+		{
+			transformer.FourierTransform(img(), F2D);
+			CenterFFTbySign(F2D);
 #ifdef S2_PROFILE
-		if (use_nonuniform_s2) t_s2_ctf = Clock::now();
+			if (use_nonuniform_s2) t_s2_ctf = Clock::now();
 #endif
 
-		if (ABS(XX(trans)) > 0. || ABS(YY(trans)) > 0. || ABS(ZZ(trans)) > 0. ) // ZZ(trans) is 0 in case data_dim=2
+			if (ABS(XX(trans)) > 0. || ABS(YY(trans)) > 0. || ABS(ZZ(trans)) > 0. ) // ZZ(trans) is 0 in case data_dim=2
+			{
+				if (isRect())
+					shiftImageInFourierTransformRect(F2D, F2D, rect_box_x, rect_box_y, 1., XX(trans), YY(trans), 0.);
+				else
+					shiftImageInFourierTransform(F2D, F2D, XSIZE(img()), XX(trans), YY(trans), ZZ(trans));
+			}
+		}
+		else
 		{
-			if (isRect())
-				shiftImageInFourierTransformRect(F2D, F2D, rect_box_x, rect_box_y, 1., XX(trans), YY(trans), 0.);
-			else
-				shiftImageInFourierTransform(F2D, F2D, XSIZE(img()), XX(trans), YY(trans), ZZ(trans));
+#ifdef S2_PROFILE
+			t_s2_ctf = Clock::now();
+#endif
 		}
 	}
 	else
@@ -1301,11 +1464,14 @@ DF.getValue(EMDL_IMAGE_NAME, fn_img, p);
 		}
 	}
 
-	Fctf.resize(F2D);
-	Fctf.initConstant(1.);
+	if (!skip_cartesian_for_s2)
+	{
+		Fctf.resize(F2D);
+		Fctf.initConstant(1.);
+	}
 
 	// Apply CTF if necessary
-	if (do_ctf || do_reconstruct_ctf)
+	if (!skip_cartesian_for_s2 && (do_ctf || do_reconstruct_ctf))
 	{
 
 		// Also allow 3D CTF correction here
@@ -1493,17 +1659,28 @@ const SpatialFrequencyGrid2D& s2_grid = getS2Grid(grid_key);
 		const bool hasShift = (ABS(XX(trans)) >= XMIPP_EQUAL_ACCURACY
 			|| ABS(YY(trans)) >= XMIPP_EQUAL_ACCURACY);
 		nonuniformSampleWeight = s2_grid.sample_weight;
-		for (long int idx = 0; idx < (long int)nonuniformSamples.size(); idx++)
+		const long int n_s2 = (long int)nonuniformSamples.size();
+		if (hasShift)
 		{
-			if (hasShift)
+			const RFLOAT inv_box = (RFLOAT)(-TWO_PI / (RFLOAT)myBoxSize);
+			const RFLOAT tx = XX(trans) * inv_box;
+			const RFLOAT ty = YY(trans) * inv_box;
+			for (long int idx = 0; idx < n_s2; idx++)
 			{
-				const RFLOAT phase = (RFLOAT)(-TWO_PI
-					* (s2_grid.sample_x[idx] * XX(trans)
-					+ s2_grid.sample_y[idx] * YY(trans)) / myBoxSize);
-				const Complex shift(cos(phase), sin(phase));
-				nonuniformSamples[idx] *= shift;
+				const RFLOAT phase = s2_grid.sample_x[idx] * tx + s2_grid.sample_y[idx] * ty;
+				RFLOAT sp, cp;
+#ifdef RELION_SINGLE_PRECISION
+				SINCOSF(phase, &sp, &cp);
+#else
+				SINCOS(phase, &sp, &cp);
+#endif
+				nonuniformSamples[idx] *= Complex(cp, sp) * nonuniformSampleWeight[idx];
 			}
-			nonuniformSamples[idx] *= nonuniformSampleWeight[idx];
+		}
+		else
+		{
+			for (long int idx = 0; idx < n_s2; idx++)
+				nonuniformSamples[idx] *= nonuniformSampleWeight[idx];
 		}
 #ifdef S2_PROFILE
 		prof.ns_shift_jac = (Clock::now() - t0_shift_jac).count();
@@ -1609,7 +1786,6 @@ if (do_ewald)
 		auto t0_ctf = Clock::now();
 #endif
 		CTF ctf;
-                std::vector<RFLOAT> gamma_offsets;
                 const std::vector<RFLOAT>* gamma_offsets_ptr = NULL;
 
                 if (do_ignore_optics)
@@ -1798,9 +1974,7 @@ if (do_ewald)
 			}
 		if (tls_bp_slot != NULL)
 		{
-			// added to the map by planes in backproject()
-			tls_bp_slot->F2D = F2D;
-			tls_bp_slot->Fctf = Fctf;
+			// F2D and Fctf were written directly into tls_bp_slot
 			tls_bp_slot->A = A3D;
 			tls_bp_slot->used = true;
 		}
@@ -1845,7 +2019,7 @@ void Reconstructor::reconstruct()
 #ifdef _OPENMP
 	omp_set_num_threads(nr_threads);
 #endif
-	backprojector.symmetrise(nr_helical_asu, helical_twist, helical_rise/angpix);
+	backprojector.symmetrise(nr_helical_asu, helical_twist, helical_rise/angpix, nr_threads);
 
 	if (do_reconstruct_ctf)
 	{

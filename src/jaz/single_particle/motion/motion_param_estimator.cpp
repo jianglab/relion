@@ -30,6 +30,8 @@
 #include <src/jaz/single_particle/img_proc/filter_helper.h>
 #include <src/jaz/single_particle/vtk_helper.h>
 
+#include <algorithm>
+#include <cmath>
 #include <src/jaz/util/zio.h>
 
 using namespace gravis;
@@ -40,7 +42,7 @@ const double MotionParamEstimator::divScale = 1.0;
 const double MotionParamEstimator::accScale = 1000.0;
 
 MotionParamEstimator::MotionParamEstimator()
-:   paramsRead(false), ready(false)
+:   paramsRead(false), ready(false), gpCacheMutex(new std::mutex())
 {
 }
 
@@ -386,6 +388,48 @@ d4Vector MotionParamEstimator::estimateThreeParamsNM(
     return d4Vector(vd[0], vd[1], vd[2], -minTsc);
 }
 
+std::shared_ptr<const GaussianProcess::Basis> MotionParamEstimator::getOrComputeUnitBasis(int g, double sig_div_px)
+{
+    const double eps = 1e-20;
+    const double sd = (sig_div_px < eps) ? eps : sig_div_px;
+
+    {
+        std::lock_guard<std::mutex> lock(*gpCacheMutex);
+        auto it = unitBasisCache[g].find(sd);
+        if (it != unitBasisCache[g].end())
+            return it->second;
+    }
+
+    const int pc = cachedPc[g];
+    const std::vector<double>& dv = distVal[g];
+    Matrix2D<double> K_unit(pc, pc);
+    for (int i = 0; i < pc; i++)
+    {
+        K_unit(i, i) = 1.0;
+        for (int j = i + 1; j < pc; j++)
+        {
+            const double k = exp(-dv[(size_t)i * pc + j] / sd);
+            K_unit(i, j) = k;
+            K_unit(j, i) = k;
+        }
+    }
+
+    auto basis = std::make_shared<GaussianProcess::Basis>(
+        GaussianProcess::getUnitBasis(K_unit, motionEstimator->getMaxEDs(), 1e-16));
+
+    {
+        std::lock_guard<std::mutex> lock(*gpCacheMutex);
+        auto it = unitBasisCache[g].find(sd);
+        if (it != unitBasisCache[g].end())
+            return it->second;
+        if (unitBasisCache[g].size() >= 32)
+            unitBasisCache[g].erase(unitBasisCache[g].begin());
+        unitBasisCache[g][sd] = basis;
+    }
+
+    return basis;
+}
+
 void MotionParamEstimator::evaluateParams(
     const std::vector<d3Vector>& sig_vals,
     std::vector<double>& TSCs)
@@ -409,75 +453,131 @@ void MotionParamEstimator::evaluateParams(
 
     const int gc = mdts.size();
 
-    for (long g = 0; g < gc; g++)
+    if (!debug)
     {
-        const int pc = mdts[g].numberOfObjects();
-
-        if (pc < 2) continue; // not really needed, mdts are pre-screened
-
-        pctot += pc;
-
-        if (debug)
+        struct EvalTask { long g; int i; long long weight; };
+        std::vector<EvalTask> tasks;
+        tasks.reserve((size_t)gc * paramCount);
+        for (long g = 0; g < gc; g++)
         {
-            std::cout << "    micrograph " << (g+1) << " / " << mdts.size() << ": "
-                << pc << " particles [" << pctot << " total]" << std::endl;
+            const int pc = mdts[g].numberOfObjects();
+            if (pc < 2 || alignmentSet.CCs[g].empty() || alignmentSet.CCs[g][0].empty()) continue;
+            for (int i = 0; i < paramCount; i++)
+                tasks.push_back({g, i, (long long)pc * pc});
         }
 
+        std::vector<int> order(tasks.size());
+        for (size_t k = 0; k < order.size(); k++) order[k] = (int)k;
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+            return tasks[a].weight > tasks[b].weight;
+        });
+
+        std::vector<d3Vector> taskTsc((size_t)gc * paramCount, d3Vector(0.0, 0.0, 0.0));
+        const int n_tasks = tasks.size();
+        const int outer_threads = std::min(nr_omp_threads, std::max(1, n_tasks));
+        const int inner_threads = std::max(1, nr_omp_threads / outer_threads);
+
+        const std::chrono::steady_clock::time_point t_all0 = std::chrono::steady_clock::now();
+        double sum_opt_sec = 0.0, sum_tsc_sec = 0.0;
+
+        #pragma omp parallel for schedule(dynamic, 1) num_threads(outer_threads) if(outer_threads > 1) reduction(+:sum_opt_sec,sum_tsc_sec)
+        for (int k = 0; k < n_tasks; k++)
+        {
+            const EvalTask& tk = tasks[order[k]];
+            const long g = tk.g;
+            const int i = tk.i;
+
+            const auto t_opt0 = std::chrono::steady_clock::now();
+            std::shared_ptr<const GaussianProcess::Basis> ub = getOrComputeUnitBasis(g, sig_d_vals_px[i]);
+            std::vector<std::vector<gravis::d2Vector>> tracks = motionEstimator->optimize(
+                alignmentSet.CCs[g],
+                alignmentSet.initialTracks[g],
+                sig_v_vals_px[i], sig_a_vals_px[i], sig_d_vals_px[i],
+                alignmentSet.positions[g], alignmentSet.globComp[g],
+                inner_threads, ub.get());
+            const auto t_opt1 = std::chrono::steady_clock::now();
+            sum_opt_sec += std::chrono::duration<double>(t_opt1 - t_opt0).count();
+
+            taskTsc[(size_t)g * paramCount + i] = alignmentSet.updateTsc(tracks, g, inner_threads);
+            const auto t_tsc1 = std::chrono::steady_clock::now();
+            sum_tsc_sec += std::chrono::duration<double>(t_tsc1 - t_opt1).count();
+        }
+
+        const double wall_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all0).count();
+        const double denom = sum_opt_sec + sum_tsc_sec;
+        if (denom > 0.0)
+        {
+            polishtiming::add("param: optimize tracks", wall_sec * (sum_opt_sec / denom));
+            polishtiming::add("param: update TSC", wall_sec * (sum_tsc_sec / denom));
+        }
+
+        for (long g = 0; g < gc; g++)
         for (int i = 0; i < paramCount; i++)
         {
-            if (debug)
+            tscsAs[i] += taskTsc[(size_t)g * paramCount + i];
+        }
+    }
+    else
+    {
+        for (long g = 0; g < gc; g++)
+        {
+            const int pc = mdts[g].numberOfObjects();
+
+            if (pc < 2) continue; // not really needed, mdts are pre-screened
+
+            pctot += pc;
+
+            std::cout << "    micrograph " << (g+1) << " / " << mdts.size() << ": "
+                << pc << " particles [" << pctot << " total]" << std::endl;
+
+            for (int i = 0; i < paramCount; i++)
             {
                 std::cout << "        evaluating: " << sig_vals[i] << std::endl;
+
+                RCTIC(paramTimer,timeOpt);
+
+                std::vector<std::vector<gravis::d2Vector>> tracks;
+                {
+                    polishtiming::Scope topt("param: optimize tracks");
+                    std::shared_ptr<const GaussianProcess::Basis> ub = getOrComputeUnitBasis(g, sig_d_vals_px[i]);
+                    tracks = motionEstimator->optimize(
+                        alignmentSet.CCs[g],
+                        alignmentSet.initialTracks[g],
+                        sig_v_vals_px[i], sig_a_vals_px[i], sig_d_vals_px[i],
+                        alignmentSet.positions[g], alignmentSet.globComp[g],
+                        nr_omp_threads, ub.get());
+                }
+
+                std::stringstream sts;
+                sts << "debug-track_" << sig_vals[i][0] << "_" << sig_vals[i][1] << "_" << sig_vals[i][2] << ".dat";
+
+                std::ofstream debugStr(sts.str());
+
+                for (int p = 0; p < pc; p++)
+                {
+                    for (int f = 0; f < fc; f++)
+                    {
+                        debugStr << tracks[p][f] << std::endl;
+                    }
+
+                    debugStr << std::endl;
+                }
+
+                debugStr.close();
+
+                RCTOC(paramTimer,timeOpt);
+
+                RCTIC(paramTimer,timeEval);
+
+                {
+                    polishtiming::Scope t("param: update TSC");
+                    tscsAs[i] += alignmentSet.updateTsc(tracks, g, nr_omp_threads);
+                }
+
+                RCTOC(paramTimer,timeEval);
             }
-
-            RCTIC(paramTimer,timeOpt);
-
-            std::vector<std::vector<gravis::d2Vector>> tracks;
-            {
-                polishtiming::Scope topt("param: optimize tracks");
-                tracks = motionEstimator->optimize(
-                    alignmentSet.CCs[g],
-                    alignmentSet.initialTracks[g],
-                    sig_v_vals_px[i], sig_a_vals_px[i], sig_d_vals_px[i],
-                    alignmentSet.positions[g], alignmentSet.globComp[g]);
-            }
-
-			if (debug)
-            {
-				std::stringstream sts;
-				sts << "debug-track_" << sig_vals[i][0] << "_" << sig_vals[i][1] << "_" << sig_vals[i][2] << ".dat";
-
-				std::ofstream debugStr(sts.str());
-
-				for (int p = 0; p < pc; p++)
-				{
-					for (int f = 0; f < fc; f++)
-					{
-						debugStr << tracks[p][f] << std::endl;
-					}
-
-					debugStr << std::endl;
-				}
-
-				debugStr.close();
-			}
-
-            RCTOC(paramTimer,timeOpt);
-
-            RCTIC(paramTimer,timeEval);
-
-            {
-                polishtiming::Scope t("param: update TSC");
-                tscsAs[i] += alignmentSet.updateTsc(tracks, g, nr_omp_threads);
-            }
-
-            RCTOC(paramTimer,timeEval);
         }
 
-    } // micrographs
-
-    if (debug)
-    {
         std::cout << std::endl;
     }
 
@@ -519,6 +619,12 @@ void MotionParamEstimator::prepAlignment()
     std::vector<ParFourierTransformer> fts(nr_omp_threads);
 
     const int gc = mdts.size();
+    distVal.assign(gc, std::vector<double>());
+    cachedPc.assign(gc, 0);
+    unitBasisCache.clear();
+    unitBasisCache.resize(gc);
+
+    const bool expKer = motionEstimator->isExpKer();
 
     int pctot = 0;
 
@@ -533,6 +639,18 @@ void MotionParamEstimator::prepAlignment()
         std::cout << "        micrograph " << (g+1) << " / " << gc << ": "
             << pc << " particles [" << pctot << " total]" << std::endl;
 
+        const MetaDataTable* next1 = 0;
+        const MetaDataTable* next2 = 0;
+        for (long g2 = g + 1; g2 < gc; g2++)
+        {
+            if (mdts[g2].numberOfObjects() >= 2)
+            {
+                if (!next1) next1 = &mdts[g2];
+                else { next2 = &mdts[g2]; break; }
+            }
+        }
+        motionEstimator->expectNext(next1, next2);
+
         std::vector<std::vector<Image<Complex>>> movie;
         std::vector<std::vector<Image<RFLOAT>>> movieCC;
 
@@ -540,7 +658,7 @@ void MotionParamEstimator::prepAlignment()
         {
             motionEstimator->prepMicrograph(
                 mdts[g], fts, alignDmgWgh,
-				0,
+                0,
                 movie, movieCC,
                 alignmentSet.positions[g],
                 alignmentSet.initialTracks[g],
@@ -556,19 +674,19 @@ void MotionParamEstimator::prepAlignment()
             continue;
         }
 
-		const int maxRangeP = 2 * motionEstimator->getCCPad() * maxRange;
+        const int maxRangeP = 2 * motionEstimator->getCCPad() * maxRange;
 
         #pragma omp parallel for num_threads(nr_omp_threads)
         for (int p = 0; p < pc; p++)
         {
-			// (the prediction does not depend on the frame: it used to be made once per frame)
-			Image<Complex> pred = reference->predict(
-				mdts[g], p, *obsModel, ReferenceMap::Opposite);
-			alignmentSet.accelerate(pred, alignmentSet.pred[g][p]);
+            // (the prediction does not depend on the frame: it used to be made once per frame)
+            Image<Complex> pred = reference->predict(
+                mdts[g], p, *obsModel, ReferenceMap::Opposite);
+            alignmentSet.accelerate(pred, alignmentSet.pred[g][p]);
 
-			for (int f = 0; f < fc; f++)
+            for (int f = 0; f < fc; f++)
             {
-				if (maxRange > 0)
+                if (maxRange > 0)
                 {
                     movieCC[p][f] = FilterHelper::cropCorner2D(movieCC[p][f], maxRangeP, maxRangeP);
                 }
@@ -577,7 +695,22 @@ void MotionParamEstimator::prepAlignment()
                 alignmentSet.accelerate(movie[p][f], alignmentSet.obs[g][p][f]);
             }
         }
+
+        cachedPc[g] = pc;
+        distVal[g].resize((size_t)pc * pc, 0.0);
+        const std::vector<d2Vector>& pos = alignmentSet.positions[g];
+        for (int i = 0; i < pc; i++)
+        for (int j = i + 1; j < pc; j++)
+        {
+            const double dd = (pos[i] - pos[j]).norm2();
+            const double dval = expKer ? sqrt(dd) : (0.5 * dd);
+            distVal[g][(size_t)i * pc + j] = dval;
+            distVal[g][(size_t)j * pc + i] = dval;
+        }
     }
+
+    // Precompute separable cross-terms and constant norms, freeing obs/pred
+    alignmentSet.prepareTsc(nr_omp_threads);
 
     // release all unneeded heap space back to the OS
     // (this can free tens of Gb)

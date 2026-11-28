@@ -585,7 +585,7 @@ void Micrograph::setMovie(FileName fnMovie, FileName fnGain, RFLOAT binning)
 	if (EERRenderer::isEER(fnMovie))
 	{
 		EERRenderer renderer;
-		renderer.read(fnMovie, eer_upsampling);
+		renderer.read(fnMovie, eer_upsampling, true);
 		width = renderer.getWidth();
 		height = renderer.getHeight();
 		n_frames = renderer.getNFrames() / eer_grouping;

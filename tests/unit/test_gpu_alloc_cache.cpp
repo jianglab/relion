@@ -29,4 +29,5 @@ TEST_CASE("gpu_alloc_cache: reuse rules, cap, give-back and exact fit", "[gpu_al
 	CHECK(o.exactFitOk);
 	CHECK(o.hitsCacheOff == 0);
 	CHECK(o.hitsWhenFull == 0);
+	CHECK(o.freeListOk);
 }

@@ -62,22 +62,22 @@ struct AutoMaskReport
 
 // Fourier shell correlation of two maps (also cuboids), in shells of 1 / (XSIZE * angpix);
 // 0 in shells without any power
-void autoMaskFsc(const MultidimArray<RFLOAT> &m1, const MultidimArray<RFLOAT> &m2, MultidimArray<RFLOAT> &fsc);
+void autoMaskFsc(const MultidimArray<RFLOAT> &m1, const MultidimArray<RFLOAT> &m2, MultidimArray<RFLOAT> &fsc, int n_threads = 1);
 
 // The resolution (A) at which the FSC first drops below threshold (from shell 1, interpolated
 // between shells), for a box of XSIZE box pixels; -1 if it never does
 RFLOAT autoMaskResolutionAtFsc(const MultidimArray<RFLOAT> &fsc, RFLOAT threshold, int box, RFLOAT angpix);
 
 // Low-pass filter with a Gaussian of sigma = lowpass / (3.81 * angpix) pixels (in Fourier space)
-void autoMaskGaussianLowPass(MultidimArray<RFLOAT> &map, RFLOAT lowpass, RFLOAT angpix);
+void autoMaskGaussianLowPass(MultidimArray<RFLOAT> &map, RFLOAT lowpass, RFLOAT angpix, int n_threads = 1);
 
 // Otsu's threshold of the histogram of the map (256 bins between its minimum and maximum, voxels
 // that are exactly 0 left out), as in EMAN2
-RFLOAT autoMaskOtsuThreshold(const MultidimArray<RFLOAT> &map, int nr_bins = 256);
+RFLOAT autoMaskOtsuThreshold(const MultidimArray<RFLOAT> &map, int nr_bins = 256, int n_threads = 1);
 
 // Steps 1-3: binary mask (1/0) of the map
 void autoMaskBinary(const MultidimArray<RFLOAT> &map, RFLOAT angpix, RFLOAT lowpass,
-		const AutoMaskOptions &opt, MultidimArray<RFLOAT> &binary, AutoMaskReport &report);
+		const AutoMaskOptions &opt, MultidimArray<RFLOAT> &binary, AutoMaskReport &report, int n_threads = 1);
 
 // Euclidean distance (pixels) of every voxel to the nearest voxel of the binary mask (0 inside)
 void autoMaskDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads = 1);
@@ -85,7 +85,7 @@ void autoMaskDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT>
 void autoMaskSquaredDistance(const MultidimArray<RFLOAT> &binary, MultidimArray<RFLOAT> &dist, int n_threads = 1);
 
 // Raised-cosine soft edge of width pixels outside the voxels at distance 0
-void autoMaskSoftEdge(const MultidimArray<RFLOAT> &dist, RFLOAT width, MultidimArray<RFLOAT> &mask);
+void autoMaskSoftEdge(const MultidimArray<RFLOAT> &dist, RFLOAT width, MultidimArray<RFLOAT> &mask, int n_threads = 1);
 
 // The mask of two half-maps
 void autoMaskFromHalfMaps(const MultidimArray<RFLOAT> &half1, const MultidimArray<RFLOAT> &half2,
